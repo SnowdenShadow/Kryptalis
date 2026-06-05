@@ -1,4 +1,4 @@
-import { Injectable, OnApplicationBootstrap, Logger } from '@nestjs/common';
+import { Injectable, OnApplicationBootstrap, OnModuleDestroy, Logger } from '@nestjs/common';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
@@ -22,8 +22,9 @@ const CONTAINER_NAME = 'kryptalis-caddy';
  * `extra_hosts: host-gateway` mapping at compose level).
  */
 @Injectable()
-export class ReverseProxyService implements OnApplicationBootstrap {
+export class ReverseProxyService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(ReverseProxyService.name);
+  private sslSyncInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(private prisma: PrismaService) {
     if (!fs.existsSync(PROXY_DIR)) fs.mkdirSync(PROXY_DIR, { recursive: true });
@@ -38,6 +39,18 @@ export class ReverseProxyService implements OnApplicationBootstrap {
       await this.regenerate();
     } catch (e: any) {
       this.logger.warn(`Caddy bootstrap deferred: ${e?.message || e}`);
+    }
+    // Background SSL status reconciliation — catches certs issued asynchronously
+    // by Caddy after a regenerate() call OR after manual changes.
+    this.sslSyncInterval = setInterval(() => {
+      this.syncSslStatuses().catch(() => {});
+    }, 60_000);
+  }
+
+  onModuleDestroy() {
+    if (this.sslSyncInterval) {
+      clearInterval(this.sslSyncInterval);
+      this.sslSyncInterval = null;
     }
   }
 
@@ -236,7 +249,63 @@ ${email ? `  email ${email}\n` : ''}}
       ),
     );
 
+    // Caddy emits ACME challenges async — schedule a few SSL status syncs after
+    // the reload so the dashboard sees the green padlock without manual resync.
+    [10_000, 30_000, 60_000, 120_000].forEach((ms) => {
+      setTimeout(() => this.syncSslStatuses().catch(() => {}), ms);
+    });
+
     return { domains: activeCount, caddyfile };
+  }
+
+  /**
+   * Ask Caddy which domains have a valid cert and update Domain.sslStatus in DB.
+   * Caddy stores certs under /data/caddy/certificates/<issuer>/<domain>/. The
+   * mere presence of <domain>.crt means the cert is issued.
+   */
+  async syncSslStatuses() {
+    const domains = await this.prisma.domain.findMany({
+      where: { sslStatus: { not: 'DISABLED' as any } },
+      select: { id: true, domain: true, sslStatus: true },
+    });
+    if (!domains.length) return { updated: 0 };
+
+    let updated = 0;
+    for (const d of domains) {
+      // skip local hostnames — Caddy uses its internal CA, not Let's Encrypt
+      if (this.isLocalHostname(d.domain)) continue;
+      const hasCert = await this.hasIssuedCert(d.domain);
+      const newStatus = hasCert ? 'ACTIVE' : 'PENDING';
+      if (d.sslStatus !== newStatus) {
+        await this.prisma.domain.update({
+          where: { id: d.id },
+          data: {
+            sslStatus: newStatus as any,
+            sslExpiresAt: hasCert ? new Date(Date.now() + 90 * 24 * 3600 * 1000) : null,
+          },
+        });
+        updated++;
+      }
+    }
+    if (updated > 0) this.logger.log(`SSL status sync: updated ${updated} domain(s)`);
+    return { updated };
+  }
+
+  private async hasIssuedCert(host: string): Promise<boolean> {
+    try {
+      // Look for the cert file inside the Caddy container. The exact subdir
+      // varies by CA (acme-v02.api.letsencrypt.org-directory for LE prod,
+      // acme-staging-v02… for staging) so we glob.
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['exec', CONTAINER_NAME, 'sh', '-c',
+          `ls /data/caddy/certificates/*/${host}/${host}.crt 2>/dev/null | head -1`],
+        { timeout: 5000 },
+      );
+      return stdout.trim().length > 0;
+    } catch {
+      return false;
+    }
   }
 
   // ── helpers ───────────────────────────────────────────────────────
