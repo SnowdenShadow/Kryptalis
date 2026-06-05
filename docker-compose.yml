@@ -75,6 +75,10 @@ services:
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
+      # Optional — Let's Encrypt contact email. If unset, Kryptalis derives one
+      # from PUBLIC_API_URL (e.g. admin@mydomain.com). Bare IPs fall back to
+      # anonymous registration (cert still works, just no expiry notices).
+      ACME_EMAIL: ${ACME_EMAIL:-}
     ports:
       - "4000:4000"
     volumes:
