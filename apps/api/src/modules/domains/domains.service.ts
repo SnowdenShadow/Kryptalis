@@ -4,6 +4,8 @@ import {
   ConflictException,
   ForbiddenException,
   BadRequestException,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateDomainDto } from './dto/create-domain.dto';
@@ -12,12 +14,15 @@ import {
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
+import { MailServerService } from '../email/mail-server.service';
 
 @Injectable()
 export class DomainsService {
   constructor(
     private prisma: PrismaService,
     private proxy: ReverseProxyService,
+    @Inject(forwardRef(() => MailServerService))
+    private mailServer: MailServerService,
   ) {}
 
   async create(userId: string, dto: CreateDomainDto) {
@@ -156,6 +161,10 @@ export class DomainsService {
 
   async remove(userId: string, id: string) {
     await this.assertDomainAccess(userId, id, 'ADMIN');
+    // Tear down mail stack BEFORE deleting the domain row so the mailbox/alias
+    // FKs still resolve and the container can be cleanly stopped + removed
+    // (frees ports, removes compose dir, drops mail_servers row).
+    try { await this.mailServer.removeForDomain(id); } catch {}
     await this.prisma.domain.delete({ where: { id } });
     this.proxy.regenerate().catch(() => {});
     return { message: 'Domain deleted' };

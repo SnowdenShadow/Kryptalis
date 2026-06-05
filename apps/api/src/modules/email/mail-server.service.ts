@@ -172,15 +172,38 @@ export class MailServerService {
 
   async remove(userId: string, domainId: string) {
     await this.assertDomainAccess(userId, domainId, 'ADMIN');
-    const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
-    if (!server) throw new NotFoundException('Mail server not provisioned');
-    const dir = path.join(MAIL_DIR, server.id);
-    if (fs.existsSync(dir)) {
-      try { await execFileAsync('docker', ['compose', 'down', '-v', '--remove-orphans'], { cwd: dir, timeout: 60_000 }); } catch {}
-      try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-    }
-    await this.prisma.mailServer.delete({ where: { id: server.id } });
+    await this.removeForDomain(domainId);
     return { message: 'Mail server removed' };
+  }
+
+  /**
+   * Internal cleanup — no auth check. Safe to call when the parent Domain row
+   * is about to be deleted (cascade): tears down compose stack, removes the
+   * container by name (covers orphans whose compose dir is missing), wipes
+   * the on-disk dir, deletes the DB row. Idempotent.
+   */
+  async removeForDomain(domainId: string) {
+    const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
+    const containerName = domain
+      ? `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`
+      : null;
+
+    if (server) {
+      const dir = path.join(MAIL_DIR, server.id);
+      if (fs.existsSync(dir)) {
+        try { await execFileAsync('docker', ['compose', 'down', '-v', '--remove-orphans'], { cwd: dir, timeout: 60_000 }); } catch {}
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+      }
+      await this.prisma.mailServer.delete({ where: { id: server.id } });
+    }
+
+    // belt-and-suspenders: if a container with the expected name still exists
+    // (compose dir missing, prior crash, name reused), force-remove it so the
+    // ports it holds are freed.
+    if (containerName) {
+      try { await execFileAsync('docker', ['rm', '-f', containerName], { timeout: 30_000 }); } catch {}
+    }
   }
 
   // ── account sync (called by EmailService after each mailbox/alias change) ──
@@ -395,6 +418,29 @@ ${sslExternalVolumes}`;
   }
 
   /**
+   * Enumerate every host-side TCP port currently published by any running
+   * docker container. Used by allocatePorts() as a safety net against orphan
+   * containers whose mail_servers row was deleted but whose port bindings
+   * persist (would otherwise cause "Bind for 0.0.0.0:X failed: port is already
+   * allocated" on the next deploy).
+   */
+  private async listDockerHostPorts(): Promise<number[]> {
+    try {
+      const { stdout } = await execFileAsync(
+        'docker', ['ps', '--format', '{{.Ports}}'], { timeout: 5000 },
+      );
+      const ports = new Set<number>();
+      // Sample line: "0.0.0.0:2525->25/tcp, [::]:2525->25/tcp, 0.0.0.0:2528->143/tcp"
+      const re = /:(\d+)->/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(stdout)) !== null) ports.add(parseInt(m[1], 10));
+      return [...ports];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Find free ports for this mail server. Default smtp=25 must be on host,
    * but we offset each new domain by +10 to avoid collisions in dev/local.
    */
@@ -413,11 +459,25 @@ ${sslExternalVolumes}`;
     }
     const others = await this.prisma.mailServer.findMany({
       where: { NOT: { domainId } },
-      select: { smtpPort: true },
+      select: { smtpPort: true, submissionPort: true, smtpsPort: true, imapPort: true, imapsPort: true },
     });
-    const used = new Set(others.map((o) => o.smtpPort));
+    const used = new Set<number>();
+    for (const o of others) {
+      used.add(o.smtpPort);
+      used.add(o.submissionPort);
+      used.add(o.smtpsPort);
+      used.add(o.imapPort);
+      used.add(o.imapsPort);
+    }
+    // also include any ports currently bound on the docker host — guards against
+    // orphan containers whose DB row was wiped (crash, manual cleanup, etc.).
+    for (const p of await this.listDockerHostPorts()) used.add(p);
+
     let base = 2525;
-    while (used.has(base)) base += 10;
+    while (
+      used.has(base) || used.has(base + 1) || used.has(base + 2) ||
+      used.has(base + 3) || used.has(base + 4)
+    ) base += 10;
     return {
       smtp: base,
       submission: base + 1,
