@@ -90,26 +90,38 @@ export class MarketplaceService {
     // patched on the fly with these substitutions.
     let composeContent = template.compose;
     if (
-      (data.appSlug === 'roundcube' ||
-        data.appSlug === 'snappymail' ||
-        data.appSlug === 'rainloop') &&
-      data.domainId
+      data.appSlug === 'roundcube' ||
+      data.appSlug === 'snappymail' ||
+      data.appSlug === 'rainloop'
     ) {
-      const mailServer = await this.prisma.mailServer.findUnique({
-        where: { domainId: data.domainId },
-      });
-      const domain = await this.prisma.domain.findUnique({
-        where: { id: data.domainId },
-      });
+      // Find the target mail server. Priority:
+      //   1. domainId from the install request
+      //   2. only ONE mail server installed → use it
+      let mailServer = null as { imapsPort: number; submissionPort: number; domainId: string } | null;
+      let domain = null as { domain: string } | null;
+      if (data.domainId) {
+        mailServer = await this.prisma.mailServer.findUnique({ where: { domainId: data.domainId } });
+        domain = await this.prisma.domain.findUnique({ where: { id: data.domainId }, select: { domain: true } });
+      } else {
+        const allMs = await this.prisma.mailServer.findMany({
+          include: { domain: { select: { domain: true } } },
+        });
+        if (allMs.length === 1) {
+          mailServer = allMs[0];
+          domain = allMs[0].domain;
+        }
+      }
+
       if (mailServer && domain) {
-        // For docker-internal access we use host.docker.internal:<actual-port>.
-        // Roundcube env vars accept tls:// + host + port.
-        const imapHost = `host.docker.internal`;
-        const smtpHost = `host.docker.internal`;
+        // CRITICAL: use the public hostname (mail.<domain>) — not host.docker.internal.
+        // The mail server's TLS cert is issued for mail.<domain>, so any other
+        // hostname would fail the certificate validation. Roundcube must hit
+        // the public host:port the mail server actually publishes.
+        const mailHost = `mail.${domain.domain}`;
         composeContent = composeContent
           .replace(
             /ROUNDCUBEMAIL_DEFAULT_HOST: tls:\/\/host\.docker\.internal/g,
-            `ROUNDCUBEMAIL_DEFAULT_HOST: tls://${imapHost}`,
+            `ROUNDCUBEMAIL_DEFAULT_HOST: ssl://${mailHost}`,
           )
           .replace(
             /ROUNDCUBEMAIL_DEFAULT_PORT: "993"/g,
@@ -117,7 +129,7 @@ export class MarketplaceService {
           )
           .replace(
             /ROUNDCUBEMAIL_SMTP_SERVER: tls:\/\/host\.docker\.internal/g,
-            `ROUNDCUBEMAIL_SMTP_SERVER: tls://${smtpHost}`,
+            `ROUNDCUBEMAIL_SMTP_SERVER: tls://${mailHost}`,
           )
           .replace(
             /ROUNDCUBEMAIL_SMTP_PORT: "587"/g,
