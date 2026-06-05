@@ -45,6 +45,11 @@ const APPS: MarketplaceApp[] = [
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const APPS_DIR = path.join(DATA_DIR, 'apps');
 
+// Webmail apps that bind to a specific Kryptalis mail server. Multi-install
+// is allowed (one instance per mail server) — uniqueness is enforced on
+// (slug, domainId) instead of (slug, projectId).
+const WEBMAIL_SLUGS = new Set(['roundcube', 'snappymail', 'rainloop']);
+
 @Injectable()
 export class MarketplaceService {
   constructor(private prisma: PrismaService) {
@@ -76,24 +81,38 @@ export class MarketplaceService {
     const template = COMPOSE_TEMPLATES[data.appSlug];
     if (!template) throw new NotFoundException(`No template for ${app.name}`);
 
-    const existing = await this.prisma.application.findFirst({
-      where: { name: app.name, projectId: data.projectId },
-    });
-    if (existing) {
-      throw new ConflictException(`${app.name} is already installed in this project`);
+    const isWebmail = WEBMAIL_SLUGS.has(data.appSlug);
+
+    if (isWebmail) {
+      // Allow multiple webmail installs — one per mail server. Block only when
+      // there's already a webmail of this slug pointing at the same domain.
+      if (data.domainId) {
+        const dup = await this.prisma.application.findFirst({
+          where: { domains: { some: { id: data.domainId } } },
+        });
+        if (dup) {
+          throw new ConflictException(
+            `An app is already linked to this domain — unlink it first`,
+          );
+        }
+      }
+    } else {
+      const existing = await this.prisma.application.findFirst({
+        where: { name: app.name, projectId: data.projectId },
+      });
+      if (existing) {
+        throw new ConflictException(`${app.name} is already installed in this project`);
+      }
     }
 
-    const realPort = data.port || PORT_MAP[data.appSlug] || app.ports[0];
+    const basePort = PORT_MAP[data.appSlug] || app.ports[0];
+    const realPort = data.port || (isWebmail ? await this.allocateFreePort(basePort) : basePort);
 
     // Pre-compute auto-resolved values for webmail-style apps that need to
     // point at an existing Kryptalis mail server. The compose template is
     // patched on the fly with these substitutions.
     let composeContent = template.compose;
-    if (
-      data.appSlug === 'roundcube' ||
-      data.appSlug === 'snappymail' ||
-      data.appSlug === 'rainloop'
-    ) {
+    if (isWebmail) {
       // Find the target mail server. Priority:
       //   1. domainId from the install request
       //   2. only ONE mail server installed → use it
@@ -141,6 +160,11 @@ export class MarketplaceService {
     // Custom env override from the install request — written as a .env file alongside compose
     const envOverride = data.envVars || {};
 
+    // Keep the app's canonical name ("Roundcube") so slugify() in
+    // applications.service produces a stable slug. Per-instance differentiation
+    // is carried by the linked domain (UI joins on app.domains[0] to render
+    // "Roundcube — mail.foo.com"), and by the applicationId suffix in the
+    // container_name/dir below.
     const application = await this.prisma.application.create({
       data: {
         name: app.name,
@@ -150,6 +174,14 @@ export class MarketplaceService {
         port: realPort,
       },
     });
+
+    // Substitute per-instance tokens AFTER we know the applicationId. Each
+    // install gets a unique container_name, host port, and volume namespace
+    // so multiple instances of the same image can coexist on one host.
+    const instanceId = application.id.slice(0, 12);
+    composeContent = composeContent
+      .replace(/__INSTANCE_ID__/g, instanceId)
+      .replace(/__HOST_PORT__/g, String(realPort));
 
     if (data.domainId) {
       await this.prisma.domain.update({
@@ -185,7 +217,7 @@ export class MarketplaceService {
       });
     }
 
-    this.runDockerCompose(data.appSlug, composeContent, application.id, task.id, envOverride);
+    this.runDockerCompose(data.appSlug, composeContent, application.id, task.id, envOverride, isWebmail);
 
     return {
       message: `Installing ${app.name}...`,
@@ -204,14 +236,39 @@ export class MarketplaceService {
     }
   }
 
+  /**
+   * Find a free TCP port at or above `base`, skipping any port currently
+   * published by a running docker container. Used for webmail multi-install
+   * (8083 → 8093 → 8103 …) so a second Roundcube instance doesn't collide
+   * with the first.
+   */
+  private async allocateFreePort(base: number): Promise<number> {
+    const used = new Set<number>();
+    try {
+      const { stdout } = await execAsync('docker ps --format "{{.Ports}}"', { timeout: 5000 });
+      const re = /:(\d+)->/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(stdout)) !== null) used.add(parseInt(m[1], 10));
+    } catch {}
+    let p = base;
+    while (used.has(p)) p += 10;
+    return p;
+  }
+
   private async runDockerCompose(
     slug: string,
     compose: string,
     applicationId: string,
     taskId: string,
     envOverride: Record<string, string> = {},
+    perInstanceDir = false,
   ) {
-    const appDir = path.join(APPS_DIR, slug);
+    // perInstanceDir = true for apps that support multi-install (webmail).
+    // Single-install apps keep using APPS_DIR/<slug> for back-compat with
+    // existing deployments and the uninstall() helper below.
+    const appDir = perInstanceDir
+      ? path.join(APPS_DIR, `${slug}-${applicationId.slice(0, 12)}`)
+      : path.join(APPS_DIR, slug);
     if (!fs.existsSync(appDir)) {
       fs.mkdirSync(appDir, { recursive: true });
     }

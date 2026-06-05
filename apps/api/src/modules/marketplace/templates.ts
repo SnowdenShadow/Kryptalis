@@ -192,14 +192,17 @@ volumes:
   },
 
   // ── Email & webmail apps ────────────────────────────────────────
+  // Webmail apps support multiple installs (one per mail server). The tokens
+  // __INSTANCE_ID__, __HOST_PORT__ are substituted at install time so each
+  // instance gets a unique container name, host port, and volume namespace.
   roundcube: {
     compose: `services:
   roundcube:
     image: roundcube/roundcubemail:latest
-    container_name: kryptalis-roundcube
+    container_name: kryptalis-roundcube-__INSTANCE_ID__
     restart: unless-stopped
     ports:
-      - "8083:80"
+      - "__HOST_PORT__:80"
     environment:
       ROUNDCUBEMAIL_DEFAULT_HOST: tls://host.docker.internal
       ROUNDCUBEMAIL_DEFAULT_PORT: "993"
@@ -210,39 +213,39 @@ volumes:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - roundcube_data:/var/roundcube/db
-      - roundcube_config:/var/roundcube/config
+      - roundcube_data___INSTANCE_ID__:/var/roundcube/db
+      - roundcube_config___INSTANCE_ID__:/var/roundcube/config
 volumes:
-  roundcube_data:
-  roundcube_config:`,
+  roundcube_data___INSTANCE_ID__:
+  roundcube_config___INSTANCE_ID__:`,
   },
 
   snappymail: {
     compose: `services:
   snappymail:
     image: djmaze/snappymail:latest
-    container_name: kryptalis-snappymail
+    container_name: kryptalis-snappymail-__INSTANCE_ID__
     restart: unless-stopped
     ports:
-      - "8084:8888"
+      - "__HOST_PORT__:8888"
     volumes:
-      - snappymail_data:/var/lib/snappymail
+      - snappymail_data___INSTANCE_ID__:/var/lib/snappymail
 volumes:
-  snappymail_data:`,
+  snappymail_data___INSTANCE_ID__:`,
   },
 
   rainloop: {
     compose: `services:
   rainloop:
     image: hardware/rainloop:latest
-    container_name: kryptalis-rainloop
+    container_name: kryptalis-rainloop-__INSTANCE_ID__
     restart: unless-stopped
     ports:
-      - "8085:8888"
+      - "__HOST_PORT__:8888"
     volumes:
-      - rainloop_data:/rainloop/data
+      - rainloop_data___INSTANCE_ID__:/rainloop/data
 volumes:
-  rainloop_data:`,
+  rainloop_data___INSTANCE_ID__:`,
   },
 
   mailpit: {

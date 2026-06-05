@@ -52,6 +52,31 @@ function imageName(slug: string) {
   return `kryptalis/${slug}:latest`;
 }
 
+/**
+ * Resolve the on-disk compose dir for an application. Marketplace multi-install
+ * apps (webmail) use `<slug>-<applicationId.slice(0,12)>`; everything else uses
+ * the legacy `<slug>` dir. Picks whichever one actually exists on disk; falls
+ * back to the legacy dir when neither exists so the caller can still write a
+ * fresh deploy there.
+ */
+function resolveAppDir(slug: string, applicationId: string): string {
+  const perInstance = path.join(APPS_DIR, `${slug}-${applicationId.slice(0, 12)}`);
+  if (fs.existsSync(perInstance)) return perInstance;
+  return path.join(APPS_DIR, slug);
+}
+
+/**
+ * Resolve the docker container_name for an application. Marketplace multi-
+ * install apps suffix with `-<applicationId.slice(0,12)>` so several instances
+ * of the same image can coexist on one host. Detection is based on the on-disk
+ * dir layout (which is what the install path actually creates).
+ */
+function resolveContainerName(slug: string, applicationId: string): string {
+  const perInstance = path.join(APPS_DIR, `${slug}-${applicationId.slice(0, 12)}`);
+  if (fs.existsSync(perInstance)) return `kryptalis-${slug}-${applicationId.slice(0, 12)}`;
+  return `kryptalis-${slug}`;
+}
+
 export interface PortDef {
   service: string;
   host: number | null;
@@ -781,15 +806,17 @@ export class ApplicationsService {
     const server = await this.resolveAppServer(id);
 
     if (this.isAppLocal(server)) {
-      const appDir = path.join(APPS_DIR, slug);
+      const appDir = resolveAppDir(slug, id);
       if (fs.existsSync(appDir)) {
         try {
           await dockerCompose(appDir, ['down', '-v', '--remove-orphans'], undefined, 60_000);
         } catch {}
         try { fs.rmSync(appDir, { recursive: true, force: true }); } catch {}
       }
-      // belt + suspenders: kill orphan container if any
+      // belt + suspenders: kill orphan containers for both naming schemes
+      // (compose `down` may have missed them on a crashed install).
       try { await execFileAsync('docker', ['rm', '-f', containerName(slug)]); } catch {}
+      try { await execFileAsync('docker', ['rm', '-f', `${containerName(slug)}-${id.slice(0, 12)}`]); } catch {}
     } else if (server) {
       await this.agent.enqueueTask(server.id, 'REMOVE', { slug, containerName: containerName(slug) });
     }
@@ -806,7 +833,7 @@ export class ApplicationsService {
     const slug = slugify(app.name);
     const server = await this.resolveAppServer(id);
     if (this.isAppLocal(server)) {
-      const appDir = path.join(APPS_DIR, slug);
+      const appDir = resolveAppDir(slug, id);
       if (fs.existsSync(appDir)) {
         await dockerCompose(appDir, ['up', '-d'], undefined, 60_000);
       }
@@ -824,7 +851,7 @@ export class ApplicationsService {
     const slug = slugify(app.name);
     const server = await this.resolveAppServer(id);
     if (this.isAppLocal(server)) {
-      const appDir = path.join(APPS_DIR, slug);
+      const appDir = resolveAppDir(slug, id);
       if (fs.existsSync(appDir)) {
         await dockerCompose(appDir, ['stop'], undefined, 60_000);
       }
@@ -842,7 +869,7 @@ export class ApplicationsService {
     const slug = slugify(app.name);
     const server = await this.resolveAppServer(id);
     if (this.isAppLocal(server)) {
-      const appDir = path.join(APPS_DIR, slug);
+      const appDir = resolveAppDir(slug, id);
       if (fs.existsSync(appDir)) {
         await dockerCompose(appDir, ['restart'], undefined, 60_000);
       }
@@ -906,7 +933,7 @@ export class ApplicationsService {
         return { logs: err?.message || 'Failed to fetch logs from agent' };
       }
     }
-    const appDir = path.join(APPS_DIR, slug);
+    const appDir = resolveAppDir(slug, id);
     if (!fs.existsSync(appDir)) {
       return { logs: 'No logs available — app has no Docker compose directory.' };
     }
@@ -927,7 +954,7 @@ export class ApplicationsService {
   async execCommand(userId: string, id: string, command: string) {
     const app = await this.assertOwnership(userId, id);
     const slug = slugify(app.name);
-    const cname = containerName(slug);
+    const cname = resolveContainerName(slug, id);
     const server = await this.resolveAppServer(id);
 
     if (!this.isAppLocal(server) && server) {
@@ -983,7 +1010,7 @@ export class ApplicationsService {
 
   async readComposeFile(userId: string, id: string) {
     const app = await this.assertOwnership(userId, id);
-    const appDir = path.join(APPS_DIR, slugify(app.name));
+    const appDir = resolveAppDir(slugify(app.name), id);
     const p = this.findComposePath(appDir);
     if (!p) return { exists: false, content: '', path: null };
     return {
@@ -1000,7 +1027,7 @@ export class ApplicationsService {
     try { yaml.load(content); } catch (e: any) {
       throw new BadRequestException(`Invalid YAML: ${e?.message || e}`);
     }
-    const appDir = path.join(APPS_DIR, slugify(app.name));
+    const appDir = resolveAppDir(slugify(app.name), id);
     if (!fs.existsSync(appDir)) fs.mkdirSync(appDir, { recursive: true });
     const target = this.findComposePath(appDir) || path.join(appDir, 'docker-compose.yml');
     fs.writeFileSync(target, content);
@@ -1009,7 +1036,7 @@ export class ApplicationsService {
 
   async readDockerfile(userId: string, id: string) {
     const app = await this.assertOwnership(userId, id);
-    const appDir = path.join(APPS_DIR, slugify(app.name));
+    const appDir = resolveAppDir(slugify(app.name), id);
     const p = path.join(appDir, 'Dockerfile');
     if (!fs.existsSync(p)) return { exists: false, content: '' };
     return { exists: true, content: fs.readFileSync(p, 'utf-8') };
@@ -1018,7 +1045,7 @@ export class ApplicationsService {
   async writeDockerfile(userId: string, id: string, content: string) {
     const app = await this.assertOwnership(userId, id);
     if (typeof content !== 'string') throw new BadRequestException('content required');
-    const appDir = path.join(APPS_DIR, slugify(app.name));
+    const appDir = resolveAppDir(slugify(app.name), id);
     if (!fs.existsSync(appDir)) fs.mkdirSync(appDir, { recursive: true });
     fs.writeFileSync(path.join(appDir, 'Dockerfile'), content);
     return { message: 'Dockerfile updated' };
@@ -1028,7 +1055,7 @@ export class ApplicationsService {
 
   async listPorts(userId: string, id: string) {
     const app = await this.assertOwnership(userId, id);
-    const appDir = path.join(APPS_DIR, slugify(app.name));
+    const appDir = resolveAppDir(slugify(app.name), id);
     const composePath = this.findComposePath(appDir);
     const fromCompose = composePath
       ? parseComposePorts(fs.readFileSync(composePath, 'utf-8'))
@@ -1069,7 +1096,7 @@ export class ApplicationsService {
         }
       }
     }
-    const appDir = path.join(APPS_DIR, slugify(app.name));
+    const appDir = resolveAppDir(slugify(app.name), id);
     const composePath = this.findComposePath(appDir);
     if (!composePath) throw new BadRequestException('No compose file');
     const content = fs.readFileSync(composePath, 'utf-8');
@@ -1233,7 +1260,7 @@ export class ApplicationsService {
 
   private async syncStatus(app: any) {
     if (app.status === 'DEPLOYING') return app;
-    const appDir = path.join(APPS_DIR, slugify(app.name));
+    const appDir = resolveAppDir(slugify(app.name), app.id);
     if (!fs.existsSync(appDir)) return app;
     try {
       const { stdout } = await dockerCompose(appDir, ['ps', '--format', 'json'], undefined, 10_000);

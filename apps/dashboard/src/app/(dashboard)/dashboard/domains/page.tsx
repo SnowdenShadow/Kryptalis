@@ -467,9 +467,18 @@ export default function DomainsPage() {
         <DialogHeader>
           <DialogTitle>Delete Domain</DialogTitle>
           <DialogDescription>
-            Delete <span className="font-mono font-semibold text-foreground">{deleteTarget?.domain}</span>? This will remove the domain and its SSL certificate.
+            Delete <span className="font-mono font-semibold text-foreground">{deleteTarget?.domain}</span>?
           </DialogDescription>
         </DialogHeader>
+        <div className="space-y-2 px-1 pb-2">
+          <p className="text-sm font-medium">This will permanently remove:</p>
+          <ul className="text-sm list-disc list-inside text-muted-foreground space-y-1">
+            <li>The DNS records, SSL certificate, and reverse-proxy route</li>
+            <li>The mail server stack (Postfix, Dovecot, rspamd) if deployed</li>
+            <li>All mailboxes, aliases, stored emails, and the DKIM key</li>
+          </ul>
+          <p className="text-xs text-orange-500 font-medium pt-1">This action is irreversible.</p>
+        </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t('common.cancel')}</Button>
           <Button variant="destructive" disabled={deleteMutation.isPending}

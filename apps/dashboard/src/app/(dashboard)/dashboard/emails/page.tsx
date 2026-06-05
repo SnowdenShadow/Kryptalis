@@ -66,6 +66,7 @@ interface DnsHints {
     ports: { smtp: number; submission: number; smtps: number; imap: number; imaps: number };
     hostname: string | null;
     lastError: string | null;
+    mailboxCount: number;
   } | null;
 }
 
@@ -576,6 +577,31 @@ export default function EmailsPage() {
                         <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-xs">
                           <p className="font-semibold text-red-400 mb-1">Last error</p>
                           <pre className="text-muted-foreground whitespace-pre-wrap break-all">{dnsHints.mailServer.lastError}</pre>
+                        </div>
+                      )}
+
+                      {dnsHints.mailServer.status === 'RUNNING' && dnsHints.mailServer.mailboxCount === 0 && (
+                        <div className="flex items-start gap-3 rounded-lg border border-orange-500/30 bg-orange-500/5 p-3">
+                          <AlertTriangle size={16} className="text-orange-500 shrink-0 mt-0.5" />
+                          <div className="text-xs flex-1">
+                            <p className="font-semibold text-orange-400">Dovecot is not accepting logins yet</p>
+                            <p className="text-muted-foreground mt-1">
+                              docker-mailserver shuts down IMAP when no mailbox exists.
+                              Create at least one mailbox to enable receiving and login.
+                            </p>
+                          </div>
+                          <Button
+                            size="sm"
+                            onClick={() => {
+                              const projId = eligibleDomains.find(d => d.id === selectedDomainId)?.project?.id
+                                || eligibleDomains.find(d => d.id === selectedDomainId)?.application?.project?.id
+                                || '';
+                              setNewMb((s) => ({ ...s, domainId: selectedDomainId, projectId: projId }));
+                              setShowCreateMb(true);
+                            }}
+                          >
+                            <Plus size={12} /> Create mailbox
+                          </Button>
                         </div>
                       )}
 

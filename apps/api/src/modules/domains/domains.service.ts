@@ -69,7 +69,7 @@ export class DomainsService {
   async findAll(userId: string) {
     const projectIds = await listAccessibleProjectIds(this.prisma, userId);
     if (projectIds.length === 0) return [];
-    return this.prisma.domain.findMany({
+    const domains = await this.prisma.domain.findMany({
       where: { projectId: { in: projectIds } },
       include: {
         project: { select: { id: true, name: true } },
@@ -83,6 +83,18 @@ export class DomainsService {
       },
       orderBy: { createdAt: 'desc' },
     });
+    // attach mailServer flag — marketplace UI uses it to filter the domain
+    // dropdown when installing webmail (Roundcube/SnappyMail/Rainloop) so
+    // users can only pick a domain that has a running mail server.
+    const mailServers = await this.prisma.mailServer.findMany({
+      where: { domainId: { in: domains.map((d) => d.id) } },
+      select: { domainId: true, status: true, hostname: true },
+    });
+    const msByDomain = new Map(mailServers.map((m) => [m.domainId, m]));
+    return domains.map((d) => ({
+      ...d,
+      mailServer: msByDomain.get(d.id) || null,
+    }));
   }
 
   private async assertDomainAccess(

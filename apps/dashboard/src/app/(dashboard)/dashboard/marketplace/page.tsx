@@ -424,16 +424,35 @@ export default function MarketplacePage() {
             )}
           </div>
 
-          <div className="space-y-2">
-            <Label>Domain (optional)</Label>
-            <Select value={selectedDomainId} onChange={(e) => setSelectedDomainId(e.target.value)}>
-              <option value="">No domain</option>
-              {allDomains.filter((d: any) => !d.applicationId).map((d: any) => (
-                <option key={d.id} value={d.id}>{d.domain}</option>
-              ))}
-            </Select>
-            <p className="text-xs text-muted-foreground">Select an existing domain to link, or leave empty</p>
-          </div>
+          {(() => {
+            const isWebmail = installApp && ['roundcube', 'snappymail', 'rainloop'].includes(installApp.slug);
+            const candidates = allDomains.filter((d: any) => {
+              if (d.applicationId) return false;
+              // webmail clients must point at a domain that already has a mail server
+              if (isWebmail && !d.mailServer) return false;
+              return true;
+            });
+            return (
+              <div className="space-y-2">
+                <Label>{isWebmail ? 'Target mail server' : 'Domain (optional)'}</Label>
+                <Select value={selectedDomainId} onChange={(e) => setSelectedDomainId(e.target.value)}>
+                  <option value="">{isWebmail ? 'Select a mail server…' : 'No domain'}</option>
+                  {candidates.map((d: any) => (
+                    <option key={d.id} value={d.id}>
+                      {isWebmail ? `mail.${d.domain}` : d.domain}
+                    </option>
+                  ))}
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {isWebmail
+                    ? candidates.length === 0
+                      ? 'No mail server available — deploy one from a domain page first.'
+                      : 'The webmail client will be pre-configured to log in to this mail server.'
+                    : 'Select an existing domain to link, or leave empty.'}
+                </p>
+              </div>
+            );
+          })()}
 
           <div className="space-y-2">
             <Label>Custom Port (optional)</Label>

@@ -246,6 +246,12 @@ export class EmailService {
     const domain = await this.assertDomainAccess(userId, domainId, 'VIEWER');
     const apex = domain.domain;
     const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    // mailbox count drives the UI warning shown when the mail server is
+    // RUNNING but dovecot can't actually accept logins (docker-mailserver
+    // refuses to start dovecot when no account exists in postfix-accounts.cf).
+    const mailboxCount = await this.prisma.mailbox.count({
+      where: { domainId, status: 'ACTIVE', forwardTo: null },
+    });
     const dkimValue = server?.dkimPublicKey
       ? `v=DKIM1; k=rsa; p=${server.dkimPublicKey}`
       : 'v=DKIM1; k=rsa; p=<deploy the mail server first>';
@@ -272,6 +278,7 @@ export class EmailService {
             },
             hostname: server.hostname,
             lastError: server.lastError,
+            mailboxCount,
           }
         : null,
     };
