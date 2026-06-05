@@ -20,6 +20,11 @@ RUN pnpm --filter @kryptalis/dashboard build
 FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3000
+# Next.js standalone output already bundles the minimal node_modules it needs.
+# outputFileTracingRoot is set to the monorepo root, so the standalone tree
+# contains both apps/dashboard/server.js AND the workspace node_modules.
 COPY --from=builder /app/apps/dashboard/.next/standalone ./
 COPY --from=builder /app/apps/dashboard/.next/static ./apps/dashboard/.next/static
 COPY --from=builder /app/apps/dashboard/public ./apps/dashboard/public
