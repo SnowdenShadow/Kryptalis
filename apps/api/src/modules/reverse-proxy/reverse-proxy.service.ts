@@ -265,15 +265,16 @@ ${email ? `  email ${email}\n` : ''}}
    */
   async syncSslStatuses() {
     const domains = await this.prisma.domain.findMany({
-      where: { sslStatus: { not: 'DISABLED' as any } },
       select: { id: true, domain: true, sslStatus: true },
     });
     if (!domains.length) return { updated: 0 };
 
     let updated = 0;
+    let checked = 0;
     for (const d of domains) {
       // skip local hostnames — Caddy uses its internal CA, not Let's Encrypt
       if (this.isLocalHostname(d.domain)) continue;
+      checked++;
       const hasCert = await this.hasIssuedCert(d.domain);
       const newStatus = hasCert ? 'ACTIVE' : 'PENDING';
       if (d.sslStatus !== newStatus) {
@@ -285,10 +286,11 @@ ${email ? `  email ${email}\n` : ''}}
           },
         });
         updated++;
+        this.logger.log(`SSL: ${d.domain} → ${newStatus}`);
       }
     }
-    if (updated > 0) this.logger.log(`SSL status sync: updated ${updated} domain(s)`);
-    return { updated };
+    this.logger.debug(`SSL sync: ${checked} checked, ${updated} updated`);
+    return { updated, checked };
   }
 
   private async hasIssuedCert(host: string): Promise<boolean> {

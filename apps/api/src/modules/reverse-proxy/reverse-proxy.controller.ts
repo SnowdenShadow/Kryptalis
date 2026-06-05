@@ -21,8 +21,18 @@ export class ReverseProxyController {
 
   @Post('sync')
   @ApiOperation({ summary: 'Regenerate the Caddyfile and reload Caddy' })
-  sync() {
-    return this.svc.regenerate();
+  async sync() {
+    const r = await this.svc.regenerate();
+    // run the SSL sync immediately so the UI doesn't have to wait for the
+    // background 60s tick after a manual resync.
+    await this.svc.syncSslStatuses();
+    return r;
+  }
+
+  @Post('sync-ssl')
+  @ApiOperation({ summary: 'Force-sync Domain.sslStatus from Caddy cert store' })
+  syncSsl() {
+    return this.svc.syncSslStatuses();
   }
 
   @Post('start')
