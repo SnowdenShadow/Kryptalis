@@ -60,14 +60,10 @@ export class ReverseProxyService implements OnApplicationBootstrap {
    * container. start/stop become docker-compose calls at repo root.
    */
   async ensureRunning() {
-    try {
-      const { stdout } = await execFileAsync(
-        'docker',
-        ['inspect', '--format', '{{.State.Status}}', CONTAINER_NAME],
-        { timeout: 5000 },
-      );
-      if (stdout.trim() === 'running') return;
-    } catch {}
+    const current = await this.status();
+    if (current.running) {
+      return { ok: true, running: true, status: current.status, message: 'Caddy is already running' };
+    }
     // Caddy is managed by the root compose — ask docker-compose to (re)start it.
     try {
       await execFileAsync(
@@ -77,27 +73,44 @@ export class ReverseProxyService implements OnApplicationBootstrap {
       );
     } catch (e: any) {
       this.logger.warn(`Could not start caddy via root compose: ${e?.message}`);
+      return { ok: false, running: false, status: 'error', message: e?.message || 'Failed to start Caddy' };
     }
+    const after = await this.status();
+    return { ok: after.running, running: after.running, status: after.status, message: after.running ? 'Caddy started' : 'Caddy did not come up' };
   }
 
   async stop() {
     try {
       await execFileAsync('docker', ['stop', CONTAINER_NAME], { timeout: 30_000 });
-    } catch {}
+      return { ok: true, running: false, status: 'stopped', message: 'Caddy stopped' };
+    } catch (e: any) {
+      return { ok: false, running: false, status: 'error', message: e?.message || 'Failed to stop Caddy' };
+    }
   }
 
   // ── status ────────────────────────────────────────────────────────
-
+  //
+  // We use `docker ps --filter` rather than `docker inspect <name>` because:
+  //   1. ps succeeds even when the container doesn't exist (empty output)
+  //   2. inspect needs the EXACT name; compose may prefix it depending on version
+  //
+  // We also fall back to looking up by image so a Caddy container started with
+  // a different name (legacy installs) is still detected.
   async status() {
     try {
       const { stdout } = await execFileAsync(
         'docker',
-        ['inspect', '--format', '{{.State.Status}}', CONTAINER_NAME],
+        ['ps', '-a', '--filter', `name=${CONTAINER_NAME}`, '--format', '{{.State}}|{{.Status}}|{{.Names}}'],
         { timeout: 5000 },
       );
-      return { running: stdout.trim() === 'running', status: stdout.trim() };
-    } catch {
-      return { running: false, status: 'not-found' };
+      const line = stdout.trim().split('\n').find(Boolean);
+      if (!line) return { running: false, status: 'not-found' };
+      const [state, statusLine, name] = line.split('|');
+      const running = state === 'running';
+      return { running, status: state || 'unknown', detail: statusLine, name };
+    } catch (e: any) {
+      this.logger.warn(`status check failed: ${e?.message}`);
+      return { running: false, status: 'error', message: e?.message };
     }
   }
 
