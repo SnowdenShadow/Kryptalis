@@ -281,13 +281,15 @@ export class MailServerService {
     const sslVolume = isLocal
       ? ''
       : `      - kryptalis_caddy_data:/caddy-certs:ro\n`;
-    // The Caddy data volume is created by the root docker-compose. Its name is
-    // <project>_caddy_data where project defaults to the parent directory name.
-    // We let the user override via COMPOSE_PROJECT_NAME env if needed.
-    const composeProject = process.env.COMPOSE_PROJECT_NAME || 'kryptalis-dev';
+    // The Caddy data volume is created by the root docker-compose. Its real
+    // name is <project>_caddy_data where <project> is the compose project
+    // (usually the parent dir name: "kryptalis" on /opt/kryptalis, but could
+    // be "kryptalis-dev" in dev). Resolve it dynamically by introspecting the
+    // running kryptalis-caddy container, with sensible env-var override.
+    const caddyDataVolumeName = isLocal ? '' : await this.resolveCaddyDataVolume();
     const sslExternalVolumes = isLocal
       ? ''
-      : `\nvolumes:\n  kryptalis_caddy_data:\n    external: true\n    name: ${composeProject}_caddy_data\n`;
+      : `\nvolumes:\n  kryptalis_caddy_data:\n    external: true\n    name: ${caddyDataVolumeName}\n`;
 
     const compose = `services:
   mailserver:
@@ -357,6 +359,39 @@ ${sslExternalVolumes}`;
         },
       });
     }
+  }
+
+  /**
+   * Find the real name of the Caddy data volume created by the root compose.
+   * Default name = <project>_caddy_data; <project> defaults to the parent dir
+   * (e.g. "kryptalis" on /opt/kryptalis, "kryptalis-dev" on a dev checkout).
+   * Resolution priority:
+   *   1. CADDY_DATA_VOLUME env var (explicit operator override)
+   *   2. The volume currently mounted at /data inside the kryptalis-caddy container
+   *   3. First matching docker volume ending in _caddy_data
+   *   4. Fallback to kryptalis_caddy_data
+   */
+  private async resolveCaddyDataVolume(): Promise<string> {
+    if (process.env.CADDY_DATA_VOLUME) return process.env.CADDY_DATA_VOLUME;
+    try {
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['inspect', 'kryptalis-caddy', '--format',
+         '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}'],
+        { timeout: 5000 },
+      );
+      const name = stdout.trim();
+      if (name) return name;
+    } catch {}
+    try {
+      const { stdout } = await execFileAsync(
+        'docker', ['volume', 'ls', '--quiet', '--filter', 'name=_caddy_data$'],
+        { timeout: 5000 },
+      );
+      const first = stdout.trim().split('\n').find(Boolean);
+      if (first) return first;
+    } catch {}
+    return 'kryptalis_caddy_data';
   }
 
   /**
