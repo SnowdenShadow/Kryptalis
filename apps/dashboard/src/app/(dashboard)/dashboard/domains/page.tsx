@@ -283,8 +283,17 @@ export default function DomainsPage() {
                       <div>
                         <h3 className="font-mono text-lg font-bold">{domain.domain}</h3>
                         <div className="flex items-center gap-2 mt-1">
-                          <Badge variant={domain.status === 'ACTIVE' ? 'success' : domain.status === 'PENDING' ? 'warning' : 'destructive'}>
-                            {domain.status}
+                          <Badge
+                            variant={domain.status === 'ACTIVE' ? 'success' : domain.status === 'PENDING' ? 'warning' : 'destructive'}
+                            title={
+                              domain.status === 'ACTIVE'
+                                ? 'Domain is live and routing traffic to its app.'
+                                : domain.status === 'PENDING'
+                                ? 'Domain reserved — SSL is being provisioned. Link an app to start serving traffic.'
+                                : 'Domain is not reachable.'
+                            }
+                          >
+                            {domain.status === 'PENDING' ? 'RESERVED' : domain.status}
                           </Badge>
                           <span className="text-xs text-muted-foreground">{timeAgo(domain.createdAt)}</span>
                         </div>
