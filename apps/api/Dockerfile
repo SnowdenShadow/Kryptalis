@@ -23,6 +23,9 @@ RUN pnpm --filter @kryptalis/api build
 FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+# The API talks to the host Docker daemon (compose stacks, mail server, Caddy reload,
+# port checks, etc.) — it MUST have the docker CLI + compose plugin + git for deploys.
+RUN apk add --no-cache docker-cli docker-cli-compose git openssh-client ca-certificates
 # Copy the whole workspace so pnpm symlinks resolve (.pnpm store lives at the root).
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages ./packages

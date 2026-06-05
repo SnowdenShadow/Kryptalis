@@ -64,15 +64,14 @@ export class ReverseProxyService implements OnApplicationBootstrap {
     if (current.running) {
       return { ok: true, running: true, status: current.status, message: 'Caddy is already running' };
     }
-    // Caddy is managed by the root compose — ask docker-compose to (re)start it.
+    // Caddy is managed by the root compose. From inside the API container we
+    // can't reach the host's compose file, but we CAN start the container by
+    // name via the mounted docker socket. (Compose just labels the containers;
+    // `docker start` works the same.)
     try {
-      await execFileAsync(
-        'docker',
-        ['compose', '-f', path.join(process.cwd(), 'docker-compose.yml'), 'up', '-d', 'caddy'],
-        { timeout: 60_000 },
-      );
+      await execFileAsync('docker', ['start', CONTAINER_NAME], { timeout: 30_000 });
     } catch (e: any) {
-      this.logger.warn(`Could not start caddy via root compose: ${e?.message}`);
+      this.logger.warn(`Could not start caddy: ${e?.message}`);
       return { ok: false, running: false, status: 'error', message: e?.message || 'Failed to start Caddy' };
     }
     const after = await this.status();
