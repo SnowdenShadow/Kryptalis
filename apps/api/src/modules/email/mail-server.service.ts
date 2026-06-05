@@ -16,6 +16,13 @@ import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 const execFileAsync = promisify(execFile);
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const MAIL_DIR = path.join(DATA_DIR, 'mail');
+// When the API runs in a container, the docker daemon on the host resolves
+// bind-mount source paths against the HOST filesystem, not the API container's
+// filesystem. Set KRYPTALIS_HOST_DATA_DIR to the host path that the API's
+// .kryptalis volume mounts FROM (e.g. /opt/kryptalis/.kryptalis) so generated
+// compose files use the correct absolute host paths.
+const HOST_DATA_DIR = process.env.KRYPTALIS_HOST_DATA_DIR || DATA_DIR;
+const HOST_MAIL_DIR = path.posix.join(HOST_DATA_DIR.replace(/\\/g, '/'), 'mail');
 
 /**
  * Provisions a docker-mailserver stack per domain.
@@ -283,6 +290,10 @@ export class MailServerService {
       if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
     }
 
+    // path the docker daemon (running on the HOST) will see — must be the host
+    // path, NOT the API-container path. See HOST_MAIL_DIR above.
+    const hostDir = path.posix.join(HOST_MAIL_DIR, serverId);
+
     // DKIM key files expected by docker-mailserver
     const dkimDir = path.join(cfgDir, 'opendkim', 'keys', domain);
     fs.mkdirSync(dkimDir, { recursive: true });
@@ -353,10 +364,10 @@ export class MailServerService {
       DOVECOT_INET_PROTOCOLS: ipv4
       TZ: UTC
     volumes:
-      - ./data:/var/mail
-      - ./state:/var/mail-state
-      - ./logs:/var/log/mail
-      - ./config:/tmp/docker-mailserver
+      - ${hostDir}/data:/var/mail
+      - ${hostDir}/state:/var/mail-state
+      - ${hostDir}/logs:/var/log/mail
+      - ${hostDir}/config:/tmp/docker-mailserver
 ${sslVolume}    cap_add:
       - NET_ADMIN
       - SYS_PTRACE

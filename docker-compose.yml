@@ -83,6 +83,12 @@ services:
       # MUST match the host mount path below so changes are visible to the
       # Caddy container too (which mounts the same .kryptalis subfolder).
       KRYPTALIS_DATA_DIR: /app/.kryptalis
+      # Host path corresponding to the .kryptalis volume mount. Required when
+      # API generates child docker-compose stacks (mail server, marketplace
+      # apps): the docker daemon on the HOST resolves bind-mount sources
+      # against the host filesystem, not the API container's filesystem.
+      # Override via .env if your repo lives somewhere other than $PWD.
+      KRYPTALIS_HOST_DATA_DIR: ${PWD}/.kryptalis
     ports:
       - "4000:4000"
     volumes:
