@@ -245,15 +245,16 @@ export class MailServerService {
     const dir = path.join(MAIL_DIR, server.id);
     if (!fs.existsSync(dir)) return;
 
-    // postfix-accounts.cf — bcrypt password compatible with docker-mailserver dovecot
-    // docker-mailserver expects each line: address|{SHA512-CRYPT}hash — but it also
-    // accepts pre-hashed plain SHA512 via setup.sh. For simplicity we let setup.sh
-    // run inside the container do the hashing at first boot via env files.
+    // postfix-accounts.cf — dovecot reads bcrypt hashes via {CRYPT} (the generic
+    // crypt(3) scheme, which recognizes $2y$ / $2a$ / $2b$ bcrypt prefixes).
+    // Dovecot does NOT have a {BCRYPT} scheme — that name is rejected with
+    // "Unknown scheme BCRYPT" and every login fails. Also normalize the legacy
+    // $2a$/$2b$ identifier to $2y$, which is what crypt_blowfish (dovecot's
+    // backend) expects. The hash payload is byte-compatible across $2a/$2b/$2y.
     const accountsPath = path.join(dir, 'config', 'postfix-accounts.cf');
     const accountsLines = mailboxes.map((m) => {
-      // we re-hash using bcrypt for portability; dovecot SHA512-CRYPT
-      // would be ideal but requires the container's binary. Plain bcrypt is supported.
-      return `${m.address}|{BCRYPT}${m.passwordHash}`;
+      const hash = m.passwordHash.replace(/^\$2[ab]\$/, '$2y$');
+      return `${m.address}|{CRYPT}${hash}`;
     });
     fs.writeFileSync(accountsPath, accountsLines.join('\n') + '\n');
 
