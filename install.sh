@@ -19,7 +19,7 @@
 
 set -eu
 
-REPO_URL="${KRYPTALIS_REPO:-https://github.com/kryptalis/kryptalis.git}"
+REPO_URL="${KRYPTALIS_REPO:-https://github.com/SnowdenShadow/Kryptalis.git}"
 INSTALL_DIR="${KRYPTALIS_DIR:-/opt/kryptalis}"
 BRANCH="${KRYPTALIS_BRANCH:-main}"
 PUBLIC_URL_DEFAULT="${PUBLIC_API_URL:-http://localhost:4000}"
