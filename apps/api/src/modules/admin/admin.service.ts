@@ -62,6 +62,18 @@ export class AdminService {
     });
     const out: Record<string, unknown> = {};
     for (const r of rows) out[r.key] = r.value;
+
+    // public_ip — the IP/hostname the dashboard tells users to point their DNS
+    // A records at. Derived from PUBLIC_API_URL set by install.sh (e.g.
+    // http://203.0.113.10:4000 → "203.0.113.10"). Falls back to the host where
+    // the API is reachable.
+    try {
+      const u = new URL(process.env.PUBLIC_API_URL || 'http://localhost:4000');
+      out.public_ip = u.hostname;
+    } catch {
+      out.public_ip = 'localhost';
+    }
+
     return out;
   }
 

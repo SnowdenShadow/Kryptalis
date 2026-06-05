@@ -116,12 +116,10 @@ export class ReverseProxyService implements OnApplicationBootstrap {
   // ── regenerate + reload ───────────────────────────────────────────
 
   async regenerate() {
-    // app-linked domains
-    const appDomains = await this.prisma.domain.findMany({
-      where: {
-        applicationId: { not: null },
-        application: { port: { not: null } },
-      },
+    // EVERY domain owned by a project — even those not yet linked to an app.
+    // Reserved domains still get a Caddy block so Let's Encrypt provisions the cert
+    // in advance (the user gets a green padlock the moment they wire it to an app).
+    const allDomains = await this.prisma.domain.findMany({
       include: { application: { select: { id: true, name: true, port: true } } },
     });
     // mail server domains — we provision a Let's Encrypt cert for mail.<apex>
@@ -140,31 +138,50 @@ export class ReverseProxyService implements OnApplicationBootstrap {
     ];
 
     let activeCount = 0;
+    let reservedCount = 0;
     const newStatusByDomainId: Record<string, 'ACTIVE' | 'PENDING'> = {};
 
-    for (const d of appDomains) {
-      const port = d.application?.port;
-      if (!port) {
-        newStatusByDomainId[d.id] = 'PENDING';
-        continue;
-      }
+    for (const d of allDomains) {
       const host = d.domain;
       const isLocal = this.isLocalHostname(host);
+      const port = d.application?.port ?? null;
+      const linked = !!d.applicationId && !!port;
 
-      blocks.push(`# ${host} → app ${d.application?.name} (host port ${port})`);
+      blocks.push(linked
+        ? `# ${host} → app ${d.application?.name} (host port ${port})`
+        : `# ${host} → reserved (no app linked yet)`);
+
       if (isLocal) {
         blocks.push(`http://${host} {`);
-        blocks.push(`  reverse_proxy host.docker.internal:${port}`);
+        if (linked) {
+          blocks.push(`  reverse_proxy host.docker.internal:${port}`);
+        } else {
+          blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
+        }
         blocks.push(`}`);
       } else {
         // real domain: Caddy auto-provisions Let's Encrypt over :80/:443
+        // even when no app is linked yet — so the cert is ready when the user
+        // wires the app in.
         blocks.push(`${host} {`);
-        blocks.push(`  reverse_proxy host.docker.internal:${port}`);
+        if (linked) {
+          blocks.push(`  reverse_proxy host.docker.internal:${port}`);
+        } else {
+          blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
+        }
         blocks.push(`}`);
       }
       blocks.push('');
-      newStatusByDomainId[d.id] = 'ACTIVE';
-      activeCount++;
+
+      if (linked) {
+        newStatusByDomainId[d.id] = 'ACTIVE';
+        activeCount++;
+      } else {
+        // The cert is being provisioned but no app routes traffic — call this
+        // PENDING in the DB so the UI shows "waiting on app link".
+        newStatusByDomainId[d.id] = 'PENDING';
+        reservedCount++;
+      }
     }
 
     // mail.<apex> routes — only purpose is to obtain Let's Encrypt certs for the mail server.
@@ -195,7 +212,7 @@ export class ReverseProxyService implements OnApplicationBootstrap {
         ['exec', CONTAINER_NAME, 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile'],
         { timeout: 15_000 },
       );
-      this.logger.log(`Caddy reloaded with ${activeCount} domain(s)`);
+      this.logger.log(`Caddy reloaded — ${activeCount} active, ${reservedCount} reserved`);
     } catch (e: any) {
       // fallback: restart container if reload failed
       this.logger.warn(`reload failed (${e?.message}); restarting container`);

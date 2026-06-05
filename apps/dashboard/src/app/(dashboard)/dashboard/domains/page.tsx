@@ -106,6 +106,14 @@ export default function DomainsPage() {
     queryFn: () => api.get('/servers/local'),
   });
 
+  // public IP/hostname users should point their DNS A records at — derived
+  // server-side from PUBLIC_API_URL (set by install.sh). NEVER use server.host
+  // because that's always 127.0.0.1 for the local server.
+  const { data: publicSettings } = useQuery<{ public_ip?: string; deployment_mode?: string }>({
+    queryKey: ['public-settings'],
+    queryFn: () => api.get('/settings/public'),
+  });
+
   const filtered = domains.filter(d => {
     if (search.trim() && !d.domain.toLowerCase().includes(search.toLowerCase())) return false;
     if (filterProjectId) {
@@ -160,7 +168,13 @@ export default function DomainsPage() {
     setTimeout(() => setCopiedId(''), 2000);
   }
 
-  const serverIp = server?.host || '127.0.0.1';
+  // Prefer the public IP exposed by the API (derived from PUBLIC_API_URL set at
+  // install time). Fallback to server.host only if it's actually a public address
+  // — never show 127.0.0.1 to a user who needs to point their DNS at it.
+  const localFallback = server?.host && server.host !== '127.0.0.1' && server.host !== 'localhost'
+    ? server.host
+    : null;
+  const serverIp = publicSettings?.public_ip || localFallback || 'YOUR-SERVER-IP';
 
   return (
     <div className="space-y-5">

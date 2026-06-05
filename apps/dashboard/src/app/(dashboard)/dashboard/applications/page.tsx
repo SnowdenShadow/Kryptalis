@@ -224,6 +224,7 @@ export default function ApplicationsPage() {
 
   const [selectedRepo, setSelectedRepo] = useState<any>(null);
   const [deployDomainId, setDeployDomainId] = useState('');
+  const [newDomainName, setNewDomainName] = useState('');
 
   const { data: availableDomains = [] } = useQuery<any[]>({
     queryKey: ['domains'],
@@ -453,9 +454,26 @@ export default function ApplicationsPage() {
     if (Object.keys(env).length) body.envVars = env;
 
     createMutation.mutate(body, {
-      onSuccess: (created: any) => {
-        if (deployDomainId && created?.id) {
-          api.patch(`/domains/${deployDomainId}`, { applicationId: created.id }).catch(() => {});
+      onSuccess: async (created: any) => {
+        if (!created?.id) return;
+        try {
+          if (deployDomainId === '__new__' && newDomainName) {
+            // Create a brand-new domain for this app
+            await api.post('/domains', {
+              domain: newDomainName,
+              projectId: body.projectId,
+              applicationId: created.id,
+              autoSsl: true,
+            });
+            toast.success(`Domain ${newDomainName} reserved — point its A record at the server IP.`);
+          } else if (deployDomainId && deployDomainId !== '__new__') {
+            await api.patch(`/domains/${deployDomainId}`, { applicationId: created.id });
+          }
+          setNewDomainName('');
+          setDeployDomainId('');
+        } catch (err: any) {
+          // App is deployed anyway — the domain step is a soft failure.
+          toast.error(`App deployed, but domain attach failed: ${err.message}`);
         }
       },
     });
@@ -1272,18 +1290,36 @@ export default function ApplicationsPage() {
               )}
             </div>
 
-            {/* Domain section */}
+            {/* Domain section — pick an existing reserved domain OR type a new one inline */}
             <div className="space-y-2">
               <Label>Domain (optional)</Label>
-              <Select value={deployDomainId} onChange={(e) => setDeployDomainId(e.target.value)}>
+              <Select value={deployDomainId} onChange={(e) => {
+                setDeployDomainId(e.target.value);
+                if (e.target.value !== '__new__') setNewDomainName('');
+              }}>
                 <option value="">No domain</option>
                 {availableDomains.filter((d: any) => !d.applicationId).map((d: any) => (
                   <option key={d.id} value={d.id}>{d.domain}</option>
                 ))}
+                <option value="__new__">+ Add a new domain…</option>
               </Select>
-              <p className="text-xs text-muted-foreground">
-                Link an existing domain. <Link href="/dashboard/domains" className="text-primary hover:underline">Manage domains</Link>
-              </p>
+              {deployDomainId === '__new__' && (
+                <div className="space-y-1">
+                  <Input
+                    placeholder="app.mydomain.com"
+                    value={newDomainName}
+                    onChange={(e) => setNewDomainName(e.target.value.trim().toLowerCase())}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    The domain will be created and auto-linked to this app. Point its A record at the server IP after deploy.
+                  </p>
+                </div>
+              )}
+              {deployDomainId !== '__new__' && (
+                <p className="text-xs text-muted-foreground">
+                  Pick a reserved domain or add a new one. <Link href="/dashboard/domains" className="text-primary hover:underline">Manage domains</Link>
+                </p>
+              )}
             </div>
 
             <DialogFooter>
