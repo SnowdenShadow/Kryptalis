@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
+import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 
 const execFileAsync = promisify(execFile);
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
@@ -22,7 +23,10 @@ const MAIL_DIR = path.join(DATA_DIR, 'mail');
  */
 @Injectable()
 export class MailServerService {
-  constructor(private prisma: PrismaService) {
+  constructor(
+    private prisma: PrismaService,
+    private proxy: ReverseProxyService,
+  ) {
     if (!fs.existsSync(MAIL_DIR)) fs.mkdirSync(MAIL_DIR, { recursive: true });
   }
 
@@ -149,6 +153,12 @@ export class MailServerService {
         lastError: null,
       },
     });
+
+    // make sure Caddy has a block for mail.<apex> so a Let's Encrypt cert gets
+    // provisioned BEFORE the container tries to start dovecot — without the
+    // cert files on disk, dovecot can't open the IMAPS socket and the deploy
+    // ends in a half-up state.
+    this.proxy.regenerate().catch(() => {});
 
     // write filesystem + start docker (async, no await)
     this.runDeploy(server.id, domain.domain, ports, dkimKey!).catch(() => {});
@@ -359,6 +369,10 @@ ${sslExternalVolumes}`;
     fs.writeFileSync(path.join(dir, 'docker-compose.yml'), compose);
 
     try {
+      // Force-remove any stale container with this name. Happens when a prior
+      // deploy crashed mid-flight or the mail_servers row was recreated with a
+      // new serverId (different compose dir) but the old container survived.
+      try { await execFileAsync('docker', ['rm', '-f', containerName], { timeout: 30_000 }); } catch {}
       await execFileAsync('docker', ['compose', 'pull'], { cwd: dir, timeout: 600_000 });
       await execFileAsync('docker', ['compose', 'up', '-d'], { cwd: dir, timeout: 300_000 });
       // mark RUNNING after 5s grace (DMS bootstrap)
