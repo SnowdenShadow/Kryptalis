@@ -19,7 +19,8 @@ import {
 import { AgentService } from '../agent/agent.service';
 
 const execAsync = promisify(exec);
-const DBS_DIR = path.join(process.cwd(), '.kryptalis', 'databases');
+const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const DBS_DIR = path.join(DATA_DIR, 'databases');
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 function isLocalServer(host: string | null | undefined): boolean {

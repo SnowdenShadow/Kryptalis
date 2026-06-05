@@ -79,6 +79,10 @@ services:
       # from PUBLIC_API_URL (e.g. admin@mydomain.com). Bare IPs fall back to
       # anonymous registration (cert still works, just no expiry notices).
       ACME_EMAIL: ${ACME_EMAIL:-}
+      # Where API persists app stacks, mail data, Caddyfile, etc.
+      # MUST match the host mount path below so changes are visible to the
+      # Caddy container too (which mounts the same .kryptalis subfolder).
+      KRYPTALIS_DATA_DIR: /app/.kryptalis
     ports:
       - "4000:4000"
     volumes:

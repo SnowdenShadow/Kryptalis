@@ -42,7 +42,8 @@ const APPS: MarketplaceApp[] = [
   { id: '18', name: 'Mailu', slug: 'mailu', description: 'Mail server admin panel — manage mailboxes & aliases', category: 'Email', icon: 'shield-mail', version: '2024.06', ports: [8088] },
 ];
 
-const APPS_DIR = path.join(process.cwd(), '.kryptalis', 'apps');
+const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const APPS_DIR = path.join(DATA_DIR, 'apps');
 
 @Injectable()
 export class MarketplaceService {

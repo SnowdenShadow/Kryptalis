@@ -11,7 +11,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
 
-const ROOT_DIR = path.join(process.cwd(), '.kryptalis');
+const ROOT_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const APPS_DIR = path.join(ROOT_DIR, 'apps');
 const DBS_DIR = path.join(ROOT_DIR, 'databases');
 

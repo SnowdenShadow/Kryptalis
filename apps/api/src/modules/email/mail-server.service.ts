@@ -13,7 +13,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 
 const execFileAsync = promisify(execFile);
-const MAIL_DIR = path.join(process.cwd(), '.kryptalis', 'mail');
+const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const MAIL_DIR = path.join(DATA_DIR, 'mail');
 
 /**
  * Provisions a docker-mailserver stack per domain.

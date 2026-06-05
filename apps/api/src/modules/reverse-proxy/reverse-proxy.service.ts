@@ -6,7 +6,8 @@ import * as fs from 'fs';
 import { PrismaService } from '../../prisma/prisma.service';
 
 const execFileAsync = promisify(execFile);
-const PROXY_DIR = path.join(process.cwd(), '.kryptalis', 'reverse-proxy');
+const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const PROXY_DIR = path.join(DATA_DIR, 'reverse-proxy');
 const CONTAINER_NAME = 'kryptalis-caddy';
 
 /**

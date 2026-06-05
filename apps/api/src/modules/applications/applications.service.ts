@@ -22,7 +22,8 @@ import * as crypto from 'crypto';
 import * as yaml from 'js-yaml';
 
 const execFileAsync = promisify(execFile);
-const APPS_DIR = path.join(process.cwd(), '.kryptalis', 'apps');
+const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const APPS_DIR = path.join(DATA_DIR, 'apps');
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 function isLocalServer(host: string | null | undefined): boolean {
