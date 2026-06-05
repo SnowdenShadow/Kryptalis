@@ -1,0 +1,185 @@
+import {
+  Controller, Get, Post, Patch, Delete, Param, Body, Query, UseGuards,
+} from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { ApplicationsService } from './applications.service';
+import { CreateApplicationDto } from './dto/create-application.dto';
+import { UpdateApplicationDto } from './dto/update-application.dto';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+
+@ApiTags('Applications')
+@ApiBearerAuth()
+@UseGuards(AuthGuard('jwt'))
+@Controller('applications')
+export class ApplicationsController {
+  constructor(private svc: ApplicationsService) {}
+
+  @Post()
+  @ApiOperation({ summary: 'Create application' })
+  create(@CurrentUser('id') userId: string, @Body() dto: CreateApplicationDto) {
+    return this.svc.create(userId, dto);
+  }
+
+  @Get()
+  @ApiOperation({ summary: 'List applications' })
+  findAll(@CurrentUser('id') userId: string) {
+    return this.svc.findAll(userId);
+  }
+
+  @Get(':id')
+  @ApiOperation({ summary: 'Get application' })
+  findOne(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.findOne(userId, id);
+  }
+
+  @Patch(':id')
+  @ApiOperation({ summary: 'Update application' })
+  update(@CurrentUser('id') userId: string, @Param('id') id: string, @Body() dto: UpdateApplicationDto) {
+    return this.svc.update(userId, id, dto);
+  }
+
+  @Delete(':id')
+  @ApiOperation({ summary: 'Delete application' })
+  remove(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.remove(userId, id);
+  }
+
+  @Get(':id/logs')
+  @ApiOperation({ summary: 'Get application logs' })
+  logs(@CurrentUser('id') userId: string, @Param('id') id: string, @Query('lines') lines?: string) {
+    return this.svc.getLogs(userId, id, lines ? parseInt(lines, 10) : 100);
+  }
+
+  @Post(':id/exec')
+  @ApiOperation({ summary: 'Execute command in container' })
+  exec(@CurrentUser('id') userId: string, @Param('id') id: string, @Body('command') command: string) {
+    return this.svc.execCommand(userId, id, command);
+  }
+
+  @Post(':id/start')
+  @ApiOperation({ summary: 'Start application' })
+  start(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.start(userId, id);
+  }
+
+  @Post(':id/stop')
+  @ApiOperation({ summary: 'Stop application' })
+  stop(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.stop(userId, id);
+  }
+
+  @Post(':id/restart')
+  @ApiOperation({ summary: 'Restart application' })
+  restart(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.restart(userId, id);
+  }
+
+  @Post(':id/redeploy')
+  @ApiOperation({ summary: 'Redeploy application (pull + rebuild)' })
+  redeploy(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.redeploy(userId, id);
+  }
+
+  @Get(':id/files/compose')
+  @ApiOperation({ summary: 'Read docker-compose.yml of the app' })
+  readCompose(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.readComposeFile(userId, id);
+  }
+
+  @Patch(':id/files/compose')
+  @ApiOperation({ summary: 'Update docker-compose.yml of the app' })
+  writeCompose(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('content') content: string,
+  ) {
+    return this.svc.writeComposeFile(userId, id, content);
+  }
+
+  @Get(':id/files/dockerfile')
+  @ApiOperation({ summary: 'Read Dockerfile of the app' })
+  readDockerfile(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.readDockerfile(userId, id);
+  }
+
+  @Patch(':id/files/dockerfile')
+  @ApiOperation({ summary: 'Update Dockerfile of the app' })
+  writeDockerfile(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('content') content: string,
+  ) {
+    return this.svc.writeDockerfile(userId, id, content);
+  }
+
+  @Get(':id/ports')
+  @ApiOperation({ summary: 'List exposed ports parsed from compose/Dockerfile' })
+  ports(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.listPorts(userId, id);
+  }
+
+  @Patch(':id/ports')
+  @ApiOperation({ summary: 'Remap host ports for the compose stack' })
+  remapPorts(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('mapping') mapping: Record<string, number>,
+  ) {
+    return this.svc.remapPorts(userId, id, mapping);
+  }
+
+  @Get(':id/env')
+  @ApiOperation({ summary: 'Read application env vars' })
+  getEnv(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.getEnv(userId, id);
+  }
+
+  @Patch(':id/env')
+  @ApiOperation({ summary: 'Update application env vars' })
+  setEnv(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('envVars') envVars: Record<string, string>,
+  ) {
+    return this.svc.setEnv(userId, id, envVars);
+  }
+
+  @Get(':id/webhook')
+  @ApiOperation({ summary: 'Get webhook URL + secret for git auto-deploy' })
+  getWebhook(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.getWebhook(userId, id);
+  }
+
+  @Post(':id/webhook/rotate')
+  @ApiOperation({ summary: 'Rotate webhook secret' })
+  rotateWebhook(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.rotateWebhookSecret(userId, id);
+  }
+
+  @Patch(':id/auto-deploy')
+  @ApiOperation({ summary: 'Toggle auto-deploy on push' })
+  toggleAutoDeploy(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('enabled') enabled: boolean,
+  ) {
+    return this.svc.setAutoDeploy(userId, id, enabled);
+  }
+
+  @Get(':id/deployments')
+  @ApiOperation({ summary: 'List deployments of this application' })
+  deployments(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.listDeployments(userId, id);
+  }
+
+  @Get(':id/deployments/:depId')
+  @ApiOperation({ summary: 'Get one deployment (with live logs)' })
+  deployment(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Param('depId') depId: string,
+  ) {
+    return this.svc.getDeployment(userId, id, depId);
+  }
+}

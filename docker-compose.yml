@@ -1,0 +1,111 @@
+# Kryptalis — top-level stack
+# Bring everything up with:   docker compose up -d
+# Bring everything down with: docker compose down
+#
+# Services:
+#   postgres   — primary database (loopback-only)
+#   redis      — cache & job queue (loopback-only)
+#   caddy      — reverse proxy (auto SSL via Let's Encrypt for linked domains)
+#   api        — NestJS backend
+#   dashboard  — Next.js dashboard
+#
+# Required secrets (refuse to start otherwise — see install.sh):
+#   POSTGRES_PASSWORD, JWT_SECRET, JWT_REFRESH_SECRET, ENCRYPTION_KEY
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kryptalis-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kryptalis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (run install.sh or set it in .env)}
+      POSTGRES_DB: kryptalis
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Loopback-only — internal services reach it by DNS (postgres:5432).
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kryptalis"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: kryptalis-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: kryptalis-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./.kryptalis/reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: kryptalis-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://kryptalis:${POSTGRES_PASSWORD}@postgres:5432/kryptalis
+      REDIS_URL: redis://redis:6379
+      API_PORT: "4000"
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
+    ports:
+      - "4000:4000"
+    volumes:
+      # API persists generated docker-compose stacks, mail server configs,
+      # Caddyfile, app sources etc. in .kryptalis on the host.
+      - ./.kryptalis:/app/.kryptalis
+      # API needs to talk to the host Docker daemon to deploy user apps.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      caddy:
+        condition: service_started
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    container_name: kryptalis-dashboard
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

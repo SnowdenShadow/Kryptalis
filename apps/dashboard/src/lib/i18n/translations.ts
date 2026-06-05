@@ -1,0 +1,238 @@
+export const translations: Record<string, Record<string, string>> = {
+  en: {
+    // ── nav ─────────────────────────────────────────────────────────
+    'nav.overview': 'Overview', 'nav.server': 'Server', 'nav.projects': 'Projects', 'nav.applications': 'Applications', 'nav.domains': 'Domains', 'nav.docker': 'Docker', 'nav.databases': 'Databases', 'nav.monitoring': 'Monitoring', 'nav.backups': 'Backups', 'nav.marketplace': 'Marketplace', 'nav.emails': 'Emails', 'nav.files': 'Files', 'nav.settings': 'Settings', 'nav.admin': 'Admin', 'nav.toggleTheme': 'Toggle theme',
+
+    // ── common ─────────────────────────────────────────────────────
+    'common.loading': 'Loading...', 'common.save': 'Save', 'common.saving': 'Saving...', 'common.cancel': 'Cancel', 'common.delete': 'Delete', 'common.deleting': 'Deleting...', 'common.edit': 'Edit', 'common.create': 'Create', 'common.creating': 'Creating...', 'common.search': 'Search...', 'common.noResults': 'No results found', 'common.confirm': 'Confirm', 'common.back': 'Back', 'common.next': 'Next', 'common.close': 'Close', 'common.install': 'Install', 'common.actions': 'Actions', 'common.name': 'Name', 'common.email': 'Email', 'common.status': 'Status', 'common.role': 'Role', 'common.created': 'Created', 'common.description': 'Description', 'common.comingSoon': 'Coming Soon', 'common.online': 'Online', 'common.offline': 'Offline', 'common.copy': 'Copy', 'common.copied': 'Copied!', 'common.reset': 'Reset', 'common.never': 'never', 'common.enabled': 'Enabled', 'common.disabled': 'Disabled', 'common.add': 'Add', 'common.remove': 'Remove', 'common.update': 'Update', 'common.refresh': 'Refresh', 'common.optional': 'optional', 'common.required': 'required',
+
+    // ── auth ───────────────────────────────────────────────────────
+    'auth.login': 'Sign in', 'auth.register': 'Create account', 'auth.email': 'Email', 'auth.password': 'Password', 'auth.name': 'Name', 'auth.loginTitle': 'Welcome back', 'auth.loginDesc': 'Sign in to your Kryptalis account', 'auth.registerTitle': 'Create account', 'auth.registerDesc': 'Get started with Kryptalis', 'auth.noAccount': "Don't have an account?", 'auth.hasAccount': 'Already have an account?', 'auth.signingIn': 'Signing in...', 'auth.creatingAccount': 'Creating account...', 'auth.signUp': 'Sign up', 'auth.signIn': 'Sign in', 'auth.regDisabled': 'Registration disabled', 'auth.regDisabledDesc': 'This platform is currently invitation-only. Ask an administrator for an account.',
+
+    // ── overview ───────────────────────────────────────────────────
+    'overview.title': 'Overview', 'overview.welcome': 'Welcome to your Kryptalis dashboard', 'overview.servers': 'Servers', 'overview.applications': 'Applications', 'overview.domains': 'Domains', 'overview.databases': 'Databases', 'overview.recentDeployments': 'Recent Deployments', 'overview.noDeployments': 'No deployments yet. Deploy your first application to get started.', 'overview.quickActions': 'Quick Actions', 'overview.addServer': 'Add Server', 'overview.deployApp': 'Deploy App', 'overview.addDomain': 'Add Domain', 'overview.createBackup': 'Create Backup', 'overview.running': 'running', 'overview.online': 'online', 'overview.configured': 'configured', 'overview.active': 'active',
+
+    // ── server ─────────────────────────────────────────────────────
+    'server.title': 'Server', 'server.subtitle': 'Your Kryptalis server', 'server.details': 'Server Details', 'server.agentToken': 'Agent Token', 'server.agentStatus': 'Agent Status', 'server.agentNotInstalled': 'Agent not installed', 'server.os': 'OS', 'server.arch': 'Architecture', 'server.cpuCores': 'CPU Cores', 'server.lastSeen': 'Last Seen', 'server.never': 'Never', 'server.resetServer': 'Reset Server', 'server.metrics': 'Metrics', 'server.cpu': 'CPU', 'server.memory': 'Memory', 'server.disk': 'Disk',
+
+    // ── projects ───────────────────────────────────────────────────
+    'projects.title': 'Projects', 'projects.subtitle': 'Organize your applications into projects', 'projects.new': 'New Project', 'projects.empty': 'No projects yet', 'projects.emptyDesc': 'Create a project to group your applications', 'projects.selectServer': 'Select a server', 'projects.deleteConfirm': 'Are you sure you want to delete this project?',
+    'projects.tab.overview': 'Overview', 'projects.tab.applications': 'Applications', 'projects.tab.members': 'Members', 'projects.tab.settings': 'Settings',
+    'projects.totalApps': 'Total Apps', 'projects.running': 'Running', 'projects.stopped': 'Stopped', 'projects.domains': 'Domains',
+    'projects.info': 'Project Info', 'projects.appStatus': 'Application Status', 'projects.details': 'Project Details',
+    'projects.dangerZone': 'Danger Zone', 'projects.dangerDesc': 'Irreversible actions',
+    'projects.deleteThis': 'Delete this project', 'projects.deleteThisDesc': 'This will permanently delete the project and all associated data.', 'projects.deleteBtn': 'Delete Project',
+    'projects.deleteTitle': 'Delete project', 'projects.deleteDesc': 'This will permanently remove the project. This cannot be undone.',
+
+    // ── members ───────────────────────────────────────────────────
+    'members.title': 'Members & Roles',
+    'members.subtitle': 'Invite teammates and assign roles. Permissions cascade to apps, domains, deployments.',
+    'members.add': 'Add Member', 'members.addTitle': 'Add Member', 'members.addDesc': 'The user must already have an account. Invite them by email.',
+    'members.adding': 'Adding...',
+    'members.none': 'No members yet',
+    'members.removeConfirm': 'Remove this member from the project?',
+    'members.rolePermissions': 'Role permissions',
+    'members.role.OWNER': 'OWNER', 'members.role.ADMIN': 'ADMIN', 'members.role.DEVELOPER': 'DEVELOPER', 'members.role.VIEWER': 'VIEWER',
+    'members.roleDesc.OWNER': 'full control, transfers, project deletion',
+    'members.roleDesc.ADMIN': 'manage members (except OWNER), manage all resources',
+    'members.roleDesc.DEVELOPER': 'create/edit apps & domains, deploy & redeploy',
+    'members.roleDesc.VIEWER': 'read-only access',
+
+    // ── apps ───────────────────────────────────────────────────────
+    'apps.title': 'Applications', 'apps.subtitle': 'Deploy and manage your applications', 'apps.deploy': 'Deploy', 'apps.start': 'Start', 'apps.stop': 'Stop', 'apps.restart': 'Restart', 'apps.redeploy': 'Redeploy', 'apps.empty': 'No applications yet', 'apps.emptyDesc': 'Deploy your first application', 'apps.framework': 'Framework', 'apps.gitUrl': 'Git URL', 'apps.gitBranch': 'Git Branch', 'apps.port': 'Port', 'apps.buildCommand': 'Build Command', 'apps.startCommand': 'Start Command', 'apps.selectProject': 'Select a project', 'apps.selectFramework': 'Select a framework', 'apps.searchPlaceholder': 'Search applications...',
+    'apps.tab.overview': 'Overview', 'apps.tab.logs': 'Logs', 'apps.tab.terminal': 'Terminal', 'apps.tab.deployments': 'Deployments', 'apps.tab.files': 'Files', 'apps.tab.ports': 'Ports', 'apps.tab.env': 'Env', 'apps.tab.settings': 'Settings',
+    'apps.status': 'Status', 'apps.connectionInfo': 'Connection Info', 'apps.domain': 'Domain', 'apps.project': 'Project', 'apps.notSet': 'Not set', 'apps.noDomain': 'No domain', 'apps.gitInfo': 'Git Info',
+    'apps.config': 'Configuration', 'apps.configDesc': 'Application settings and build configuration',
+    'apps.terminalDesc': 'Execute commands in the application container',
+    'apps.deployHistory': 'Deployment History', 'apps.deployHistoryDesc': 'Recent deployments for this application', 'apps.noDeployments': 'No deployments yet',
+    'apps.deleteApp': 'Delete Application',
+    'apps.deleteConfirm': 'This will stop all Docker containers and permanently delete the application. This action cannot be undone.',
+    'apps.logsAuto': 'Auto', 'apps.logsPaused': 'Paused', 'apps.logsHint': 'Auto-refreshes every 3s', 'apps.logsHintPaused': 'Auto-refresh paused', 'apps.logsLines': 'Showing last {n} lines', 'apps.waitingLogs': 'Waiting for logs...', 'apps.waitingFirstLog': 'Waiting for first log line...',
+    'apps.envEditor': 'Environment Variables', 'apps.envEditorDesc': 'Variables injected into the container at start. Save then redeploy.', 'apps.envSaved': 'Env vars saved — redeploy to apply', 'apps.addVar': 'Add Variable',
+    'apps.portMapping': 'Port Mapping', 'apps.portMappingDesc': 'Map container ports to host ports. Save then redeploy to apply.',
+    'apps.noPortDeclared': 'No port declared', 'apps.noPortDesc': "Container will start but won't be reachable from the host.",
+    'apps.composeEditor': 'docker-compose.yml',
+    'apps.dockerfileEditor': 'Dockerfile',
+    'apps.composeSaved': 'Compose saved', 'apps.dockerfileSaved': 'Dockerfile saved', 'apps.portsRemapped': 'Ports remapped — redeploy to apply', 'apps.portUpdated': 'Port updated',
+    'apps.redeployTriggered': 'Redeploy triggered', 'apps.created': 'Application created', 'apps.deleted': 'Application deleted',
+    'apps.webhookTitle': 'Auto-Deploy & Webhook', 'apps.webhookDesc': 'Trigger a redeploy automatically when your Git provider receives a push.',
+    'apps.autoDeploy': 'Auto-deploy on push', 'apps.autoDeployDesc': 'When enabled, every push to {branch} triggers a deploy.',
+    'apps.webhookUrl': 'Webhook URL', 'apps.webhookSecret': 'Webhook Secret', 'apps.rotateSecret': 'Rotate', 'apps.rotateConfirm': 'Rotate the secret? The old one will stop working.', 'apps.secretRotated': 'Secret rotated',
+    'apps.deployWizard.title': 'Where is your code?', 'apps.deployWizard.subtitle': 'Choose how to deploy your application',
+    'apps.deployWizard.stepSource': 'Source', 'apps.deployWizard.stepConfig': 'Config', 'apps.deployWizard.stepFiles': 'Files', 'apps.deployWizard.stepDeploy': 'Deploy',
+    'apps.deployWizard.importGit': 'Import from Git Provider', 'apps.deployWizard.browseRepos': 'Browse repos from {providers}',
+    'apps.deployWizard.publicUrl': 'Public Git URL', 'apps.deployWizard.publicUrlDesc': 'Paste any public Git repository URL',
+    'apps.deployWizard.dockerImage': 'Docker Image', 'apps.deployWizard.dockerImageDesc': 'Deploy from a Docker image or Dockerfile',
+    'apps.deployWizard.connectProvider': 'Connect a Git provider',
+    'apps.deployWizard.inSettings': 'in Settings to deploy from private repos',
+    'apps.deployWizard.configTitle': 'Configure your app', 'apps.deployWizard.configSubtitle': 'Name your app and set the basics',
+    'apps.deployWizard.appName': 'App Name', 'apps.deployWizard.namePlaceholder': 'my-awesome-app',
+    'apps.deployWizard.composeDetected': 'Docker Compose detected',
+    'apps.deployWizard.composeHint': 'Ports, build commands and env will be loaded from your docker-compose.yml. Tweak them in the next step.',
+    'apps.deployWizard.dockerfileDetected': 'Dockerfile detected',
+    'apps.deployWizard.dockerfileHint': 'Build uses your Dockerfile. Ports come from EXPOSE directives — edit them in the next step if needed.',
+    'apps.deployWizard.filesTitle': 'Files, ports & env',
+    'apps.deployWizard.filesSubtitle': "Review and tweak before deploy. Changes here override what's in the repo.",
+    'apps.deployWizard.envDetected': '{n} env file(s) detected',
+    'apps.deployWizard.envDetectedHint': 'Imported into the form below:',
+    'apps.deployWizard.reviewTitle': 'Ready to deploy', 'apps.deployWizard.reviewSubtitle': 'Review and confirm',
+    'apps.deployWizard.deploying': 'Deploying...',
+    'apps.deployWizard.token': 'Personal Access Token', 'apps.deployWizard.tokenHint': 'Used once to clone the private repo. Not stored. Prefer connecting a Git provider in Settings for re-deploys.',
+
+    // ── domains ────────────────────────────────────────────────────
+    'domains.title': 'Domains', 'domains.subtitle': 'Manage your domains and SSL certificates', 'domains.add': 'Add Domain', 'domains.empty': 'No domains configured', 'domains.emptyDesc': 'Add a domain to get started', 'domains.domain': 'Domain', 'domains.application': 'Application', 'domains.ssl': 'SSL Status', 'domains.autoSsl': 'Auto SSL',
+
+    'docker.title': 'Docker', 'docker.subtitle': 'Manage containers, images, networks and volumes', 'docker.selectServer': 'Select a server to manage Docker', 'docker.containers': 'Containers', 'docker.images': 'Images', 'docker.networks': 'Networks', 'docker.volumes': 'Volumes', 'docker.noContainers': 'No containers found', 'docker.noImages': 'No images found', 'docker.noNetworks': 'No networks found', 'docker.noVolumes': 'No volumes found',
+    'databases.title': 'Databases', 'databases.subtitle': 'Manage your database instances', 'databases.create': 'Create Database', 'databases.empty': 'No databases yet', 'databases.emptyDesc': 'Create your first database', 'databases.type': 'Type', 'databases.selectServer': 'Select a server', 'databases.username': 'Username',
+    'monitoring.title': 'Monitoring', 'monitoring.subtitle': 'Monitor server resources in real-time', 'monitoring.selectServer': 'Select a server to view metrics', 'monitoring.noMetrics': 'No metrics yet', 'monitoring.alertRules': 'Alert Rules', 'monitoring.addAlert': 'Add Alert', 'monitoring.metric': 'Metric', 'monitoring.threshold': 'Threshold', 'monitoring.channel': 'Channel', 'monitoring.network': 'Network',
+    'backups.title': 'Backups', 'backups.subtitle': 'Create and manage backups of your infrastructure', 'backups.create': 'Create Backup', 'backups.empty': 'No backups configured', 'backups.emptyDesc': 'Create your first backup', 'backups.restore': 'Restore', 'backups.target': 'Target', 'backups.schedule': 'Schedule', 'backups.lastRun': 'Last Run', 'backups.size': 'Size', 'backups.includeApps': 'Include Applications', 'backups.includeDbs': 'Include Databases', 'backups.includeVolumes': 'Include Volumes',
+    'marketplace.title': 'Marketplace', 'marketplace.subtitle': 'Install pre-configured applications with one click', 'marketplace.searchPlaceholder': 'Search applications...', 'marketplace.noResults': 'No applications found', 'marketplace.noResultsDesc': 'Try adjusting your search or filter criteria', 'marketplace.installTitle': 'Install', 'marketplace.configureWhere': 'Configure where to deploy', 'marketplace.selectServer': 'Server', 'marketplace.selectProject': 'Project', 'marketplace.noServers': 'No servers available. Add a server first.', 'marketplace.noProjects': 'No projects available. Create a project first.', 'marketplace.domain': 'Domain (optional)', 'marketplace.installing': 'Installing...',
+    'emails.title': 'Email Management', 'emails.comingSoon': 'Email hosting is coming in V4', 'emails.comingSoonDesc': 'Host professional emails directly on your infrastructure with SPF, DKIM, DMARC, mailboxes, aliases, and quotas.',
+    'files.title': 'File Manager', 'files.comingSoon': 'File Manager is Coming in V2', 'files.comingSoonDesc': 'Browse, upload, and edit files directly from your dashboard.',
+
+    // ── settings ───────────────────────────────────────────────────
+    'settings.title': 'Settings', 'settings.subtitle': 'Manage your account and preferences', 'settings.profile': 'Profile', 'settings.security': 'Security', 'settings.team': 'Team', 'settings.notifications': 'Notifications', 'settings.appearance': 'Appearance', 'settings.infrastructure': 'Infrastructure', 'settings.profileInfo': 'Profile Information', 'settings.profileDesc': 'Update your personal details', 'settings.emailCantChange': 'Email cannot be changed', 'settings.saveChanges': 'Save Changes', 'settings.changePassword': 'Change Password', 'settings.changePasswordDesc': 'Update your password to keep your account secure', 'settings.currentPassword': 'Current Password', 'settings.newPassword': 'New Password', 'settings.confirmPassword': 'Confirm New Password', 'settings.twoFactor': 'Two-Factor Authentication', 'settings.twoFactorDesc': 'Add an extra layer of security to your account', 'settings.authenticatorApp': 'Authenticator App', 'settings.enabled': 'Enabled', 'settings.notConfigured': 'Not configured', 'settings.enable': 'Enable', 'settings.disable': 'Disable',
+    'settings.theme': 'Theme', 'settings.themeDarkOnly': 'Dark theme only — light mode has been removed.', 'settings.darkMode': 'Dark mode', 'settings.darkOnlyHint': "All Kryptalis surfaces use the dark theme. There's nothing to switch.",
+    'settings.language': 'Language', 'settings.languageDesc': 'Choose your preferred language',
+    'settings.serverMode': 'Server Mode', 'settings.serverModeDesc': 'Choose how Kryptalis manages servers', 'settings.localMode': 'Local Server', 'settings.localModeDesc': 'Kryptalis manages the server it is installed on', 'settings.multiMode': 'Multi-Server', 'settings.multiModeDesc': 'Connect and manage multiple remote servers', 'settings.mode': 'mode', 'settings.currentTheme': 'Current',
+
+    // ── admin ──────────────────────────────────────────────────────
+    'admin.title': 'Admin',
+    'admin.tab.overview': 'Overview', 'admin.tab.users': 'Users', 'admin.tab.settings': 'Settings', 'admin.tab.audit': 'Audit',
+    'admin.totalUsers': 'Users', 'admin.activeDay': 'Active 24h', 'admin.totalProjects': 'Projects', 'admin.totalApps': 'Applications', 'admin.runningApps': 'Running', 'admin.errorApps': 'Errored', 'admin.totalDeployments': 'Deployments', 'admin.totalProviders': 'Git Providers',
+    'admin.recentSignups': 'Recent Signups', 'admin.recentSignupsDesc': 'Last 5 user registrations', 'admin.noSignups': 'No signups yet.',
+    'admin.searchUser': 'Search by email / name', 'admin.allRoles': 'All roles', 'admin.allStatuses': 'All statuses', 'admin.createUser': 'Create User', 'admin.user': 'User', 'admin.role': 'Role', 'admin.status': 'Status', 'admin.resources': 'Resources', 'admin.lastLogin': 'Last login', 'admin.actions': 'Actions',
+    'admin.editRole': 'Edit role', 'admin.resetPw': 'Reset password', 'admin.suspend': 'Suspend', 'admin.reactivate': 'Reactivate',
+    'admin.noUsers': 'No users match the filters.', 'admin.totalCount': '{n} total users',
+    'admin.editUserTitle': 'Edit {name}',
+    'admin.deleteWarning': 'Deleting permanently removes the user, their projects, deployments, providers, sessions.',
+    'admin.deleteUser': 'Delete user', 'admin.deleteUserConfirm': 'Delete {email}? This cannot be undone.', 'admin.userDeleted': 'User deleted',
+    'admin.resetPwTitle': 'Reset password — {name}', 'admin.resetPwDesc': "All active sessions for this user will be revoked. They'll need to log in again.",
+    'admin.newPw': 'New password (min 8 chars)', 'admin.newPwPlaceholder': 'A strong password...', 'admin.resetting': 'Resetting...', 'admin.resetAndRevoke': 'Reset & revoke', 'admin.pwResetSuccess': 'Password reset — sessions revoked',
+    'admin.createUserDesc': 'Create an account directly — useful when registration is disabled.', 'admin.userCreated': 'User created', 'admin.roleUpdated': 'Role updated', 'admin.statusUpdated': 'Status updated',
+    'admin.settings.registrationLabel': 'Public registration', 'admin.settings.registrationDesc': 'Allow new users to sign up from /register. When off, only admins can create accounts.',
+    'admin.settings.approvalLabel': 'Require admin approval', 'admin.settings.approvalDesc': 'New signups are created SUSPENDED and need approval before they can log in.',
+    'admin.settings.maintenanceLabel': 'Maintenance mode', 'admin.settings.maintenanceDesc': 'Show a maintenance banner. (Future) Block non-admin login.',
+    'admin.settings.platformLabel': 'Platform name', 'admin.settings.platformDesc': 'Displayed across the dashboard. Default: Kryptalis.',
+    'admin.settings.defaultRoleLabel': 'Default role for new users', 'admin.settings.defaultRoleDesc': 'Role assigned at signup time.',
+    'admin.settings.maintenanceActive': 'Maintenance mode active', 'admin.settings.maintenanceWarn': 'Visitors will see a banner. Make sure to disable this once maintenance is done.',
+    'admin.audit.title': 'Audit Log', 'admin.audit.desc': 'Last 100 events', 'admin.audit.user': 'User', 'admin.audit.action': 'Action', 'admin.audit.resource': 'Resource', 'admin.audit.ip': 'IP', 'admin.audit.when': 'When', 'admin.audit.none': 'No events recorded yet.', 'admin.audit.system': 'system',
+  },
+  fr: {
+    // ── nav ─────────────────────────────────────────────────────────
+    'nav.overview': "Vue d'ensemble", 'nav.server': 'Serveur', 'nav.projects': 'Projets', 'nav.applications': 'Applications', 'nav.domains': 'Domaines', 'nav.docker': 'Docker', 'nav.databases': 'Bases de données', 'nav.monitoring': 'Monitoring', 'nav.backups': 'Sauvegardes', 'nav.marketplace': 'Marketplace', 'nav.emails': 'Emails', 'nav.files': 'Fichiers', 'nav.settings': 'Paramètres', 'nav.admin': 'Admin', 'nav.toggleTheme': 'Changer le thème',
+
+    // ── common ─────────────────────────────────────────────────────
+    'common.loading': 'Chargement...', 'common.save': 'Enregistrer', 'common.saving': 'Enregistrement...', 'common.cancel': 'Annuler', 'common.delete': 'Supprimer', 'common.deleting': 'Suppression...', 'common.edit': 'Modifier', 'common.create': 'Créer', 'common.creating': 'Création...', 'common.search': 'Rechercher...', 'common.noResults': 'Aucun résultat', 'common.confirm': 'Confirmer', 'common.back': 'Retour', 'common.next': 'Suivant', 'common.close': 'Fermer', 'common.install': 'Installer', 'common.actions': 'Actions', 'common.name': 'Nom', 'common.email': 'Email', 'common.status': 'Statut', 'common.role': 'Rôle', 'common.created': 'Créé le', 'common.description': 'Description', 'common.comingSoon': 'Bientôt disponible', 'common.online': 'En ligne', 'common.offline': 'Hors ligne', 'common.copy': 'Copier', 'common.copied': 'Copié !', 'common.reset': 'Réinitialiser', 'common.never': 'jamais', 'common.enabled': 'Activé', 'common.disabled': 'Désactivé', 'common.add': 'Ajouter', 'common.remove': 'Retirer', 'common.update': 'Mettre à jour', 'common.refresh': 'Actualiser', 'common.optional': 'optionnel', 'common.required': 'requis',
+
+    // ── auth ───────────────────────────────────────────────────────
+    'auth.login': 'Se connecter', 'auth.register': 'Créer un compte', 'auth.email': 'Email', 'auth.password': 'Mot de passe', 'auth.name': 'Nom', 'auth.loginTitle': 'Bon retour', 'auth.loginDesc': 'Connectez-vous à votre compte Kryptalis', 'auth.registerTitle': 'Créer un compte', 'auth.registerDesc': 'Commencez avec Kryptalis', 'auth.noAccount': "Pas encore de compte ?", 'auth.hasAccount': 'Déjà un compte ?', 'auth.signingIn': 'Connexion...', 'auth.creatingAccount': 'Création du compte...', 'auth.signUp': "S'inscrire", 'auth.signIn': 'Se connecter', 'auth.regDisabled': 'Inscriptions désactivées', 'auth.regDisabledDesc': "Cette plateforme est actuellement sur invitation. Demande un compte à un administrateur.",
+
+    // ── overview ───────────────────────────────────────────────────
+    'overview.title': "Vue d'ensemble", 'overview.welcome': 'Bienvenue sur votre tableau de bord Kryptalis', 'overview.servers': 'Serveurs', 'overview.applications': 'Applications', 'overview.domains': 'Domaines', 'overview.databases': 'Bases de données', 'overview.recentDeployments': 'Déploiements récents', 'overview.noDeployments': 'Aucun déploiement. Déployez votre première application.', 'overview.quickActions': 'Actions rapides', 'overview.addServer': 'Ajouter serveur', 'overview.deployApp': 'Déployer app', 'overview.addDomain': 'Ajouter domaine', 'overview.createBackup': 'Créer sauvegarde', 'overview.running': 'en cours', 'overview.online': 'en ligne', 'overview.configured': 'configurés', 'overview.active': 'actives',
+
+    'server.title': 'Serveur', 'server.subtitle': 'Votre serveur Kryptalis', 'server.details': 'Détails du serveur', 'server.agentToken': "Jeton de l'agent", 'server.agentStatus': "Statut de l'agent", 'server.agentNotInstalled': 'Agent non installé', 'server.os': 'Système', 'server.arch': 'Architecture', 'server.cpuCores': 'Coeurs CPU', 'server.lastSeen': 'Dernière connexion', 'server.never': 'Jamais', 'server.resetServer': 'Réinitialiser le serveur', 'server.metrics': 'Métriques', 'server.cpu': 'CPU', 'server.memory': 'Mémoire', 'server.disk': 'Disque',
+
+    // ── projects ───────────────────────────────────────────────────
+    'projects.title': 'Projets', 'projects.subtitle': 'Organisez vos applications en projets', 'projects.new': 'Nouveau projet', 'projects.empty': 'Aucun projet', 'projects.emptyDesc': 'Créez un projet pour regrouper vos applications', 'projects.selectServer': 'Sélectionner un serveur', 'projects.deleteConfirm': 'Êtes-vous sûr de vouloir supprimer ce projet ?',
+    'projects.tab.overview': "Vue d'ensemble", 'projects.tab.applications': 'Applications', 'projects.tab.members': 'Membres', 'projects.tab.settings': 'Paramètres',
+    'projects.totalApps': 'Apps totales', 'projects.running': 'En cours', 'projects.stopped': 'Arrêtées', 'projects.domains': 'Domaines',
+    'projects.info': 'Infos du projet', 'projects.appStatus': 'Statut des applications', 'projects.details': 'Détails du projet',
+    'projects.dangerZone': 'Zone de danger', 'projects.dangerDesc': 'Actions irréversibles',
+    'projects.deleteThis': 'Supprimer ce projet', 'projects.deleteThisDesc': 'Cela supprimera définitivement le projet et toutes les données associées.', 'projects.deleteBtn': 'Supprimer le projet',
+    'projects.deleteTitle': 'Supprimer le projet', 'projects.deleteDesc': 'Le projet sera supprimé définitivement. Action irréversible.',
+
+    // ── members ───────────────────────────────────────────────────
+    'members.title': 'Membres & rôles',
+    'members.subtitle': 'Invitez vos collègues et attribuez des rôles. Les permissions sont héritées par les apps, domaines, déploiements.',
+    'members.add': 'Ajouter un membre', 'members.addTitle': 'Ajouter un membre', 'members.addDesc': "L'utilisateur doit déjà avoir un compte. Invitez-le par email.",
+    'members.adding': 'Ajout...',
+    'members.none': 'Aucun membre',
+    'members.removeConfirm': 'Retirer ce membre du projet ?',
+    'members.rolePermissions': 'Permissions des rôles',
+    'members.role.OWNER': 'PROPRIÉTAIRE', 'members.role.ADMIN': 'ADMIN', 'members.role.DEVELOPER': 'DÉVELOPPEUR', 'members.role.VIEWER': 'LECTEUR',
+    'members.roleDesc.OWNER': "contrôle total, transferts, suppression du projet",
+    'members.roleDesc.ADMIN': "gérer les membres (sauf PROPRIÉTAIRE), gérer toutes les ressources",
+    'members.roleDesc.DEVELOPER': "créer/éditer apps & domaines, déployer & redéployer",
+    'members.roleDesc.VIEWER': "lecture seule",
+
+    // ── apps ───────────────────────────────────────────────────────
+    'apps.title': 'Applications', 'apps.subtitle': 'Déployez et gérez vos applications', 'apps.deploy': 'Déployer', 'apps.start': 'Démarrer', 'apps.stop': 'Arrêter', 'apps.restart': 'Redémarrer', 'apps.redeploy': 'Redéployer', 'apps.empty': 'Aucune application', 'apps.emptyDesc': 'Déployez votre première application', 'apps.framework': 'Framework', 'apps.gitUrl': 'URL Git', 'apps.gitBranch': 'Branche Git', 'apps.port': 'Port', 'apps.buildCommand': 'Commande de build', 'apps.startCommand': 'Commande de démarrage', 'apps.selectProject': 'Sélectionner un projet', 'apps.selectFramework': 'Sélectionner un framework', 'apps.searchPlaceholder': 'Rechercher une application...',
+    'apps.tab.overview': "Vue d'ensemble", 'apps.tab.logs': 'Logs', 'apps.tab.terminal': 'Terminal', 'apps.tab.deployments': 'Déploiements', 'apps.tab.files': 'Fichiers', 'apps.tab.ports': 'Ports', 'apps.tab.env': 'Env', 'apps.tab.settings': 'Paramètres',
+    'apps.status': 'Statut', 'apps.connectionInfo': 'Informations de connexion', 'apps.domain': 'Domaine', 'apps.project': 'Projet', 'apps.notSet': 'Non défini', 'apps.noDomain': 'Aucun domaine', 'apps.gitInfo': 'Infos Git',
+    'apps.config': 'Configuration', 'apps.configDesc': 'Paramètres et configuration de build',
+    'apps.terminalDesc': "Exécutez des commandes dans le conteneur de l'application",
+    'apps.deployHistory': 'Historique des déploiements', 'apps.deployHistoryDesc': 'Déploiements récents pour cette application', 'apps.noDeployments': 'Aucun déploiement',
+    'apps.deleteApp': "Supprimer l'application",
+    'apps.deleteConfirm': "Cela arrêtera tous les conteneurs Docker et supprimera l'application. Action irréversible.",
+    'apps.logsAuto': 'Auto', 'apps.logsPaused': 'En pause', 'apps.logsHint': 'Rafraîchit toutes les 3s', 'apps.logsHintPaused': 'Auto-refresh en pause', 'apps.logsLines': 'Dernières {n} lignes', 'apps.waitingLogs': 'En attente des logs...', 'apps.waitingFirstLog': 'En attente de la première ligne de log...',
+    'apps.envEditor': "Variables d'environnement", 'apps.envEditorDesc': "Variables injectées au démarrage du conteneur. Enregistrez puis redéployez.", 'apps.envSaved': "Variables enregistrées — redéployez pour appliquer", 'apps.addVar': 'Ajouter une variable',
+    'apps.portMapping': 'Mapping des ports', 'apps.portMappingDesc': "Mappez les ports du conteneur vers ceux de l'hôte. Enregistrez puis redéployez.",
+    'apps.noPortDeclared': 'Aucun port déclaré', 'apps.noPortDesc': "Le conteneur va démarrer mais ne sera pas accessible depuis l'hôte.",
+    'apps.composeEditor': 'docker-compose.yml',
+    'apps.dockerfileEditor': 'Dockerfile',
+    'apps.composeSaved': 'Compose enregistré', 'apps.dockerfileSaved': 'Dockerfile enregistré', 'apps.portsRemapped': 'Ports remappés — redéployez pour appliquer', 'apps.portUpdated': 'Port mis à jour',
+    'apps.redeployTriggered': 'Redéploiement déclenché', 'apps.created': 'Application créée', 'apps.deleted': 'Application supprimée',
+    'apps.webhookTitle': 'Auto-déploiement & Webhook', 'apps.webhookDesc': "Déclenche un redéploiement automatique quand votre provider Git reçoit un push.",
+    'apps.autoDeploy': 'Auto-déploiement au push', 'apps.autoDeployDesc': 'Quand activé, chaque push sur {branch} déclenche un déploiement.',
+    'apps.webhookUrl': 'URL du webhook', 'apps.webhookSecret': 'Secret du webhook', 'apps.rotateSecret': 'Régénérer', 'apps.rotateConfirm': "Régénérer le secret ? L'ancien cessera de fonctionner.", 'apps.secretRotated': 'Secret régénéré',
+    'apps.deployWizard.title': 'Où se trouve votre code ?', 'apps.deployWizard.subtitle': 'Choisissez comment déployer votre application',
+    'apps.deployWizard.stepSource': 'Source', 'apps.deployWizard.stepConfig': 'Config', 'apps.deployWizard.stepFiles': 'Fichiers', 'apps.deployWizard.stepDeploy': 'Déployer',
+    'apps.deployWizard.importGit': 'Importer depuis un provider Git', 'apps.deployWizard.browseRepos': 'Parcourir les repos de {providers}',
+    'apps.deployWizard.publicUrl': 'URL Git publique', 'apps.deployWizard.publicUrlDesc': "Collez l'URL d'un dépôt Git public",
+    'apps.deployWizard.dockerImage': 'Image Docker', 'apps.deployWizard.dockerImageDesc': "Déployer depuis une image Docker ou un Dockerfile",
+    'apps.deployWizard.connectProvider': 'Connecter un provider Git',
+    'apps.deployWizard.inSettings': 'dans les paramètres pour déployer depuis des repos privés',
+    'apps.deployWizard.configTitle': 'Configurez votre app', 'apps.deployWizard.configSubtitle': 'Nommez votre app et configurez les bases',
+    'apps.deployWizard.appName': "Nom de l'app", 'apps.deployWizard.namePlaceholder': 'mon-super-app',
+    'apps.deployWizard.composeDetected': 'Docker Compose détecté',
+    'apps.deployWizard.composeHint': 'Ports, commandes de build et variables seront chargés depuis votre docker-compose.yml. Ajustez à la prochaine étape.',
+    'apps.deployWizard.dockerfileDetected': 'Dockerfile détecté',
+    'apps.deployWizard.dockerfileHint': 'Le build utilise votre Dockerfile. Les ports viennent des directives EXPOSE — éditez à la prochaine étape si besoin.',
+    'apps.deployWizard.filesTitle': 'Fichiers, ports & env',
+    'apps.deployWizard.filesSubtitle': "Vérifiez et ajustez avant de déployer. Les modifications ici remplacent celles du repo.",
+    'apps.deployWizard.envDetected': '{n} fichier(s) env détecté(s)',
+    'apps.deployWizard.envDetectedHint': 'Importés dans le formulaire ci-dessous :',
+    'apps.deployWizard.reviewTitle': 'Prêt à déployer', 'apps.deployWizard.reviewSubtitle': 'Vérifiez et confirmez',
+    'apps.deployWizard.deploying': 'Déploiement...',
+    'apps.deployWizard.token': "Token d'accès personnel", 'apps.deployWizard.tokenHint': "Utilisé une seule fois pour cloner le repo privé. Non stocké. Préférez connecter un provider Git dans les paramètres pour les redéploiements.",
+
+    // ── domains/etc ────────────────────────────────────────────────
+    'domains.title': 'Domaines', 'domains.subtitle': 'Gérez vos domaines et certificats SSL', 'domains.add': 'Ajouter un domaine', 'domains.empty': 'Aucun domaine configuré', 'domains.emptyDesc': 'Ajoutez un domaine pour commencer', 'domains.domain': 'Domaine', 'domains.application': 'Application', 'domains.ssl': 'Statut SSL', 'domains.autoSsl': 'SSL automatique',
+    'docker.title': 'Docker', 'docker.subtitle': 'Gérez les conteneurs, images, réseaux et volumes', 'docker.selectServer': 'Sélectionnez un serveur pour gérer Docker', 'docker.containers': 'Conteneurs', 'docker.images': 'Images', 'docker.networks': 'Réseaux', 'docker.volumes': 'Volumes', 'docker.noContainers': 'Aucun conteneur trouvé', 'docker.noImages': 'Aucune image trouvée', 'docker.noNetworks': 'Aucun réseau trouvé', 'docker.noVolumes': 'Aucun volume trouvé',
+    'databases.title': 'Bases de données', 'databases.subtitle': 'Gérez vos instances de base de données', 'databases.create': 'Créer une base', 'databases.empty': 'Aucune base de données', 'databases.emptyDesc': 'Créez votre première base de données', 'databases.type': 'Type', 'databases.selectServer': 'Sélectionner un serveur', 'databases.username': "Nom d'utilisateur",
+    'monitoring.title': 'Monitoring', 'monitoring.subtitle': 'Surveillez les ressources en temps réel', 'monitoring.selectServer': 'Sélectionnez un serveur pour voir les métriques', 'monitoring.noMetrics': 'Pas encore de métriques', 'monitoring.alertRules': "Règles d'alerte", 'monitoring.addAlert': 'Ajouter une alerte', 'monitoring.metric': 'Métrique', 'monitoring.threshold': 'Seuil', 'monitoring.channel': 'Canal', 'monitoring.network': 'Réseau',
+    'backups.title': 'Sauvegardes', 'backups.subtitle': 'Créez et gérez les sauvegardes de votre infrastructure', 'backups.create': 'Créer une sauvegarde', 'backups.empty': 'Aucune sauvegarde configurée', 'backups.emptyDesc': 'Créez votre première sauvegarde', 'backups.restore': 'Restaurer', 'backups.target': 'Cible', 'backups.schedule': 'Planification', 'backups.lastRun': 'Dernière exécution', 'backups.size': 'Taille', 'backups.includeApps': 'Inclure les applications', 'backups.includeDbs': 'Inclure les bases de données', 'backups.includeVolumes': 'Inclure les volumes',
+    'marketplace.title': 'Marketplace', 'marketplace.subtitle': "Installez des applications préconfigurées en un clic", 'marketplace.searchPlaceholder': 'Rechercher des applications...', 'marketplace.noResults': 'Aucune application trouvée', 'marketplace.noResultsDesc': 'Essayez de modifier vos critères de recherche', 'marketplace.installTitle': 'Installer', 'marketplace.configureWhere': 'Configurez où déployer', 'marketplace.selectServer': 'Serveur', 'marketplace.selectProject': 'Projet', 'marketplace.noServers': "Aucun serveur disponible. Ajoutez d'abord un serveur.", 'marketplace.noProjects': "Aucun projet disponible. Créez d'abord un projet.", 'marketplace.domain': 'Domaine (optionnel)', 'marketplace.installing': 'Installation...',
+    'emails.title': 'Gestion des emails', 'emails.comingSoon': "L'hébergement email arrive en V4", 'emails.comingSoonDesc': 'Hébergez des emails professionnels directement sur votre infrastructure avec SPF, DKIM, DMARC, boîtes mail, alias et quotas.',
+    'files.title': 'Gestionnaire de fichiers', 'files.comingSoon': 'Le gestionnaire de fichiers arrive en V2', 'files.comingSoonDesc': 'Parcourez, uploadez et modifiez vos fichiers directement depuis le tableau de bord.',
+
+    // ── settings ───────────────────────────────────────────────────
+    'settings.title': 'Paramètres', 'settings.subtitle': 'Gérez votre compte et vos préférences', 'settings.profile': 'Profil', 'settings.security': 'Sécurité', 'settings.team': 'Équipe', 'settings.notifications': 'Notifications', 'settings.appearance': 'Apparence', 'settings.infrastructure': 'Infrastructure', 'settings.profileInfo': 'Informations du profil', 'settings.profileDesc': 'Mettez à jour vos informations personnelles', 'settings.emailCantChange': "L'email ne peut pas être modifié", 'settings.saveChanges': 'Enregistrer', 'settings.changePassword': 'Changer le mot de passe', 'settings.changePasswordDesc': 'Mettez à jour votre mot de passe pour sécuriser votre compte', 'settings.currentPassword': 'Mot de passe actuel', 'settings.newPassword': 'Nouveau mot de passe', 'settings.confirmPassword': 'Confirmer le nouveau mot de passe', 'settings.twoFactor': 'Authentification à deux facteurs', 'settings.twoFactorDesc': 'Ajoutez une couche de sécurité supplémentaire', 'settings.authenticatorApp': 'Application Authenticator', 'settings.enabled': 'Activé', 'settings.notConfigured': 'Non configuré', 'settings.enable': 'Activer', 'settings.disable': 'Désactiver',
+    'settings.theme': 'Thème', 'settings.themeDarkOnly': 'Thème sombre uniquement — le mode clair a été retiré.', 'settings.darkMode': 'Mode sombre', 'settings.darkOnlyHint': "Toutes les surfaces de Kryptalis utilisent le thème sombre. Rien à changer.",
+    'settings.language': 'Langue', 'settings.languageDesc': 'Choisissez votre langue préférée',
+    'settings.serverMode': 'Mode serveur', 'settings.serverModeDesc': 'Choisissez comment Kryptalis gère les serveurs', 'settings.localMode': 'Serveur local', 'settings.localModeDesc': 'Kryptalis gère le serveur sur lequel il est installé', 'settings.multiMode': 'Multi-serveur', 'settings.multiModeDesc': 'Connectez et gérez plusieurs serveurs distants', 'settings.mode': 'mode', 'settings.currentTheme': 'Actuel',
+
+    // ── admin ──────────────────────────────────────────────────────
+    'admin.title': 'Admin',
+    'admin.tab.overview': "Vue d'ensemble", 'admin.tab.users': 'Utilisateurs', 'admin.tab.settings': 'Paramètres', 'admin.tab.audit': 'Audit',
+    'admin.totalUsers': 'Utilisateurs', 'admin.activeDay': 'Actifs 24h', 'admin.totalProjects': 'Projets', 'admin.totalApps': 'Applications', 'admin.runningApps': 'En cours', 'admin.errorApps': 'En erreur', 'admin.totalDeployments': 'Déploiements', 'admin.totalProviders': 'Providers Git',
+    'admin.recentSignups': 'Inscriptions récentes', 'admin.recentSignupsDesc': '5 dernières inscriptions', 'admin.noSignups': "Aucune inscription pour l'instant.",
+    'admin.searchUser': 'Recherche par email / nom', 'admin.allRoles': 'Tous les rôles', 'admin.allStatuses': 'Tous les statuts', 'admin.createUser': 'Créer un utilisateur', 'admin.user': 'Utilisateur', 'admin.role': 'Rôle', 'admin.status': 'Statut', 'admin.resources': 'Ressources', 'admin.lastLogin': 'Dernière connexion', 'admin.actions': 'Actions',
+    'admin.editRole': 'Modifier le rôle', 'admin.resetPw': 'Réinitialiser le mot de passe', 'admin.suspend': 'Suspendre', 'admin.reactivate': 'Réactiver',
+    'admin.noUsers': 'Aucun utilisateur ne correspond aux filtres.', 'admin.totalCount': '{n} utilisateurs au total',
+    'admin.editUserTitle': 'Modifier {name}',
+    'admin.deleteWarning': "Supprimer définitivement supprime l'utilisateur, ses projets, déploiements, providers et sessions.",
+    'admin.deleteUser': "Supprimer l'utilisateur", 'admin.deleteUserConfirm': 'Supprimer {email} ? Action irréversible.', 'admin.userDeleted': 'Utilisateur supprimé',
+    'admin.resetPwTitle': 'Réinitialiser le mot de passe — {name}', 'admin.resetPwDesc': "Toutes les sessions actives seront révoquées. L'utilisateur devra se reconnecter.",
+    'admin.newPw': 'Nouveau mot de passe (min 8 caractères)', 'admin.newPwPlaceholder': 'Un mot de passe fort...', 'admin.resetting': 'Réinitialisation...', 'admin.resetAndRevoke': 'Réinitialiser & révoquer', 'admin.pwResetSuccess': 'Mot de passe réinitialisé — sessions révoquées',
+    'admin.createUserDesc': "Créez un compte directement — utile quand les inscriptions sont désactivées.", 'admin.userCreated': 'Utilisateur créé', 'admin.roleUpdated': 'Rôle mis à jour', 'admin.statusUpdated': 'Statut mis à jour',
+    'admin.settings.registrationLabel': 'Inscription publique', 'admin.settings.registrationDesc': 'Autorise les nouveaux utilisateurs à s\'inscrire via /register. Désactivé : seuls les admins peuvent créer des comptes.',
+    'admin.settings.approvalLabel': 'Approbation admin requise', 'admin.settings.approvalDesc': 'Les nouvelles inscriptions sont créées SUSPENDUES et nécessitent une approbation.',
+    'admin.settings.maintenanceLabel': 'Mode maintenance', 'admin.settings.maintenanceDesc': 'Affiche une bannière de maintenance. (À venir) bloque la connexion non-admin.',
+    'admin.settings.platformLabel': 'Nom de la plateforme', 'admin.settings.platformDesc': 'Affiché dans tout le dashboard. Par défaut : Kryptalis.',
+    'admin.settings.defaultRoleLabel': 'Rôle par défaut des nouveaux utilisateurs', 'admin.settings.defaultRoleDesc': "Rôle attribué à l'inscription.",
+    'admin.settings.maintenanceActive': 'Mode maintenance actif', 'admin.settings.maintenanceWarn': 'Les visiteurs verront une bannière. Pensez à désactiver une fois la maintenance terminée.',
+    'admin.audit.title': "Journal d'audit", 'admin.audit.desc': '100 derniers événements', 'admin.audit.user': 'Utilisateur', 'admin.audit.action': 'Action', 'admin.audit.resource': 'Ressource', 'admin.audit.ip': 'IP', 'admin.audit.when': 'Quand', 'admin.audit.none': "Aucun événement enregistré.", 'admin.audit.system': 'système',
+  },
+};
