@@ -81,6 +81,14 @@ export class EmailController {
     return this.svc.removeAlias(userId, id);
   }
 
+  // overview — list every mail-eligible domain with its mail server status
+  // and mailbox/alias counts. Drives /dashboard/emails.
+  @Get('overview')
+  @ApiOperation({ summary: 'Cross-domain email overview for the dashboard' })
+  overview(@CurrentUser('id') userId: string) {
+    return this.svc.overview(userId);
+  }
+
   // dns
   @Get('dns/:domainId')
   @ApiOperation({ summary: 'DNS records hints for email hosting' })

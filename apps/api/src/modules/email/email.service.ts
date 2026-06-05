@@ -283,4 +283,69 @@ export class EmailService {
         : null,
     };
   }
+
+  /**
+   * One-shot list for the email overview page: every mail-eligible domain
+   * the user can see, joined with mail server status + mailbox/alias counts.
+   * Powers /dashboard/emails (no per-domain round-trips).
+   */
+  async overview(userId: string) {
+    const projectIds = await listAccessibleProjectIds(this.prisma, userId);
+    if (projectIds.length === 0) return [];
+    const domains = await this.prisma.domain.findMany({
+      where: { projectId: { in: projectIds } },
+      include: {
+        project: { select: { id: true, name: true } },
+        application: { select: { id: true, name: true, port: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (domains.length === 0) return [];
+    const domainIds = domains.map((d) => d.id);
+    const [servers, mailboxAgg, aliasAgg, webmails] = await Promise.all([
+      this.prisma.mailServer.findMany({
+        where: { domainId: { in: domainIds } },
+        select: {
+          domainId: true, status: true, hostname: true, lastError: true,
+          smtpPort: true, submissionPort: true, smtpsPort: true, imapPort: true, imapsPort: true,
+        },
+      }),
+      this.prisma.mailbox.groupBy({
+        by: ['domainId'],
+        where: { domainId: { in: domainIds }, status: 'ACTIVE', forwardTo: null },
+        _count: { _all: true },
+      }),
+      this.prisma.emailAlias.groupBy({
+        by: ['domainId'],
+        where: { domainId: { in: domainIds } },
+        _count: { _all: true },
+      }),
+      // webmail apps already linked to one of these domains — used to surface
+      // an "Open webmail" deep-link in the overview card.
+      this.prisma.application.findMany({
+        where: {
+          name: { in: ['Roundcube', 'SnappyMail', 'Rainloop'] },
+          domains: { some: { id: { in: domainIds } } },
+        },
+        select: { id: true, name: true, port: true, status: true, domains: { select: { id: true } } },
+      }),
+    ]);
+    const srvBy = new Map(servers.map((s) => [s.domainId, s]));
+    const mbBy = new Map(mailboxAgg.map((g) => [g.domainId, g._count._all]));
+    const alBy = new Map(aliasAgg.map((g) => [g.domainId, g._count._all]));
+    const wmBy = new Map<string, { id: string; name: string; port: number | null; status: string }>();
+    for (const w of webmails) {
+      for (const d of w.domains) wmBy.set(d.id, { id: w.id, name: w.name, port: w.port, status: w.status });
+    }
+    return domains.map((d) => ({
+      id: d.id,
+      domain: d.domain,
+      project: d.project,
+      application: d.application,
+      mailServer: srvBy.get(d.id) || null,
+      mailboxCount: mbBy.get(d.id) || 0,
+      aliasCount: alBy.get(d.id) || 0,
+      webmail: wmBy.get(d.id) || null,
+    }));
+  }
 }
