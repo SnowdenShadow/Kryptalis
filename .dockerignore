@@ -1,0 +1,30 @@
+# Never ship build artifacts INTO the build context — they confuse tsc incremental
+# (.tsbuildinfo makes nest build skip emit), bloat the image, and break Next standalone.
+**/node_modules
+**/dist
+**/.next
+**/.turbo
+**/*.tsbuildinfo
+**/tsconfig.tsbuildinfo
+
+# Local state created by the API at runtime (compose stacks, mail data, Caddy state).
+.kryptalis
+apps/api/.kryptalis
+
+# IDE / VCS noise
+.git
+.github
+.vscode
+.idea
+.claude
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Local env (compose passes runtime env vars; never bake them into the image)
+.env
+.env.local
+.env.*.local
