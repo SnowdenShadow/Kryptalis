@@ -91,7 +91,33 @@ else
   ok ".env already exists — leaving it alone"
 fi
 
-# ─── 5. start the stack ──────────────────────────────────────────────
+# ─── 5. seed the Caddyfile so Caddy can mount it on first boot ──────
+# The API regenerates this file on every domain change, but the file MUST exist
+# (and be a regular file, not a directory) before `docker compose up` mounts it
+# into the Caddy container — otherwise Docker creates an empty dir at that path
+# and Caddy crashes with "not a directory".
+CADDY_DIR="$INSTALL_DIR/.kryptalis/reverse-proxy"
+CADDY_FILE="$CADDY_DIR/Caddyfile"
+mkdir -p "$CADDY_DIR"
+# If Docker previously created a directory here, remove it.
+if [ -d "$CADDY_FILE" ] && [ ! -f "$CADDY_FILE" ]; then
+  rmdir "$CADDY_FILE" 2>/dev/null || rm -rf "$CADDY_FILE"
+fi
+if [ ! -f "$CADDY_FILE" ]; then
+  cat > "$CADDY_FILE" <<'CADDYEOF'
+# Seeded by install.sh — the API will overwrite this with the real config
+# once domains are created.
+{
+  admin :2019
+  email kryptalis@localhost
+}
+:80 {
+  respond "Kryptalis: no domain configured yet." 404
+}
+CADDYEOF
+fi
+
+# ─── 6. start the stack ──────────────────────────────────────────────
 say "Pulling images & starting Kryptalis..."
 docker compose pull
 docker compose up -d --remove-orphans
