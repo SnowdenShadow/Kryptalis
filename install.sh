@@ -68,14 +68,37 @@ else
   cd "$INSTALL_DIR"
 fi
 
-# ─── 4. .env (preserve existing) ─────────────────────────────────────
+# ─── 4. detect the public IP / hostname the browser will use ─────────
+# The dashboard's API URL is baked into the build (Next inlines NEXT_PUBLIC_*),
+# so we need to know it BEFORE `docker compose up`. Order of precedence:
+#   1. PUBLIC_API_URL env var the operator set explicitly
+#   2. ipify.org (public IPv4)
+#   3. `hostname -I` first non-loopback address
+DETECTED_HOST=""
+if [ -z "${PUBLIC_API_URL:-}" ]; then
+  DETECTED_HOST=$(curl -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || true)
+  if [ -z "$DETECTED_HOST" ]; then
+    DETECTED_HOST=$(hostname -I 2>/dev/null | awk '{print $1}')
+  fi
+  if [ -z "$DETECTED_HOST" ]; then
+    DETECTED_HOST="localhost"
+    warn "Could not detect a public IP — falling back to localhost. Edit .env later and set PUBLIC_API_URL."
+  else
+    ok "Detected public address: $DETECTED_HOST"
+  fi
+  PUBLIC_API_URL_RESOLVED="http://$DETECTED_HOST:4000"
+else
+  PUBLIC_API_URL_RESOLVED="$PUBLIC_API_URL"
+  ok "Using operator-supplied PUBLIC_API_URL=$PUBLIC_API_URL_RESOLVED"
+fi
+
+# ─── 5. .env (preserve existing) ─────────────────────────────────────
 if [ ! -f .env ]; then
   say "Generating /opt/kryptalis/.env with secure random secrets"
   JWT_SECRET=$(openssl rand -hex 32)
   JWT_REFRESH_SECRET=$(openssl rand -hex 32)
   ENCRYPTION_KEY=$(openssl rand -hex 16)
   POSTGRES_PASSWORD=$(openssl rand -hex 16)
-  PUBLIC_URL="${PUBLIC_API_URL:-$PUBLIC_URL_DEFAULT}"
 
   cat > .env <<EOF
 # Kryptalis runtime config — generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -83,12 +106,21 @@ POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 JWT_SECRET=$JWT_SECRET
 JWT_REFRESH_SECRET=$JWT_REFRESH_SECRET
 ENCRYPTION_KEY=$ENCRYPTION_KEY
-PUBLIC_API_URL=$PUBLIC_URL
+PUBLIC_API_URL=$PUBLIC_API_URL_RESOLVED
 EOF
   chmod 600 .env
   ok ".env created (kept private at /opt/kryptalis/.env)"
 else
-  ok ".env already exists — leaving it alone"
+  # .env exists — but if PUBLIC_API_URL is wrong (e.g. localhost on a public VPS),
+  # rewrite ONLY that line so the dashboard rebuild uses the correct origin.
+  CURRENT_URL=$(grep -E '^PUBLIC_API_URL=' .env | head -1 | cut -d= -f2- || true)
+  if [ "$CURRENT_URL" != "$PUBLIC_API_URL_RESOLVED" ]; then
+    say "Updating PUBLIC_API_URL in .env: $CURRENT_URL → $PUBLIC_API_URL_RESOLVED"
+    sed -i.bak "s|^PUBLIC_API_URL=.*|PUBLIC_API_URL=$PUBLIC_API_URL_RESOLVED|" .env
+    NEEDS_DASHBOARD_REBUILD=1
+  else
+    ok ".env already exists — leaving it alone"
+  fi
 fi
 
 # ─── 5. seed the Caddyfile so Caddy can mount it on first boot ──────
@@ -120,7 +152,11 @@ fi
 # ─── 6. start the stack ──────────────────────────────────────────────
 say "Pulling images & starting Kryptalis..."
 docker compose pull
-docker compose up -d --remove-orphans
+if [ "${NEEDS_DASHBOARD_REBUILD:-0}" = "1" ]; then
+  say "PUBLIC_API_URL changed — rebuilding dashboard with --no-cache (Next inlines it)"
+  docker compose build --no-cache dashboard
+fi
+docker compose up -d --build --remove-orphans
 
 # Wait for the API to answer
 say "Waiting for the API to come up..."
