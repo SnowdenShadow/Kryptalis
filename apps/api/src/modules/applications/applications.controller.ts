@@ -139,6 +139,27 @@ export class ApplicationsController {
     return this.svc.setUrlMode(userId, id, customPort);
   }
 
+  // Port bindings — for apps co-hosted on a domain on a custom port. See
+  // DomainPortBinding in the Prisma schema.
+  @Post(':id/port-bindings')
+  @ApiOperation({ summary: 'Bind this app to <domain>:<port> (co-hosted with other apps)' })
+  addBinding(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body() body: { domainId: string; port: number },
+  ) {
+    return this.svc.addPortBinding(userId, id, body.domainId, body.port);
+  }
+
+  @Delete('port-bindings/:bindingId')
+  @ApiOperation({ summary: 'Remove a port binding (detach app from <domain>:<port>)' })
+  removeBinding(
+    @CurrentUser('id') userId: string,
+    @Param('bindingId') bindingId: string,
+  ) {
+    return this.svc.removePortBinding(userId, bindingId);
+  }
+
   @Get(':id/env')
   @ApiOperation({ summary: 'Read application env vars' })
   getEnv(@CurrentUser('id') userId: string, @Param('id') id: string) {

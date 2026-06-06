@@ -63,6 +63,11 @@ interface Application {
   project?: { id: string; name: string };
   customPort?: boolean;
   domains?: { id: string; domain: string; sslStatus: string }[];
+  portBindings?: {
+    id: string;
+    port: number;
+    domain: { id: string; domain: string; sslStatus: string };
+  }[];
 }
 
 interface ProjectOption {
@@ -128,21 +133,23 @@ function appUrl(port: number) {
 }
 
 /**
- * Prefer a linked domain over the bare IP:port. If the user picked a custom
- * port at install (customPort=true), keep it in the URL — that's what the
- * Caddyfile 308-redirects to and what the user explicitly wants visible.
+ * First URL the user can open — handles clean-URL domain, port-pinned domain,
+ * port-binding (app co-hosted on another domain), or bare IP:port fallback.
  */
 function publicAppUrl(app: {
   port?: number | null;
   customPort?: boolean;
   domains?: { domain: string; sslStatus: string }[];
+  portBindings?: { port: number; domain: { domain: string; sslStatus: string } }[];
 }): string | null {
-  const linked = app.domains?.find((d) => d.sslStatus === 'ACTIVE') || app.domains?.[0];
-  if (linked) {
+  const main = app.domains?.[0];
+  if (main) {
     return app.customPort && app.port
-      ? `https://${linked.domain}:${app.port}`
-      : `https://${linked.domain}`;
+      ? `https://${main.domain}:${app.port}`
+      : `https://${main.domain}`;
   }
+  const bound = app.portBindings?.[0];
+  if (bound) return `https://${bound.domain.domain}:${bound.port}`;
   return app.port ? appUrl(app.port) : null;
 }
 
@@ -718,13 +725,18 @@ export default function ApplicationsPage() {
                           </div>
                         </div>
                       )}
-                      {app.domains && app.domains.length > 0 && (
+                      {((app.domains && app.domains.length > 0) || (app.portBindings && app.portBindings.length > 0)) && (
                         <div className="col-span-2">
-                          <p className="text-xs text-muted-foreground">Domains</p>
+                          <p className="text-xs text-muted-foreground">Routes</p>
                           <div className="flex flex-wrap gap-1.5 mt-0.5">
-                            {app.domains.map((d) => (
+                            {(app.domains || []).map((d) => (
                               <Badge key={d.id} variant={d.sslStatus === 'ACTIVE' ? 'success' : 'outline'} className="text-[10px] gap-1 font-mono">
-                                <Globe size={9} /> {d.domain}
+                                <Globe size={9} /> {app.customPort && app.port ? `${d.domain}:${app.port}` : d.domain}
+                              </Badge>
+                            ))}
+                            {(app.portBindings || []).map((b) => (
+                              <Badge key={b.id} variant={b.domain.sslStatus === 'ACTIVE' ? 'success' : 'outline'} className="text-[10px] gap-1 font-mono">
+                                <Globe size={9} /> {b.domain.domain}:{b.port}
                               </Badge>
                             ))}
                           </div>

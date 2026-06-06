@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateApplicationDto } from './dto/create-application.dto';
@@ -778,7 +779,18 @@ export class ApplicationsService {
       orderBy: { createdAt: 'desc' },
       include: {
         project: { select: { id: true, name: true } },
+        // Both the clean-URL domain (apps.domains) AND port-pinned bindings
+        // (apps.portBindings) are surfaced — the dashboard shows one URL per
+        // entry. An app that owns Domain.applicationId AND has port bindings
+        // on other domains shows multiple URLs in the same card.
         domains: { select: { id: true, domain: true, sslStatus: true } },
+        portBindings: {
+          select: {
+            id: true,
+            port: true,
+            domain: { select: { id: true, domain: true, sslStatus: true } },
+          },
+        },
       },
     });
     return Promise.all(apps.map((app) => this.syncStatus(app)));
@@ -790,6 +802,13 @@ export class ApplicationsService {
       include: {
         project: { include: { server: { select: { id: true, name: true } } } },
         domains: { select: { id: true, domain: true, sslStatus: true, status: true } },
+        portBindings: {
+          select: {
+            id: true,
+            port: true,
+            domain: { select: { id: true, domain: true, sslStatus: true, status: true } },
+          },
+        },
       },
     });
     if (!application) throw new NotFoundException('Application not found');
@@ -1158,6 +1177,53 @@ export class ApplicationsService {
     });
     this.proxy.regenerate().catch(() => {});
     return updated;
+  }
+
+  /**
+   * Add a (domain, port) → this app binding. Lets the user co-host this app
+   * on a domain that already serves another app on a different port. The
+   * (domainId, port) tuple is unique — same domain + same port can't go to
+   * two apps.
+   */
+  async addPortBinding(userId: string, appId: string, domainId: string, port: number) {
+    await this.assertOwnership(userId, appId);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new BadRequestException('port must be 1-65535');
+    }
+    const domain = await this.prisma.domain.findUnique({
+      where: { id: domainId },
+      include: {
+        portBindings: { include: { application: { select: { name: true, projectId: true } } } },
+        application: { select: { name: true, port: true } },
+      },
+    });
+    if (!domain) throw new NotFoundException('Domain not found');
+    // Reject if the (domain, port) is taken — by another binding OR by the
+    // clean-URL app's published port. Caddy can't tell those apart.
+    const occupied = domain.portBindings.find((b) => b.port === port);
+    if (occupied) {
+      throw new ConflictException(`Port ${port} on ${domain.domain} is already used by ${occupied.application.name}`);
+    }
+    if (domain.application && domain.application.port === port) {
+      throw new ConflictException(`Port ${port} is the main app (${domain.application.name})'s port on ${domain.domain}`);
+    }
+    const binding = await this.prisma.domainPortBinding.create({
+      data: { domainId, applicationId: appId, port },
+    });
+    this.proxy.regenerate().catch(() => {});
+    return binding;
+  }
+
+  /** Remove one port binding. Ownership check goes through the bound app. */
+  async removePortBinding(userId: string, bindingId: string) {
+    const binding = await this.prisma.domainPortBinding.findUnique({
+      where: { id: bindingId },
+    });
+    if (!binding) throw new NotFoundException('Binding not found');
+    await this.assertOwnership(userId, binding.applicationId);
+    await this.prisma.domainPortBinding.delete({ where: { id: bindingId } });
+    this.proxy.regenerate().catch(() => {});
+    return { message: 'Binding removed' };
   }
 
   // ── env vars ───────────────────────────────────────────────────────

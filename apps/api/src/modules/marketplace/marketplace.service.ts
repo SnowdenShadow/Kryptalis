@@ -87,29 +87,7 @@ export class MarketplaceService {
 
     const isWebmail = WEBMAIL_SLUGS.has(data.appSlug);
 
-    // Every domain may only be linked to ONE app at a time. If the user picks
-    // a domain currently attached to ANOTHER app:
-    //   - In the same project → auto-detach (user is clearly replacing it).
-    //   - In a different project → refuse with a clear pointer to the owner.
-    // This is what "reinstall on the same domain" needs to just work.
-    if (data.domainId) {
-      const dup = await this.prisma.application.findFirst({
-        where: { domains: { some: { id: data.domainId } } },
-        select: { id: true, name: true, projectId: true },
-      });
-      if (dup) {
-        if (dup.projectId === data.projectId) {
-          await this.prisma.domain.update({
-            where: { id: data.domainId },
-            data: { applicationId: null },
-          });
-        } else {
-          throw new ConflictException(
-            `Domain is already linked to "${dup.name}" in another project. Detach it from /dashboard/applications/${dup.id} first.`,
-          );
-        }
-      }
-    }
+    // Multi-app per domain rules — checked AFTER port resolution. See below.
 
     // Webmail (Roundcube/SnappyMail/Rainloop) → multi-install allowed
     //   (one per mail server, dedup is on the domainId check above).
@@ -229,15 +207,10 @@ export class MarketplaceService {
       .replace(/__HOST_PORT__/g, String(realPort));
 
     if (data.domainId) {
-      await this.prisma.domain.update({
-        where: { id: data.domainId },
-        data: { applicationId: application.id },
-      });
+      await this.attachAppToDomain(application.id, data.domainId, realPort, customPort, data.projectId);
       // CRITICAL: rewrite Caddyfile so the domain actually routes to the new
       // app. Without this, the domain is linked in the DB but Caddy keeps
       // serving the 503 "reserved" placeholder until the next regenerate.
-      // Don't await — Caddy reload happens in the background; if it fails
-      // (Caddy down), the next regenerate picks it up.
       this.proxy.regenerate().catch(() => {});
     }
 
@@ -287,6 +260,64 @@ export class MarketplaceService {
       try {
         await execAsync('docker compose down -v', { cwd: appDir });
       } catch {}
+    }
+  }
+
+  /**
+   * Link an app to a domain — clean-URL apps grab the :443 slot
+   * (Domain.applicationId), port-pinned apps register a DomainPortBinding
+   * row instead so they coexist with other apps on the same hostname.
+   *
+   * Conflict policy:
+   *   - same-project conflict on the :443 slot → auto-replace (user is
+   *     clearly swapping the main app)
+   *   - cross-project conflict on the :443 slot → refuse with a clear
+   *     pointer so the original owner can detach
+   *   - port-binding conflict → always refuse (operator must pick another
+   *     port; auto-replacing a port that may be load-bearing is dangerous)
+   */
+  private async attachAppToDomain(
+    applicationId: string,
+    domainId: string,
+    port: number,
+    customPort: boolean,
+    projectId: string,
+  ) {
+    if (customPort) {
+      const existing = await this.prisma.domainPortBinding.findUnique({
+        where: { domainId_port: { domainId, port } },
+        include: { application: { select: { id: true, name: true, projectId: true } } },
+      });
+      if (existing) {
+        if (existing.application.projectId === projectId) {
+          await this.prisma.domainPortBinding.delete({ where: { id: existing.id } });
+        } else {
+          throw new ConflictException(
+            `Port ${port} on this domain is already used by "${existing.application.name}" in another project. Pick a different port.`,
+          );
+        }
+      }
+      await this.prisma.domainPortBinding.create({
+        data: { domainId, applicationId, port },
+      });
+    } else {
+      const domain = await this.prisma.domain.findUnique({
+        where: { id: domainId },
+        include: { application: { select: { id: true, name: true, projectId: true } } },
+      });
+      if (domain?.applicationId) {
+        if (domain.application?.projectId === projectId) {
+          // Auto-detach same-project incumbent — user is clearly replacing it.
+        } else {
+          throw new ConflictException(
+            `Domain is already serving "${domain.application?.name}" in another project on the default port. Detach it first.`,
+          );
+        }
+      }
+      await this.prisma.domain.update({
+        where: { id: domainId },
+        data: { applicationId },
+      });
     }
   }
 
@@ -427,10 +458,7 @@ export class MarketplaceService {
       .replace(/__HOST_PORT__/g, String(hostPort));
 
     if (data.domainId) {
-      await this.prisma.domain.update({
-        where: { id: data.domainId },
-        data: { applicationId: application.id },
-      });
+      await this.attachAppToDomain(application.id, data.domainId, hostPort, !!data.hostPort, data.projectId);
       this.proxy.regenerate().catch(() => {});
     }
 

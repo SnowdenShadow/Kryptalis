@@ -134,7 +134,12 @@ ${email ? `  email ${email}\n` : ''}}
     // Reserved domains still get a Caddy block so Let's Encrypt provisions the cert
     // in advance (the user gets a green padlock the moment they wire it to an app).
     const allDomains = await this.prisma.domain.findMany({
-      include: { application: { select: { id: true, name: true, port: true, customPort: true } } },
+      include: {
+        application: { select: { id: true, name: true, port: true, customPort: true } },
+        portBindings: {
+          include: { application: { select: { id: true, name: true } } },
+        },
+      },
     });
 
     // Some marketplace apps listen on HTTPS internally with a self-signed
@@ -174,72 +179,77 @@ ${email ? `  email ${email}\n` : ''}}
     let reservedCount = 0;
     const newStatusByDomainId: Record<string, 'ACTIVE' | 'PENDING'> = {};
 
+    const proxyFor = (appName: string, port: number): string => {
+      const upstreamHttps =
+        HTTPS_UPSTREAM_APP_NAMES.has(appName) || HTTPS_UPSTREAM_PORTS.has(port);
+      return upstreamHttps
+        ? `  reverse_proxy https://host.docker.internal:${port} {\n    transport http {\n      tls\n      tls_insecure_skip_verify\n    }\n  }`
+        : `  reverse_proxy host.docker.internal:${port}`;
+    };
+
     for (const d of allDomains) {
       const host = d.domain;
       const isLocal = this.isLocalHostname(host);
-      const port = d.application?.port ?? null;
-      const linked = !!d.applicationId && !!port;
-      // When the user explicitly picked a port at install, Caddy serves the
-      // domain on THAT port (https://domain:<port>) with a Let's Encrypt cert.
-      // Otherwise Caddy uses the default 443 (https://domain) — clean URL.
-      const customPortMode = linked && !!d.application?.customPort;
 
-      blocks.push(linked
-        ? `# ${host} → app ${d.application?.name} (host port ${port})${customPortMode ? ' — serving on :' + port : ''}`
-        : `# ${host} → reserved (no app linked yet)`);
+      // Main app on :443 (clean-URL slot). Tracked via Domain.applicationId.
+      const mainPort = d.application?.port ?? null;
+      const mainLinked = !!d.applicationId && !!mainPort;
+      const mainAppName = d.application?.name || '';
 
-      const appName = d.application?.name || '';
-      const upstreamHttps = linked && port !== null && (
-        HTTPS_UPSTREAM_APP_NAMES.has(appName) || HTTPS_UPSTREAM_PORTS.has(port)
-      );
-      const proxyDirective = upstreamHttps
-        ? `  reverse_proxy https://host.docker.internal:${port} {\n    transport http {\n      tls\n      tls_insecure_skip_verify\n    }\n  }`
-        : `  reverse_proxy host.docker.internal:${port}`;
+      // Custom-port apps co-hosted on the same hostname. Each one publishes
+      // its own port on the Docker host (Caddy can't bind these from inside
+      // a container, so traffic hits the container directly — its own cert).
+      const portBindings = (d.portBindings || []).filter((b) => !!b.port);
 
+      // ── :443 block ────────────────────────────────────────────────
       if (isLocal) {
+        blocks.push(`# ${host} :80 → ${mainLinked ? `app ${mainAppName} (port ${mainPort})` : 'reserved'}`);
         blocks.push(`http://${host} {`);
-        if (linked) {
-          blocks.push(proxyDirective);
+        if (mainLinked) {
+          blocks.push(proxyFor(mainAppName, mainPort!));
+        } else if (portBindings.length > 0) {
+          // No clean-URL app, but port-bound apps exist → 308 to the first one
+          // so https://host doesn't 503 when at least one app IS reachable.
+          const first = portBindings[0];
+          blocks.push(`  respond "Open https://${host}:${first.port} for ${first.application.name}." 200`);
         } else {
           blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
         }
         blocks.push(`}`);
       } else {
-        // Real domain. Caddy always binds :80 + :443 and auto-provisions
-        // Let's Encrypt for <host> regardless of customPort, so the cert is
-        // valid whether the user opens https://host or https://host:<port>.
-        //
-        // customPortMode affects only the proxying behaviour at :443:
-        //   - false → Caddy serves https://host and proxies to the container
-        //   - true  → Caddy 308-redirects https://host → https://host:<port>
-        //             and the user's container handles :<port> directly
-        //             (its own TLS / cert; for Portainer that's self-signed).
-        // Caddy can't bind arbitrary user-picked ports from inside a
-        // container without network_mode: host, so we leave port-bound
-        // traffic to the container itself — which is what publishing the
-        // port in docker compose does.
-        if (customPortMode && linked) {
-          blocks.push(`${host} {`);
-          blocks.push(`  redir https://${host}:${port}{uri} 308`);
-          blocks.push(`}`);
+        // Real domain — Caddy always binds :443 and auto-provisions LE.
+        blocks.push(`# ${host} :443 → ${mainLinked ? `app ${mainAppName} (port ${mainPort})` : (portBindings.length > 0 ? 'redirect to port-bound apps' : 'reserved')}`);
+        blocks.push(`${host} {`);
+        if (mainLinked) {
+          blocks.push(proxyFor(mainAppName, mainPort!));
+        } else if (portBindings.length > 0) {
+          // No main app, but port-bound apps exist → 308 to the first one.
+          // User can pick a different default with the "Public URL" toggle.
+          const first = portBindings[0];
+          blocks.push(`  redir https://${host}:${first.port}{uri} 308`);
         } else {
-          blocks.push(`${host} {`);
-          if (linked) {
-            blocks.push(proxyDirective);
-          } else {
-            blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
-          }
-          blocks.push(`}`);
+          blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
         }
+        blocks.push(`}`);
       }
       blocks.push('');
 
-      if (linked) {
+      // ── one block per port binding ────────────────────────────────
+      // We can't actually have Caddy proxy these (it'd need to bind the
+      // port, which means network_mode: host or extra port mappings on the
+      // Caddy container). Instead the container publishes the port itself
+      // — Caddy just documents it for visibility. The user opens
+      // https://host:<port> and hits the container directly.
+      for (const b of portBindings) {
+        blocks.push(`# ${host}:${b.port} → app ${b.application.name} (direct container publish)`);
+        blocks.push('');
+      }
+
+      const hasAnyApp = mainLinked || portBindings.length > 0;
+      if (hasAnyApp) {
         newStatusByDomainId[d.id] = 'ACTIVE';
         activeCount++;
       } else {
-        // The cert is being provisioned but no app routes traffic — call this
-        // PENDING in the DB so the UI shows "waiting on app link".
         newStatusByDomainId[d.id] = 'PENDING';
         reservedCount++;
       }

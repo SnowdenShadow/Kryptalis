@@ -80,6 +80,11 @@ interface ApplicationDetail {
     server?: { id: string; name: string };
   };
   domains?: { id: string; domain: string; sslStatus: string }[];
+  portBindings?: {
+    id: string;
+    port: number;
+    domain: { id: string; domain: string; sslStatus: string };
+  }[];
 }
 
 interface Deployment {
@@ -183,31 +188,46 @@ function appUrl(hostname: string, port: number) {
 }
 
 /**
- * Pick the canonical public URL for an application.
- *   - Domain + customPort=true → https://<domain>:<port> (user-picked port)
- *   - Domain + customPort=false → https://<domain> (Caddy on 443, clean URL)
- *   - No domain → <hostname>:<port> (direct IP access)
+ * Every URL this app is reachable at:
+ *   - clean-URL domains (app on :443)  → https://<domain>
+ *   - port bindings (app co-hosted on another domain) → https://<domain>:<port>
+ *   - no domain at all → fallback to <hostname>:<port>
+ *
+ * Multi-URL is real: an app linked to "myapp.com" as the main app AND port-
+ * bound to "shared.com:8080" exposes BOTH URLs.
  */
-function publicUrl(
+function publicUrls(
   app: {
     port?: number | null;
     customPort?: boolean;
     domains?: { domain: string; sslStatus: string }[];
+    portBindings?: { port: number; domain: { domain: string; sslStatus: string } }[];
   },
   fallbackHostname: string,
+): string[] {
+  const urls: string[] = [];
+  for (const d of app.domains || []) {
+    // When customPort=true on a clean-URL domain, Caddy 308-redirects to the
+    // port-pinned URL — show that as the canonical address.
+    urls.push(app.customPort && app.port
+      ? `https://${d.domain}:${app.port}`
+      : `https://${d.domain}`);
+  }
+  for (const b of app.portBindings || []) {
+    urls.push(`https://${b.domain.domain}:${b.port}`);
+  }
+  if (urls.length === 0 && app.port) {
+    urls.push(appUrl(fallbackHostname, app.port));
+  }
+  return urls;
+}
+
+/** First URL — used by Open button / single-line displays. */
+function publicUrl(
+  app: Parameters<typeof publicUrls>[0],
+  fallbackHostname: string,
 ): string | null {
-  const linked = app.domains?.find((d) => d.sslStatus === 'ACTIVE')
-    || app.domains?.[0]
-    || null;
-  if (linked) {
-    return app.customPort && app.port
-      ? `https://${linked.domain}:${app.port}`
-      : `https://${linked.domain}`;
-  }
-  if (app.port) {
-    return appUrl(fallbackHostname, app.port);
-  }
-  return null;
+  return publicUrls(app, fallbackHostname)[0] || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +399,31 @@ export default function ApplicationDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['applications'] });
       toast.success('URL mode updated — Caddy reloading');
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const [newBindingDomainId, setNewBindingDomainId] = useState('');
+  const [newBindingPort, setNewBindingPort] = useState('');
+  const addBindingMutation = useMutation({
+    mutationFn: ({ domainId, port }: { domainId: string; port: number }) =>
+      api.post(`/applications/${id}/port-bindings`, { domainId, port }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['application', id] });
+      queryClient.invalidateQueries({ queryKey: ['applications'] });
+      toast.success('Port binding added — Caddy reloading');
+      setNewBindingDomainId('');
+      setNewBindingPort('');
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+  const removeBindingMutation = useMutation({
+    mutationFn: (bindingId: string) =>
+      api.delete(`/applications/port-bindings/${bindingId}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['application', id] });
+      queryClient.invalidateQueries({ queryKey: ['applications'] });
+      toast.success('Binding removed');
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -574,22 +619,21 @@ export default function ApplicationDetailPage() {
               <Badge variant="outline">{FRAMEWORK_LABELS[app.framework] || app.framework}</Badge>
             </div>
             {isRunning && app.port && (() => {
-              const url = publicUrl(app, hostname);
-              if (!url) return null;
-              const hasDomain = !!(app.domains && app.domains.length > 0);
+              const urls = publicUrls(app, hostname);
+              if (urls.length === 0) return null;
               return (
-                <div className="flex items-center gap-2 mt-1.5 text-sm text-muted-foreground">
-                  <a
-                    href={url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary hover:underline font-mono truncate"
-                  >
-                    {url}
-                  </a>
-                  {hasDomain && (
-                    <span className="text-[10px] font-mono opacity-60">→ :{app.port}</span>
-                  )}
+                <div className="flex items-center gap-x-3 gap-y-1 mt-1.5 text-sm text-muted-foreground flex-wrap">
+                  {urls.map((url) => (
+                    <a
+                      key={url}
+                      href={url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary hover:underline font-mono truncate"
+                    >
+                      {url}
+                    </a>
+                  ))}
                 </div>
               );
             })()}
@@ -681,80 +725,90 @@ export default function ApplicationDetailPage() {
               <CardHeader>
                 <CardTitle className="text-lg">Connection Info</CardTitle>
               </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  {/* Port + Access URL */}
-                  <div className="rounded-lg border border-border p-3">
-                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">
-                      {app.domains && app.domains.length > 0 ? 'Public URL' : 'Port'}
-                    </p>
-                    {app.domains && app.domains.length > 0 ? (
-                      <>
-                        {(() => {
-                          const url = publicUrl(app, hostname);
-                          return url ? (
+              <CardContent className="space-y-3">
+                {/* Public URLs — one row per reachable URL */}
+                <div className="rounded-lg border border-border p-3">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+                    Public URLs
+                  </p>
+                  {(() => {
+                    const urls = publicUrls(app, hostname);
+                    if (urls.length === 0) {
+                      return (
+                        <p className="text-sm text-muted-foreground">
+                          No URL yet — start the app, then link a domain or open the port directly.
+                        </p>
+                      );
+                    }
+                    // Pair each URL with the domain it came from (so we can show
+                    // the SSL badge alongside).
+                    const rows: { url: string; domain?: string; sslStatus?: string; kind: 'main' | 'binding' | 'ip' }[] = [];
+                    for (const d of app.domains || []) {
+                      rows.push({
+                        url: app.customPort && app.port
+                          ? `https://${d.domain}:${app.port}`
+                          : `https://${d.domain}`,
+                        domain: d.domain,
+                        sslStatus: d.sslStatus,
+                        kind: 'main',
+                      });
+                    }
+                    for (const b of app.portBindings || []) {
+                      rows.push({
+                        url: `https://${b.domain.domain}:${b.port}`,
+                        domain: b.domain.domain,
+                        sslStatus: b.domain.sslStatus,
+                        kind: 'binding',
+                      });
+                    }
+                    if (rows.length === 0 && app.port) {
+                      rows.push({ url: appUrl(hostname, app.port), kind: 'ip' });
+                    }
+                    return (
+                      <div className="space-y-2">
+                        {rows.map((r) => (
+                          <div key={r.url} className="flex items-center gap-2 flex-wrap">
                             <a
-                              href={url}
+                              href={r.url}
                               target="_blank"
                               rel="noreferrer"
-                              className="text-primary hover:underline font-mono text-base font-semibold flex items-center gap-1 break-all"
+                              className="text-primary hover:underline font-mono text-sm font-semibold flex items-center gap-1 break-all"
                             >
-                              <ExternalLink size={12} /> {url}
+                              <ExternalLink size={11} /> {r.url}
                             </a>
-                          ) : null;
-                        })()}
-                        <p className="text-[11px] text-muted-foreground mt-1">
-                          Caddy proxies HTTPS to internal port <span className="font-mono">{app.port}</span>.
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        <p className="font-mono text-lg font-bold">{app.port || 'Not set'}</p>
-                        {isRunning && app.port && (
-                          <a
-                            href={appUrl(hostname, app.port)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-xs text-primary hover:underline font-mono flex items-center gap-1 mt-1"
-                          >
-                            <ExternalLink size={10} /> {appUrl(hostname, app.port)}
-                          </a>
-                        )}
-                        <p className="text-[11px] text-muted-foreground mt-1">
-                          Link a domain to enable HTTPS and a clean URL.
-                        </p>
-                      </>
-                    )}
-                  </div>
-
-                  {/* Domain */}
-                  <div className="rounded-lg border border-border p-3">
-                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Domain</p>
-                    {app.domains && app.domains.length > 0 ? (
-                      <div>
-                        {app.domains.map((d) => (
-                          <div key={d.id}>
-                            <p className="font-mono text-lg font-bold">{d.domain}</p>
-                            <div className="flex items-center gap-1.5 mt-1">
-                              <Badge variant={d.sslStatus === 'ACTIVE' ? 'success' : d.sslStatus === 'PENDING' ? 'warning' : 'destructive'} className="text-[10px]">
-                                {d.sslStatus === 'ACTIVE' ? '🔒 SSL Active' : d.sslStatus === 'PENDING' ? '⏳ SSL Pending' : '⚠️ SSL Error'}
+                            {r.sslStatus && (
+                              <Badge
+                                variant={r.sslStatus === 'ACTIVE' ? 'success' : r.sslStatus === 'PENDING' ? 'warning' : 'destructive'}
+                                className="text-[10px]"
+                              >
+                                {r.sslStatus === 'ACTIVE' ? '🔒 SSL' : r.sslStatus === 'PENDING' ? '⏳ SSL' : '⚠️ SSL'}
                               </Badge>
-                            </div>
+                            )}
+                            {r.kind === 'binding' && (
+                              <Badge variant="outline" className="text-[10px]">port-pinned</Badge>
+                            )}
+                            {r.kind === 'main' && app.customPort && (
+                              <Badge variant="outline" className="text-[10px]">redirected</Badge>
+                            )}
+                            {r.kind === 'ip' && (
+                              <Badge variant="outline" className="text-[10px]">direct IP</Badge>
+                            )}
                           </div>
                         ))}
                       </div>
-                    ) : (
-                      <p className="text-sm text-muted-foreground">No domain</p>
-                    )}
-                  </div>
+                    );
+                  })()}
+                </div>
 
-                  {/* Framework */}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <div className="rounded-lg border border-border p-3">
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Internal port</p>
+                    <p className="font-mono text-lg font-bold">{app.port || 'Not set'}</p>
+                  </div>
                   <div className="rounded-lg border border-border p-3">
                     <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Framework</p>
                     <p className="text-lg font-bold">{FRAMEWORK_LABELS[app.framework] || app.framework}</p>
                   </div>
-
-                  {/* Project */}
                   <div className="rounded-lg border border-border p-3">
                     <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Project</p>
                     {app.project ? (
@@ -1368,6 +1422,89 @@ export default function ApplicationDetailPage() {
                 </CardContent>
               </Card>
             )}
+
+            {/* Port bindings — co-host this app on other domains on custom ports */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <Plug size={18} /> Port bindings
+                </CardTitle>
+                <CardDescription>
+                  Expose this app on <span className="font-mono">https://&lt;domain&gt;:&lt;port&gt;</span>. Lets several apps share the same hostname on different ports.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {(app.portBindings || []).length > 0 ? (
+                  <div className="space-y-2">
+                    {(app.portBindings || []).map((b) => (
+                      <div key={b.id} className="flex items-center justify-between rounded-md border border-border p-2.5">
+                        <a
+                          href={`https://${b.domain.domain}:${b.port}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-mono text-sm text-primary hover:underline flex items-center gap-1"
+                        >
+                          <ExternalLink size={11} /> https://{b.domain.domain}:{b.port}
+                        </a>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => removeBindingMutation.mutate(b.id)}
+                          disabled={removeBindingMutation.isPending}
+                        >
+                          <Trash2 size={12} /> Remove
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground">No port bindings yet.</p>
+                )}
+
+                <div className="flex items-end gap-2 pt-2 border-t border-border">
+                  <div className="flex-1">
+                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Domain</label>
+                    <select
+                      value={newBindingDomainId}
+                      onChange={(e) => setNewBindingDomainId(e.target.value)}
+                      className="w-full mt-0.5 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+                    >
+                      <option value="">Pick a domain…</option>
+                      {(allDomains || []).map((d: any) => (
+                        <option key={d.id} value={d.id}>{d.domain}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="w-32">
+                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Port</label>
+                    <input
+                      type="number"
+                      placeholder={String(app.port || 8080)}
+                      value={newBindingPort}
+                      onChange={(e) => setNewBindingPort(e.target.value)}
+                      className="w-full mt-0.5 rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
+                    />
+                  </div>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      const p = Number(newBindingPort);
+                      if (!newBindingDomainId || !Number.isInteger(p) || p < 1) {
+                        toast.error('Pick a domain and a valid port');
+                        return;
+                      }
+                      addBindingMutation.mutate({ domainId: newBindingDomainId, port: p });
+                    }}
+                    disabled={addBindingMutation.isPending}
+                  >
+                    <Plus size={14} /> Add
+                  </Button>
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  Caddy can't actually proxy custom ports from a container — it just documents them. Your container publishes the port itself; the URL hits it directly (its own cert, e.g. self-signed for Portainer).
+                </p>
+              </CardContent>
+            </Card>
 
             {/* Auto-deploy + webhook */}
             <Card>

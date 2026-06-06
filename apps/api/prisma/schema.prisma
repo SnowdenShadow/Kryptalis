@@ -213,10 +213,11 @@ model Application {
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
 
-  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  deployments Deployment[]
-  domains     Domain[]
-  databases   Database[]
+  project          Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  deployments      Deployment[]
+  domains          Domain[]
+  portBindings     DomainPortBinding[]
+  databases        Database[]
 
   @@index([projectId])
   @@map("applications")
@@ -296,6 +297,9 @@ model Domain {
   id            String       @id @default(cuid())
   domain        String       @unique
   projectId     String?
+  // The "main" application on this domain — served on :443 in clean-URL mode.
+  // Additional apps can co-host on the same domain via DomainPortBinding
+  // (each on its own custom port).
   applicationId String?
   status        DomainStatus @default(PENDING)
   sslStatus     SSLStatus    @default(PENDING)
@@ -303,17 +307,47 @@ model Domain {
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
-  project     Project?        @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  application Application?    @relation(fields: [applicationId], references: [id], onDelete: SetNull)
-  dnsRecords  DNSRecord[]
-  certificate SSLCertificate?
-  mailboxes   Mailbox[]
-  aliases     EmailAlias[]
-  mailServer  MailServer?
+  project      Project?           @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  application  Application?       @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  portBindings DomainPortBinding[]
+  dnsRecords   DNSRecord[]
+  certificate  SSLCertificate?
+  mailboxes    Mailbox[]
+  aliases      EmailAlias[]
+  mailServer   MailServer?
 
   @@index([projectId])
   @@index([applicationId])
   @@map("domains")
+}
+
+/**
+ * One <domain, port> binding to an application. Lets multiple apps share a
+ * single hostname when each lives on its own port.
+ *
+ * Examples for the apex test.webelis.com:
+ *   - (test.webelis.com, 443, app=WordPress)  — the "main" app, also tracked
+ *                                                via Domain.applicationId
+ *   - (test.webelis.com, 9443, app=Portainer)
+ *   - (test.webelis.com, 8080, app=Ghost)
+ *
+ * Caddy reads this table to emit one `<domain>:<port>` site block per row.
+ * The (domainId, port) pair is unique — two apps can't fight over the same
+ * exposed port on the same hostname.
+ */
+model DomainPortBinding {
+  id            String   @id @default(cuid())
+  domainId      String
+  applicationId String
+  port          Int
+  createdAt     DateTime @default(now())
+
+  domain      Domain      @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@unique([domainId, port])
+  @@index([applicationId])
+  @@map("domain_port_bindings")
 }
 
 model MailServer {
