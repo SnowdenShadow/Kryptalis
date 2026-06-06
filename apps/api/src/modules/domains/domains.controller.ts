@@ -55,4 +55,16 @@ export class DomainsController {
   ) {
     return this.svc.transfer(userId, id, targetProjectId);
   }
+
+  @Get(':id/health')
+  @ApiOperation({ summary: 'Live DNS health check (A / CNAME / mail flag)' })
+  getDnsHealth(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.getDnsHealth(userId, id);
+  }
+
+  @Get(':id/records')
+  @ApiOperation({ summary: 'Full DNS records dump + reconciliation' })
+  getDnsRecords(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.getDnsRecords(userId, id);
+  }
 }

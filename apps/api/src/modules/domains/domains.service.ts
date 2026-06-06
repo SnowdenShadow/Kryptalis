@@ -7,6 +7,7 @@ import {
   Inject,
   forwardRef,
 } from '@nestjs/common';
+import * as dns from 'dns';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateDomainDto } from './dto/create-domain.dto';
 import {
@@ -228,5 +229,230 @@ export class DomainsService {
     });
     this.proxy.regenerate().catch(() => {});
     return updated;
+  }
+
+  /**
+   * Live DNS health check for any domain (web or mail). Queries public DNS
+   * resolvers and compares against the expected record set:
+   *
+   *   - A (or AAAA): must point to the server's public IP. Subdomains may
+   *     use a CNAME to the apex — we follow it.
+   *   - CNAME (subdomains only): allowed alternative to A. Must ultimately
+   *     resolve to the server.
+   *   - MX (if domain has a mail server): see EmailService.getDnsHealth
+   *     for the deep check — we just say "use the mail tab" here.
+   *
+   * Returns per-record verdicts so the UI can show each line as OK / WARN
+   * / FAIL with the exact value seen, AND a `recommendedRecords` array the
+   * dashboard can copy-paste into the user's registrar.
+   */
+  async getDnsHealth(userId: string, id: string) {
+    const domain = await this.assertDomainAccess(userId, id, 'VIEWER');
+    const host = domain.domain;
+    const isSubdomain = host.split('.').length > 2;
+    const apex = isSubdomain ? host.split('.').slice(-2).join('.') : host;
+
+    const resolver = new dns.promises.Resolver();
+    resolver.setServers(['1.1.1.1', '8.8.8.8']);
+    const safe = async <T>(p: Promise<T>): Promise<T | null> => {
+      try { return await p; } catch { return null; }
+    };
+
+    let expectedIp = '';
+    try {
+      const url = process.env.PUBLIC_API_URL || '';
+      const m = url.match(/^https?:\/\/([^:/]+)/);
+      if (m && /^\d+\.\d+\.\d+\.\d+$/.test(m[1])) expectedIp = m[1];
+    } catch {}
+
+    const ips = await safe(resolver.resolve4(host));
+    const cname = await safe(resolver.resolveCname(host));
+    const actualIp = ips?.[0] || null;
+    const matchIp = expectedIp && actualIp === expectedIp;
+
+    const mailServer = await this.prisma.mailServer.findUnique({ where: { domainId: id } });
+    const hasMail = !!mailServer;
+
+    // MX check — only when mail server exists.
+    let mxCheck: { status: 'OK' | 'WARN' | 'FAIL' | 'UNKNOWN'; message: string } | null = null;
+    if (hasMail) {
+      const mxRecords = await safe(resolver.resolveMx(host));
+      const expectedMx = `mail.${apex}`;
+      const mxStrings = (mxRecords || []).map((r) => r.exchange.replace(/\.$/, '').toLowerCase());
+      const hasOurs = mxStrings.includes(expectedMx.toLowerCase());
+      const foreign = mxStrings.filter((m) => m !== expectedMx.toLowerCase());
+      mxCheck = !mxRecords || mxRecords.length === 0
+        ? { status: 'FAIL', message: `No MX record. Add: MX ${host} 10 mail.${apex}` }
+        : !hasOurs
+        ? { status: 'FAIL', message: `MX does not include mail.${apex}. Found: ${mxStrings.join(', ')}` }
+        : foreign.length > 0
+        ? { status: 'WARN', message: `Foreign MX present (mail will be split): ${foreign.join(', ')}.` }
+        : { status: 'OK', message: `MX → mail.${apex}` };
+    }
+
+    const checks: Record<string, { status: 'OK' | 'WARN' | 'FAIL' | 'UNKNOWN'; message: string }> = {
+      a: !actualIp
+        ? { status: 'FAIL', message: `No A record for ${host}. Add: A ${host} → ${expectedIp || '<server IP>'}` }
+        : !expectedIp
+        ? { status: 'WARN', message: `Resolves to ${actualIp}, but server's expected IP isn't configured.` }
+        : matchIp
+        ? { status: 'OK', message: `A → ${actualIp}` }
+        : { status: 'FAIL', message: `Points to ${actualIp}, expected ${expectedIp}. Fix at your DNS provider.` },
+
+      cname: cname && cname.length > 0
+        ? { status: 'OK', message: `CNAME → ${cname[0]}` }
+        : isSubdomain
+        ? { status: 'WARN', message: `Subdomain uses A directly. CNAME → ${apex} would simplify maintenance.` }
+        : { status: 'OK', message: `Apex uses A (CNAMEs forbidden on apex by RFC).` },
+    };
+    if (mxCheck) checks.mx = mxCheck;
+
+    // Recommended record set the user should add at their registrar — gives
+    // them the exact "host / type / value" trio to paste.
+    const recommendedRecords: { type: 'A' | 'CNAME' | 'MX' | 'TXT'; host: string; value: string; priority?: number; note?: string }[] = [];
+    if (isSubdomain) {
+      recommendedRecords.push({
+        type: 'CNAME',
+        host,
+        value: apex,
+        note: 'Subdomain → apex. Cleaner than A: if you ever move servers, only the apex needs updating.',
+      });
+    } else {
+      recommendedRecords.push({
+        type: 'A',
+        host,
+        value: expectedIp || 'YOUR-SERVER-IP',
+        note: 'Apex domain → server IP. CNAME is not allowed on apex by DNS spec.',
+      });
+    }
+    if (hasMail) {
+      recommendedRecords.push({
+        type: 'MX',
+        host,
+        value: `mail.${apex}`,
+        priority: 10,
+        note: 'Routes incoming email to the mail server container.',
+      });
+      // mail.<apex> A record (needed because MX targets it)
+      recommendedRecords.push({
+        type: 'A',
+        host: `mail.${apex}`,
+        value: expectedIp || 'YOUR-SERVER-IP',
+        note: 'A record that MX target resolves to. Required.',
+      });
+    }
+
+    return {
+      domain: host,
+      isSubdomain,
+      apex,
+      expectedIp: expectedIp || null,
+      actualIp,
+      hasMail,
+      checks,
+      recommendedRecords,
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Full DNS record dump — every record type the dashboard cares about
+   * (A, AAAA, CNAME, MX, TXT, NS) for the domain, plus a reconciliation
+   * pass: for each *expected* record we mark whether it's present, missing
+   * or wrong. Powers the "Records" tab.
+   */
+  async getDnsRecords(userId: string, id: string) {
+    const domain = await this.assertDomainAccess(userId, id, 'VIEWER');
+    const host = domain.domain;
+    const isSubdomain = host.split('.').length > 2;
+    const apex = isSubdomain ? host.split('.').slice(-2).join('.') : host;
+
+    const resolver = new dns.promises.Resolver();
+    resolver.setServers(['1.1.1.1', '8.8.8.8']);
+    const safe = async <T>(p: Promise<T>): Promise<T | null> => {
+      try { return await p; } catch { return null; }
+    };
+
+    let expectedIp = '';
+    try {
+      const url = process.env.PUBLIC_API_URL || '';
+      const m = url.match(/^https?:\/\/([^:/]+)/);
+      if (m && /^\d+\.\d+\.\d+\.\d+$/.test(m[1])) expectedIp = m[1];
+    } catch {}
+
+    const [a, aaaa, cname, mx, txt, ns] = await Promise.all([
+      safe(resolver.resolve4(host)),
+      safe(resolver.resolve6(host)),
+      safe(resolver.resolveCname(host)),
+      safe(resolver.resolveMx(host)),
+      safe(resolver.resolveTxt(host)),
+      safe(resolver.resolveNs(apex)),
+    ]);
+
+    const actual = {
+      A: (a || []).map((v) => ({ value: v })),
+      AAAA: (aaaa || []).map((v) => ({ value: v })),
+      CNAME: (cname || []).map((v) => ({ value: v.replace(/\.$/, '') })),
+      MX: (mx || []).map((v) => ({ value: v.exchange.replace(/\.$/, ''), priority: v.priority })),
+      TXT: (txt || []).map((v) => ({ value: v.join('') })),
+      NS: (ns || []).map((v) => ({ value: v.replace(/\.$/, '') })),
+    };
+
+    const mailServer = await this.prisma.mailServer.findUnique({ where: { domainId: id } });
+    const hasMail = !!mailServer;
+
+    type Expected = {
+      type: 'A' | 'AAAA' | 'CNAME' | 'MX' | 'TXT';
+      host: string;
+      value: string;
+      priority?: number;
+      reason: string;
+      status: 'OK' | 'MISSING' | 'WRONG';
+      actualValue?: string;
+    };
+
+    const expected: Expected[] = [];
+
+    const pushExpected = (e: Omit<Expected, 'status' | 'actualValue'>) => {
+      const list = (actual as any)[e.type] as { value: string; priority?: number }[];
+      const found = list.find((r) => r.value.toLowerCase() === e.value.toLowerCase());
+      if (found) {
+        if (e.type === 'MX' && e.priority !== undefined && found.priority !== e.priority) {
+          expected.push({ ...e, status: 'WRONG', actualValue: `${found.value} (prio ${found.priority})` });
+          return;
+        }
+        expected.push({ ...e, status: 'OK', actualValue: found.value });
+        return;
+      }
+      const anyForType = list.length > 0 ? list[0].value : undefined;
+      expected.push({ ...e, status: anyForType ? 'WRONG' : 'MISSING', actualValue: anyForType });
+    };
+
+    if (isSubdomain) {
+      if (actual.CNAME.length > 0) {
+        pushExpected({ type: 'CNAME', host, value: apex, reason: 'Subdomain → apex (recommended).' });
+      } else {
+        pushExpected({ type: 'A', host, value: expectedIp || 'YOUR-SERVER-IP', reason: 'Subdomain A record → server.' });
+      }
+    } else {
+      pushExpected({ type: 'A', host, value: expectedIp || 'YOUR-SERVER-IP', reason: 'Apex A record → server.' });
+    }
+
+    if (hasMail) {
+      pushExpected({ type: 'MX', host, value: `mail.${apex}`, priority: 10, reason: 'Inbound mail routing.' });
+      pushExpected({ type: 'A', host: `mail.${apex}`, value: expectedIp || 'YOUR-SERVER-IP', reason: 'MX target A record.' });
+      pushExpected({ type: 'TXT', host, value: `v=spf1 mx ~all`, reason: 'SPF: authorize MX hosts to send mail.' });
+    }
+
+    return {
+      domain: host,
+      apex,
+      isSubdomain,
+      expectedIp: expectedIp || null,
+      hasMail,
+      actual,
+      expected,
+      checkedAt: new Date().toISOString(),
+    };
   }
 }
