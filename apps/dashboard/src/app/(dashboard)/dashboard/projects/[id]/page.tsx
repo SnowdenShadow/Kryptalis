@@ -7,7 +7,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowLeft, Trash2, Server, Rocket, Plus, ExternalLink, Store,
   FolderKanban, Activity, Users, Shield, Crown, UserPlus, Loader2,
-  ArrowRightLeft, AlertTriangle,
+  ArrowRightLeft, AlertTriangle, Network, Database, Copy, Check, Info,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -74,7 +74,34 @@ function timeAgo(d: string) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-type Tab = 'overview' | 'applications' | 'members' | 'settings';
+type Tab = 'overview' | 'applications' | 'mesh' | 'members' | 'settings';
+
+interface MeshNode {
+  id: string;
+  name: string;
+  kind: 'app' | 'database';
+  host: string;
+  port: number;
+  url: string;
+  status?: string;
+  framework?: string;
+  dbType?: string;
+  username?: string;
+}
+interface MeshEnvSuggestion {
+  from: { id: string; name: string };
+  to: { id: string; name: string };
+  envVar: string;
+  value: string;
+}
+interface ServiceMesh {
+  projectId: string;
+  networkName: string;
+  apps: MeshNode[];
+  databases: MeshNode[];
+  envSuggestions: MeshEnvSuggestion[];
+  hint: string;
+}
 
 export default function ProjectDetailPage() {
   const { t } = useTranslation();
@@ -116,9 +143,25 @@ export default function ProjectDetailPage() {
   const TABS: { id: Tab; label: string }[] = [
     { id: 'overview', label: t('projects.tab.overview') },
     { id: 'applications', label: t('projects.tab.applications') },
+    { id: 'mesh', label: 'Service mesh' },
     { id: 'members', label: t('projects.tab.members') },
     { id: 'settings', label: t('projects.tab.settings') },
   ];
+
+  const { data: mesh } = useQuery<ServiceMesh>({
+    queryKey: ['project-mesh', id],
+    queryFn: () => api.get(`/projects/${id}/mesh`),
+    enabled: !!id && activeTab === 'mesh',
+  });
+
+  const [copiedMesh, setCopiedMesh] = useState('');
+  function copyMesh(text: string, key: string) {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedMesh(key);
+      toast.success('Copied');
+      setTimeout(() => setCopiedMesh(''), 1200);
+    });
+  }
 
   const deleteMutation = useMutation({
     mutationFn: () => api.delete(`/projects/${id}`),
@@ -425,6 +468,105 @@ export default function ProjectDetailPage() {
               })}
             </div>
           )}
+        </>
+      )}
+
+      {/* Service Mesh Tab */}
+      {activeTab === 'mesh' && (
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Network size={18} /> Service mesh
+              </CardTitle>
+              <CardDescription>
+                Containers in this project share a docker network — they can reach each other by these hostnames.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {mesh && (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2 text-xs">
+                    <Network size={12} className="text-muted-foreground" />
+                    <span className="text-muted-foreground">Network:</span>
+                    <code className="font-mono">{mesh.networkName}</code>
+                  </div>
+
+                  {mesh.apps.length === 0 && mesh.databases.length === 0 && (
+                    <p className="text-sm text-muted-foreground italic">No apps or databases yet. Add some to see the mesh.</p>
+                  )}
+
+                  {mesh.apps.length > 0 && (
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Applications ({mesh.apps.length})</p>
+                      <div className="space-y-2">
+                        {mesh.apps.map((n) => (
+                          <div key={n.id} className="rounded-md border border-border p-2.5 flex items-center gap-3">
+                            <Rocket size={14} className="text-primary shrink-0" />
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-medium truncate">{n.name}</p>
+                              <p className="text-[11px] text-muted-foreground font-mono truncate">{n.url}</p>
+                            </div>
+                            <button onClick={() => copyMesh(n.url, `app-${n.id}`)} className="text-muted-foreground hover:text-foreground shrink-0">
+                              {copiedMesh === `app-${n.id}` ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {mesh.databases.length > 0 && (
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Databases ({mesh.databases.length})</p>
+                      <div className="space-y-2">
+                        {mesh.databases.map((d) => (
+                          <div key={d.id} className="rounded-md border border-border p-2.5 flex items-center gap-3">
+                            <Database size={14} className="text-primary shrink-0" />
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-medium truncate">{d.name} <Badge variant="outline" className="text-[9px] ml-1">{d.dbType}</Badge></p>
+                              <p className="text-[11px] text-muted-foreground font-mono truncate">{d.url}</p>
+                            </div>
+                            <button onClick={() => copyMesh(d.url, `db-${d.id}`)} className="text-muted-foreground hover:text-foreground shrink-0">
+                              {copiedMesh === `db-${d.id}` ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {mesh.envSuggestions.length > 0 && (
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1">
+                        <Info size={11} /> Suggested env vars
+                      </p>
+                      <p className="text-xs text-muted-foreground mb-2">Paste into an app's environment variables to link it to a database.</p>
+                      <div className="space-y-2">
+                        {mesh.envSuggestions.map((s, i) => {
+                          const key = `env-${i}`;
+                          const line = `${s.envVar}=${s.value}`;
+                          return (
+                            <div key={key} className="rounded-md border border-border p-2.5">
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <p className="text-xs text-muted-foreground">
+                                  Connect <span className="font-medium text-foreground">{s.to.name}</span> → <span className="font-medium text-foreground">{s.from.name}</span>
+                                </p>
+                                <button onClick={() => copyMesh(line, key)} className="text-muted-foreground hover:text-foreground">
+                                  {copiedMesh === key ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+                                </button>
+                              </div>
+                              <code className="block mt-1 text-[11px] font-mono break-all bg-muted/40 rounded px-2 py-1">{line}</code>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </>
       )}
 

@@ -218,6 +218,94 @@ export class ProjectsService {
     };
   }
 
+  /**
+   * Service-mesh view of a project: every app + database, the hostname they
+   * can be reached at *from inside* the shared docker network, and ready-made
+   * connection-string snippets the user can paste into another app's env vars.
+   *
+   * Network: kryptalis_proj_<projectId-stripped>. Every container is named
+   * by its slug + id-suffix so siblings can resolve each other by DNS.
+   */
+  async getServiceMesh(projectId: string, userId: string) {
+    await assertProjectAccess(this.prisma, userId, projectId, 'VIEWER');
+    const project: any = await (this.prisma as any).project.findUnique({
+      where: { id: projectId },
+      include: {
+        applications: true,
+        databases: true,
+      },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    const slugify = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'svc';
+    const networkName = `kryptalis_proj_${projectId.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
+
+    const apps = project.applications.map((a: any) => {
+      const slug = slugify(a.name);
+      const host = a.containerName || `kryptalis-${slug}`;
+      const port = a.containerPort || a.port || 80;
+      return {
+        id: a.id,
+        name: a.name,
+        kind: 'app' as const,
+        status: a.status,
+        framework: a.framework,
+        host,
+        port,
+        url: `http://${host}:${port}`,
+      };
+    });
+
+    const dbs = project.databases.map((d: any) => {
+      const slug = slugify(d.name);
+      const host = `kryptalis-db-${slug}`;
+      const port = d.port;
+      const protocol =
+        d.type === 'POSTGRESQL' ? 'postgres' :
+        d.type === 'MYSQL' ? 'mysql' :
+        d.type === 'MARIADB' ? 'mysql' :
+        d.type === 'MONGODB' ? 'mongodb' :
+        d.type === 'REDIS' ? 'redis' : 'tcp';
+      return {
+        id: d.id,
+        name: d.name,
+        kind: 'database' as const,
+        dbType: d.type,
+        host,
+        port,
+        username: d.username,
+        url: `${protocol}://${d.username}:<PASSWORD>@${host}:${port}/${slug}`,
+      };
+    });
+
+    // Env-var suggestions: "if you link database X to app Y, paste this".
+    const envSuggestions: { from: { id: string; name: string }; to: { id: string; name: string }; envVar: string; value: string }[] = [];
+    for (const db of dbs) {
+      const envName =
+        db.dbType === 'POSTGRESQL' ? 'DATABASE_URL' :
+        db.dbType === 'MYSQL' || db.dbType === 'MARIADB' ? 'DATABASE_URL' :
+        db.dbType === 'MONGODB' ? 'MONGO_URL' :
+        db.dbType === 'REDIS' ? 'REDIS_URL' : 'DB_URL';
+      for (const app of apps) {
+        envSuggestions.push({
+          from: { id: db.id, name: db.name },
+          to: { id: app.id, name: app.name },
+          envVar: envName,
+          value: db.url,
+        });
+      }
+    }
+
+    return {
+      projectId,
+      networkName,
+      apps,
+      databases: dbs,
+      envSuggestions,
+      hint: 'Containers in this project share a docker network and can reach each other by these hostnames. Use them in env vars instead of IPs.',
+    };
+  }
+
   // ── Members ───────────────────────────────────────────────────────
 
   async listMembers(projectId: string, userId: string) {

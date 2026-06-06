@@ -67,6 +67,12 @@ export class ProjectsController {
     return this.projectsService.migrate(id, userId, targetServerId);
   }
 
+  @Get(':id/mesh')
+  @ApiOperation({ summary: 'Service mesh: internal hostnames + env var suggestions' })
+  getServiceMesh(@Param('id') id: string, @CurrentUser('id') userId: string) {
+    return this.projectsService.getServiceMesh(id, userId);
+  }
+
   // ── Members ───────────────────────────────────────────────────────
 
   @Get(':id/members')
