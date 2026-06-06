@@ -228,11 +228,18 @@ export class ProjectsService {
    */
   async getServiceMesh(projectId: string, userId: string) {
     await assertProjectAccess(this.prisma, userId, projectId, 'VIEWER');
-    const project: any = await (this.prisma as any).project.findUnique({
+    const project = await this.prisma.project.findUnique({
       where: { id: projectId },
       include: {
-        applications: true,
-        databases: true,
+        applications: {
+          select: {
+            id: true, name: true, status: true, port: true,
+            containerName: true, containerPort: true, framework: true,
+          },
+        },
+        databases: {
+          select: { id: true, name: true, type: true, port: true, username: true },
+        },
       },
     });
     if (!project) throw new NotFoundException('Project not found');
@@ -240,7 +247,7 @@ export class ProjectsService {
     const slugify = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'svc';
     const networkName = `kryptalis_proj_${projectId.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
 
-    const apps = project.applications.map((a: any) => {
+    const apps = project.applications.map((a) => {
       const slug = slugify(a.name);
       const host = a.containerName || `kryptalis-${slug}`;
       const port = a.containerPort || a.port || 80;
@@ -256,7 +263,7 @@ export class ProjectsService {
       };
     });
 
-    const dbs = project.databases.map((d: any) => {
+    const dbs = project.databases.map((d) => {
       const slug = slugify(d.name);
       const host = `kryptalis-db-${slug}`;
       const port = d.port;

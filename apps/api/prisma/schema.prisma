@@ -631,6 +631,8 @@ enum TaskType {
   SSL_RENEW
   DNS_UPDATE
   MONITOR
+  VOLUME_EXPORT
+  VOLUME_IMPORT
 }
 
 enum TaskStatus {
