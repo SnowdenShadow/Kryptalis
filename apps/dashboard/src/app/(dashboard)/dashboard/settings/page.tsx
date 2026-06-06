@@ -671,7 +671,7 @@ export default function SettingsPage() {
                   </CardTitle>
                   <CardDescription>
                     Your installation automatically pulls the latest version from{' '}
-                    <span className="font-mono">{updateStatus?.branch || 'main'}</span> every 10 minutes.
+                    <span className="font-mono">{updateStatus?.branch || 'main'}</span> every 30 seconds.
                   </CardDescription>
                 </div>
                 <Button size="sm" variant="outline" onClick={() => refetchUpdate()} disabled={updateFetching}>
@@ -765,7 +765,7 @@ export default function SettingsPage() {
 
               {!updateStatus?.manualTriggerAvailable && (
                 <p className="text-[11px] text-muted-foreground">
-                  Manual trigger unavailable in this deployment — the timer runs every 10 min automatically.
+                  Manual trigger unavailable in this deployment — the timer runs every 30 seconds automatically.
                 </p>
               )}
             </CardContent>
@@ -778,7 +778,7 @@ export default function SettingsPage() {
                 <Power size={16} /> Auto-update
               </CardTitle>
               <CardDescription>
-                When enabled, the platform pulls and applies updates every 10 minutes. Disable if you want full manual control.
+                When enabled, the platform pulls and applies updates every 30 seconds. Disable if you want full manual control.
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -790,7 +790,7 @@ export default function SettingsPage() {
                   <p className="text-xs text-muted-foreground mt-0.5">
                     {updateStatus?.autoUpdateEnabled === false
                       ? 'Updates will not be applied automatically. Use "Update now" when ready.'
-                      : 'New commits on origin will land on your instance within 10 minutes.'}
+                      : 'New commits on origin will land on your instance within 30 seconds.'}
                   </p>
                 </div>
                 <Button

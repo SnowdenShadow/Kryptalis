@@ -38,6 +38,35 @@ cd "$INSTALL_DIR" 2>/dev/null || { echo "Not installed at $INSTALL_DIR"; exit 1;
 
 mkdir -p "$STATUS_DIR"
 
+# ─── self-heal systemd timer ────────────────────────────────────────
+# Older installs shipped with OnUnitActiveSec=10min. We can't ship a new
+# timer interval through `git pull` alone — systemd only reads the unit
+# file from /etc/systemd/system/. So on every run, check what's installed
+# and rewrite + reload if the interval is stale. Idempotent — does nothing
+# when the file already has the desired value.
+TIMER_FILE="/etc/systemd/system/kryptalis-update.timer"
+DESIRED_INTERVAL="30s"
+if [ -w /etc/systemd/system ] && [ -f "$TIMER_FILE" ]; then
+  if ! grep -q "^OnUnitActiveSec=$DESIRED_INTERVAL\$" "$TIMER_FILE" 2>/dev/null; then
+    cat > "$TIMER_FILE" <<TIMEREOF
+[Unit]
+Description=Run Kryptalis self-update every $DESIRED_INTERVAL
+Requires=kryptalis-update.service
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=$DESIRED_INTERVAL
+Unit=kryptalis-update.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMEREOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart kryptalis-update.timer >/dev/null 2>&1 || true
+  fi
+fi
+
 # ─── respect dashboard auto-update toggle ───────────────────────────
 # The dashboard writes "disabled" to this file when the operator turns auto-
 # update off. We honour it for both scheduled and --check runs; --force still
