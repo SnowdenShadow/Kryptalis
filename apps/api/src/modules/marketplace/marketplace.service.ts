@@ -87,18 +87,27 @@ export class MarketplaceService {
 
     const isWebmail = WEBMAIL_SLUGS.has(data.appSlug);
 
-    // Every domain may only be linked to ONE app at a time — switching is
-    // explicit. Refuse if the user picked a domain that's already attached
-    // to a different application (regardless of slug).
+    // Every domain may only be linked to ONE app at a time. If the user picks
+    // a domain currently attached to ANOTHER app:
+    //   - In the same project → auto-detach (user is clearly replacing it).
+    //   - In a different project → refuse with a clear pointer to the owner.
+    // This is what "reinstall on the same domain" needs to just work.
     if (data.domainId) {
       const dup = await this.prisma.application.findFirst({
         where: { domains: { some: { id: data.domainId } } },
-        select: { id: true, name: true },
+        select: { id: true, name: true, projectId: true },
       });
       if (dup) {
-        throw new ConflictException(
-          `Domain is already linked to "${dup.name}". Detach it first from /dashboard/applications/${dup.id}.`,
-        );
+        if (dup.projectId === data.projectId) {
+          await this.prisma.domain.update({
+            where: { id: data.domainId },
+            data: { applicationId: null },
+          });
+        } else {
+          throw new ConflictException(
+            `Domain is already linked to "${dup.name}" in another project. Detach it from /dashboard/applications/${dup.id} first.`,
+          );
+        }
       }
     }
 
@@ -364,10 +373,19 @@ export class MarketplaceService {
     if (data.domainId) {
       const dup = await this.prisma.application.findFirst({
         where: { domains: { some: { id: data.domainId } } },
-        select: { id: true, name: true },
+        select: { id: true, name: true, projectId: true },
       });
       if (dup) {
-        throw new ConflictException(`Domain is already linked to "${dup.name}". Detach it first.`);
+        if (dup.projectId === data.projectId) {
+          await this.prisma.domain.update({
+            where: { id: data.domainId },
+            data: { applicationId: null },
+          });
+        } else {
+          throw new ConflictException(
+            `Domain is already linked to "${dup.name}" in another project. Detach it from /dashboard/applications/${dup.id} first.`,
+          );
+        }
       }
     }
 

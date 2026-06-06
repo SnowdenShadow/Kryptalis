@@ -129,6 +129,16 @@ export class ApplicationsController {
     return this.svc.remapPorts(userId, id, mapping);
   }
 
+  @Patch(':id/url-mode')
+  @ApiOperation({ summary: 'Toggle clean URL (Caddy on 443) vs port URL (https://domain:port)' })
+  setUrlMode(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('customPort') customPort: boolean,
+  ) {
+    return this.svc.setUrlMode(userId, id, customPort);
+  }
+
   @Get(':id/env')
   @ApiOperation({ summary: 'Read application env vars' })
   getEnv(@CurrentUser('id') userId: string, @Param('id') id: string) {

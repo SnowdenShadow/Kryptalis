@@ -31,6 +31,7 @@ import {
   Save,
   AlertTriangle,
   Loader2,
+  Check,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -367,6 +368,17 @@ export default function ApplicationDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['applications'] });
       toast.success('Port updated');
       setEditingPort(false);
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const urlModeMutation = useMutation({
+    mutationFn: (customPort: boolean) =>
+      api.patch(`/applications/${id}/url-mode`, { customPort }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['application', id] });
+      queryClient.invalidateQueries({ queryKey: ['applications'] });
+      toast.success('URL mode updated — Caddy reloading');
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -1304,6 +1316,58 @@ export default function ApplicationDetailPage() {
                 </div>
               </CardContent>
             </Card>
+
+            {/* URL mode */}
+            {app.domains && app.domains.length > 0 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-lg">
+                    <ExternalLink size={18} /> Public URL
+                  </CardTitle>
+                  <CardDescription>
+                    Choose how Kryptalis exposes this app on its domain.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <button
+                    onClick={() => urlModeMutation.mutate(false)}
+                    disabled={urlModeMutation.isPending}
+                    className={cn(
+                      'w-full rounded-md border p-3 text-left transition-colors',
+                      !app.customPort ? 'border-primary bg-primary/5' : 'border-border hover:bg-accent/40',
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="font-medium text-sm">Clean URL (recommended)</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          <span className="font-mono">https://{app.domains[0].domain}</span> — Caddy proxies on 443 with a Let's Encrypt cert.
+                        </p>
+                      </div>
+                      {!app.customPort && <Check size={16} className="text-primary shrink-0 mt-0.5" />}
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => urlModeMutation.mutate(true)}
+                    disabled={urlModeMutation.isPending || !app.port}
+                    className={cn(
+                      'w-full rounded-md border p-3 text-left transition-colors',
+                      app.customPort ? 'border-primary bg-primary/5' : 'border-border hover:bg-accent/40',
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="font-medium text-sm">Port-pinned URL</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          <span className="font-mono">https://{app.domains[0].domain}:{app.port}</span> — direct to the container. Cert is the container's own (self-signed for Portainer; warning on first visit).
+                        </p>
+                      </div>
+                      {app.customPort && <Check size={16} className="text-primary shrink-0 mt-0.5" />}
+                    </div>
+                  </button>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Auto-deploy + webhook */}
             <Card>

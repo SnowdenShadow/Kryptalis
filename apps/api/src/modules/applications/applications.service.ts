@@ -302,12 +302,19 @@ export class ApplicationsService {
       ? Object.values(portMapping).find((n) => Number.isFinite(n))
       : undefined;
 
+    // If the user explicitly provided a port (or a port mapping) at create
+    // time, mark customPort=true so the URL displayed (and the Caddy block)
+    // includes the port. Git-deploy apps that ship a compose with hardcoded
+    // ports also count — the user knows that port belongs in the URL.
+    const userPickedPort = !!(firstMappedHost || dbData.port);
+
     const app = await this.prisma.application.create({
       data: {
         ...dbData,
         gitProviderId: gitProviderId || null,
         portMapping: portMapping || undefined,
         port: firstMappedHost ?? dbData.port,
+        customPort: userPickedPort,
         status: 'DEPLOYING',
         webhookSecret: crypto.randomBytes(24).toString('hex'),
       },
@@ -1103,12 +1110,14 @@ export class ApplicationsService {
     const updated = remapComposePorts(content, mapping);
     fs.writeFileSync(composePath, updated);
     // canonical app port = first remapped host port (used by the dashboard URL)
+    // Any explicit remap means the user is picking a port → customPort=true.
     const firstHost = wanted.values().next().value;
     await this.prisma.application.update({
       where: { id },
       data: {
         portMapping: mapping,
         ...(firstHost && firstHost !== app.port ? { port: firstHost } : {}),
+        customPort: true,
       },
     });
     // Recreate the container so the new port binding takes effect. Compose's
@@ -1130,6 +1139,25 @@ export class ApplicationsService {
     }
     this.proxy.regenerate().catch(() => {});
     return { message: 'Ports remapped and container restarted', mapping };
+  }
+
+  /**
+   * Toggle how the app's URL is exposed:
+   *   - customPort=false → Caddy serves https://<domain> on :443 (clean URL)
+   *   - customPort=true  → 308-redirect to https://<domain>:<port> (port-pinned)
+   * Updates the DB row and asks Caddy to regenerate so the change takes effect
+   * within seconds. The user can flip back and forth without touching the
+   * compose file.
+   */
+  async setUrlMode(userId: string, id: string, customPort: boolean) {
+    await this.assertOwnership(userId, id);
+    const updated = await this.prisma.application.update({
+      where: { id },
+      data: { customPort: !!customPort },
+      select: { id: true, customPort: true, port: true },
+    });
+    this.proxy.regenerate().catch(() => {});
+    return updated;
   }
 
   // ── env vars ───────────────────────────────────────────────────────
