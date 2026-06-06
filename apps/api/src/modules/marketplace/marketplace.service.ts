@@ -96,15 +96,22 @@ export class MarketplaceService {
 
     // Webmail (Roundcube/SnappyMail/Rainloop) → multi-install allowed
     //   (one per mail server, dedup is on the domainId check above).
-    // Everything else → uniqueness on (slug, projectId) so the user doesn't
-    //   accidentally spin up two Grafanas in the same project.
+    // Everything else → auto-suffix the name on conflict so the user can
+    //   spin up e.g. two WordPress instances in the same project (typically
+    //   one per domain). We don't refuse the install — instead we mint a
+    //   fresh "<App> 2", "<App> 3", … until we land on something free.
+    let appName = app.name;
     if (!isWebmail) {
-      const existing = await this.prisma.application.findFirst({
-        where: { name: app.name, projectId: data.projectId },
-        select: { id: true },
-      });
-      if (existing) {
-        throw new ConflictException(`${app.name} is already installed in this project`);
+      let suffix = 2;
+      // hard cap to avoid an infinite loop if something goes very wrong
+      while (suffix < 100) {
+        const existing = await this.prisma.application.findFirst({
+          where: { name: appName, projectId: data.projectId },
+          select: { id: true },
+        });
+        if (!existing) break;
+        appName = `${app.name} ${suffix}`;
+        suffix++;
       }
     }
 
@@ -194,7 +201,7 @@ export class MarketplaceService {
     // container_name/dir below.
     const application = await this.prisma.application.create({
       data: {
-        name: app.name,
+        name: appName,
         projectId: data.projectId,
         framework: 'DOCKER_COMPOSE',
         status: 'DEPLOYING',
@@ -205,7 +212,7 @@ export class MarketplaceService {
     });
 
     const instanceId = application.id.slice(0, 12);
-    const containerName = this.computeContainerName(data.appSlug, instanceId, app.name);
+    const containerName = this.computeContainerName(data.appSlug, instanceId, appName);
     await this.prisma.application.update({
       where: { id: application.id },
       data: { containerName },
@@ -247,7 +254,7 @@ export class MarketplaceService {
         startedAt: new Date(),
         payload: {
           appSlug: app.slug,
-          appName: app.name,
+          appName,
           applicationId: application.id,
           ports: app.ports,
         },
