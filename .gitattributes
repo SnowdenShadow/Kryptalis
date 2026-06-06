@@ -1,0 +1,4 @@
+# Force LF line endings on shell scripts — otherwise Windows checkouts
+# push CRLF, and bash on Linux refuses to run the file with "command not
+# found" because the shebang ends in \r.
+*.sh text eol=lf
