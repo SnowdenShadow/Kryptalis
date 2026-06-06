@@ -784,12 +784,6 @@ export default function ApplicationDetailPage() {
                                 {r.sslStatus === 'ACTIVE' ? '🔒 SSL' : r.sslStatus === 'PENDING' ? '⏳ SSL' : '⚠️ SSL'}
                               </Badge>
                             )}
-                            {r.kind === 'binding' && (
-                              <Badge variant="outline" className="text-[10px]">port-pinned</Badge>
-                            )}
-                            {r.kind === 'main' && app.customPort && (
-                              <Badge variant="outline" className="text-[10px]">redirected</Badge>
-                            )}
                             {r.kind === 'ip' && (
                               <Badge variant="outline" className="text-[10px]">direct IP</Badge>
                             )}
@@ -1413,7 +1407,7 @@ export default function ApplicationDetailPage() {
                       <div>
                         <p className="font-medium text-sm">Port-pinned URL</p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          <span className="font-mono">https://{app.domains[0].domain}:{app.port}</span> — direct to the container. Cert is the container's own (self-signed for Portainer; warning on first visit).
+                          <span className="font-mono">https://{app.domains[0].domain}:{app.port}</span> — Caddy proxies this port too, same Let's Encrypt cert as :443. Useful when you want the port in the URL (e.g. {app.port} for Portainer).
                         </p>
                       </div>
                       {app.customPort && <Check size={16} className="text-primary shrink-0 mt-0.5" />}
@@ -1501,7 +1495,7 @@ export default function ApplicationDetailPage() {
                   </Button>
                 </div>
                 <p className="text-[10px] text-muted-foreground">
-                  Caddy can't actually proxy custom ports from a container — it just documents them. Your container publishes the port itself; the URL hits it directly (its own cert, e.g. self-signed for Portainer).
+                  Caddy proxies the port (Let's Encrypt cert valid). Adding a binding restarts Caddy briefly (~5s downtime).
                 </p>
               </CardContent>
             </Card>

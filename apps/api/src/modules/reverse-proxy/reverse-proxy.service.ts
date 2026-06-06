@@ -9,6 +9,16 @@ const execFileAsync = promisify(execFile);
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const PROXY_DIR = path.join(DATA_DIR, 'reverse-proxy');
 const CONTAINER_NAME = 'kryptalis-caddy';
+// docker-compose.override.yml lives at the install root on the host and
+// is bind-mounted into the API container at /app/install-root/. The API
+// writes it to publish extra Caddy ports (HTTPS on port-pinned apps).
+const OVERRIDE_FILE = process.env.KRYPTALIS_COMPOSE_OVERRIDE
+  || '/app/install-root/docker-compose.override.yml';
+// Host path equivalent — needed so when we tell docker compose on the host
+// to restart Caddy, the override file is at the path the docker daemon sees.
+const INSTALL_ROOT_HOST = process.env.KRYPTALIS_HOST_INSTALL_DIR
+  || process.env.KRYPTALIS_HOST_DATA_DIR?.replace(/[\\/]\.kryptalis[\\/]*$/, '')
+  || '/opt/kryptalis';
 
 /**
  * Generates a Caddyfile from the current domains↔applications mapping,
@@ -234,14 +244,18 @@ ${email ? `  email ${email}\n` : ''}}
       }
       blocks.push('');
 
-      // ── one block per port binding ────────────────────────────────
-      // We can't actually have Caddy proxy these (it'd need to bind the
-      // port, which means network_mode: host or extra port mappings on the
-      // Caddy container). Instead the container publishes the port itself
-      // — Caddy just documents it for visibility. The user opens
-      // https://host:<port> and hits the container directly.
+      // ── one site block per port binding ─────────────────────────
+      // Caddy CAN serve these now: we publish each unique port on the Caddy
+      // container via docker-compose.override.yml (written further down).
+      // The HTTP-01 challenge for the LE cert flows through :80 (always
+      // bound), so the cert is valid for <host> on every port we listen on.
       for (const b of portBindings) {
-        blocks.push(`# ${host}:${b.port} → app ${b.application.name} (direct container publish)`);
+        const appName = b.application.name;
+        const portProxy = proxyFor(appName, b.port);
+        blocks.push(`# ${host}:${b.port} → app ${appName}`);
+        blocks.push(`https://${host}:${b.port} {`);
+        blocks.push(portProxy);
+        blocks.push(`}`);
         blocks.push('');
       }
 
@@ -276,20 +290,51 @@ ${email ? `  email ${email}\n` : ''}}
     const caddyfile = blocks.join('\n');
     fs.writeFileSync(path.join(PROXY_DIR, 'Caddyfile'), caddyfile);
 
-    // try graceful reload via Caddy admin API inside the container
-    try {
-      await execFileAsync(
-        'docker',
-        ['exec', CONTAINER_NAME, 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile'],
-        { timeout: 15_000 },
-      );
-      this.logger.log(`Caddy reloaded — ${activeCount} active, ${reservedCount} reserved`);
-    } catch (e: any) {
-      // fallback: restart container if reload failed
-      this.logger.warn(`reload failed (${e?.message}); restarting container`);
+    // Collect every port we want Caddy to listen on (port-pinned bindings).
+    // We always keep 80/443 in the root compose, so the override only adds
+    // EXTRAS. Each port is unique even if multiple domains bind to it —
+    // Caddy uses Host SNI to route the right site block.
+    const extraPorts = new Set<number>();
+    for (const d of allDomains) {
+      for (const b of d.portBindings || []) {
+        if (b.port && b.port !== 80 && b.port !== 443) extraPorts.add(b.port);
+      }
+    }
+    const portsChanged = await this.syncCaddyComposeOverride([...extraPorts].sort((a, b) => a - b));
+
+    // If extra ports changed, we MUST recreate the Caddy container so docker
+    // picks up the new port bindings — a `caddy reload` from inside the
+    // container can't add new listening sockets to the host.
+    if (portsChanged) {
+      this.logger.log(`Caddy port set changed — recreating container`);
       try {
-        await execFileAsync('docker', ['restart', CONTAINER_NAME], { timeout: 30_000 });
-      } catch {}
+        await execFileAsync(
+          'docker',
+          ['compose', '-f', `${INSTALL_ROOT_HOST}/docker-compose.yml`, '-f', `${INSTALL_ROOT_HOST}/docker-compose.override.yml`, 'up', '-d', 'caddy'],
+          { timeout: 60_000, cwd: INSTALL_ROOT_HOST },
+        );
+        this.logger.log(`Caddy recreated — ${activeCount} active, ${reservedCount} reserved`);
+      } catch (e: any) {
+        // Fall back to a hard restart if compose isn't reachable from inside
+        // the container (the user can also re-run install.sh to pick it up).
+        this.logger.warn(`compose up failed (${e?.message}); restarting Caddy container`);
+        try { await execFileAsync('docker', ['restart', CONTAINER_NAME], { timeout: 30_000 }); } catch {}
+      }
+    } else {
+      // Same port set — graceful reload is enough. Way faster (no downtime).
+      try {
+        await execFileAsync(
+          'docker',
+          ['exec', CONTAINER_NAME, 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile'],
+          { timeout: 15_000 },
+        );
+        this.logger.log(`Caddy reloaded — ${activeCount} active, ${reservedCount} reserved`);
+      } catch (e: any) {
+        this.logger.warn(`reload failed (${e?.message}); restarting container`);
+        try {
+          await execFileAsync('docker', ['restart', CONTAINER_NAME], { timeout: 30_000 });
+        } catch {}
+      }
     }
 
     // sync DB statuses + persist for visibility
@@ -341,6 +386,40 @@ ${email ? `  email ${email}\n` : ''}}
     }
     this.logger.debug(`SSL sync: ${checked} checked, ${updated} updated`);
     return { updated, checked };
+  }
+
+  /**
+   * Maintain docker-compose.override.yml — adds extra `port:port/tcp` and
+   * `/udp` publications to the Caddy container so HTTPS-on-port-pinned apps
+   * actually reach Caddy. Returns true when the file was rewritten (caller
+   * needs to recreate Caddy to pick up new bindings).
+   *
+   * The file is bind-mounted at /app/install-root/docker-compose.override.yml
+   * (see docker-compose.yml). The host has it at /opt/kryptalis/docker-compose.override.yml.
+   */
+  private async syncCaddyComposeOverride(extraPorts: number[]): Promise<boolean> {
+    const portLines = extraPorts.flatMap((p) => [`      - "${p}:${p}"`, `      - "${p}:${p}/udp"`]);
+    const desired = `# Auto-managed by Kryptalis API — do not edit.
+# Extra ports published on the Caddy container for HTTPS port-pinned bindings.
+services:
+  caddy:
+    ports:
+${portLines.length > 0 ? portLines.join('\n') : '      []'}
+`;
+    let current = '';
+    try {
+      current = fs.readFileSync(OVERRIDE_FILE, 'utf-8');
+    } catch {
+      // File doesn't exist or mount wasn't applied yet — write anyway.
+    }
+    if (current.trim() === desired.trim()) return false;
+    try {
+      fs.writeFileSync(OVERRIDE_FILE, desired);
+      return true;
+    } catch (e: any) {
+      this.logger.warn(`Could not write ${OVERRIDE_FILE}: ${e?.message}. Caddy will keep its current port set.`);
+      return false;
+    }
   }
 
   private async hasIssuedCert(host: string): Promise<boolean> {

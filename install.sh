@@ -181,6 +181,25 @@ if [ ! -f "$CADDY_FILE" ]; then
 CADDYEOF
 fi
 
+# ─── 7b. seed the docker-compose override the API maintains ─────────
+# The API writes extra Caddy port publications here (e.g. 5000:5000 so
+# https://athexis.xyz:5000 hits Caddy with a valid Let's Encrypt cert).
+# The file MUST exist before `docker compose up` so the bind mount works
+# (otherwise Docker creates an empty dir at that path).
+OVERRIDE_FILE="$INSTALL_DIR/docker-compose.override.yml"
+if [ -d "$OVERRIDE_FILE" ] && [ ! -f "$OVERRIDE_FILE" ]; then
+  rmdir "$OVERRIDE_FILE" 2>/dev/null || rm -rf "$OVERRIDE_FILE"
+fi
+if [ ! -f "$OVERRIDE_FILE" ]; then
+  cat > "$OVERRIDE_FILE" <<'OVEREOF'
+# Auto-managed by Kryptalis API — extra Caddy port publications go here.
+# Edit nothing; the file is rewritten on every domain/port change.
+services:
+  caddy:
+    ports: []
+OVEREOF
+fi
+
 # ─── 8. start the stack ──────────────────────────────────────────────
 # IMPORTANT: when PUBLIC_API_URL changes we MUST rebuild the dashboard without
 # cache, otherwise Next reuses the old inlined URL and the browser keeps calling

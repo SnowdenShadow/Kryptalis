@@ -97,6 +97,11 @@ services:
       - ./.kryptalis:/app/.kryptalis
       # API needs to talk to the host Docker daemon to deploy user apps.
       - /var/run/docker.sock:/var/run/docker.sock
+      # API writes a docker-compose.override.yml at the install root to
+      # publish extra ports on the Caddy container (HTTPS on port-pinned
+      # bindings). Mounting the override file individually keeps the rest
+      # of the repo read-only.
+      - ./docker-compose.override.yml:/app/install-root/docker-compose.override.yml
     depends_on:
       postgres:
         condition: service_healthy
