@@ -136,6 +136,12 @@ ${email ? `  email ${email}\n` : ''}}
     const allDomains = await this.prisma.domain.findMany({
       include: { application: { select: { id: true, name: true, port: true } } },
     });
+
+    // Some marketplace apps listen on HTTPS by default with a self-signed
+    // cert (Portainer on 9443 is the canonical case). When we reverse_proxy
+    // to them in plain HTTP, Caddy gets a TLS alert and returns 502. Switch
+    // the upstream to https:// with `tls_insecure_skip_verify` so it works.
+    const HTTPS_UPSTREAM_PORTS = new Set([443, 8443, 9443]);
     // mail server domains — we provision a Let's Encrypt cert for mail.<apex>
     // so the mail server container can re-use it.
     const mailServers = await this.prisma.mailServer.findMany({
@@ -172,10 +178,15 @@ ${email ? `  email ${email}\n` : ''}}
         ? `# ${host} → app ${d.application?.name} (host port ${port})`
         : `# ${host} → reserved (no app linked yet)`);
 
+      const upstreamHttps = linked && port !== null && HTTPS_UPSTREAM_PORTS.has(port);
+      const proxyDirective = upstreamHttps
+        ? `  reverse_proxy https://host.docker.internal:${port} {\n    transport http {\n      tls\n      tls_insecure_skip_verify\n    }\n  }`
+        : `  reverse_proxy host.docker.internal:${port}`;
+
       if (isLocal) {
         blocks.push(`http://${host} {`);
         if (linked) {
-          blocks.push(`  reverse_proxy host.docker.internal:${port}`);
+          blocks.push(proxyDirective);
         } else {
           blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
         }
@@ -186,7 +197,7 @@ ${email ? `  email ${email}\n` : ''}}
         // wires the app in.
         blocks.push(`${host} {`);
         if (linked) {
-          blocks.push(`  reverse_proxy host.docker.internal:${port}`);
+          blocks.push(proxyDirective);
         } else {
           blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
         }

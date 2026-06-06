@@ -180,6 +180,29 @@ function appUrl(hostname: string, port: number) {
   return `${proto}://${hostname}:${port}`;
 }
 
+/**
+ * Pick the canonical public URL for an application.
+ *   - If a domain is linked: https://<domain> (Caddy routes + has a cert)
+ *   - Otherwise: fall back to <hostname>:<port> (direct IP access)
+ * SSL_PENDING domains still get returned — the user sees the URL, and Caddy
+ * serves a temporary internal cert while LE finishes provisioning.
+ */
+function publicUrl(
+  app: { port?: number | null; domains?: { domain: string; sslStatus: string }[] },
+  fallbackHostname: string,
+): string | null {
+  const linked = app.domains?.find((d) => d.sslStatus === 'ACTIVE')
+    || app.domains?.[0]
+    || null;
+  if (linked) {
+    return `https://${linked.domain}`;
+  }
+  if (app.port) {
+    return appUrl(fallbackHostname, app.port);
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Status dot
 // ---------------------------------------------------------------------------
@@ -532,27 +555,35 @@ export default function ApplicationDetailPage() {
               </Badge>
               <Badge variant="outline">{FRAMEWORK_LABELS[app.framework] || app.framework}</Badge>
             </div>
-            {isRunning && app.port && (
-              <div className="flex items-center gap-2 mt-1.5 text-sm text-muted-foreground">
-                <span className="font-mono">Port {app.port}</span>
-                <ChevronRight size={12} />
-                <a
-                  href={appUrl(hostname, app.port)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary hover:underline font-mono truncate"
-                >
-                  {appUrl(hostname, app.port)}
-                </a>
-              </div>
-            )}
+            {isRunning && app.port && (() => {
+              const url = publicUrl(app, hostname);
+              if (!url) return null;
+              return (
+                <div className="flex items-center gap-2 mt-1.5 text-sm text-muted-foreground">
+                  <span className="font-mono">Port {app.port}</span>
+                  <ChevronRight size={12} />
+                  <a
+                    href={url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-primary hover:underline font-mono truncate"
+                  >
+                    {url}
+                  </a>
+                </div>
+              );
+            })()}
           </div>
           <div className="flex gap-2 shrink-0 flex-wrap">
-            {isRunning && app.port && (
-              <Button onClick={() => window.open(appUrl(hostname, app.port!), '_blank')}>
-                <ExternalLink size={14} /> Open
-              </Button>
-            )}
+            {isRunning && app.port && (() => {
+              const url = publicUrl(app, hostname);
+              if (!url) return null;
+              return (
+                <Button onClick={() => window.open(url, '_blank')}>
+                  <ExternalLink size={14} /> Open
+                </Button>
+              );
+            })()}
             {isStopped ? (
               <Button variant="outline" disabled={actionMutation.isPending} onClick={() => actionMutation.mutate('start')}>
                 <Play size={14} /> {t('apps.start')}
@@ -636,12 +667,15 @@ export default function ApplicationDetailPage() {
                   <div className="rounded-lg border border-border p-3">
                     <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Port</p>
                     <p className="font-mono text-lg font-bold">{app.port || 'Not set'}</p>
-                    {isRunning && app.port && (
-                      <a href={appUrl(hostname, app.port)} target="_blank" rel="noreferrer"
-                        className="text-xs text-primary hover:underline font-mono flex items-center gap-1 mt-1">
-                        <ExternalLink size={10} /> {appUrl(hostname, app.port)}
-                      </a>
-                    )}
+                    {isRunning && app.port && (() => {
+                      const url = publicUrl(app, hostname);
+                      return url ? (
+                        <a href={url} target="_blank" rel="noreferrer"
+                          className="text-xs text-primary hover:underline font-mono flex items-center gap-1 mt-1">
+                          <ExternalLink size={10} /> {url}
+                        </a>
+                      ) : null;
+                    })()}
                   </div>
 
                   {/* Domain */}

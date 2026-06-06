@@ -126,6 +126,17 @@ function appUrl(port: number) {
   return `${proto}://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:${port}`;
 }
 
+/**
+ * Prefer a linked domain over the bare IP:port. ACTIVE-SSL domain first,
+ * then any domain (Caddy serves a temporary cert while LE provisions), then
+ * fall back to direct IP:port for IP-only deployments.
+ */
+function publicAppUrl(app: { port?: number | null; domains?: { domain: string; sslStatus: string }[] }): string | null {
+  const linked = app.domains?.find((d) => d.sslStatus === 'ACTIVE') || app.domains?.[0];
+  if (linked) return `https://${linked.domain}`;
+  return app.port ? appUrl(app.port) : null;
+}
+
 function truncateGitUrl(url: string, max = 40) {
   if (url.length <= max) return url;
   return url.slice(0, max - 1) + '…';
@@ -654,7 +665,11 @@ export default function ApplicationsPage() {
                         <Button
                           size="sm"
                           className="shrink-0"
-                          onClick={(e) => { stop(e); window.open(appUrl(app.port!), '_blank'); }}
+                          onClick={(e) => {
+                            stop(e);
+                            const url = publicAppUrl(app);
+                            if (url) window.open(url, '_blank');
+                          }}
                         >
                           <ExternalLink size={12} /> Open
                         </Button>
