@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '@/lib/i18n';
 import { useAuthStore } from '@/lib/store';
@@ -106,6 +107,7 @@ function InfrastructureTab({
   onModeChange: (m: 'local' | 'multi') => void;
 }) {
   const qc = useQueryClient();
+  const router = useRouter();
   const me = useAuthStore((s) => s.user);
   const isAdmin = me?.role === 'ADMIN' || me?.role === 'SUPERADMIN';
 
@@ -134,6 +136,10 @@ function InfrastructureTab({
       qc.invalidateQueries({ queryKey: ['servers'] });
       setShowConfirm(null);
       onModeChange(next === 'MULTI' ? 'multi' : 'local');
+      // Going MULTI with no remote servers? Send them to /servers to add one.
+      if (next === 'MULTI' && remoteServers.length === 0) {
+        setTimeout(() => router.push('/dashboard/servers'), 400);
+      }
     },
     onError: (e: Error) => toast.error(e.message),
   });

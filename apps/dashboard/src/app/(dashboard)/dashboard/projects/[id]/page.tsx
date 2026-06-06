@@ -6,7 +6,8 @@ import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowLeft, Trash2, Server, Rocket, Plus, ExternalLink, Store,
-  FolderKanban, Activity, Users, Shield, Crown, UserPlus,
+  FolderKanban, Activity, Users, Shield, Crown, UserPlus, Loader2,
+  ArrowRightLeft, AlertTriangle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -83,6 +84,21 @@ export default function ProjectDetailPage() {
 
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   const [showDelete, setShowDelete] = useState(false);
+  const [showMigrate, setShowMigrate] = useState(false);
+  const [migrateTargetId, setMigrateTargetId] = useState('');
+
+  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
+    queryKey: ['public-settings'],
+    queryFn: () => api.get('/settings/public'),
+    staleTime: 60_000,
+  });
+  const isMulti = publicSettings?.deployment_mode === 'MULTI';
+
+  const { data: servers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
+    queryKey: ['servers'],
+    queryFn: () => api.get('/servers'),
+    enabled: isMulti,
+  });
 
   const { data: project, isLoading } = useQuery<Project>({
     queryKey: ['project', id],
@@ -110,6 +126,22 @@ export default function ProjectDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       toast.success('Project deleted');
       router.push('/dashboard/projects');
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const migrateMutation = useMutation({
+    mutationFn: (targetServerId: string) =>
+      api.post(`/projects/${id}/migrate`, { targetServerId }) as Promise<{ message: string; queued: string[]; warnings: string[] }>,
+    onSuccess: (data) => {
+      toast.success(data.message);
+      if (data.warnings.length > 0) {
+        toast.warning(`${data.warnings.length} warning${data.warnings.length > 1 ? 's' : ''} during migration. Check logs.`);
+      }
+      queryClient.invalidateQueries({ queryKey: ['project', id] });
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      setShowMigrate(false);
+      setMigrateTargetId('');
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -264,9 +296,18 @@ export default function ProjectDetailPage() {
             <CardContent>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="rounded-lg border border-border p-3">
-                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Server</p>
-                  <p className="font-semibold">{project.server?.name ?? 'Unknown'}</p>
-                  {project.server?.host && <p className="text-xs text-muted-foreground font-mono">{project.server.host}</p>}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Server</p>
+                      <p className="font-semibold truncate">{project.server?.name ?? 'Unknown'}</p>
+                      {project.server?.host && <p className="text-xs text-muted-foreground font-mono truncate">{project.server.host}</p>}
+                    </div>
+                    {isMulti && has(myRole, 'ADMIN') && servers.filter(s => s.id !== project.serverId && s.status === 'ONLINE').length > 0 && (
+                      <Button size="sm" variant="outline" onClick={() => setShowMigrate(true)} title="Move project to another server">
+                        <ArrowRightLeft size={12} />
+                      </Button>
+                    )}
+                  </div>
                 </div>
                 <div className="rounded-lg border border-border p-3">
                   <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Created</p>
@@ -576,6 +617,52 @@ export default function ProjectDetailPage() {
           <Button variant="outline" onClick={() => setShowDelete(false)}>{t('common.cancel')}</Button>
           <Button variant="destructive" disabled={deleteMutation.isPending} onClick={() => deleteMutation.mutate()}>
             {deleteMutation.isPending ? t('common.deleting') : t('projects.deleteBtn')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* Migrate Dialog */}
+      <Dialog open={showMigrate} onClose={() => { setShowMigrate(false); setMigrateTargetId(''); }}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <ArrowRightLeft size={16} /> Move project to another server
+          </DialogTitle>
+          <DialogDescription>
+            Every app and database in <span className="font-mono">{project.name}</span> will be torn down on{' '}
+            <span className="font-semibold">{project.server?.name}</span> and re-deployed on the target server. Domains follow automatically.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 text-xs flex items-start gap-2">
+            <AlertTriangle size={14} className="text-orange-500 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold text-orange-600">Downtime expected.</p>
+              <p className="text-muted-foreground mt-0.5">Apps are unavailable while they redeploy on the new server. Data in mounted volumes is not copied across hosts — set up backups or use external DBs first.</p>
+            </div>
+          </div>
+
+          <div>
+            <Label className="text-xs">Target server</Label>
+            <Select value={migrateTargetId} onChange={(e) => setMigrateTargetId(e.target.value)}>
+              <option value="">Select server…</option>
+              {servers
+                .filter(s => s.id !== project.serverId && s.status === 'ONLINE')
+                .map(s => (
+                  <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+                ))}
+            </Select>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => { setShowMigrate(false); setMigrateTargetId(''); }}>Cancel</Button>
+          <Button
+            disabled={!migrateTargetId || migrateMutation.isPending}
+            onClick={() => migrateMutation.mutate(migrateTargetId)}
+          >
+            {migrateMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+            Migrate project
           </Button>
         </DialogFooter>
       </Dialog>

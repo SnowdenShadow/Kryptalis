@@ -57,6 +57,16 @@ export class ProjectsController {
     return this.projectsService.remove(id, userId);
   }
 
+  @Post(':id/migrate')
+  @ApiOperation({ summary: 'Migrate all apps + DBs to another server' })
+  migrate(
+    @Param('id') id: string,
+    @CurrentUser('id') userId: string,
+    @Body('targetServerId') targetServerId: string,
+  ) {
+    return this.projectsService.migrate(id, userId, targetServerId);
+  }
+
   // ── Members ───────────────────────────────────────────────────────
 
   @Get(':id/members')

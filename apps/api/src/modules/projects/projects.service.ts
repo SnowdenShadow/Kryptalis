@@ -14,12 +14,16 @@ import {
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
+import { AgentService } from '../agent/agent.service';
+import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 
 @Injectable()
 export class ProjectsService {
   constructor(
     private prisma: PrismaService,
     private admin: AdminService,
+    private agent: AgentService,
+    private proxy: ReverseProxyService,
   ) {}
 
   async create(userId: string, dto: CreateProjectDto) {
@@ -112,6 +116,106 @@ export class ProjectsService {
     await assertProjectAccess(this.prisma, userId, id, 'OWNER');
     await this.prisma.project.delete({ where: { id } });
     return { message: 'Project deleted' };
+  }
+
+  /**
+   * Move every app + DB in this project from its current server to `targetServerId`.
+   *
+   * Flow per app: enqueue REMOVE on the *old* server (best-effort — failures
+   * are logged not blocking, because the old server may be unreachable, which
+   * is often why the user is migrating in the first place), then flip the
+   * project.serverId and enqueue DEPLOY on the new server. Caddy regenerates
+   * so domain routing follows. Mark each app status TRANSITIONING during the
+   * window so the UI shows progress.
+   */
+  async migrate(projectId: string, userId: string, targetServerId: string) {
+    await assertProjectAccess(this.prisma, userId, projectId, 'ADMIN');
+
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      include: {
+        server: { select: { id: true, host: true, name: true } },
+        applications: { select: { id: true, name: true, status: true } },
+        databases: { select: { id: true, name: true } },
+      },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    if (project.serverId === targetServerId) {
+      throw new BadRequestException('Project is already on this server');
+    }
+
+    const target = await this.prisma.server.findUnique({ where: { id: targetServerId } });
+    if (!target) throw new NotFoundException('Target server not found');
+    if (target.status !== 'ONLINE') {
+      throw new BadRequestException(`Target server "${target.name}" is ${target.status} — must be ONLINE`);
+    }
+
+    const oldServerId = project.serverId;
+    const slugify = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'app';
+
+    // Best-effort tear down on old server.
+    const teardownErrors: string[] = [];
+    for (const app of project.applications) {
+      try {
+        await this.agent.enqueueTask(oldServerId, 'REMOVE', {
+          slug: slugify(app.name),
+          containerName: `kryptalis-${slugify(app.name)}`,
+        });
+      } catch (e: any) {
+        teardownErrors.push(`${app.name}: ${e?.message || e}`);
+      }
+    }
+    for (const db of project.databases) {
+      try {
+        await this.agent.enqueueTask(oldServerId, 'REMOVE', {
+          slug: slugify(db.name),
+          containerName: `kryptalis-db-${slugify(db.name)}`,
+        });
+      } catch (e: any) {
+        teardownErrors.push(`db ${db.name}: ${e?.message || e}`);
+      }
+    }
+
+    // Flip the server pointer.
+    await this.prisma.project.update({
+      where: { id: projectId },
+      data: { serverId: targetServerId },
+    });
+
+    // Re-deploy each app on the new server (queued — agent picks them up).
+    const queued: string[] = [];
+    for (const app of project.applications) {
+      try {
+        await this.agent.enqueueTask(targetServerId, 'DEPLOY', {
+          applicationId: app.id,
+          slug: slugify(app.name),
+        });
+        queued.push(app.name);
+      } catch (e: any) {
+        teardownErrors.push(`redeploy ${app.name}: ${e?.message || e}`);
+      }
+    }
+    for (const db of project.databases) {
+      try {
+        await this.agent.enqueueTask(targetServerId, 'DEPLOY', {
+          databaseId: db.id,
+          slug: slugify(db.name),
+        });
+        queued.push(`db:${db.name}`);
+      } catch (e: any) {
+        teardownErrors.push(`redeploy db ${db.name}: ${e?.message || e}`);
+      }
+    }
+
+    // Caddy regen so domains follow the move.
+    this.proxy.regenerate().catch(() => {});
+
+    return {
+      message: `Project migrated from ${project.server?.name || oldServerId} → ${target.name}`,
+      queued,
+      warnings: teardownErrors,
+    };
   }
 
   // ── Members ───────────────────────────────────────────────────────

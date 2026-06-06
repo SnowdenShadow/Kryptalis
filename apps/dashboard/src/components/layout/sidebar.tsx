@@ -20,13 +20,15 @@ import {
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
 import { useSidebarStore, useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
+import { api } from '@/lib/api';
 
 const navigation = [
   { key: 'nav.overview', href: '/dashboard', icon: LayoutDashboard },
-  { key: 'nav.server', href: '/dashboard/servers', icon: Server },
+  { key: 'nav.server', href: '/dashboard/servers', icon: Server, multiOnly: true },
   { key: 'nav.projects', href: '/dashboard/projects', icon: FolderKanban },
   { key: 'nav.applications', href: '/dashboard/applications', icon: Rocket },
   { key: 'nav.domains', href: '/dashboard/domains', icon: Globe },
@@ -48,6 +50,12 @@ export function Sidebar() {
   const { user } = useAuthStore();
   const { t } = useTranslation();
   const isAdmin = user?.role && ADMIN_ROLES.has(user.role);
+  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
+    queryKey: ['public-settings'],
+    queryFn: () => api.get('/settings/public'),
+    staleTime: 60_000,
+  });
+  const isMulti = publicSettings?.deployment_mode === 'MULTI';
 
   return (
     <aside
@@ -75,6 +83,7 @@ export function Sidebar() {
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
         {navigation.map((item) => {
+          if (item.multiOnly && !isMulti) return null;
           const isActive =
             item.href === '/dashboard'
               ? pathname === '/dashboard'
