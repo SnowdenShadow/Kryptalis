@@ -239,6 +239,38 @@ write_status "UPDATING" "Pulling docker images" "$LATEST" "$LATEST"
 log "docker compose pull"
 docker compose pull >>"$LOG_FILE" 2>&1 || true
 
+# Seed bind-mounted files BEFORE compose up — when these don't exist as
+# regular files, docker creates an empty DIRECTORY at the bind path and
+# the affected service crashes ("not a directory" / "is a directory").
+# Idempotent: only touches the file when it's missing or a stray dir.
+seed_bind_file() {
+  TARGET="$1"
+  CONTENT="$2"
+  if [ -d "$TARGET" ] && [ ! -f "$TARGET" ]; then
+    rmdir "$TARGET" 2>/dev/null || rm -rf "$TARGET"
+  fi
+  if [ ! -f "$TARGET" ]; then
+    mkdir -p "$(dirname "$TARGET")"
+    printf '%s' "$CONTENT" > "$TARGET"
+  fi
+}
+
+seed_bind_file "$INSTALL_DIR/docker-compose.override.yml" '# Auto-managed by Kryptalis API — do not edit.
+services:
+  caddy:
+    ports: []
+'
+
+seed_bind_file "$INSTALL_DIR/.kryptalis/reverse-proxy/Caddyfile" '# Seeded by update.sh — the API rewrites this once domains are created.
+{
+  admin :2019
+  email kryptalis@localhost
+}
+:80 {
+  respond "Kryptalis: no domain configured yet." 404
+}
+'
+
 write_status "UPDATING" "Rebuilding and restarting services" "$LATEST" "$LATEST"
 log "docker compose up -d --build --remove-orphans"
 if ! docker compose up -d --build --remove-orphans >>"$LOG_FILE" 2>&1; then
