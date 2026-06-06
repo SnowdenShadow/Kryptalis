@@ -268,18 +268,12 @@ ${email ? `  email ${email}\n` : ''}}
       }
       blocks.push('');
 
-      // ── one site block per port binding ─────────────────────────
-      // Caddy CAN proxy port-pinned apps now: the app's container no
-      // longer publishes its host port (the marketplace install strips
-      // it). Caddy publishes the port via docker-compose.override.yml and
-      // reverse-proxies via the kryptalis-apps network using container_name.
-      // The HTTP-01 challenge for LE flows through :80 (always bound), so
-      // the cert is valid on every port we listen on for this host.
+      // Port-pinned URLs aren't proxied — Caddy only binds 80/443. The user
+      // opens http://<host>:<port> directly to the container's own publish.
+      // We document the binding in the Caddyfile so an operator reading
+      // the file knows where each port goes.
       for (const b of portBindings) {
-        blocks.push(`# ${host}:${b.port} → app ${b.application.name}`);
-        blocks.push(`https://${host}:${b.port} {`);
-        blocks.push(proxyFor(b.application, b.port));
-        blocks.push(`}`);
+        blocks.push(`# http://${host}:${b.port} → app ${b.application.name} (direct container publish, not proxied by Caddy)`);
         blocks.push('');
       }
 
@@ -314,67 +308,32 @@ ${email ? `  email ${email}\n` : ''}}
     const caddyfile = blocks.join('\n');
     fs.writeFileSync(path.join(PROXY_DIR, 'Caddyfile'), caddyfile);
 
-    // Collect every port we want Caddy to publish on the host so port-pinned
-    // bindings answer in HTTPS with a real LE cert. The app containers no
-    // longer publish their host port (the marketplace install strips it), so
-    // there's no collision with Caddy.
-    const extraPorts = new Set<number>();
-    for (const d of allDomains) {
-      for (const b of d.portBindings || []) {
-        if (b.port && b.port !== 80 && b.port !== 443) extraPorts.add(b.port);
-      }
-    }
-    const portsChanged = await this.syncCaddyComposeOverride([...extraPorts].sort((a, b) => a - b));
+    // Caddy ONLY binds 80/443. Port-pinned URLs (https://domain:port) are
+    // NOT proxied — the user opens http://domain:port directly to the
+    // container's published port. Trying to make Caddy bind extra ports
+    // conflicts with the app's own port publish (only one process can bind
+    // a host port). Keeping it simple = stable.
+    const portsChanged = await this.syncCaddyComposeOverride([]);
 
     // If extra ports changed, we MUST recreate the Caddy container so docker
     // picks up the new port bindings — a `caddy reload` from inside the
     // container can't add new listening sockets to the host.
-    if (portsChanged) {
-      this.logger.log(`Caddy port set changed — recreating container`);
-      // The Caddy container already exists from the root `docker compose up`,
-      // and compose can't replace a running container from inside an
-      // ephemeral helper. Tear it down explicitly with `rm -f`, THEN bring
-      // it back via compose so the new ports take effect. We keep Caddy's
-      // data volume (`caddy_data`) so LE certs survive.
+    // Graceful reload — fast (no downtime) since Caddy never changes its
+    // listening ports.
+    try {
+      await execFileAsync(
+        'docker',
+        ['exec', CONTAINER_NAME, 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile'],
+        { timeout: 15_000 },
+      );
+      this.logger.log(`Caddy reloaded — ${activeCount} active, ${reservedCount} reserved`);
+    } catch (e: any) {
+      this.logger.warn(`reload failed (${e?.message}); restarting container`);
       try {
-        await execFileAsync('docker', ['rm', '-f', CONTAINER_NAME], { timeout: 30_000 }).catch(() => {});
-        await execFileAsync(
-          'docker',
-          [
-            'run', '--rm',
-            '-v', `${INSTALL_ROOT_HOST}:/repo`,
-            '-v', '/var/run/docker.sock:/var/run/docker.sock',
-            '-w', '/repo',
-            'docker:cli',
-            'sh', '-c',
-            // Use compose's --project-name so the existing project's network
-            // (kryptalis_default) is reused instead of docker complaining
-            // that "a network with name X exists but was not created for
-            // project repo".
-            'docker compose -p kryptalis -f docker-compose.yml -f docker-compose.override.yml up -d caddy',
-          ],
-          { timeout: 120_000 },
-        );
-        this.logger.log(`Caddy recreated — ${activeCount} active, ${reservedCount} reserved`);
-      } catch (e: any) {
-        this.logger.error(`Caddy recreate failed (${e?.message})`);
-      }
-    } else {
-      // Same port set — graceful reload is enough. Way faster (no downtime).
-      try {
-        await execFileAsync(
-          'docker',
-          ['exec', CONTAINER_NAME, 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile'],
-          { timeout: 15_000 },
-        );
-        this.logger.log(`Caddy reloaded — ${activeCount} active, ${reservedCount} reserved`);
-      } catch (e: any) {
-        this.logger.warn(`reload failed (${e?.message}); restarting container`);
-        try {
-          await execFileAsync('docker', ['restart', CONTAINER_NAME], { timeout: 30_000 });
-        } catch {}
-      }
+        await execFileAsync('docker', ['restart', CONTAINER_NAME], { timeout: 30_000 });
+      } catch {}
     }
+    void portsChanged;
 
     // sync DB statuses + persist for visibility
     await Promise.all(

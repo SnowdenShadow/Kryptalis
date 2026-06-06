@@ -207,14 +207,15 @@ function publicUrls(
 ): string[] {
   const urls: string[] = [];
   for (const d of app.domains || []) {
-    // Caddy proxies every port now (own port publish, container_name target).
-    // Both clean URL and port-pinned URL get the same Let's Encrypt cert.
+    // Clean URL on :443 → HTTPS via Caddy. Port-pinned → direct to container
+    // (http://) because Caddy only binds 80/443 and the container holds the
+    // custom port itself.
     urls.push(app.customPort && app.port
-      ? `https://${d.domain}:${app.port}`
+      ? `http://${d.domain}:${app.port}`
       : `https://${d.domain}`);
   }
   for (const b of app.portBindings || []) {
-    urls.push(`https://${b.domain.domain}:${b.port}`);
+    urls.push(`http://${b.domain.domain}:${b.port}`);
   }
   if (urls.length === 0 && app.port) {
     urls.push(appUrl(fallbackHostname, app.port));
@@ -1407,7 +1408,7 @@ export default function ApplicationDetailPage() {
                       <div>
                         <p className="font-medium text-sm">Port-pinned URL</p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          <span className="font-mono">https://{app.domains[0].domain}:{app.port}</span> — Caddy publishes this port and proxies to the container with the same Let's Encrypt cert. Useful for the canonical Portainer/Grafana ports.
+                          <span className="font-mono">http://{app.domains[0].domain}:{app.port}</span> — opens the container directly on its custom port. No HTTPS on this port (Caddy only proxies :443). Use clean URL above for HTTPS.
                         </p>
                       </div>
                       {app.customPort && <Check size={16} className="text-primary shrink-0 mt-0.5" />}
@@ -1495,7 +1496,7 @@ export default function ApplicationDetailPage() {
                   </Button>
                 </div>
                 <p className="text-[10px] text-muted-foreground">
-                  Caddy publishes the port and proxies to the container over the shared docker network. Same Let's Encrypt cert as :443. Adding a binding restarts Caddy briefly (~5s).
+                  Port-pinned bindings open the container directly (http://, no TLS). The container's own port publish is what makes them reachable. For HTTPS use the clean URL on :443.
                 </p>
               </CardContent>
             </Card>

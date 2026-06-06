@@ -145,11 +145,11 @@ function publicAppUrl(app: {
   const main = app.domains?.[0];
   if (main) {
     return app.customPort && app.port
-      ? `https://${main.domain}:${app.port}`
+      ? `http://${main.domain}:${app.port}`
       : `https://${main.domain}`;
   }
   const bound = app.portBindings?.[0];
-  if (bound) return `https://${bound.domain.domain}:${bound.port}`;
+  if (bound) return `http://${bound.domain.domain}:${bound.port}`;
   return app.port ? appUrl(app.port) : null;
 }
 

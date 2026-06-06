@@ -1,18 +1,20 @@
 // Marketplace compose templates.
 //
 // Every template uses these per-install placeholders so each install is
-// isolated and the port the user picks is what actually binds on the host:
+// isolated:
 //
-//   __HOST_PORT__   → the canonical host-side port (Application.port).
-//                     Defaults to PORT_MAP[slug] when the user doesn't override.
+//   __HOST_PORT__   → canonical host-side port (Application.port). Caddy
+//                     publishes this same port on the host when the user
+//                     picks a port-pinned binding.
 //   __INSTANCE_ID__ → first 12 chars of Application.id. Used for container
 //                     names AND volume namespaces so two instances of the
 //                     same image can coexist on one host.
 //
-// For apps that expose a SECOND port (Portainer's 8000, Postal's SMTP 25,
-// MinIO's S3 9000, etc.) we still hardcode that secondary port — the user
-// changes the canonical port via the dashboard, and the second port is for
-// advanced cases only (handled via Application.portMapping later).
+// Every template ALSO attaches to the `kryptalis-apps` external network so
+// Caddy can reach the container by name. The network is created by the root
+// docker-compose. Marketplace install MAY strip the host `ports:` block
+// when a port-pinned binding is requested — Caddy publishes the port on
+// the host in that case, so the container only needs the internal port.
 export const COMPOSE_TEMPLATES: Record<string, { compose: string; healthCheck?: string }> = {
   portainer: {
     compose: `services:
@@ -20,6 +22,8 @@ export const COMPOSE_TEMPLATES: Record<string, { compose: string; healthCheck?: 
     image: portainer/portainer-ce:lts
     container_name: kryptalis-portainer-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:9443"
       - "8000:8000"
@@ -27,7 +31,10 @@ export const COMPOSE_TEMPLATES: Record<string, { compose: string; healthCheck?: 
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data___INSTANCE_ID__:/data
 volumes:
-  portainer_data___INSTANCE_ID__:`,
+  portainer_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   grafana: {
     compose: `services:
@@ -35,6 +42,8 @@ volumes:
     image: grafana/grafana:latest
     container_name: kryptalis-grafana-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:3000"
     volumes:
@@ -42,7 +51,10 @@ volumes:
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
 volumes:
-  grafana_data___INSTANCE_ID__:`,
+  grafana_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   'uptime-kuma': {
     compose: `services:
@@ -50,12 +62,17 @@ volumes:
     image: louislam/uptime-kuma:1
     container_name: kryptalis-uptime-kuma-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:3001"
     volumes:
       - uptime_data___INSTANCE_ID__:/app/data
 volumes:
-  uptime_data___INSTANCE_ID__:`,
+  uptime_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   n8n: {
     compose: `services:
@@ -63,6 +80,8 @@ volumes:
     image: n8nio/n8n:latest
     container_name: kryptalis-n8n-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:5678"
     volumes:
@@ -70,7 +89,10 @@ volumes:
     environment:
       - N8N_SECURE_COOKIE=false
 volumes:
-  n8n_data___INSTANCE_ID__:`,
+  n8n_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   wordpress: {
     compose: `services:
@@ -78,6 +100,8 @@ volumes:
     image: wordpress:latest
     container_name: kryptalis-wordpress-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:80"
     environment:
@@ -93,6 +117,8 @@ volumes:
     image: mariadb:11
     container_name: kryptalis-wordpress-db-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     environment:
       MYSQL_DATABASE: wordpress
       MYSQL_USER: wordpress
@@ -102,7 +128,10 @@ volumes:
       - wp_db___INSTANCE_ID__:/var/lib/mysql
 volumes:
   wp_data___INSTANCE_ID__:
-  wp_db___INSTANCE_ID__:`,
+  wp_db___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   ghost: {
     compose: `services:
@@ -110,6 +139,8 @@ volumes:
     image: ghost:5-alpine
     container_name: kryptalis-ghost-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:2368"
     environment:
@@ -117,7 +148,10 @@ volumes:
     volumes:
       - ghost_data___INSTANCE_ID__:/var/lib/ghost/content
 volumes:
-  ghost_data___INSTANCE_ID__:`,
+  ghost_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   minio: {
     compose: `services:
@@ -125,6 +159,8 @@ volumes:
     image: minio/minio:latest
     container_name: kryptalis-minio-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:9001"
       - "9000:9000"
@@ -135,7 +171,10 @@ volumes:
     volumes:
       - minio_data___INSTANCE_ID__:/data
 volumes:
-  minio_data___INSTANCE_ID__:`,
+  minio_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   nextcloud: {
     compose: `services:
@@ -143,12 +182,17 @@ volumes:
     image: nextcloud:latest
     container_name: kryptalis-nextcloud-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:80"
     volumes:
       - nextcloud_data___INSTANCE_ID__:/var/www/html
 volumes:
-  nextcloud_data___INSTANCE_ID__:`,
+  nextcloud_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   postgresql: {
     compose: `services:
@@ -156,6 +200,8 @@ volumes:
     image: postgres:16-alpine
     container_name: kryptalis-postgresql-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:5432"
     environment:
@@ -165,7 +211,10 @@ volumes:
     volumes:
       - pg_data___INSTANCE_ID__:/var/lib/postgresql/data
 volumes:
-  pg_data___INSTANCE_ID__:`,
+  pg_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   redis: {
     compose: `services:
@@ -173,12 +222,17 @@ volumes:
     image: redis:7-alpine
     container_name: kryptalis-redis-app-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:6379"
     volumes:
       - redis_app_data___INSTANCE_ID__:/data
 volumes:
-  redis_app_data___INSTANCE_ID__:`,
+  redis_app_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   supabase: {
     compose: `services:
@@ -186,11 +240,15 @@ volumes:
     image: supabase/studio:latest
     container_name: kryptalis-supabase-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:3000"
     environment:
       STUDIO_PG_META_URL: http://localhost:8080
-volumes: {}`,
+networks:
+  kryptalis-apps:
+    external: true`,
   },
   appwrite: {
     compose: `services:
@@ -198,12 +256,17 @@ volumes: {}`,
     image: appwrite/appwrite:1.6
     container_name: kryptalis-appwrite-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:80"
     volumes:
       - appwrite_data___INSTANCE_ID__:/storage
 volumes:
-  appwrite_data___INSTANCE_ID__:`,
+  appwrite_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
 
   // ── Email & webmail apps ────────────────────────────────────────
@@ -213,6 +276,8 @@ volumes:
     image: roundcube/roundcubemail:latest
     container_name: kryptalis-roundcube-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:80"
     environment:
@@ -229,7 +294,10 @@ volumes:
       - roundcube_config___INSTANCE_ID__:/var/roundcube/config
 volumes:
   roundcube_data___INSTANCE_ID__:
-  roundcube_config___INSTANCE_ID__:`,
+  roundcube_config___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
 
   snappymail: {
@@ -238,12 +306,17 @@ volumes:
     image: djmaze/snappymail:latest
     container_name: kryptalis-snappymail-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:8888"
     volumes:
       - snappymail_data___INSTANCE_ID__:/var/lib/snappymail
 volumes:
-  snappymail_data___INSTANCE_ID__:`,
+  snappymail_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
 
   rainloop: {
@@ -252,12 +325,17 @@ volumes:
     image: hardware/rainloop:latest
     container_name: kryptalis-rainloop-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:8888"
     volumes:
       - rainloop_data___INSTANCE_ID__:/rainloop/data
 volumes:
-  rainloop_data___INSTANCE_ID__:`,
+  rainloop_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
 
   mailpit: {
@@ -266,6 +344,8 @@ volumes:
     image: axllent/mailpit:latest
     container_name: kryptalis-mailpit-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:8025"
       - "1025:1025"
@@ -275,7 +355,10 @@ volumes:
       MP_DATA_FILE: /data/mailpit.db
       MP_MAX_MESSAGES: "5000"
 volumes:
-  mailpit_data___INSTANCE_ID__:`,
+  mailpit_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
 
   postal: {
@@ -284,6 +367,8 @@ volumes:
     image: ghcr.io/postalserver/postal:3
     container_name: kryptalis-postal-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:5000"
       - "2526:25"
@@ -297,6 +382,8 @@ volumes:
     image: mariadb:11
     container_name: kryptalis-postal-mariadb-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     environment:
       MYSQL_ROOT_PASSWORD: postal_root
       MYSQL_DATABASE: postal
@@ -308,13 +395,18 @@ volumes:
     image: rabbitmq:3-management
     container_name: kryptalis-postal-rabbitmq-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     environment:
       RABBITMQ_DEFAULT_USER: postal
       RABBITMQ_DEFAULT_PASS: postal
 volumes:
   postal_data___INSTANCE_ID__:
   postal_config___INSTANCE_ID__:
-  postal_db___INSTANCE_ID__:`,
+  postal_db___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
 
   mailu: {
@@ -324,6 +416,8 @@ services:
     image: ghcr.io/mailu/admin:2024.06
     container_name: kryptalis-mailu-admin-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:8080"
     environment:
@@ -333,7 +427,10 @@ services:
     volumes:
       - mailu_data___INSTANCE_ID__:/data
 volumes:
-  mailu_data___INSTANCE_ID__:`,
+  mailu_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
   },
 };
 
@@ -362,10 +459,6 @@ export const PORT_MAP: Record<string, number> = {
  * Build a docker-compose body for an arbitrary Docker Hub image — no template
  * required. The dashboard's "Deploy custom image" dialog feeds this so users
  * can run literally any image without us pre-baking it into PORT_MAP.
- *
- * Volumes are optional; pass them as `host:container` strings. Env vars are
- * inlined as `KEY: value` lines so secrets land in the env section (not the
- * shell expansion of `${KEY}` syntax).
  */
 export function renderCustomComposeTemplate(opts: {
   image: string;
@@ -384,7 +477,12 @@ export function renderCustomComposeTemplate(opts: {
     image: ${opts.image}
     container_name: kryptalis-custom-__INSTANCE_ID__
     restart: unless-stopped
+    networks:
+      - kryptalis-apps
     ports:
       - "__HOST_PORT__:${opts.containerPort}"
-${opts.command ? `    command: ${JSON.stringify(opts.command)}\n` : ''}${env ? `    environment:\n${env}\n` : ''}${vols ? `    volumes:\n${vols}\n` : ''}${hasVolumes ? `volumes: {}\n` : ''}`;
+${opts.command ? `    command: ${JSON.stringify(opts.command)}\n` : ''}${env ? `    environment:\n${env}\n` : ''}${vols ? `    volumes:\n${vols}\n` : ''}${hasVolumes ? `volumes: {}\n` : ''}networks:
+  kryptalis-apps:
+    external: true
+`;
 }

@@ -215,27 +215,18 @@ export class MarketplaceService {
       .replace(/__INSTANCE_ID__/g, instanceId)
       .replace(/__HOST_PORT__/g, String(realPort));
 
-    // Apps that get a port-pinned binding don't need to publish their port
-    // on the host — Caddy publishes it instead and proxies via the shared
-    // network. Stripping the ports: block prevents the "port already
-    // allocated" conflict the user hit before.
-    if (customPort) {
-      composeContent = this.stripHostPortPublish(composeContent, realPort);
-    }
-    // Always attach to the kryptalis-apps network so Caddy can reach the
-    // container by name. Idempotent — adding the network twice is a no-op.
-    composeContent = this.attachToCaddyNetwork(composeContent);
-
-    // Apps that get a port-pinned binding don't need to publish their port
-    // on the host — Caddy publishes it instead and proxies via the shared
-    // network. Stripping the ports: block prevents the "port already
-    // allocated" conflict the user hit before.
-    if (customPort) {
-      composeContent = this.stripHostPortPublish(composeContent, realPort);
-    }
-    // Always attach to the kryptalis-apps network so Caddy can reach the
-    // container by name. Idempotent — adding the network twice is a no-op.
-    composeContent = this.attachToCaddyNetwork(composeContent);
+    // Templates already declare:
+    //   - networks: kryptalis-apps (external) at top-level
+    //   - the service joined to that network
+    //   - host port publish (so direct IP:port access still works)
+    //
+    // For port-pinned bindings, Caddy proxies via container_name over the
+    // shared network — it does NOT need its own host-side port publish
+    // (would conflict with the container's own publish). So we DON'T strip
+    // the ports block from the app. Caddy and the app coexist:
+    //   - User → https://domain (Caddy :443 → container_name)
+    //   - User → http://ip:hostPort (direct container publish, bypass Caddy)
+    // No Caddy port publish on the custom port = no port conflict.
 
     if (data.domainId) {
       await this.domainAttach.attach({
@@ -309,78 +300,6 @@ export class MarketplaceService {
     // verbatim; the underlying templates use the same form.
     const stem = slug === 'redis' ? 'redis-app' : slug;
     return `kryptalis-${stem}-${instanceId}`;
-  }
-
-  /**
-   * Remove the host-side `ports:` block of the primary service so the
-   * container only listens internally on the shared docker network. Caddy
-   * publishes <hostPort>:<containerPort> on the host instead and proxies
-   * via container_name, which is the only way to get a Let's Encrypt cert
-   * on a custom port without a port-already-allocated collision.
-   *
-   * This is a deliberately permissive YAML-aware strip — it only nukes the
-   * first `ports:` section whose first item contains the host port we
-   * picked. Secondary services (Wordpress's MariaDB, Postal's RabbitMQ,
-   * etc.) keep their ports because the main service's host port is what
-   * we identify.
-   */
-  private stripHostPortPublish(compose: string, hostPort: number): string {
-    const lines = compose.split('\n');
-    const out: string[] = [];
-    let i = 0;
-    let removed = false;
-    while (i < lines.length) {
-      const line = lines[i];
-      if (!removed && /^\s{4}ports:\s*$/.test(line)) {
-        // Peek into the items — only strip if hostPort appears in any of them.
-        let j = i + 1;
-        const blockEnd = (() => {
-          let k = j;
-          while (k < lines.length && /^\s{6}-/.test(lines[k])) k++;
-          return k;
-        })();
-        const block = lines.slice(j, blockEnd).join('\n');
-        if (block.includes(`"${hostPort}:`) || block.includes(`${hostPort}:`)) {
-          i = blockEnd;
-          removed = true;
-          continue;
-        }
-      }
-      out.push(line);
-      i++;
-    }
-    return out.join('\n');
-  }
-
-  /**
-   * Attach the primary service to the kryptalis-apps external network so
-   * Caddy can reach it by container_name. Adds the networks: declaration
-   * at the top-level AND in the service block. Idempotent.
-   */
-  private attachToCaddyNetwork(compose: string): string {
-    let result = compose;
-    // Top-level networks block.
-    if (!/^networks:/m.test(result)) {
-      result += `\nnetworks:\n  kryptalis-apps:\n    external: true\n`;
-    } else if (!/kryptalis-apps:/.test(result)) {
-      result = result.replace(
-        /^networks:\s*\n/m,
-        `networks:\n  kryptalis-apps:\n    external: true\n`,
-      );
-    }
-    // Service-level networks list — attach to the FIRST service only. Pattern:
-    // services:
-    //   <name>:
-    //     image: ...
-    //     ...    ← we inject `    networks:\n      - kryptalis-apps\n` after the
-    //              first service block's leading "    image:" line.
-    if (!/^\s{4}networks:\s*\n\s{6}-\s*kryptalis-apps\s*$/m.test(result)) {
-      result = result.replace(
-        /(^\s{4}image:[^\n]+\n)/m,
-        `$1    networks:\n      - kryptalis-apps\n`,
-      );
-    }
-    return result;
   }
 
   /** True when no running container holds this host port. */
@@ -525,11 +444,6 @@ export class MarketplaceService {
     composeContent = composeContent
       .replace(/__INSTANCE_ID__/g, instanceId)
       .replace(/__HOST_PORT__/g, String(hostPort));
-
-    if (!!data.hostPort) {
-      composeContent = this.stripHostPortPublish(composeContent, hostPort);
-    }
-    composeContent = this.attachToCaddyNetwork(composeContent);
 
     if (data.domainId) {
       await this.domainAttach.attach({
