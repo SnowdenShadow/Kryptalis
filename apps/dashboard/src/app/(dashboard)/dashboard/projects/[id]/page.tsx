@@ -492,6 +492,16 @@ export default function ProjectDetailPage() {
                     <code className="font-mono">{mesh.networkName}</code>
                   </div>
 
+                  {/* Scope warning — internal hostnames are project-local. */}
+                  <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-3 text-xs space-y-1">
+                    <p className="font-semibold text-blue-600 flex items-center gap-1">
+                      <Info size={11} /> Scope
+                    </p>
+                    <p className="text-muted-foreground">
+                      These hostnames work <span className="font-semibold">only between services inside this project</span>, on the same Docker host. To reach a service in a different project (or on a different server), use its public HTTPS URL via its attached domain instead.
+                    </p>
+                  </div>
+
                   {mesh.apps.length === 0 && mesh.databases.length === 0 && (
                     <p className="text-sm text-muted-foreground italic">No apps or databases yet. Add some to see the mesh.</p>
                   )}
