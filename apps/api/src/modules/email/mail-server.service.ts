@@ -3,6 +3,8 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  OnApplicationBootstrap,
+  Logger,
 } from '@nestjs/common';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -29,12 +31,115 @@ const HOST_MAIL_DIR = path.posix.join(HOST_DATA_DIR.replace(/\\/g, '/'), 'mail')
  * Uses `mailserver/docker-mailserver` image — Postfix + Dovecot + rspamd + OpenDKIM bundled.
  */
 @Injectable()
-export class MailServerService {
+export class MailServerService implements OnApplicationBootstrap {
+  private readonly logger = new Logger('MailServerReconcile');
+
   constructor(
     private prisma: PrismaService,
     private proxy: ReverseProxyService,
   ) {
     if (!fs.existsSync(MAIL_DIR)) fs.mkdirSync(MAIL_DIR, { recursive: true });
+  }
+
+  /**
+   * On every API boot, walk every MailServer row and make sure the on-disk
+   * compose file + opendkim config match what the CURRENT code would
+   * generate. If anything drifted (because the code changed across a
+   * deploy, like the ENABLE_OPENDKIM:0 → 1 fix), redeploy that domain.
+   *
+   * This is what makes `git pull + restart api` enough — no manual click.
+   * Safe to run repeatedly: the comparison is content-based, so identical
+   * configs are no-ops.
+   */
+  async onApplicationBootstrap() {
+    // Run async; never block the API from coming up if reconcile hangs.
+    setImmediate(() => this.reconcileAll().catch((e) =>
+      this.logger.error(`Reconcile failed: ${e?.message || e}`),
+    ));
+  }
+
+  private async reconcileAll() {
+    let servers: { id: string; domainId: string }[];
+    try {
+      servers = await this.prisma.mailServer.findMany({
+        select: { id: true, domainId: true },
+      });
+    } catch (e: any) {
+      // DB not ready yet — boot reconcile is best-effort; the next API
+      // restart will pick it up.
+      this.logger.warn(`Skipping mail reconcile (DB not ready): ${e?.message || e}`);
+      return;
+    }
+    if (servers.length === 0) return;
+    this.logger.log(`Reconciling ${servers.length} mail server(s)…`);
+    for (const s of servers) {
+      try {
+        await this.reconcileOne(s.id, s.domainId);
+      } catch (e: any) {
+        this.logger.error(`reconcile ${s.id}: ${e?.message || e}`);
+      }
+    }
+  }
+
+  /**
+   * Schema version of the generated mail server compose. Bumped EVERY TIME
+   * we change the compose body or the opendkim/postfix layout in a way that
+   * existing on-disk stacks need to pick up. The bootstrap reconciler reads
+   * .stack-version from each mail dir and triggers a redeploy if it's
+   * missing or older than this constant.
+   *
+   * History:
+   *   1 — first auto-deploy logic
+   *   2 — enable OpenDKIM + write KeyTable/SigningTable/TrustedHosts,
+   *       enable OpenDMARC + policyd-spf
+   */
+  private static readonly STACK_VERSION = 2;
+
+  /**
+   * If the stack on disk is older than STACK_VERSION (or has no version
+   * stamp at all), rebuild it with the current code. This is what makes
+   * `git pull + restart api` enough — no manual click required to pick up
+   * code changes to the mail stack.
+   */
+  private async reconcileOne(serverId: string, domainId: string) {
+    const server = await this.prisma.mailServer.findUnique({ where: { id: serverId } });
+    if (!server) return;
+    const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
+    if (!domain) return;
+    if (!server.dkimPrivateKey) return; // never deployed — nothing to reconcile
+
+    const dir = path.join(MAIL_DIR, serverId);
+    if (!fs.existsSync(dir)) return; // stack was wiped manually — leave alone
+
+    const versionPath = path.join(dir, '.stack-version');
+    let onDiskVersion = 0;
+    try {
+      onDiskVersion = parseInt(fs.readFileSync(versionPath, 'utf-8').trim(), 10) || 0;
+    } catch {}
+
+    if (onDiskVersion >= MailServerService.STACK_VERSION) return; // up to date
+
+    this.logger.log(
+      `Mail server ${domain.domain}: stack v${onDiskVersion} → v${MailServerService.STACK_VERSION} — redeploying with new code`,
+    );
+
+    await this.prisma.mailServer.update({
+      where: { id: serverId },
+      data: { status: 'DEPLOYING', lastError: null },
+    });
+    // runDeploy() rewrites everything + `docker compose up -d --build`.
+    this.runDeploy(
+      serverId,
+      domain.domain,
+      {
+        smtp: server.smtpPort,
+        submission: server.submissionPort,
+        smtps: server.smtpsPort,
+        imap: server.imapPort,
+        imaps: server.imapsPort,
+      },
+      server.dkimPrivateKey,
+    ).catch(() => {});
   }
 
   // ── access ────────────────────────────────────────────────────────
@@ -412,6 +517,17 @@ ${sslVolume}    cap_add:
       retries: 3
 ${sslExternalVolumes}`;
     fs.writeFileSync(path.join(dir, 'docker-compose.yml'), compose);
+
+    // Tag the on-disk stack with the version the boot reconciler compares
+    // against. Write BEFORE compose up so even a partial failure leaves a
+    // marker (next boot won't retry endlessly if compose itself is broken —
+    // the run already errored visibly via lastError).
+    try {
+      fs.writeFileSync(
+        path.join(dir, '.stack-version'),
+        String(MailServerService.STACK_VERSION) + '\n',
+      );
+    } catch {}
 
     try {
       // Force-remove any stale container with this name. Happens when a prior
