@@ -229,6 +229,12 @@ if ! git reset --hard "origin/$BRANCH" >>"$LOG_FILE" 2>&1; then
   exit 1
 fi
 
+# Re-assert the executable bit on shell scripts — Windows checkouts don't
+# preserve the +x flag, so files pushed from Windows land here mode 0644
+# after `git reset --hard`. Without this, the NEXT timer fire fails with
+# "command not found" because systemd ExecStarts the script directly.
+chmod +x "$INSTALL_DIR/update.sh" "$INSTALL_DIR/install.sh" 2>/dev/null || true
+
 write_status "UPDATING" "Pulling docker images" "$LATEST" "$LATEST"
 log "docker compose pull"
 docker compose pull >>"$LOG_FILE" 2>&1 || true
