@@ -137,11 +137,17 @@ ${email ? `  email ${email}\n` : ''}}
       include: { application: { select: { id: true, name: true, port: true } } },
     });
 
-    // Some marketplace apps listen on HTTPS by default with a self-signed
-    // cert (Portainer on 9443 is the canonical case). When we reverse_proxy
-    // to them in plain HTTP, Caddy gets a TLS alert and returns 502. Switch
-    // the upstream to https:// with `tls_insecure_skip_verify` so it works.
-    const HTTPS_UPSTREAM_PORTS = new Set([443, 8443, 9443]);
+    // Some marketplace apps listen on HTTPS internally with a self-signed
+    // cert (Portainer is the canonical case — its container listens HTTPS on
+    // 9443 even when published on a different host port). When we reverse_proxy
+    // to them in plain HTTP, Caddy gets a TLS alert and returns 502. Match by
+    // app NAME — not host port — because the user can remap the host port.
+    const HTTPS_UPSTREAM_APP_NAMES = new Set([
+      'Portainer',
+    ]);
+    // Fallback: well-known HTTPS-only port numbers, in case someone bound a
+    // home-rolled HTTPS service to one of these.
+    const HTTPS_UPSTREAM_PORTS = new Set([443, 8443]);
     // mail server domains — we provision a Let's Encrypt cert for mail.<apex>
     // so the mail server container can re-use it.
     const mailServers = await this.prisma.mailServer.findMany({
@@ -178,7 +184,10 @@ ${email ? `  email ${email}\n` : ''}}
         ? `# ${host} → app ${d.application?.name} (host port ${port})`
         : `# ${host} → reserved (no app linked yet)`);
 
-      const upstreamHttps = linked && port !== null && HTTPS_UPSTREAM_PORTS.has(port);
+      const appName = d.application?.name || '';
+      const upstreamHttps = linked && port !== null && (
+        HTTPS_UPSTREAM_APP_NAMES.has(appName) || HTTPS_UPSTREAM_PORTS.has(port)
+      );
       const proxyDirective = upstreamHttps
         ? `  reverse_proxy https://host.docker.internal:${port} {\n    transport http {\n      tls\n      tls_insecure_skip_verify\n    }\n  }`
         : `  reverse_proxy host.docker.internal:${port}`;
