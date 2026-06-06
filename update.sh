@@ -272,11 +272,28 @@ seed_bind_file "$INSTALL_DIR/.kryptalis/reverse-proxy/Caddyfile" '# Seeded by up
 '
 
 write_status "UPDATING" "Rebuilding and restarting services" "$LATEST" "$LATEST"
+
+# Clean up stale containers from previous failed recreates. When `docker
+# compose up` is interrupted between rename + delete, it leaves a zombie
+# named "<hash>_kryptalis-<service>" that the NEXT recreate tries to
+# reference by stale ID — and fails with "No such container".
+# Match anything that ends in _kryptalis-(api|dashboard|caddy|postgres|redis)
+# and isn't the canonical name itself, then force-remove.
+log "cleaning up stale compose orphans"
+docker ps -a --format '{{.Names}}' \
+  | grep -E '_kryptalis-(api|dashboard|caddy|postgres|redis)$' \
+  | xargs -r docker rm -f >>"$LOG_FILE" 2>&1 || true
+
 log "docker compose up -d --build --remove-orphans"
 if ! docker compose up -d --build --remove-orphans >>"$LOG_FILE" 2>&1; then
-  write_status "ERROR" "docker compose up failed — see /opt/kryptalis/.kryptalis/update.log" "$LATEST" "$LATEST"
-  trim_log
-  exit 1
+  # Second-chance: force-recreate. Handles the rare case where a healthy
+  # container is left dangling and the normal up bails on the conflict.
+  log "first attempt failed — retrying with --force-recreate"
+  if ! docker compose up -d --build --force-recreate --remove-orphans >>"$LOG_FILE" 2>&1; then
+    write_status "ERROR" "docker compose up failed — see /opt/kryptalis/.kryptalis/update.log" "$LATEST" "$LATEST"
+    trim_log
+    exit 1
+  fi
 fi
 
 write_status "UP_TO_DATE" "Updated successfully to $LATEST" "$LATEST" "$LATEST"
