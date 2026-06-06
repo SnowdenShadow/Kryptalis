@@ -331,13 +331,13 @@ ${email ? `  email ${email}\n` : ''}}
     // container can't add new listening sockets to the host.
     if (portsChanged) {
       this.logger.log(`Caddy port set changed — recreating container`);
-      // We can't run `docker compose -f /opt/kryptalis/docker-compose.yml`
-      // from inside the API container because the compose file lives on the
-      // host filesystem (not in /app/). Trick: spawn an ephemeral
-      // `docker:cli` container with the install root bind-mounted; THAT
-      // container has the file at /repo and can run compose against the
-      // host's docker daemon via the shared socket.
+      // The Caddy container already exists from the root `docker compose up`,
+      // and compose can't replace a running container from inside an
+      // ephemeral helper. Tear it down explicitly with `rm -f`, THEN bring
+      // it back via compose so the new ports take effect. We keep Caddy's
+      // data volume (`caddy_data`) so LE certs survive.
       try {
+        await execFileAsync('docker', ['rm', '-f', CONTAINER_NAME], { timeout: 30_000 }).catch(() => {});
         await execFileAsync(
           'docker',
           [
@@ -347,14 +347,17 @@ ${email ? `  email ${email}\n` : ''}}
             '-w', '/repo',
             'docker:cli',
             'sh', '-c',
-            'docker compose -f docker-compose.yml -f docker-compose.override.yml up -d caddy',
+            // Use compose's --project-name so the existing project's network
+            // (kryptalis_default) is reused instead of docker complaining
+            // that "a network with name X exists but was not created for
+            // project repo".
+            'docker compose -p kryptalis -f docker-compose.yml -f docker-compose.override.yml up -d caddy',
           ],
           { timeout: 120_000 },
         );
         this.logger.log(`Caddy recreated — ${activeCount} active, ${reservedCount} reserved`);
       } catch (e: any) {
-        this.logger.warn(`compose up failed (${e?.message}); restarting Caddy container`);
-        try { await execFileAsync('docker', ['restart', CONTAINER_NAME], { timeout: 30_000 }); } catch {}
+        this.logger.error(`Caddy recreate failed (${e?.message})`);
       }
     } else {
       // Same port set — graceful reload is enough. Way faster (no downtime).
