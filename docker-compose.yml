@@ -60,6 +60,12 @@ services:
       - ./.kryptalis/reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      # default network (postgres/redis/api/dashboard) AND kryptalis-apps so
+      # Caddy can reach any container the API deploys via container_name —
+      # the basis for HTTPS-on-custom-port (no host port collision).
+      - default
+      - kryptalis-apps
 
   api:
     build:
@@ -126,6 +132,16 @@ services:
       - "3000:3000"
     depends_on:
       - api
+
+networks:
+  # default — postgres/redis/api/dashboard talk to each other here.
+  # kryptalis-apps — shared bridge that Caddy also joins. User apps the API
+  #   deploys attach to it via `external: true`, which lets Caddy proxy by
+  #   container_name (so we don't need host port publish on app containers
+  #   and can serve HTTPS with a Let's Encrypt cert on any custom port).
+  kryptalis-apps:
+    name: kryptalis-apps
+    driver: bridge
 
 volumes:
   postgres_data:

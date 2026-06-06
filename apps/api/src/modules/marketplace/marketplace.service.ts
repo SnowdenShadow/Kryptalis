@@ -18,30 +18,33 @@ export interface MarketplaceApp {
   category: string;
   icon: string;
   version: string;
+  /** Default host ports the template publishes. Index 0 is the canonical one. */
   ports: number[];
+  /** Internal port the container actually listens on. Caddy proxies here. */
+  containerPort: number;
 }
 
 const APPS: MarketplaceApp[] = [
-  { id: '1', name: 'Portainer', slug: 'portainer', description: 'Container management UI', category: 'DevOps', icon: 'container', version: '2.21', ports: [9443] },
-  { id: '2', name: 'Grafana', slug: 'grafana', description: 'Observability dashboards', category: 'DevOps', icon: 'chart', version: '11.0', ports: [3001] },
-  { id: '3', name: 'Uptime Kuma', slug: 'uptime-kuma', description: 'Self-hosted monitoring tool', category: 'DevOps', icon: 'heartbeat', version: '1.23', ports: [3002] },
-  { id: '4', name: 'n8n', slug: 'n8n', description: 'Workflow automation', category: 'Automation', icon: 'workflow', version: '1.64', ports: [5678] },
-  { id: '5', name: 'Supabase', slug: 'supabase', description: 'Open-source Firebase alternative', category: 'Backend', icon: 'lightning', version: '2.0', ports: [3003] },
-  { id: '6', name: 'WordPress', slug: 'wordpress', description: 'Popular CMS', category: 'CMS', icon: 'edit', version: '6.6', ports: [8080] },
-  { id: '7', name: 'Ghost', slug: 'ghost', description: 'Publishing platform', category: 'CMS', icon: 'ghost', version: '5.94', ports: [2368] },
-  { id: '8', name: 'MinIO', slug: 'minio', description: 'S3-compatible object storage', category: 'Storage', icon: 'bucket', version: '2024', ports: [9001] },
-  { id: '9', name: 'Nextcloud', slug: 'nextcloud', description: 'File hosting platform', category: 'Storage', icon: 'cloud', version: '29', ports: [8081] },
-  { id: '10', name: 'PostgreSQL', slug: 'postgresql', description: 'Relational database', category: 'Databases', icon: 'database', version: '16', ports: [5433] },
-  { id: '11', name: 'Redis', slug: 'redis', description: 'In-memory data store', category: 'Databases', icon: 'zap', version: '7.4', ports: [6380] },
-  { id: '12', name: 'Appwrite', slug: 'appwrite', description: 'Backend-as-a-Service', category: 'Backend', icon: 'server', version: '1.6', ports: [8082] },
+  { id: '1', name: 'Portainer', slug: 'portainer', description: 'Container management UI', category: 'DevOps', icon: 'container', version: '2.21', ports: [9443], containerPort: 9443 },
+  { id: '2', name: 'Grafana', slug: 'grafana', description: 'Observability dashboards', category: 'DevOps', icon: 'chart', version: '11.0', ports: [3001], containerPort: 3000 },
+  { id: '3', name: 'Uptime Kuma', slug: 'uptime-kuma', description: 'Self-hosted monitoring tool', category: 'DevOps', icon: 'heartbeat', version: '1.23', ports: [3002], containerPort: 3001 },
+  { id: '4', name: 'n8n', slug: 'n8n', description: 'Workflow automation', category: 'Automation', icon: 'workflow', version: '1.64', ports: [5678], containerPort: 5678 },
+  { id: '5', name: 'Supabase', slug: 'supabase', description: 'Open-source Firebase alternative', category: 'Backend', icon: 'lightning', version: '2.0', ports: [3003], containerPort: 3000 },
+  { id: '6', name: 'WordPress', slug: 'wordpress', description: 'Popular CMS', category: 'CMS', icon: 'edit', version: '6.6', ports: [8080], containerPort: 80 },
+  { id: '7', name: 'Ghost', slug: 'ghost', description: 'Publishing platform', category: 'CMS', icon: 'ghost', version: '5.94', ports: [2368], containerPort: 2368 },
+  { id: '8', name: 'MinIO', slug: 'minio', description: 'S3-compatible object storage', category: 'Storage', icon: 'bucket', version: '2024', ports: [9001], containerPort: 9001 },
+  { id: '9', name: 'Nextcloud', slug: 'nextcloud', description: 'File hosting platform', category: 'Storage', icon: 'cloud', version: '29', ports: [8081], containerPort: 80 },
+  { id: '10', name: 'PostgreSQL', slug: 'postgresql', description: 'Relational database', category: 'Databases', icon: 'database', version: '16', ports: [5433], containerPort: 5432 },
+  { id: '11', name: 'Redis', slug: 'redis', description: 'In-memory data store', category: 'Databases', icon: 'zap', version: '7.4', ports: [6380], containerPort: 6379 },
+  { id: '12', name: 'Appwrite', slug: 'appwrite', description: 'Backend-as-a-Service', category: 'Backend', icon: 'server', version: '1.6', ports: [8082], containerPort: 80 },
 
   // ── Email & webmail ─────────────────────────────────────────────
-  { id: '13', name: 'Roundcube', slug: 'roundcube', description: 'Polished IMAP webmail client', category: 'Email', icon: 'mail', version: '1.6', ports: [8083] },
-  { id: '14', name: 'SnappyMail', slug: 'snappymail', description: 'Modern lightweight webmail (Rainloop successor)', category: 'Email', icon: 'mail-check', version: '2.36', ports: [8084] },
-  { id: '15', name: 'Rainloop', slug: 'rainloop', description: 'Legacy webmail client (read-only fork)', category: 'Email', icon: 'inbox', version: '1.16', ports: [8085] },
-  { id: '16', name: 'Mailpit', slug: 'mailpit', description: 'SMTP testing tool with web UI — catches outgoing mail in dev', category: 'Email', icon: 'send', version: '1.20', ports: [8086, 1025] },
-  { id: '17', name: 'Postal', slug: 'postal', description: 'Modern SMTP server alternative for transactional mail', category: 'Email', icon: 'server-cog', version: '3.0', ports: [8087] },
-  { id: '18', name: 'Mailu', slug: 'mailu', description: 'Mail server admin panel — manage mailboxes & aliases', category: 'Email', icon: 'shield-mail', version: '2024.06', ports: [8088] },
+  { id: '13', name: 'Roundcube', slug: 'roundcube', description: 'Polished IMAP webmail client', category: 'Email', icon: 'mail', version: '1.6', ports: [8083], containerPort: 80 },
+  { id: '14', name: 'SnappyMail', slug: 'snappymail', description: 'Modern lightweight webmail (Rainloop successor)', category: 'Email', icon: 'mail-check', version: '2.36', ports: [8084], containerPort: 8888 },
+  { id: '15', name: 'Rainloop', slug: 'rainloop', description: 'Legacy webmail client (read-only fork)', category: 'Email', icon: 'inbox', version: '1.16', ports: [8085], containerPort: 8888 },
+  { id: '16', name: 'Mailpit', slug: 'mailpit', description: 'SMTP testing tool with web UI — catches outgoing mail in dev', category: 'Email', icon: 'send', version: '1.20', ports: [8086, 1025], containerPort: 8025 },
+  { id: '17', name: 'Postal', slug: 'postal', description: 'Modern SMTP server alternative for transactional mail', category: 'Email', icon: 'server-cog', version: '3.0', ports: [8087], containerPort: 5000 },
+  { id: '18', name: 'Mailu', slug: 'mailu', description: 'Mail server admin panel — manage mailboxes & aliases', category: 'Email', icon: 'shield-mail', version: '2024.06', ports: [8088], containerPort: 8080 },
 ];
 
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
@@ -197,16 +200,42 @@ export class MarketplaceService {
         status: 'DEPLOYING',
         port: realPort,
         customPort,
+        containerPort: app.containerPort,
       },
     });
 
-    // Substitute per-instance tokens AFTER we know the applicationId. Each
-    // install gets a unique container_name, host port, and volume namespace
-    // so multiple instances of the same image can coexist on one host.
     const instanceId = application.id.slice(0, 12);
+    const containerName = this.computeContainerName(data.appSlug, instanceId, app.name);
+    await this.prisma.application.update({
+      where: { id: application.id },
+      data: { containerName },
+    });
+
     composeContent = composeContent
       .replace(/__INSTANCE_ID__/g, instanceId)
       .replace(/__HOST_PORT__/g, String(realPort));
+
+    // Apps that get a port-pinned binding don't need to publish their port
+    // on the host — Caddy publishes it instead and proxies via the shared
+    // network. Stripping the ports: block prevents the "port already
+    // allocated" conflict the user hit before.
+    if (customPort) {
+      composeContent = this.stripHostPortPublish(composeContent, realPort);
+    }
+    // Always attach to the kryptalis-apps network so Caddy can reach the
+    // container by name. Idempotent — adding the network twice is a no-op.
+    composeContent = this.attachToCaddyNetwork(composeContent);
+
+    // Apps that get a port-pinned binding don't need to publish their port
+    // on the host — Caddy publishes it instead and proxies via the shared
+    // network. Stripping the ports: block prevents the "port already
+    // allocated" conflict the user hit before.
+    if (customPort) {
+      composeContent = this.stripHostPortPublish(composeContent, realPort);
+    }
+    // Always attach to the kryptalis-apps network so Caddy can reach the
+    // container by name. Idempotent — adding the network twice is a no-op.
+    composeContent = this.attachToCaddyNetwork(composeContent);
 
     if (data.domainId) {
       await this.domainAttach.attach({
@@ -266,6 +295,92 @@ export class MarketplaceService {
         await execAsync('docker compose down -v', { cwd: appDir });
       } catch {}
     }
+  }
+
+  /**
+   * Compute the container_name a template will pick at install time. Mirrors
+   * the `container_name: kryptalis-<slug>-__INSTANCE_ID__` convention used by
+   * every template in templates.ts. We need this BEFORE the compose file
+   * is written so we can persist it on the Application row — Caddy reads
+   * the row to know where to proxy.
+   */
+  private computeContainerName(slug: string, instanceId: string, _appName: string): string {
+    // Match the canonical template names. Slugs like 'uptime-kuma' are kept
+    // verbatim; the underlying templates use the same form.
+    const stem = slug === 'redis' ? 'redis-app' : slug;
+    return `kryptalis-${stem}-${instanceId}`;
+  }
+
+  /**
+   * Remove the host-side `ports:` block of the primary service so the
+   * container only listens internally on the shared docker network. Caddy
+   * publishes <hostPort>:<containerPort> on the host instead and proxies
+   * via container_name, which is the only way to get a Let's Encrypt cert
+   * on a custom port without a port-already-allocated collision.
+   *
+   * This is a deliberately permissive YAML-aware strip — it only nukes the
+   * first `ports:` section whose first item contains the host port we
+   * picked. Secondary services (Wordpress's MariaDB, Postal's RabbitMQ,
+   * etc.) keep their ports because the main service's host port is what
+   * we identify.
+   */
+  private stripHostPortPublish(compose: string, hostPort: number): string {
+    const lines = compose.split('\n');
+    const out: string[] = [];
+    let i = 0;
+    let removed = false;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!removed && /^\s{4}ports:\s*$/.test(line)) {
+        // Peek into the items — only strip if hostPort appears in any of them.
+        let j = i + 1;
+        const blockEnd = (() => {
+          let k = j;
+          while (k < lines.length && /^\s{6}-/.test(lines[k])) k++;
+          return k;
+        })();
+        const block = lines.slice(j, blockEnd).join('\n');
+        if (block.includes(`"${hostPort}:`) || block.includes(`${hostPort}:`)) {
+          i = blockEnd;
+          removed = true;
+          continue;
+        }
+      }
+      out.push(line);
+      i++;
+    }
+    return out.join('\n');
+  }
+
+  /**
+   * Attach the primary service to the kryptalis-apps external network so
+   * Caddy can reach it by container_name. Adds the networks: declaration
+   * at the top-level AND in the service block. Idempotent.
+   */
+  private attachToCaddyNetwork(compose: string): string {
+    let result = compose;
+    // Top-level networks block.
+    if (!/^networks:/m.test(result)) {
+      result += `\nnetworks:\n  kryptalis-apps:\n    external: true\n`;
+    } else if (!/kryptalis-apps:/.test(result)) {
+      result = result.replace(
+        /^networks:\s*\n/m,
+        `networks:\n  kryptalis-apps:\n    external: true\n`,
+      );
+    }
+    // Service-level networks list — attach to the FIRST service only. Pattern:
+    // services:
+    //   <name>:
+    //     image: ...
+    //     ...    ← we inject `    networks:\n      - kryptalis-apps\n` after the
+    //              first service block's leading "    image:" line.
+    if (!/^\s{4}networks:\s*\n\s{6}-\s*kryptalis-apps\s*$/m.test(result)) {
+      result = result.replace(
+        /(^\s{4}image:[^\n]+\n)/m,
+        `$1    networks:\n      - kryptalis-apps\n`,
+      );
+    }
+    return result;
   }
 
   /** True when no running container holds this host port. */
@@ -395,14 +510,26 @@ export class MarketplaceService {
         status: 'DEPLOYING',
         port: hostPort,
         customPort: !!data.hostPort,
+        containerPort: data.containerPort,
         envVars: (data.envVars || {}) as any,
       },
     });
 
     const instanceId = application.id.slice(0, 12);
+    const containerName = `kryptalis-custom-${instanceId}`;
+    await this.prisma.application.update({
+      where: { id: application.id },
+      data: { containerName },
+    });
+
     composeContent = composeContent
       .replace(/__INSTANCE_ID__/g, instanceId)
       .replace(/__HOST_PORT__/g, String(hostPort));
+
+    if (!!data.hostPort) {
+      composeContent = this.stripHostPortPublish(composeContent, hostPort);
+    }
+    composeContent = this.attachToCaddyNetwork(composeContent);
 
     if (data.domainId) {
       await this.domainAttach.attach({

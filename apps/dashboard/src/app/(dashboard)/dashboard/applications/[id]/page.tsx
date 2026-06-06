@@ -207,8 +207,8 @@ function publicUrls(
 ): string[] {
   const urls: string[] = [];
   for (const d of app.domains || []) {
-    // When customPort=true on a clean-URL domain, Caddy 308-redirects to the
-    // port-pinned URL — show that as the canonical address.
+    // Caddy proxies every port now (own port publish, container_name target).
+    // Both clean URL and port-pinned URL get the same Let's Encrypt cert.
     urls.push(app.customPort && app.port
       ? `https://${d.domain}:${app.port}`
       : `https://${d.domain}`);
@@ -1407,7 +1407,7 @@ export default function ApplicationDetailPage() {
                       <div>
                         <p className="font-medium text-sm">Port-pinned URL</p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          <span className="font-mono">https://{app.domains[0].domain}:{app.port}</span> — Caddy proxies this port too, same Let's Encrypt cert as :443. Useful when you want the port in the URL (e.g. {app.port} for Portainer).
+                          <span className="font-mono">https://{app.domains[0].domain}:{app.port}</span> — Caddy publishes this port and proxies to the container with the same Let's Encrypt cert. Useful for the canonical Portainer/Grafana ports.
                         </p>
                       </div>
                       {app.customPort && <Check size={16} className="text-primary shrink-0 mt-0.5" />}
@@ -1495,7 +1495,7 @@ export default function ApplicationDetailPage() {
                   </Button>
                 </div>
                 <p className="text-[10px] text-muted-foreground">
-                  Caddy proxies the port (Let's Encrypt cert valid). Adding a binding restarts Caddy briefly (~5s downtime).
+                  Caddy publishes the port and proxies to the container over the shared docker network. Same Let's Encrypt cert as :443. Adding a binding restarts Caddy briefly (~5s).
                 </p>
               </CardContent>
             </Card>

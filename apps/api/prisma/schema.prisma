@@ -206,6 +206,14 @@ model Application {
   // routes traffic to https://<domain>:<port> instead of https://<domain>
   // when this is set, so the user-picked port shows up in the final URL.
   customPort        Boolean         @default(false)
+  // Internal container port — what the app actually listens on inside its
+  // Docker container (e.g. 80 for nginx, 5000 for a Flask app, 9443 for
+  // Portainer). When `containerName` + `containerPort` are set, Caddy
+  // reverse_proxies to <containerName>:<containerPort> over the shared
+  // docker network — no host-side port publish needed, so multiple custom
+  // ports + Let's Encrypt certs work.
+  containerName     String?
+  containerPort     Int?
   envVars           Json?
   portMapping       Json?
   webhookSecret     String?

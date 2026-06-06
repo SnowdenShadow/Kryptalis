@@ -145,9 +145,18 @@ ${email ? `  email ${email}\n` : ''}}
     // in advance (the user gets a green padlock the moment they wire it to an app).
     const allDomains = await this.prisma.domain.findMany({
       include: {
-        application: { select: { id: true, name: true, port: true, customPort: true } },
+        application: {
+          select: {
+            id: true, name: true, port: true, customPort: true,
+            containerName: true, containerPort: true,
+          },
+        },
         portBindings: {
-          include: { application: { select: { id: true, name: true } } },
+          include: {
+            application: {
+              select: { id: true, name: true, containerName: true, containerPort: true },
+            },
+          },
         },
       },
     });
@@ -189,12 +198,33 @@ ${email ? `  email ${email}\n` : ''}}
     let reservedCount = 0;
     const newStatusByDomainId: Record<string, 'ACTIVE' | 'PENDING'> = {};
 
-    const proxyFor = (appName: string, port: number): string => {
+    /**
+     * Build the reverse_proxy directive for an app.
+     *
+     * Preferred path: when we know the container_name + the internal port
+     * the container listens on, proxy directly over the shared docker
+     * network. Lets Caddy publish the host port without colliding with the
+     * container's own port publish — that's how HTTPS-on-custom-port works.
+     *
+     * Fallback: legacy apps that don't have containerName/containerPort
+     * stored yet (deployed before the schema bump) keep hitting
+     * host.docker.internal:<hostPort>. Works for clean URLs on :443 but
+     * breaks when the user also wants HTTPS on a custom port — they need
+     * to redeploy from the marketplace to migrate.
+     */
+    const proxyFor = (
+      app: { name: string; containerName?: string | null; containerPort?: number | null },
+      hostPort: number,
+    ): string => {
+      const target = app.containerName && app.containerPort
+        ? `${app.containerName}:${app.containerPort}`
+        : `host.docker.internal:${hostPort}`;
+      const targetPortForHttpsHint = app.containerPort || hostPort;
       const upstreamHttps =
-        HTTPS_UPSTREAM_APP_NAMES.has(appName) || HTTPS_UPSTREAM_PORTS.has(port);
+        HTTPS_UPSTREAM_APP_NAMES.has(app.name) || HTTPS_UPSTREAM_PORTS.has(targetPortForHttpsHint);
       return upstreamHttps
-        ? `  reverse_proxy https://host.docker.internal:${port} {\n    transport http {\n      tls\n      tls_insecure_skip_verify\n    }\n  }`
-        : `  reverse_proxy host.docker.internal:${port}`;
+        ? `  reverse_proxy https://${target} {\n    transport http {\n      tls\n      tls_insecure_skip_verify\n    }\n  }`
+        : `  reverse_proxy ${target}`;
     };
 
     for (const d of allDomains) {
@@ -204,22 +234,19 @@ ${email ? `  email ${email}\n` : ''}}
       // Main app on :443 (clean-URL slot). Tracked via Domain.applicationId.
       const mainPort = d.application?.port ?? null;
       const mainLinked = !!d.applicationId && !!mainPort;
-      const mainAppName = d.application?.name || '';
+      const mainApp = d.application;
 
-      // Custom-port apps co-hosted on the same hostname. Each one publishes
-      // its own port on the Docker host (Caddy can't bind these from inside
-      // a container, so traffic hits the container directly — its own cert).
+      // Port-pinned apps. Caddy publishes their port on the host (override
+      // file) and proxies via the shared docker network.
       const portBindings = (d.portBindings || []).filter((b) => !!b.port);
 
       // ── :443 block ────────────────────────────────────────────────
       if (isLocal) {
-        blocks.push(`# ${host} :80 → ${mainLinked ? `app ${mainAppName} (port ${mainPort})` : 'reserved'}`);
+        blocks.push(`# ${host} :80 → ${mainLinked ? `app ${mainApp!.name} (host port ${mainPort})` : 'reserved'}`);
         blocks.push(`http://${host} {`);
         if (mainLinked) {
-          blocks.push(proxyFor(mainAppName, mainPort!));
+          blocks.push(proxyFor(mainApp!, mainPort!));
         } else if (portBindings.length > 0) {
-          // No clean-URL app, but port-bound apps exist → 308 to the first one
-          // so https://host doesn't 503 when at least one app IS reachable.
           const first = portBindings[0];
           blocks.push(`  respond "Open https://${host}:${first.port} for ${first.application.name}." 200`);
         } else {
@@ -227,14 +254,11 @@ ${email ? `  email ${email}\n` : ''}}
         }
         blocks.push(`}`);
       } else {
-        // Real domain — Caddy always binds :443 and auto-provisions LE.
-        blocks.push(`# ${host} :443 → ${mainLinked ? `app ${mainAppName} (port ${mainPort})` : (portBindings.length > 0 ? 'redirect to port-bound apps' : 'reserved')}`);
+        blocks.push(`# ${host} :443 → ${mainLinked ? `app ${mainApp!.name} (host port ${mainPort})` : (portBindings.length > 0 ? 'redirect to port-bound apps' : 'reserved')}`);
         blocks.push(`${host} {`);
         if (mainLinked) {
-          blocks.push(proxyFor(mainAppName, mainPort!));
+          blocks.push(proxyFor(mainApp!, mainPort!));
         } else if (portBindings.length > 0) {
-          // No main app, but port-bound apps exist → 308 to the first one.
-          // User can pick a different default with the "Public URL" toggle.
           const first = portBindings[0];
           blocks.push(`  redir https://${host}:${first.port}{uri} 308`);
         } else {
@@ -245,16 +269,16 @@ ${email ? `  email ${email}\n` : ''}}
       blocks.push('');
 
       // ── one site block per port binding ─────────────────────────
-      // Caddy CAN serve these now: we publish each unique port on the Caddy
-      // container via docker-compose.override.yml (written further down).
-      // The HTTP-01 challenge for the LE cert flows through :80 (always
-      // bound), so the cert is valid for <host> on every port we listen on.
+      // Caddy CAN proxy port-pinned apps now: the app's container no
+      // longer publishes its host port (the marketplace install strips
+      // it). Caddy publishes the port via docker-compose.override.yml and
+      // reverse-proxies via the kryptalis-apps network using container_name.
+      // The HTTP-01 challenge for LE flows through :80 (always bound), so
+      // the cert is valid on every port we listen on for this host.
       for (const b of portBindings) {
-        const appName = b.application.name;
-        const portProxy = proxyFor(appName, b.port);
-        blocks.push(`# ${host}:${b.port} → app ${appName}`);
+        blocks.push(`# ${host}:${b.port} → app ${b.application.name}`);
         blocks.push(`https://${host}:${b.port} {`);
-        blocks.push(portProxy);
+        blocks.push(proxyFor(b.application, b.port));
         blocks.push(`}`);
         blocks.push('');
       }
@@ -290,10 +314,10 @@ ${email ? `  email ${email}\n` : ''}}
     const caddyfile = blocks.join('\n');
     fs.writeFileSync(path.join(PROXY_DIR, 'Caddyfile'), caddyfile);
 
-    // Collect every port we want Caddy to listen on (port-pinned bindings).
-    // We always keep 80/443 in the root compose, so the override only adds
-    // EXTRAS. Each port is unique even if multiple domains bind to it —
-    // Caddy uses Host SNI to route the right site block.
+    // Collect every port we want Caddy to publish on the host so port-pinned
+    // bindings answer in HTTPS with a real LE cert. The app containers no
+    // longer publish their host port (the marketplace install strips it), so
+    // there's no collision with Caddy.
     const extraPorts = new Set<number>();
     for (const d of allDomains) {
       for (const b of d.portBindings || []) {
@@ -307,16 +331,28 @@ ${email ? `  email ${email}\n` : ''}}
     // container can't add new listening sockets to the host.
     if (portsChanged) {
       this.logger.log(`Caddy port set changed — recreating container`);
+      // We can't run `docker compose -f /opt/kryptalis/docker-compose.yml`
+      // from inside the API container because the compose file lives on the
+      // host filesystem (not in /app/). Trick: spawn an ephemeral
+      // `docker:cli` container with the install root bind-mounted; THAT
+      // container has the file at /repo and can run compose against the
+      // host's docker daemon via the shared socket.
       try {
         await execFileAsync(
           'docker',
-          ['compose', '-f', `${INSTALL_ROOT_HOST}/docker-compose.yml`, '-f', `${INSTALL_ROOT_HOST}/docker-compose.override.yml`, 'up', '-d', 'caddy'],
-          { timeout: 60_000, cwd: INSTALL_ROOT_HOST },
+          [
+            'run', '--rm',
+            '-v', `${INSTALL_ROOT_HOST}:/repo`,
+            '-v', '/var/run/docker.sock:/var/run/docker.sock',
+            '-w', '/repo',
+            'docker:cli',
+            'sh', '-c',
+            'docker compose -f docker-compose.yml -f docker-compose.override.yml up -d caddy',
+          ],
+          { timeout: 120_000 },
         );
         this.logger.log(`Caddy recreated — ${activeCount} active, ${reservedCount} reserved`);
       } catch (e: any) {
-        // Fall back to a hard restart if compose isn't reachable from inside
-        // the container (the user can also re-run install.sh to pick it up).
         this.logger.warn(`compose up failed (${e?.message}); restarting Caddy container`);
         try { await execFileAsync('docker', ['restart', CONTAINER_NAME], { timeout: 30_000 }); } catch {}
       }
