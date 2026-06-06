@@ -18,6 +18,18 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {/*
+          Read the saved locale BEFORE React boots so <html lang> is correct
+          on first paint. Avoids the EN→FR flash on hydration. Inline + sync
+          on purpose — runs before any client component renders.
+        */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var l=localStorage.getItem('kryptalis-lang');if(l==='fr'||l==='en'){document.documentElement.lang=l;}}catch(e){}})();`,
+          }}
+        />
+      </head>
       <body className={`${inter.variable} antialiased`}>
         <Providers>
           {children}

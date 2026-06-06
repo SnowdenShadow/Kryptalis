@@ -17,16 +17,28 @@ const I18nContext = createContext<I18nContextType>({
   t: (key) => key,
 });
 
+/**
+ * Read the user's saved locale BEFORE the first render. localStorage is
+ * client-only, so SSR still gets 'en' — but a tiny inline `<script>` in the
+ * root layout already set document.documentElement.lang before React boots,
+ * and on the client we lazy-init useState from localStorage so the very
+ * first hydrated render uses the right strings. No EN→FR flash.
+ */
+function initialLocale(): Locale {
+  if (typeof window === 'undefined') return 'en';
+  try {
+    const saved = localStorage.getItem('kryptalis-lang') as Locale | null;
+    if (saved && translations[saved]) return saved;
+  } catch {}
+  return 'en';
+}
+
 export function I18nProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<Locale>('en');
+  const [locale, setLocaleState] = useState<Locale>(initialLocale);
 
   useEffect(() => {
-    const saved = localStorage.getItem('kryptalis-lang') as Locale | null;
-    if (saved && translations[saved]) {
-      setLocaleState(saved);
-      document.documentElement.lang = saved;
-    }
-  }, []);
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   const setLocale = useCallback((newLocale: Locale) => {
     setLocaleState(newLocale);
