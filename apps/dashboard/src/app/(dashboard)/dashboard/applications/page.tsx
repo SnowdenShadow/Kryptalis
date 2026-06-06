@@ -480,6 +480,14 @@ export default function ApplicationsPage() {
     }
     if (Object.keys(env).length) body.envVars = env;
 
+    // Inline domain attach — picking an existing domain goes through the
+    // backend create endpoint which calls DomainAttachService (same conflict
+    // rules as marketplace). Creating a NEW domain still needs a follow-up
+    // request because the domain row doesn't exist yet.
+    if (deployDomainId && deployDomainId !== '__new__') {
+      body.domainId = deployDomainId;
+    }
+
     createMutation.mutate(body, {
       onSuccess: async (created: any) => {
         if (!created?.id) return;
@@ -493,14 +501,11 @@ export default function ApplicationsPage() {
               autoSsl: true,
             });
             toast.success(`Domain ${newDomainName} reserved — point its A record at the server IP.`);
-          } else if (deployDomainId && deployDomainId !== '__new__') {
-            await api.patch(`/domains/${deployDomainId}`, { applicationId: created.id });
           }
           setNewDomainName('');
           setDeployDomainId('');
         } catch (err: any) {
-          // App is deployed anyway — the domain step is a soft failure.
-          toast.error(`App deployed, but domain attach failed: ${err.message}`);
+          toast.error(`App created, but domain attach failed: ${err.message}`);
         }
       },
     });
@@ -1326,7 +1331,8 @@ export default function ApplicationsPage() {
               )}
             </div>
 
-            {/* Domain section — pick an existing reserved domain OR type a new one inline */}
+            {/* Domain section — every domain shows up; backend rules decide
+                whether the app takes :443 or a custom port. */}
             <div className="space-y-2">
               <Label>Domain (optional)</Label>
               <Select value={deployDomainId} onChange={(e) => {
@@ -1334,8 +1340,10 @@ export default function ApplicationsPage() {
                 if (e.target.value !== '__new__') setNewDomainName('');
               }}>
                 <option value="">No domain</option>
-                {availableDomains.filter((d: any) => !d.applicationId).map((d: any) => (
-                  <option key={d.id} value={d.id}>{d.domain}</option>
+                {availableDomains.map((d: any) => (
+                  <option key={d.id} value={d.id}>
+                    {d.domain}{d.applicationId ? ' (main :443 used — will bind on the app port)' : ''}
+                  </option>
                 ))}
                 <option value="__new__">+ Add a new domain…</option>
               </Select>
@@ -1347,13 +1355,13 @@ export default function ApplicationsPage() {
                     onChange={(e) => setNewDomainName(e.target.value.trim().toLowerCase())}
                   />
                   <p className="text-xs text-muted-foreground">
-                    The domain will be created and auto-linked to this app. Point its A record at the server IP after deploy.
+                    The domain will be created and auto-linked. Point its A record at the server IP after deploy.
                   </p>
                 </div>
               )}
               {deployDomainId !== '__new__' && (
                 <p className="text-xs text-muted-foreground">
-                  Pick a reserved domain or add a new one. <Link href="/dashboard/domains" className="text-primary hover:underline">Manage domains</Link>
+                  Picking a domain that already serves another app on :443 will bind this one on its custom port instead. <Link href="/dashboard/domains" className="text-primary hover:underline">Manage domains</Link>
                 </p>
               )}
             </div>

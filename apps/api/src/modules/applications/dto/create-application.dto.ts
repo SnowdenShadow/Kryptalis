@@ -89,4 +89,14 @@ export class CreateApplicationDto {
   @IsOptional()
   @IsObject()
   portMapping?: Record<string, number>;
+
+  /**
+   * Optional: attach the new app to this domain right after create. Goes
+   * through DomainAttachService so multi-app-per-domain rules apply the
+   * same way they do for marketplace installs.
+   */
+  @ApiProperty({ required: false, description: 'Domain to attach the app to once created' })
+  @IsOptional()
+  @IsString()
+  domainId?: string;
 }

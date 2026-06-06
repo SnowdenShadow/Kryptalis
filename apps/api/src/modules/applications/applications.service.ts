@@ -6,6 +6,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { DomainAttachService } from '../domains/domain-attach.service';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { UpdateApplicationDto } from './dto/update-application.dto';
 import { AppStatus, DeploymentStatus } from '@prisma/client';
@@ -240,6 +241,7 @@ export class ApplicationsService {
     private prisma: PrismaService,
     private proxy: ReverseProxyService,
     private agent: AgentService,
+    private domainAttach: DomainAttachService,
   ) {}
 
   /**
@@ -295,6 +297,7 @@ export class ApplicationsService {
       composeOverride,
       dockerfileOverride,
       portMapping,
+      domainId,
       ...dbData
     } = dto;
 
@@ -320,6 +323,31 @@ export class ApplicationsService {
         webhookSecret: crypto.randomBytes(24).toString('hex'),
       },
     });
+
+    // Hook the new app into a domain if one was picked. Same rules as the
+    // marketplace flow: clean-URL apps grab the :443 slot, port-pinned apps
+    // register a port binding, conflicts surface uniformly.
+    if (domainId) {
+      try {
+        await this.domainAttach.attach({
+          applicationId: app.id,
+          domainId,
+          projectId: dto.projectId,
+          customPort: userPickedPort,
+          port: app.port ?? 80,
+        });
+        this.proxy.regenerate().catch(() => {});
+      } catch (err: any) {
+        // Domain attach failed (conflict, etc.) — the app is created anyway,
+        // and the deploy continues. The error surfaces in the deploy logs so
+        // the user can fix it from the app's Settings tab.
+        await this.prisma.application.update({
+          where: { id: app.id },
+          data: { status: 'ERROR' },
+        });
+        throw err;
+      }
+    }
 
     // resolve auth url WITHOUT persisting token in url
     let cloneUrl: string | undefined = dto.gitUrl || undefined;
@@ -1181,37 +1209,23 @@ export class ApplicationsService {
 
   /**
    * Add a (domain, port) → this app binding. Lets the user co-host this app
-   * on a domain that already serves another app on a different port. The
-   * (domainId, port) tuple is unique — same domain + same port can't go to
-   * two apps.
+   * on a domain that already serves another app on a different port. Delegates
+   * to DomainAttachService so the conflict rules stay consistent with what
+   * the marketplace / git-deploy use.
    */
   async addPortBinding(userId: string, appId: string, domainId: string, port: number) {
-    await this.assertOwnership(userId, appId);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      throw new BadRequestException('port must be 1-65535');
-    }
-    const domain = await this.prisma.domain.findUnique({
-      where: { id: domainId },
-      include: {
-        portBindings: { include: { application: { select: { name: true, projectId: true } } } },
-        application: { select: { name: true, port: true } },
-      },
-    });
-    if (!domain) throw new NotFoundException('Domain not found');
-    // Reject if the (domain, port) is taken — by another binding OR by the
-    // clean-URL app's published port. Caddy can't tell those apart.
-    const occupied = domain.portBindings.find((b) => b.port === port);
-    if (occupied) {
-      throw new ConflictException(`Port ${port} on ${domain.domain} is already used by ${occupied.application.name}`);
-    }
-    if (domain.application && domain.application.port === port) {
-      throw new ConflictException(`Port ${port} is the main app (${domain.application.name})'s port on ${domain.domain}`);
-    }
-    const binding = await this.prisma.domainPortBinding.create({
-      data: { domainId, applicationId: appId, port },
+    const app = await this.assertOwnership(userId, appId);
+    await this.domainAttach.attach({
+      applicationId: appId,
+      domainId,
+      projectId: app.projectId,
+      customPort: true,
+      port,
     });
     this.proxy.regenerate().catch(() => {});
-    return binding;
+    return this.prisma.domainPortBinding.findUnique({
+      where: { domainId_port: { domainId, port } },
+    });
   }
 
   /** Remove one port binding. Ownership check goes through the bound app. */

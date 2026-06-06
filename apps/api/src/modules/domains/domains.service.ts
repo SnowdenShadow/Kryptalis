@@ -15,6 +15,7 @@ import {
 } from '../../common/rbac/project-access';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
+import { DomainAttachService } from './domain-attach.service';
 
 @Injectable()
 export class DomainsService {
@@ -23,6 +24,7 @@ export class DomainsService {
     private proxy: ReverseProxyService,
     @Inject(forwardRef(() => MailServerService))
     private mailServer: MailServerService,
+    private domainAttach: DomainAttachService,
   ) {}
 
   async create(userId: string, dto: CreateDomainDto) {
@@ -144,31 +146,56 @@ export class DomainsService {
     data: { applicationId?: string | null; projectId?: string | null },
   ) {
     await this.assertDomainAccess(userId, id, 'DEVELOPER');
-    const patch: any = {};
+
     if (data.applicationId !== undefined) {
-      patch.applicationId = data.applicationId || null;
-      if (data.applicationId) {
+      if (data.applicationId === null) {
+        // Detaching everything: drop the clean-URL slot AND every port
+        // binding the previous app had on this domain. Goes through the
+        // central service so port bindings actually get cleaned up.
+        const cur = await this.prisma.domain.findUnique({
+          where: { id },
+          select: { applicationId: true },
+        });
+        if (cur?.applicationId) {
+          await this.domainAttach.detachAll(cur.applicationId, id);
+        } else {
+          await this.prisma.domain.update({ where: { id }, data: { applicationId: null } });
+        }
+      } else {
+        // Attaching: route through DomainAttachService so multi-app rules
+        // apply uniformly (same conflict policy as marketplace + git deploy).
         const app = await this.prisma.application.findUnique({
           where: { id: data.applicationId },
-          select: { projectId: true },
+          select: { projectId: true, port: true, customPort: true },
         });
         if (!app) throw new NotFoundException('Target application not found');
         await assertProjectAccess(this.prisma, userId, app.projectId, 'DEVELOPER');
-        // re-attach to the same project as the app
-        patch.projectId = app.projectId;
+        await this.domainAttach.attach({
+          applicationId: data.applicationId,
+          domainId: id,
+          projectId: app.projectId,
+          customPort: !!app.customPort,
+          port: app.port ?? 80,
+        });
+        // also re-home the domain under the app's project for visibility
+        await this.prisma.domain.update({
+          where: { id },
+          data: { projectId: app.projectId },
+        });
       }
     }
+
     if (data.projectId !== undefined && data.applicationId === undefined) {
       if (data.projectId) {
         await assertProjectAccess(this.prisma, userId, data.projectId, 'DEVELOPER');
-        patch.projectId = data.projectId;
+        await this.prisma.domain.update({ where: { id }, data: { projectId: data.projectId } });
       } else {
-        patch.projectId = null;
+        await this.prisma.domain.update({ where: { id }, data: { projectId: null } });
       }
     }
-    const updated = await this.prisma.domain.update({ where: { id }, data: patch });
+
     this.proxy.regenerate().catch(() => {});
-    return updated;
+    return this.prisma.domain.findUnique({ where: { id } });
   }
 
   async remove(userId: string, id: string) {

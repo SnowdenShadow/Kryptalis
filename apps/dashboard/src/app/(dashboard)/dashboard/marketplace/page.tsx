@@ -505,9 +505,10 @@ export default function MarketplacePage() {
 
           {(() => {
             const isWebmail = installApp && ['roundcube', 'snappymail', 'rainloop'].includes(installApp.slug);
+            // Show every domain. Backend decides: if :443 is free → clean
+            // URL; if taken → port-pinned binding. The label hints what
+            // will happen so the user isn't surprised.
             const candidates = allDomains.filter((d: any) => {
-              if (d.applicationId) return false;
-              // webmail clients must point at a domain that already has a mail server
               if (isWebmail && !d.mailServer) return false;
               return true;
             });
@@ -518,7 +519,9 @@ export default function MarketplacePage() {
                   <option value="">{isWebmail ? 'Select a mail server…' : 'No domain'}</option>
                   {candidates.map((d: any) => (
                     <option key={d.id} value={d.id}>
-                      {isWebmail ? `mail.${d.domain}` : d.domain}
+                      {isWebmail
+                        ? `mail.${d.domain}`
+                        : `${d.domain}${d.applicationId ? ' (main :443 used — will bind on the app port)' : ''}`}
                     </option>
                   ))}
                 </Select>
@@ -527,7 +530,7 @@ export default function MarketplacePage() {
                     ? candidates.length === 0
                       ? 'No mail server available — deploy one from a domain page first.'
                       : 'The webmail client will be pre-configured to log in to this mail server.'
-                    : 'Select an existing domain to link, or leave empty.'}
+                    : 'Picking a domain whose :443 is taken will bind this app on its custom port instead.'}
                 </p>
               </div>
             );
@@ -754,8 +757,10 @@ export default function MarketplacePage() {
               onChange={(e) => setCustomForm({ ...customForm, domainId: e.target.value })}
             >
               <option value="">No domain</option>
-              {allDomains.filter((d: any) => !d.applicationId).map((d: any) => (
-                <option key={d.id} value={d.id}>{d.domain}</option>
+              {allDomains.map((d: any) => (
+                <option key={d.id} value={d.id}>
+                  {d.domain}{d.applicationId ? ' (main :443 used — will bind on the app port)' : ''}
+                </option>
               ))}
             </Select>
             <p className="text-[10px] text-muted-foreground">Caddy will route this domain (with HTTPS) to your container.</p>

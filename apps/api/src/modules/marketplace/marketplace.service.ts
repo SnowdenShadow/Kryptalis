@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, ConflictException, BadRequestException }
 import { PrismaService } from '../../prisma/prisma.service';
 import { COMPOSE_TEMPLATES, PORT_MAP, renderCustomComposeTemplate } from './templates';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
+import { DomainAttachService } from '../domains/domain-attach.service';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -56,6 +57,7 @@ export class MarketplaceService {
   constructor(
     private prisma: PrismaService,
     private proxy: ReverseProxyService,
+    private domainAttach: DomainAttachService,
   ) {
     if (!fs.existsSync(APPS_DIR)) {
       fs.mkdirSync(APPS_DIR, { recursive: true });
@@ -207,10 +209,13 @@ export class MarketplaceService {
       .replace(/__HOST_PORT__/g, String(realPort));
 
     if (data.domainId) {
-      await this.attachAppToDomain(application.id, data.domainId, realPort, customPort, data.projectId);
-      // CRITICAL: rewrite Caddyfile so the domain actually routes to the new
-      // app. Without this, the domain is linked in the DB but Caddy keeps
-      // serving the 503 "reserved" placeholder until the next regenerate.
+      await this.domainAttach.attach({
+        applicationId: application.id,
+        domainId: data.domainId,
+        projectId: data.projectId,
+        customPort,
+        port: realPort,
+      });
       this.proxy.regenerate().catch(() => {});
     }
 
@@ -260,64 +265,6 @@ export class MarketplaceService {
       try {
         await execAsync('docker compose down -v', { cwd: appDir });
       } catch {}
-    }
-  }
-
-  /**
-   * Link an app to a domain — clean-URL apps grab the :443 slot
-   * (Domain.applicationId), port-pinned apps register a DomainPortBinding
-   * row instead so they coexist with other apps on the same hostname.
-   *
-   * Conflict policy:
-   *   - same-project conflict on the :443 slot → auto-replace (user is
-   *     clearly swapping the main app)
-   *   - cross-project conflict on the :443 slot → refuse with a clear
-   *     pointer so the original owner can detach
-   *   - port-binding conflict → always refuse (operator must pick another
-   *     port; auto-replacing a port that may be load-bearing is dangerous)
-   */
-  private async attachAppToDomain(
-    applicationId: string,
-    domainId: string,
-    port: number,
-    customPort: boolean,
-    projectId: string,
-  ) {
-    if (customPort) {
-      const existing = await this.prisma.domainPortBinding.findUnique({
-        where: { domainId_port: { domainId, port } },
-        include: { application: { select: { id: true, name: true, projectId: true } } },
-      });
-      if (existing) {
-        if (existing.application.projectId === projectId) {
-          await this.prisma.domainPortBinding.delete({ where: { id: existing.id } });
-        } else {
-          throw new ConflictException(
-            `Port ${port} on this domain is already used by "${existing.application.name}" in another project. Pick a different port.`,
-          );
-        }
-      }
-      await this.prisma.domainPortBinding.create({
-        data: { domainId, applicationId, port },
-      });
-    } else {
-      const domain = await this.prisma.domain.findUnique({
-        where: { id: domainId },
-        include: { application: { select: { id: true, name: true, projectId: true } } },
-      });
-      if (domain?.applicationId) {
-        if (domain.application?.projectId === projectId) {
-          // Auto-detach same-project incumbent — user is clearly replacing it.
-        } else {
-          throw new ConflictException(
-            `Domain is already serving "${domain.application?.name}" in another project on the default port. Detach it first.`,
-          );
-        }
-      }
-      await this.prisma.domain.update({
-        where: { id: domainId },
-        data: { applicationId },
-      });
     }
   }
 
@@ -458,7 +405,13 @@ export class MarketplaceService {
       .replace(/__HOST_PORT__/g, String(hostPort));
 
     if (data.domainId) {
-      await this.attachAppToDomain(application.id, data.domainId, hostPort, !!data.hostPort, data.projectId);
+      await this.domainAttach.attach({
+        applicationId: application.id,
+        domainId: data.domainId,
+        projectId: data.projectId,
+        customPort: !!data.hostPort,
+        port: hostPort,
+      });
       this.proxy.regenerate().catch(() => {});
     }
 
