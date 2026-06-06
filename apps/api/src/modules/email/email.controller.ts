@@ -96,6 +96,14 @@ export class EmailController {
     return this.svc.getDnsHints(userId, domainId);
   }
 
+  // dns health — live probe of public DNS to tell the operator exactly
+  // which records are missing, wrong, or partially propagated.
+  @Get('dns/:domainId/health')
+  @ApiOperation({ summary: 'Live DNS health check (MX/A/PTR/SPF/DKIM/DMARC)' })
+  getDnsHealth(@CurrentUser('id') userId: string, @Param('domainId') domainId: string) {
+    return this.svc.getDnsHealth(userId, domainId);
+  }
+
   // mail server lifecycle
   @Get('server/:domainId')
   @ApiOperation({ summary: 'Status of the mail server for a domain' })

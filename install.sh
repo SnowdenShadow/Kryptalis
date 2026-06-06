@@ -195,6 +195,61 @@ fi
 
 docker compose up -d --build --remove-orphans
 
+# ─── 8b. install auto-update systemd timer ──────────────────────────
+# Runs update.sh every 10 min — checks origin/main, rebuilds only if a new
+# commit landed. Idempotent + locked so simultaneous runs are safe. The user
+# can disable it from the dashboard (which calls `systemctl disable --now
+# kryptalis-update.timer`) or by setting KRYPTALIS_NO_AUTOUPDATE=1.
+UPDATE_SCRIPT="$INSTALL_DIR/update.sh"
+if [ -f "$UPDATE_SCRIPT" ]; then
+  chmod +x "$UPDATE_SCRIPT"
+fi
+
+if [ "${KRYPTALIS_NO_AUTOUPDATE:-0}" = "1" ]; then
+  warn "KRYPTALIS_NO_AUTOUPDATE=1 — skipping auto-update timer install"
+elif [ ! -f "$UPDATE_SCRIPT" ]; then
+  warn "update.sh missing — auto-update will be installed on the next sync"
+elif ! command -v systemctl >/dev/null 2>&1; then
+  warn "systemd not detected — auto-update timer skipped (use cron manually)"
+else
+  say "Installing kryptalis-update.timer (checks every 10 min)"
+  cat > /etc/systemd/system/kryptalis-update.service <<EOF
+[Unit]
+Description=Kryptalis self-update (pull latest from origin/$BRANCH, rebuild if changed)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=KRYPTALIS_DIR=$INSTALL_DIR
+Environment=KRYPTALIS_BRANCH=$BRANCH
+ExecStart=$UPDATE_SCRIPT
+# Don't fail the unit if the script logs an error — it writes status to JSON
+SuccessExitStatus=0 1
+EOF
+
+  cat > /etc/systemd/system/kryptalis-update.timer <<EOF
+[Unit]
+Description=Run Kryptalis self-update every 10 min
+Requires=kryptalis-update.service
+
+[Timer]
+# First run 2 min after boot to give docker time to settle, then every 10 min.
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=kryptalis-update.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now kryptalis-update.timer >/dev/null 2>&1 && \
+    ok "Auto-update enabled (kryptalis-update.timer)" || \
+    warn "Could not enable auto-update timer (continuing)"
+fi
+
 # ─── 9. wait for the API ────────────────────────────────────────────
 say "Waiting for the API to come up (up to 180s)..."
 DEADLINE=$((`date +%s` + 180))

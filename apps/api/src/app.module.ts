@@ -23,6 +23,7 @@ import { AdminModule } from './modules/admin/admin.module';
 import { FilesModule } from './modules/files/files.module';
 import { EmailModule } from './modules/email/email.module';
 import { ReverseProxyModule } from './modules/reverse-proxy/reverse-proxy.module';
+import { SystemModule } from './modules/system/system.module';
 
 @Module({
   imports: [
@@ -60,6 +61,7 @@ import { ReverseProxyModule } from './modules/reverse-proxy/reverse-proxy.module
     FilesModule,
     EmailModule,
     ReverseProxyModule,
+    SystemModule,
   ],
 })
 export class AppModule {}

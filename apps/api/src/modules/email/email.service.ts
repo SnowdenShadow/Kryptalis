@@ -6,6 +6,8 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
+import * as dns from 'dns';
+import { promisify } from 'util';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateMailboxDto } from './dto/create-mailbox.dto';
 import { UpdateMailboxDto } from './dto/update-mailbox.dto';
@@ -257,8 +259,10 @@ export class EmailService {
       : 'v=DKIM1; k=rsa; p=<deploy the mail server first>';
     return {
       mx: [{ host: apex, value: `mail.${apex}`, priority: 10 }],
-      spf: { host: apex, type: 'TXT', value: `v=spf1 mx ~all` },
-      dmarc: { host: `_dmarc.${apex}`, type: 'TXT', value: `v=DMARC1; p=quarantine; rua=mailto:postmaster@${apex}` },
+      // include mx AND the A record of mail.<apex> — many resolvers cache MX
+      // separately and SPF "mx" can lag while "a:mail.<apex>" stays consistent.
+      spf: { host: apex, type: 'TXT', value: `v=spf1 mx a:mail.${apex} ~all` },
+      dmarc: { host: `_dmarc.${apex}`, type: 'TXT', value: `v=DMARC1; p=quarantine; rua=mailto:postmaster@${apex}; adkim=r; aspf=r; pct=100` },
       dkim: {
         host: `${server?.dkimSelector || 'kryptalis'}._domainkey.${apex}`,
         type: 'TXT',
@@ -281,6 +285,164 @@ export class EmailService {
             mailboxCount,
           }
         : null,
+    };
+  }
+
+  /**
+   * Live DNS health check — queries public DNS (Cloudflare 1.1.1.1) and compares
+   * against expected records. Tells the operator EXACTLY what's wrong so they
+   * can stop guessing in mail-tester.com.
+   *
+   * Checks (in order of how badly they hurt deliverability):
+   *  - A     mail.<apex>          → must resolve to server IP
+   *  - MX    <apex>               → must point to mail.<apex>, nothing else
+   *  - PTR   serverIp             → must = mail.<apex> (rDNS / FCrDNS)
+   *  - SPF   <apex> TXT           → present + matches expected
+   *  - DKIM  kryptalis._domainkey → present + matches stored public key
+   *  - DMARC _dmarc.<apex>        → present + has p= policy
+   */
+  async getDnsHealth(userId: string, domainId: string) {
+    const domain = await this.assertDomainAccess(userId, domainId, 'VIEWER');
+    const apex = domain.domain;
+    const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
+
+    const resolver = new dns.promises.Resolver();
+    resolver.setServers(['1.1.1.1', '8.8.8.8']);
+
+    const safe = async <T>(p: Promise<T>): Promise<T | null> => {
+      try { return await p; } catch { return null; }
+    };
+    const flat = (recs: string[][] | null) =>
+      recs ? recs.map((r) => r.join('')) : [];
+
+    // 1. Server IP — what mail.<apex> resolves to AND what we should compare PTR against.
+    const aRecords = await safe(resolver.resolve4(`mail.${apex}`));
+    const apexARecords = await safe(resolver.resolve4(apex));
+    const serverIp = aRecords?.[0] || null;
+
+    // 2. MX
+    const mxRecords = await safe(resolver.resolveMx(apex));
+    const expectedMx = `mail.${apex}`;
+    const mxStrings = (mxRecords || []).map((r) => r.exchange.replace(/\.$/, ''));
+    const mxHasOurs = mxStrings.some((m) => m.toLowerCase() === expectedMx.toLowerCase());
+    const mxForeign = mxStrings.filter((m) => m.toLowerCase() !== expectedMx.toLowerCase());
+
+    // 3. PTR (rDNS) — only checkable if A record resolved
+    let ptrHostnames: string[] = [];
+    let ptrMatches = false;
+    if (serverIp) {
+      const ptr = await safe(resolver.reverse(serverIp));
+      ptrHostnames = ptr || [];
+      ptrMatches = ptrHostnames.some(
+        (h) => h.replace(/\.$/, '').toLowerCase() === expectedMx.toLowerCase(),
+      );
+    }
+
+    // 4. SPF
+    const apexTxts = flat(await safe(resolver.resolveTxt(apex)));
+    const spfRaw = apexTxts.find((t) => /^v=spf1\b/i.test(t)) || null;
+    const spfHasMx = !!spfRaw && /\bmx\b/i.test(spfRaw);
+    const spfHasA = !!spfRaw && new RegExp(`a:mail\\.${apex.replace(/\./g, '\\.')}`, 'i').test(spfRaw);
+    const spfTooSoft = !!spfRaw && /\+all\b/i.test(spfRaw);
+    const spfMultiple = apexTxts.filter((t) => /^v=spf1\b/i.test(t)).length > 1;
+
+    // 5. DKIM
+    const selector = server?.dkimSelector || 'kryptalis';
+    const dkimHost = `${selector}._domainkey.${apex}`;
+    const dkimTxts = flat(await safe(resolver.resolveTxt(dkimHost)));
+    const dkimRaw = dkimTxts.find((t) => /v=DKIM1/i.test(t)) || null;
+    const dkimPubInDns = dkimRaw?.match(/p=([A-Za-z0-9+/=]+)/)?.[1] || null;
+    const dkimMatches = !!dkimPubInDns && !!server?.dkimPublicKey
+      && dkimPubInDns.replace(/\s+/g, '') === server.dkimPublicKey.replace(/\s+/g, '');
+
+    // 6. DMARC
+    const dmarcTxts = flat(await safe(resolver.resolveTxt(`_dmarc.${apex}`)));
+    const dmarcRaw = dmarcTxts.find((t) => /^v=DMARC1\b/i.test(t)) || null;
+    const dmarcPolicy = dmarcRaw?.match(/\bp=(none|quarantine|reject)\b/i)?.[1]?.toLowerCase() || null;
+
+    // 7. Autodiscover (informational only — not a deliverability blocker)
+    const autoCname = await safe(resolver.resolveCname(`autodiscover.${apex}`));
+    const autoHas = !!autoCname && autoCname.some(
+      (c) => c.replace(/\.$/, '').toLowerCase() === expectedMx.toLowerCase(),
+    );
+
+    // ── Verdicts: each check is one of OK / WARN / FAIL / UNKNOWN ────
+    const checks = {
+      a: serverIp
+        ? { status: 'OK' as const, message: `mail.${apex} → ${serverIp}` }
+        : { status: 'FAIL' as const, message: `mail.${apex} has no A record. Add: A mail ${apex.split('.').join('.')} → <server IP>` },
+
+      mx: mxRecords && mxRecords.length === 0
+        ? { status: 'FAIL' as const, message: `No MX record for ${apex}. Add: MX ${apex} 10 mail.${apex}` }
+        : !mxHasOurs
+        ? { status: 'FAIL' as const, message: `MX does not point to mail.${apex}. Found: ${mxStrings.join(', ') || '(none)'}` }
+        : mxForeign.length > 0
+        ? { status: 'WARN' as const, message: `Foreign MX records also present (mail will be split): ${mxForeign.join(', ')}. Remove them.` }
+        : { status: 'OK' as const, message: `MX → mail.${apex}` },
+
+      ptr: !serverIp
+        ? { status: 'UNKNOWN' as const, message: `Cannot check PTR until mail.${apex} resolves.` }
+        : ptrMatches
+        ? { status: 'OK' as const, message: `PTR ${serverIp} → mail.${apex}` }
+        : ptrHostnames.length > 0
+        ? { status: 'FAIL' as const, message: `PTR for ${serverIp} is "${ptrHostnames[0]}", expected "mail.${apex}". Set rDNS at your VPS host (OVH/Hetzner/AWS).` }
+        : { status: 'FAIL' as const, message: `No PTR record for ${serverIp}. Set rDNS to "mail.${apex}" at your VPS host.` },
+
+      spf: !spfRaw
+        ? { status: 'FAIL' as const, message: `No SPF record. Add TXT ${apex}: v=spf1 mx a:mail.${apex} ~all` }
+        : spfMultiple
+        ? { status: 'FAIL' as const, message: `Multiple SPF records on ${apex} — RFC says only one. Merge them.` }
+        : spfTooSoft
+        ? { status: 'WARN' as const, message: `SPF uses +all (allows anyone). Change to ~all or -all.` }
+        : !spfHasMx && !spfHasA
+        ? { status: 'WARN' as const, message: `SPF found but doesn't include mx or a:mail.${apex}. Current: ${spfRaw}` }
+        : { status: 'OK' as const, message: spfRaw },
+
+      dkim: !server?.dkimPublicKey
+        ? { status: 'UNKNOWN' as const, message: `Deploy the mail server first to generate a DKIM key.` }
+        : !dkimRaw
+        ? { status: 'FAIL' as const, message: `No DKIM record at ${dkimHost}. Copy the DKIM value from the table below.` }
+        : !dkimMatches
+        ? { status: 'FAIL' as const, message: `DKIM key in DNS does not match the key on this server — DNS is stale or wrong. Re-paste the value below.` }
+        : { status: 'OK' as const, message: `DKIM record matches server key.` },
+
+      dmarc: !dmarcRaw
+        ? { status: 'FAIL' as const, message: `No DMARC record. Add TXT _dmarc.${apex}: v=DMARC1; p=quarantine; rua=mailto:postmaster@${apex}` }
+        : !dmarcPolicy
+        ? { status: 'WARN' as const, message: `DMARC record found but no p= policy. Current: ${dmarcRaw}` }
+        : dmarcPolicy === 'none'
+        ? { status: 'WARN' as const, message: `DMARC policy is p=none (monitoring only). Move to p=quarantine when DKIM/SPF pass.` }
+        : { status: 'OK' as const, message: `DMARC p=${dmarcPolicy}` },
+
+      autodiscover: autoHas
+        ? { status: 'OK' as const, message: `autodiscover.${apex} → mail.${apex}` }
+        : { status: 'WARN' as const, message: `Autodiscover CNAME missing — clients won't auto-configure. Add CNAME autodiscover.${apex} → mail.${apex}` },
+
+      apexA: apexARecords && apexARecords.length > 0
+        ? { status: 'OK' as const, message: `${apex} A → ${apexARecords.join(', ')}` }
+        : { status: 'WARN' as const, message: `${apex} has no A record (only matters if you also host a website on the apex).` },
+    };
+
+    const counts = {
+      ok: Object.values(checks).filter((c) => c.status === 'OK').length,
+      warn: Object.values(checks).filter((c) => c.status === 'WARN').length,
+      fail: Object.values(checks).filter((c) => c.status === 'FAIL').length,
+      unknown: Object.values(checks).filter((c) => c.status === 'UNKNOWN').length,
+    };
+    // Overall verdict: any FAIL → bad; only WARN/UNKNOWN → partial; all OK → ready
+    const overall =
+      counts.fail > 0 ? 'FAIL' :
+      counts.warn > 0 || counts.unknown > 0 ? 'PARTIAL' : 'OK';
+
+    return {
+      domain: apex,
+      serverIp,
+      ptrHostnames,
+      mxRecords: mxStrings,
+      checks,
+      counts,
+      overall,
+      checkedAt: new Date().toISOString(),
     };
   }
 

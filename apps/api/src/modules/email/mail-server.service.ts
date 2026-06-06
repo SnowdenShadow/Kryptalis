@@ -295,10 +295,41 @@ export class MailServerService {
     // path, NOT the API-container path. See HOST_MAIL_DIR above.
     const hostDir = path.posix.join(HOST_MAIL_DIR, serverId);
 
-    // DKIM key files expected by docker-mailserver
-    const dkimDir = path.join(cfgDir, 'opendkim', 'keys', domain);
-    fs.mkdirSync(dkimDir, { recursive: true });
-    fs.writeFileSync(path.join(dkimDir, 'kryptalis.private'), dkimPrivateKey);
+    // DKIM key files expected by docker-mailserver (OpenDKIM).
+    // DMS mounts /tmp/docker-mailserver/opendkim → /etc/opendkim. We must
+    // ship the FULL OpenDKIM config (KeyTable, SigningTable, TrustedHosts,
+    // opendkim.conf) AND the private key — DMS does NOT auto-generate these
+    // when an external key is provided.
+    const opendkimDir = path.join(cfgDir, 'opendkim');
+    const dkimKeyDir = path.join(opendkimDir, 'keys', domain);
+    fs.mkdirSync(dkimKeyDir, { recursive: true });
+    // Trim accidental BOM/whitespace + ensure trailing newline (OpenDKIM is strict).
+    const cleanKey = dkimPrivateKey.replace(/^﻿/, '').trimEnd() + '\n';
+    fs.writeFileSync(path.join(dkimKeyDir, 'kryptalis.private'), cleanKey);
+    try { fs.chmodSync(path.join(dkimKeyDir, 'kryptalis.private'), 0o600); } catch {}
+
+    fs.writeFileSync(
+      path.join(opendkimDir, 'KeyTable'),
+      `kryptalis._domainkey.${domain} ${domain}:kryptalis:/etc/opendkim/keys/${domain}/kryptalis.private\n`,
+    );
+    fs.writeFileSync(
+      path.join(opendkimDir, 'SigningTable'),
+      `*@${domain} kryptalis._domainkey.${domain}\n`,
+    );
+    // Trust localhost + every RFC1918 range so postfix→opendkim signing works
+    // from any docker network (DMS sometimes lands on 172.16/12, 172.17/16, …).
+    fs.writeFileSync(
+      path.join(opendkimDir, 'TrustedHosts'),
+      [
+        '127.0.0.1',
+        'localhost',
+        '10.0.0.0/8',
+        '172.16.0.0/12',
+        '192.168.0.0/16',
+        `mail.${domain}`,
+        domain,
+      ].join('\n') + '\n',
+    );
 
     // accounts/virtual seed (empty until sync)
     fs.writeFileSync(path.join(cfgDir, 'postfix-accounts.cf'), '');
@@ -350,7 +381,9 @@ export class MailServerService {
       - "${ports.imaps}:993"
     environment:
       ENABLE_RSPAMD: 1
-      ENABLE_OPENDKIM: 0
+      ENABLE_OPENDKIM: 1
+      ENABLE_OPENDMARC: 1
+      ENABLE_POLICYD_SPF: 1
       ENABLE_RSPAMD_REDIS: 1
       ENABLE_AMAVIS: 0
       ENABLE_SPAMASSASSIN: 0

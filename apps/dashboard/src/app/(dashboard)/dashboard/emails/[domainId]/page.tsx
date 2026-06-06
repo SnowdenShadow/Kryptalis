@@ -51,6 +51,21 @@ interface DnsHints {
     mailboxCount: number;
   } | null;
 }
+type DnsCheckStatus = 'OK' | 'WARN' | 'FAIL' | 'UNKNOWN';
+interface DnsCheck { status: DnsCheckStatus; message: string }
+interface DnsHealth {
+  domain: string;
+  serverIp: string | null;
+  ptrHostnames: string[];
+  mxRecords: string[];
+  checks: {
+    a: DnsCheck; mx: DnsCheck; ptr: DnsCheck; spf: DnsCheck;
+    dkim: DnsCheck; dmarc: DnsCheck; autodiscover: DnsCheck; apexA: DnsCheck;
+  };
+  counts: { ok: number; warn: number; fail: number; unknown: number };
+  overall: 'OK' | 'PARTIAL' | 'FAIL';
+  checkedAt: string;
+}
 interface DomainDetail {
   id: string; domain: string;
   project: { id: string; name: string } | null;
@@ -108,6 +123,19 @@ export default function EmailDomainPage() {
     queryKey: ['email-aliases', domainId],
     queryFn: () => api.get(`/email/aliases?domainId=${domainId}`),
     enabled: !!domainId,
+  });
+
+  // Live DNS health probe — only fetched when DNS tab is opened, refetched
+  // on demand. Public DNS resolution is slow (~1-3s) so we don't poll it.
+  const {
+    data: dnsHealth,
+    refetch: refetchHealth,
+    isFetching: healthLoading,
+  } = useQuery<DnsHealth>({
+    queryKey: ['email-dns-health', domainId],
+    queryFn: () => api.get(`/email/dns/${domainId}/health`),
+    enabled: !!domainId && activeTab === 'dns',
+    staleTime: 30_000,
   });
 
   // ── mutations ────────────────────────────────────────────────────
@@ -582,45 +610,138 @@ export default function EmailDomainPage() {
 
       {/* ─── DNS ─────────────────────────────────────────────── */}
       {activeTab === 'dns' && dnsHints && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">{t('emails.dnsTitle')}</CardTitle>
-            <CardDescription className="text-xs">
-              {t('emails.dnsDesc')}
-              {!dnsHints.dkim.ready && (
-                <span className="block mt-1 text-orange-500">⚠ {t('emails.dkimNotReady')}</span>
-              )}
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {[
-              { label: t('emails.dns.mx'), host: dnsHints.mx[0].host, type: 'MX', value: `${dnsHints.mx[0].priority} ${dnsHints.mx[0].value}` },
-              { label: t('emails.dns.spf'), host: dnsHints.spf.host, type: 'TXT', value: dnsHints.spf.value },
-              { label: t('emails.dns.dmarc'), host: dnsHints.dmarc.host, type: 'TXT', value: dnsHints.dmarc.value },
-              { label: t('emails.dns.dkim'), host: dnsHints.dkim.host, type: 'TXT', value: dnsHints.dkim.value },
-              { label: t('emails.dns.autodiscover'), host: dnsHints.autodiscover.host, type: 'CNAME', value: dnsHints.autodiscover.value },
-            ].map((r, i) => {
-              const k = `dns-${i}`;
-              return (
-                <div key={r.label} className="rounded-lg border border-border p-3">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wider mb-2">{r.label}</p>
-                  <div className="grid grid-cols-[60px_180px_1fr_auto] gap-2 items-center text-sm">
-                    <Badge variant="outline" className="font-mono text-[10px] justify-center">{r.type}</Badge>
-                    <span className="font-mono text-xs truncate">{r.host}</span>
-                    <code className="font-mono text-xs bg-muted/30 rounded px-2 py-1 truncate">{r.value}</code>
-                    <button
-                      className="text-muted-foreground hover:text-foreground"
-                      onClick={() => copyText(`${r.host}\t${r.type}\t${r.value}`, k)}
-                      title={t('common.copy')}
-                    >
-                      {copied === k ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
-                    </button>
-                  </div>
+        <div className="space-y-3">
+          {/* Health check — live DNS probe */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    DNS health check
+                    {dnsHealth && (
+                      <Badge
+                        variant={
+                          dnsHealth.overall === 'OK' ? 'success' :
+                          dnsHealth.overall === 'PARTIAL' ? 'warning' : 'destructive'
+                        }
+                        className="text-[10px]"
+                      >
+                        {dnsHealth.overall === 'OK' ? 'All good' :
+                         dnsHealth.overall === 'PARTIAL' ? `${dnsHealth.counts.warn} warning${dnsHealth.counts.warn !== 1 ? 's' : ''}` :
+                         `${dnsHealth.counts.fail} blocker${dnsHealth.counts.fail !== 1 ? 's' : ''}`}
+                      </Badge>
+                    )}
+                  </CardTitle>
+                  <CardDescription className="text-xs">
+                    Live probe of public DNS (1.1.1.1). Fix everything red below before sending real mail.
+                  </CardDescription>
                 </div>
-              );
-            })}
-          </CardContent>
-        </Card>
+                <Button size="sm" variant="outline" onClick={() => refetchHealth()} disabled={healthLoading}>
+                  {healthLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                  Recheck
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {!dnsHealth && healthLoading && (
+                <div className="py-6 flex justify-center"><Loader2 size={20} className="animate-spin text-muted-foreground" /></div>
+              )}
+              {dnsHealth && (
+                <>
+                  {([
+                    ['A (mail host)', dnsHealth.checks.a],
+                    ['MX', dnsHealth.checks.mx],
+                    ['PTR / rDNS', dnsHealth.checks.ptr],
+                    ['SPF', dnsHealth.checks.spf],
+                    ['DKIM', dnsHealth.checks.dkim],
+                    ['DMARC', dnsHealth.checks.dmarc],
+                    ['Autodiscover', dnsHealth.checks.autodiscover],
+                    ['A (apex)', dnsHealth.checks.apexA],
+                  ] as const).map(([label, check]) => {
+                    const colorRing =
+                      check.status === 'OK' ? 'border-emerald-500/40 bg-emerald-500/5' :
+                      check.status === 'WARN' ? 'border-orange-500/40 bg-orange-500/5' :
+                      check.status === 'FAIL' ? 'border-red-500/40 bg-red-500/5' :
+                      'border-zinc-500/30 bg-zinc-500/5';
+                    const Icon =
+                      check.status === 'OK' ? Check :
+                      check.status === 'WARN' ? AlertTriangle :
+                      check.status === 'FAIL' ? AlertCircle :
+                      Loader2;
+                    const iconColor =
+                      check.status === 'OK' ? 'text-emerald-500' :
+                      check.status === 'WARN' ? 'text-orange-500' :
+                      check.status === 'FAIL' ? 'text-red-500' :
+                      'text-zinc-400';
+                    return (
+                      <div key={label} className={cn('flex items-start gap-3 rounded-lg border p-3', colorRing)}>
+                        <Icon size={14} className={cn('shrink-0 mt-0.5', iconColor)} />
+                        <div className="flex-1 min-w-0 text-xs">
+                          <p className="font-semibold">{label}</p>
+                          <p className="text-muted-foreground mt-0.5 break-words font-mono text-[11px]">{check.message}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <p className="text-[10px] text-muted-foreground pt-2">
+                    Checked {new Date(dnsHealth.checkedAt).toLocaleTimeString()}
+                    {dnsHealth.serverIp && <> · server IP: <span className="font-mono">{dnsHealth.serverIp}</span></>}
+                  </p>
+                </>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Records to add */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t('emails.dnsTitle')}</CardTitle>
+              <CardDescription className="text-xs">
+                {t('emails.dnsDesc')}
+                {!dnsHints.dkim.ready && (
+                  <span className="block mt-1 text-orange-500">⚠ {t('emails.dkimNotReady')}</span>
+                )}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {[
+                { label: t('emails.dns.mx'), host: dnsHints.mx[0].host, type: 'MX', value: `${dnsHints.mx[0].priority} ${dnsHints.mx[0].value}` },
+                { label: t('emails.dns.spf'), host: dnsHints.spf.host, type: 'TXT', value: dnsHints.spf.value },
+                { label: t('emails.dns.dmarc'), host: dnsHints.dmarc.host, type: 'TXT', value: dnsHints.dmarc.value },
+                { label: t('emails.dns.dkim'), host: dnsHints.dkim.host, type: 'TXT', value: dnsHints.dkim.value },
+                { label: t('emails.dns.autodiscover'), host: dnsHints.autodiscover.host, type: 'CNAME', value: dnsHints.autodiscover.value },
+              ].map((r, i) => {
+                const k = `dns-${i}`;
+                return (
+                  <div key={r.label} className="rounded-lg border border-border p-3">
+                    <p className="text-xs text-muted-foreground uppercase tracking-wider mb-2">{r.label}</p>
+                    <div className="grid grid-cols-[60px_180px_1fr_auto] gap-2 items-center text-sm">
+                      <Badge variant="outline" className="font-mono text-[10px] justify-center">{r.type}</Badge>
+                      <span className="font-mono text-xs truncate">{r.host}</span>
+                      <code className="font-mono text-xs bg-muted/30 rounded px-2 py-1 truncate">{r.value}</code>
+                      <button
+                        className="text-muted-foreground hover:text-foreground"
+                        onClick={() => copyText(`${r.host}\t${r.type}\t${r.value}`, k)}
+                        title={t('common.copy')}
+                      >
+                        {copied === k ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 text-xs space-y-1">
+                <p className="font-semibold text-orange-400 flex items-center gap-1"><AlertTriangle size={12} /> Not in DNS, but required for inbox placement:</p>
+                <p className="text-muted-foreground">
+                  <span className="font-mono">PTR / rDNS</span> — set at your VPS provider (OVH/Hetzner/AWS console), point the server IP back to <span className="font-mono">mail.{domain.domain}</span>. Without it, Gmail and Outlook send your mail straight to spam.
+                </p>
+                <p className="text-muted-foreground">
+                  <span className="font-mono">A record</span> for <span className="font-mono">mail.{domain.domain}</span> — point to the server IP. The MX record above only works once this exists.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
       )}
 
       {/* ─── Create mailbox dialog ─── */}
