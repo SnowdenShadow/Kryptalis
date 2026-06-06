@@ -202,6 +202,10 @@ model Application {
   buildCommand      String?
   startCommand      String?
   port              Int?
+  // True when the user explicitly chose this port at install time. Caddy
+  // routes traffic to https://<domain>:<port> instead of https://<domain>
+  // when this is set, so the user-picked port shows up in the final URL.
+  customPort        Boolean         @default(false)
   envVars           Json?
   portMapping       Json?
   webhookSecret     String?

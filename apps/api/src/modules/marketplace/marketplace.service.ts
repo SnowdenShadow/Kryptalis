@@ -121,8 +121,12 @@ export class MarketplaceService {
     //   2. Multi-install apps → search upward from the template default.
     //   3. Single-install apps → use the template default; refuse with a
     //      clear error if it's busy (instead of silently changing it).
+    // Track whether the user PICKED a port — controls whether Caddy serves
+    // https://domain:port (user wants the port visible) or https://domain
+    // (clean URL, Caddy proxies on 443).
     const basePort = PORT_MAP[data.appSlug] || app.ports[0];
     let realPort: number;
+    const customPort = !!data.port;
     if (data.port) {
       if (!(await this.isPortFree(data.port))) {
         throw new ConflictException(`Port ${data.port} is already in use on the host. Pick another.`);
@@ -203,6 +207,7 @@ export class MarketplaceService {
         framework: 'DOCKER_COMPOSE',
         status: 'DEPLOYING',
         port: realPort,
+        customPort,
       },
     });
 
@@ -393,6 +398,7 @@ export class MarketplaceService {
         framework: 'DOCKER_COMPOSE',
         status: 'DEPLOYING',
         port: hostPort,
+        customPort: !!data.hostPort,
         envVars: (data.envVars || {}) as any,
       },
     });

@@ -61,6 +61,7 @@ interface Application {
   port: number | null;
   createdAt: string;
   project?: { id: string; name: string };
+  customPort?: boolean;
   domains?: { id: string; domain: string; sslStatus: string }[];
 }
 
@@ -127,13 +128,21 @@ function appUrl(port: number) {
 }
 
 /**
- * Prefer a linked domain over the bare IP:port. ACTIVE-SSL domain first,
- * then any domain (Caddy serves a temporary cert while LE provisions), then
- * fall back to direct IP:port for IP-only deployments.
+ * Prefer a linked domain over the bare IP:port. If the user picked a custom
+ * port at install (customPort=true), keep it in the URL — that's what the
+ * Caddyfile 308-redirects to and what the user explicitly wants visible.
  */
-function publicAppUrl(app: { port?: number | null; domains?: { domain: string; sslStatus: string }[] }): string | null {
+function publicAppUrl(app: {
+  port?: number | null;
+  customPort?: boolean;
+  domains?: { domain: string; sslStatus: string }[];
+}): string | null {
   const linked = app.domains?.find((d) => d.sslStatus === 'ACTIVE') || app.domains?.[0];
-  if (linked) return `https://${linked.domain}`;
+  if (linked) {
+    return app.customPort && app.port
+      ? `https://${linked.domain}:${app.port}`
+      : `https://${linked.domain}`;
+  }
   return app.port ? appUrl(app.port) : null;
 }
 

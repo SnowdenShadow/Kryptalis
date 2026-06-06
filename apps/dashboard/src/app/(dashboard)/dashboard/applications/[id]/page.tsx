@@ -69,6 +69,7 @@ interface ApplicationDetail {
   gitUrl: string | null;
   gitBranch: string | null;
   port: number | null;
+  customPort?: boolean;
   buildCommand?: string | null;
   startCommand?: string | null;
   createdAt: string;
@@ -182,20 +183,25 @@ function appUrl(hostname: string, port: number) {
 
 /**
  * Pick the canonical public URL for an application.
- *   - If a domain is linked: https://<domain> (Caddy routes + has a cert)
- *   - Otherwise: fall back to <hostname>:<port> (direct IP access)
- * SSL_PENDING domains still get returned — the user sees the URL, and Caddy
- * serves a temporary internal cert while LE finishes provisioning.
+ *   - Domain + customPort=true → https://<domain>:<port> (user-picked port)
+ *   - Domain + customPort=false → https://<domain> (Caddy on 443, clean URL)
+ *   - No domain → <hostname>:<port> (direct IP access)
  */
 function publicUrl(
-  app: { port?: number | null; domains?: { domain: string; sslStatus: string }[] },
+  app: {
+    port?: number | null;
+    customPort?: boolean;
+    domains?: { domain: string; sslStatus: string }[];
+  },
   fallbackHostname: string,
 ): string | null {
   const linked = app.domains?.find((d) => d.sslStatus === 'ACTIVE')
     || app.domains?.[0]
     || null;
   if (linked) {
-    return `https://${linked.domain}`;
+    return app.customPort && app.port
+      ? `https://${linked.domain}:${app.port}`
+      : `https://${linked.domain}`;
   }
   if (app.port) {
     return appUrl(fallbackHostname, app.port);
