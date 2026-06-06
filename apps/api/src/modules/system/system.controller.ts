@@ -1,9 +1,31 @@
-import { Controller, Get, Post, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Body, UseGuards, Req, Headers, HttpCode } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { SystemUpdatesService } from './system-updates.service';
+
+/**
+ * GitHub webhook is PUBLIC (no JWT) — auth is the HMAC signature in the
+ * X-Hub-Signature-256 header verified against the per-install secret. So
+ * the webhook route lives on a separate controller without the auth guards.
+ */
+@ApiTags('System')
+@Controller('system')
+export class SystemWebhookController {
+  constructor(private updates: SystemUpdatesService) {}
+
+  @Post('updates/webhook')
+  @HttpCode(202)
+  @ApiOperation({ summary: 'GitHub push webhook → trigger self-update (no JWT — HMAC-verified)' })
+  async webhook(
+    @Req() req: any,
+    @Headers('x-hub-signature-256') signature: string,
+    @Headers('x-github-event') eventType: string,
+  ) {
+    return this.updates.handleGithubWebhook(req.rawBody, signature, eventType);
+  }
+}
 
 @ApiTags('System')
 @ApiBearerAuth()
@@ -41,5 +63,11 @@ export class SystemController {
   @ApiOperation({ summary: 'Enable or disable the 10-min auto-update timer' })
   setAuto(@Body('enabled') enabled: boolean) {
     return this.updates.setAutoUpdate(!!enabled);
+  }
+
+  @Post('updates/webhook/rotate')
+  @ApiOperation({ summary: 'Rotate the GitHub webhook secret (must re-paste in GitHub)' })
+  rotateWebhook() {
+    return this.updates.rotateWebhookSecret();
   }
 }

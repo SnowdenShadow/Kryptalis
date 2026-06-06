@@ -70,6 +70,12 @@ interface UpdateStatus {
   autoUpdateEnabled: boolean | null;
   manualTriggerAvailable: boolean;
   hasUpdateLog: boolean;
+  webhook: {
+    url: string;
+    secret: string;
+    fired: boolean;
+    lastFiredAt: string | null;
+  };
 }
 
 const notificationEvents = [

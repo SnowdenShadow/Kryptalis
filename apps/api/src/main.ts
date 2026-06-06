@@ -25,7 +25,11 @@ async function bootstrap() {
       return;
     }
     const opts: any = { limit: '10mb' };
-    if (req.path.startsWith('/api/webhooks/')) {
+    // Preserve raw bytes for any endpoint that needs HMAC verification over
+    // the exact payload the provider signed. Both /api/webhooks/* (per-app
+    // git push webhooks) and /api/system/updates/webhook (the platform's
+    // self-update push hook) use this.
+    if (req.path.startsWith('/api/webhooks/') || req.path === '/api/system/updates/webhook') {
       opts.verify = (req2: any, _res2: any, buf: Buffer) => {
         req2.rawBody = Buffer.from(buf);
       };

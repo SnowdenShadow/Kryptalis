@@ -196,10 +196,17 @@ fi
 docker compose up -d --build --remove-orphans
 
 # ─── 8b. install auto-update systemd timer ──────────────────────────
-# Runs update.sh every 10 min — checks origin/main, rebuilds only if a new
-# commit landed. Idempotent + locked so simultaneous runs are safe. The user
-# can disable it from the dashboard (which calls `systemctl disable --now
-# kryptalis-update.timer`) or by setting KRYPTALIS_NO_AUTOUPDATE=1.
+# Runs update.sh every 30 SECONDS — checks origin/main via the GitHub API
+# (no auth required, 60 req/h limit is well under our cadence), rebuilds only
+# if the upstream SHA changed. A no-op check is ~100ms and writes nothing to
+# disk, so polling this aggressively is essentially free.
+#
+# This is what makes updates feel "instant" to end-users: ~30s between
+# `git push` and their install starting the rebuild. No webhook, no
+# third-party service, no per-install configuration.
+#
+# Toggleable from the dashboard (writes `auto-update.pref` which update.sh
+# honours) or via KRYPTALIS_NO_AUTOUPDATE=1.
 UPDATE_SCRIPT="$INSTALL_DIR/update.sh"
 if [ -f "$UPDATE_SCRIPT" ]; then
   chmod +x "$UPDATE_SCRIPT"
@@ -230,13 +237,18 @@ EOF
 
   cat > /etc/systemd/system/kryptalis-update.timer <<EOF
 [Unit]
-Description=Run Kryptalis self-update every 10 min
+Description=Run Kryptalis self-update every 30 seconds
 Requires=kryptalis-update.service
 
 [Timer]
-# First run 2 min after boot to give docker time to settle, then every 10 min.
-OnBootSec=2min
-OnUnitActiveSec=10min
+# First run 1 min after boot (let docker settle), then every 30 seconds.
+# update.sh polls the GitHub API with If-None-Match — when the upstream SHA
+# is unchanged, GitHub returns 304 Not Modified WITHOUT consuming the 60/h
+# anonymous quota. So even at 120 req/h cadence we sit at 0 quota cost in
+# steady state, and the latency between \`git push\` and rebuild start is
+# at most ~30 seconds. No webhook, no third-party service, no config.
+OnBootSec=1min
+OnUnitActiveSec=30s
 Unit=kryptalis-update.service
 Persistent=true
 

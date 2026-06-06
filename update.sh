@@ -95,13 +95,75 @@ log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$LOG_FILE"; }
 trim_log() { tail -n 500 "$LOG_FILE" > "$LOG_FILE.tmp" 2>/dev/null && mv "$LOG_FILE.tmp" "$LOG_FILE" || true; }
 
 # ─── fetch & compare ────────────────────────────────────────────────
+# Default to the GitHub REST API (anonymous, 60 req/h per IP is plenty for a
+# 30-second polling cadence) — way faster than `git fetch`, and we don't pay
+# the round-trip when nothing changed. Falls back to `git fetch` if the API is
+# unreachable or the repo isn't on GitHub.
+#
+# Resolution order for the API repo:
+#   1. KRYPTALIS_GITHUB_REPO env var (e.g. "SnowdenShadow/Kryptalis")
+#   2. Parse the `origin` remote URL
 CURRENT=$(git rev-parse HEAD)
-git fetch --depth=1 origin "$BRANCH" >/dev/null 2>&1 || {
-  write_status "ERROR" "git fetch failed" "$CURRENT" ""
-  log "git fetch failed"
-  exit 1
-}
-LATEST=$(git rev-parse "origin/$BRANCH")
+
+GH_REPO="${KRYPTALIS_GITHUB_REPO:-}"
+if [ -z "$GH_REPO" ]; then
+  ORIGIN_URL=$(git config --get remote.origin.url 2>/dev/null || echo "")
+  # Strip protocol + .git + handle both git@host:owner/repo and https://host/owner/repo
+  GH_REPO=$(printf '%s' "$ORIGIN_URL" \
+    | sed -E 's#^(https?://[^/]+/|git@[^:]+:)##; s#\.git$##' \
+    | grep -E '^[^/]+/[^/]+$' || true)
+fi
+
+LATEST=""
+if [ -n "$GH_REPO" ]; then
+  # Use cached ETag so unchanged responses return 304 and don't consume the
+  # 60/h anonymous quota. State files in STATUS_DIR persist across runs.
+  ETAG_FILE="$STATUS_DIR/api-etag"
+  CACHED_SHA_FILE="$STATUS_DIR/api-cached-sha"
+  ETAG_HEADER=""
+  if [ -f "$ETAG_FILE" ]; then
+    ETAG_HEADER="If-None-Match: $(cat "$ETAG_FILE" 2>/dev/null)"
+  fi
+
+  # Capture body + headers so we can read ETag AND the response code.
+  TMP_BODY=$(mktemp 2>/dev/null || echo "/tmp/kryptalis-api-body.$$")
+  TMP_HEAD=$(mktemp 2>/dev/null || echo "/tmp/kryptalis-api-head.$$")
+  HTTP_CODE=$(curl -sS --max-time 5 \
+    -o "$TMP_BODY" -D "$TMP_HEAD" -w "%{http_code}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "User-Agent: kryptalis-update" \
+    ${ETAG_HEADER:+-H "$ETAG_HEADER"} \
+    "https://api.github.com/repos/$GH_REPO/commits/$BRANCH" 2>/dev/null || echo "000")
+
+  if [ "$HTTP_CODE" = "304" ]; then
+    # Not Modified — reuse the SHA we cached last time. Free of quota cost.
+    LATEST=$(cat "$CACHED_SHA_FILE" 2>/dev/null || echo "")
+  elif [ "$HTTP_CODE" = "200" ]; then
+    LATEST=$(grep -oE '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' "$TMP_BODY" 2>/dev/null \
+      | head -1 \
+      | sed -E 's/.*"([0-9a-f]{40})"/\1/')
+    # Persist new ETag + SHA so the NEXT call benefits from the 304 fast-path.
+    NEW_ETAG=$(grep -i '^etag:' "$TMP_HEAD" 2>/dev/null \
+      | head -1 | sed -E 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//' | tr -d '\r\n')
+    [ -n "$NEW_ETAG" ] && printf '%s' "$NEW_ETAG" > "$ETAG_FILE"
+    [ -n "$LATEST" ] && printf '%s' "$LATEST" > "$CACHED_SHA_FILE"
+  fi
+  # 403 (rate limit), 404, 5xx, 000 (timeout) → fall through to git fetch.
+  rm -f "$TMP_BODY" "$TMP_HEAD" 2>/dev/null
+fi
+
+# Fallback to local git fetch (covers self-hosted repos, network blips, etc.)
+if [ -z "$LATEST" ]; then
+  if git fetch --depth=1 origin "$BRANCH" >/dev/null 2>&1; then
+    LATEST=$(git rev-parse "origin/$BRANCH" 2>/dev/null || echo "")
+  fi
+fi
+
+if [ -z "$LATEST" ]; then
+  write_status "ERROR" "Could not reach GitHub API or origin" "$CURRENT" ""
+  log "no-op: could not determine latest SHA"
+  exit 0
+fi
 
 if [ "$CHECK_ONLY" = "1" ]; then
   if [ "$CURRENT" = "$LATEST" ] && [ "$FORCE" = "0" ]; then
@@ -113,8 +175,19 @@ if [ "$CHECK_ONLY" = "1" ]; then
 fi
 
 if [ "$CURRENT" = "$LATEST" ] && [ "$FORCE" = "0" ]; then
-  write_status "UP_TO_DATE" "No new commits" "$CURRENT" "$LATEST"
+  # Don't rewrite STATUS_FILE every minute when nothing changed — that file's
+  # mtime is what the API uses to detect the timer is alive (detectAutoUpdate).
+  # Touch it instead to keep the timestamp fresh without re-doing the JSON.
+  touch "$STATUS_FILE" 2>/dev/null || write_status "UP_TO_DATE" "No new commits" "$CURRENT" "$LATEST"
   exit 0
+fi
+
+# New commit detected via API — we MUST `git fetch` before reset to actually
+# bring the new objects into the local repo.
+if ! git fetch --depth=1 origin "$BRANCH" >/dev/null 2>&1; then
+  write_status "ERROR" "git fetch failed after API detected update" "$CURRENT" "$LATEST"
+  log "git fetch failed"
+  exit 1
 fi
 
 # ─── apply ──────────────────────────────────────────────────────────

@@ -1,14 +1,16 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 const execFileAsync = promisify(execFile);
 
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const STATUS_FILE = path.join(DATA_DIR, 'update-status.json');
 const LOG_FILE = path.join(DATA_DIR, 'update.log');
+const WEBHOOK_SECRET_FILE = path.join(DATA_DIR, 'webhook-secret');
 
 // Host path to update.sh — the script lives in the install root, NOT inside
 // the API container. We invoke it via `nsenter` against PID 1 on the host
@@ -44,6 +46,13 @@ export interface UpdateStatus {
    */
   manualTriggerAvailable: boolean;
   hasUpdateLog: boolean;
+  webhook: {
+    url: string;
+    secret: string;
+    /** True if the user has copied & configured it at least once. */
+    fired: boolean;
+    lastFiredAt: string | null;
+  };
 }
 
 @Injectable()
@@ -69,6 +78,8 @@ export class SystemUpdatesService {
       this.detectManualTriggerAvailable(),
     ]);
 
+    const secret = this.getOrCreateWebhookSecret();
+    const base = (process.env.PUBLIC_API_URL || '').replace(/\/$/, '');
     return {
       state: parsed?.state || 'UNKNOWN',
       message: parsed?.message || 'No update run yet — the timer fires every 10 min after boot.',
@@ -79,6 +90,12 @@ export class SystemUpdatesService {
       autoUpdateEnabled: autoEnabled,
       manualTriggerAvailable: manualOk,
       hasUpdateLog: fs.existsSync(LOG_FILE),
+      webhook: {
+        url: `${base}/api/system/updates/webhook`,
+        secret,
+        fired: parsed?.lastWebhookAt ? true : false,
+        lastFiredAt: parsed?.lastWebhookAt || null,
+      },
     };
   }
 
@@ -182,7 +199,117 @@ export class SystemUpdatesService {
     }
   }
 
+  /**
+   * Handle a GitHub push webhook. Verifies the HMAC-SHA256 signature against
+   * the per-install secret, then kicks off update.sh in the background.
+   *
+   * GitHub sends X-Hub-Signature-256: sha256=<hmac> over the raw JSON body.
+   * We MUST verify the signature on the raw body (not a re-stringified JSON
+   * object) — that's why the controller hands us `rawBody`.
+   *
+   * Returns 202 on accepted, 401 on bad signature, 400 on malformed body.
+   * Non-push events (ping, etc.) return 200 with a "skipped" message.
+   */
+  async handleGithubWebhook(
+    rawBody: Buffer,
+    signature: string | undefined,
+    eventType: string | undefined,
+  ): Promise<{ message: string; triggered: boolean }> {
+    const secret = this.getOrCreateWebhookSecret();
+    if (!signature || !signature.startsWith('sha256=')) {
+      throw new UnauthorizedException('Missing or malformed X-Hub-Signature-256 header');
+    }
+    const expected = 'sha256=' +
+      crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+    // Timing-safe comparison so an attacker can't iterate the secret byte-by-byte
+    const a = Buffer.from(signature);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      throw new UnauthorizedException('Invalid webhook signature');
+    }
+
+    // GitHub's "ping" event arrives on first config. Accept silently.
+    if (eventType === 'ping') {
+      this.markWebhookFired();
+      return { message: 'pong — webhook configured successfully', triggered: false };
+    }
+
+    // Only act on push (and only on the branch we track — best effort).
+    if (eventType !== 'push') {
+      return { message: `Ignored event "${eventType}"`, triggered: false };
+    }
+
+    let payload: any = {};
+    try { payload = JSON.parse(rawBody.toString('utf-8')); } catch {}
+    const ref: string = payload.ref || '';
+    const branch = ref.replace(/^refs\/heads\//, '');
+    const trackedBranch = process.env.KRYPTALIS_BRANCH || 'main';
+    if (branch && branch !== trackedBranch) {
+      return { message: `Push to "${branch}" ignored — tracking "${trackedBranch}"`, triggered: false };
+    }
+
+    this.markWebhookFired();
+    // Fire-and-forget — same docker-cli ephemeral container we use for the
+    // dashboard "Update now" button. If docker.sock isn't mounted (rare), the
+    // exec is a no-op; the systemd timer still picks the push up within 10 min.
+    if (await this.detectManualTriggerAvailable()) {
+      execFile(
+        'docker',
+        [
+          'run', '--rm', '-d',
+          '-v', `${HOST_INSTALL_DIR}:/app`,
+          '-v', '/var/run/docker.sock:/var/run/docker.sock',
+          '-w', '/app',
+          'docker:cli',
+          'sh', '/app/update.sh',
+        ],
+        () => {},
+      );
+      return { message: 'Update triggered', triggered: true };
+    }
+    return { message: 'Webhook OK but cannot trigger update from API — timer will catch it within 10 min', triggered: false };
+  }
+
+  /** Rotate the webhook secret — user has to update GitHub after this. */
+  rotateWebhookSecret(): { secret: string } {
+    const next = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(WEBHOOK_SECRET_FILE, next + '\n', { mode: 0o600 });
+    return { secret: next };
+  }
+
   // ── internals ─────────────────────────────────────────────────────
+
+  /**
+   * Read the per-install webhook secret, generating it on first call. The
+   * secret is a 32-byte hex string saved to .kryptalis/webhook-secret with
+   * mode 0600. It's stable across restarts so the user only pastes it into
+   * GitHub once.
+   */
+  private getOrCreateWebhookSecret(): string {
+    try {
+      if (fs.existsSync(WEBHOOK_SECRET_FILE)) {
+        return fs.readFileSync(WEBHOOK_SECRET_FILE, 'utf-8').trim();
+      }
+    } catch {}
+    const next = crypto.randomBytes(32).toString('hex');
+    try {
+      fs.writeFileSync(WEBHOOK_SECRET_FILE, next + '\n', { mode: 0o600 });
+    } catch {}
+    return next;
+  }
+
+  /** Stamp the status file with the last webhook firing time. */
+  private markWebhookFired(): void {
+    try {
+      let current: any = {};
+      if (fs.existsSync(STATUS_FILE)) {
+        try { current = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8')); } catch {}
+      }
+      current.lastWebhookAt = new Date().toISOString();
+      fs.writeFileSync(STATUS_FILE, JSON.stringify(current, null, 2));
+    } catch {}
+  }
+
 
   private async detectAutoUpdate(): Promise<boolean | null> {
     // Honour the operator preference file first — it's the in-container signal
