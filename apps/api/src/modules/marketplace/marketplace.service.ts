@@ -100,7 +100,11 @@ export class MarketplaceService {
     //   spin up e.g. two WordPress instances in the same project (typically
     //   one per domain). We don't refuse the install — instead we mint a
     //   fresh "<App> 2", "<App> 3", … until we land on something free.
+    // Track whether we suffixed (= multi-install): if so, the default host
+    // port is almost certainly taken by the previous instance, so we'll
+    // auto-allocate a fresh one instead of refusing the install.
     let appName = app.name;
+    let isMultiInstall = false;
     if (!isWebmail) {
       let suffix = 2;
       // hard cap to avoid an infinite loop if something goes very wrong
@@ -111,6 +115,7 @@ export class MarketplaceService {
         });
         if (!existing) break;
         appName = `${app.name} ${suffix}`;
+        isMultiInstall = true;
         suffix++;
       }
     }
@@ -131,7 +136,11 @@ export class MarketplaceService {
         throw new ConflictException(`Port ${data.port} is already in use on the host. Pick another.`);
       }
       realPort = data.port;
-    } else if (isWebmail) {
+    } else if (isWebmail || isMultiInstall) {
+      // Multi-install (second WordPress, etc.) → walk upward from the
+      // template default until we find a free host port. Caddy still
+      // serves https://<domain> cleanly because each instance has its own
+      // container_name and domain binding.
       realPort = await this.allocateFreePort(basePort);
     } else {
       if (!(await this.isPortFree(basePort))) {
