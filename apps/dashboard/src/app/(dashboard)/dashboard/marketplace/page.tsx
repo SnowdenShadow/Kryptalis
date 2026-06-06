@@ -13,6 +13,9 @@ import {
   Circle,
   ExternalLink,
   RotateCcw,
+  Container,
+  Plus,
+  Trash2,
 } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
@@ -156,6 +159,19 @@ export default function MarketplacePage() {
   const [selectedDomainId, setSelectedDomainId] = useState('');
   const [customPort, setCustomPort] = useState('');
 
+  // ── custom image dialog (any Docker Hub image) ──────────────────
+  const [showCustom, setShowCustom] = useState(false);
+  const [customForm, setCustomForm] = useState({
+    name: '',
+    image: '',
+    containerPort: '',
+    hostPort: '',
+    domainId: '',
+    command: '',
+  });
+  const [customEnvList, setCustomEnvList] = useState<{ key: string; value: string }[]>([]);
+  const [customVolList, setCustomVolList] = useState<string[]>([]);
+
   // Progress modal state
   const [progressApp, setProgressApp] = useState<MarketplaceApp | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -209,6 +225,66 @@ export default function MarketplacePage() {
     },
   });
 
+  const customMutation = useMutation({
+    mutationFn: (data: {
+      name: string;
+      image: string;
+      serverId: string;
+      projectId: string;
+      containerPort: number;
+      hostPort?: number;
+      domainId?: string;
+      envVars?: Record<string, string>;
+      volumes?: string[];
+      command?: string;
+    }) => api.post<{ taskId: string; applicationId: string; hostPort: number }>('/marketplace/install-custom', data),
+    onSuccess: (result) => {
+      setShowCustom(false);
+      setProgressApp({
+        name: customForm.name || customForm.image,
+        slug: 'custom',
+        description: customForm.image,
+        category: 'Custom',
+        icon: 'container',
+        ports: [result.hostPort],
+      });
+      setActiveTaskId(result.taskId);
+      setApplicationId(result.applicationId);
+      setCustomForm({ name: '', image: '', containerPort: '', hostPort: '', domainId: '', command: '' });
+      setCustomEnvList([]);
+      setCustomVolList([]);
+    },
+    onError: (err: Error) => {
+      toast.error('Custom deploy failed', { description: err.message });
+    },
+  });
+
+  const handleCustomDeploy = () => {
+    if (!selectedServerId) { toast.error('Pick a server'); return; }
+    if (!selectedProjectId) { toast.error('Pick a project'); return; }
+    if (!customForm.image.trim()) { toast.error('Image required'); return; }
+    if (!customForm.containerPort) { toast.error('Container port required'); return; }
+    const cport = Number(customForm.containerPort);
+    if (!Number.isInteger(cport) || cport < 1 || cport > 65535) {
+      toast.error('Container port must be 1-65535'); return;
+    }
+    const envVars = Object.fromEntries(
+      customEnvList.filter((e) => e.key.trim()).map((e) => [e.key.trim(), e.value]),
+    );
+    customMutation.mutate({
+      name: customForm.name.trim() || customForm.image.split('/').pop()?.split(':')[0] || 'custom',
+      image: customForm.image.trim(),
+      serverId: selectedServerId,
+      projectId: selectedProjectId,
+      containerPort: cport,
+      ...(customForm.hostPort ? { hostPort: Number(customForm.hostPort) } : {}),
+      ...(customForm.domainId ? { domainId: customForm.domainId } : {}),
+      ...(Object.keys(envVars).length > 0 ? { envVars } : {}),
+      ...(customVolList.filter(Boolean).length > 0 ? { volumes: customVolList.filter(Boolean) } : {}),
+      ...(customForm.command.trim() ? { command: customForm.command.trim() } : {}),
+    });
+  };
+
   const resetForm = () => {
     setSelectedServerId('');
     setSelectedProjectId('');
@@ -261,11 +337,14 @@ export default function MarketplacePage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold">{t('marketplace.title')}</h1>
-        <p className="text-muted-foreground">
-          {t('marketplace.subtitle')}
-        </p>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-3xl font-bold">{t('marketplace.title')}</h1>
+          <p className="text-muted-foreground">{t('marketplace.subtitle')}</p>
+        </div>
+        <Button onClick={() => setShowCustom(true)}>
+          <Container size={14} /> Deploy custom image
+        </Button>
       </div>
 
       <div className="relative">
@@ -589,6 +668,186 @@ export default function MarketplacePage() {
               Run in Background
             </Button>
           )}
+        </DialogFooter>
+      </Dialog>
+
+      {/* ─── Custom image deploy dialog ─────────────────────────── */}
+      <Dialog open={showCustom} onClose={() => setShowCustom(false)}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Container size={16} /> Deploy any Docker image
+          </DialogTitle>
+          <DialogDescription>
+            Paste any image from Docker Hub or a registry — Kryptalis runs it like a marketplace app.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label>Server *</Label>
+              <Select value={selectedServerId} onChange={(e) => setSelectedServerId(e.target.value)}>
+                <option value="">Select a server…</option>
+                {serverList.map((s: any) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Project *</Label>
+              <Select value={selectedProjectId} onChange={(e) => setSelectedProjectId(e.target.value)}>
+                <option value="">Select a project…</option>
+                {projectList.map((p: any) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </Select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label>Image *</Label>
+              <Input
+                placeholder="linuxserver/jellyfin:latest"
+                value={customForm.image}
+                onChange={(e) => setCustomForm({ ...customForm, image: e.target.value })}
+                className="font-mono text-sm"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>App name</Label>
+              <Input
+                placeholder="Auto from image"
+                value={customForm.name}
+                onChange={(e) => setCustomForm({ ...customForm, name: e.target.value })}
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label>Container port *</Label>
+              <Input
+                type="number"
+                placeholder="8096"
+                value={customForm.containerPort}
+                onChange={(e) => setCustomForm({ ...customForm, containerPort: e.target.value })}
+              />
+              <p className="text-[10px] text-muted-foreground">Port the container listens on (from the image docs)</p>
+            </div>
+            <div className="space-y-2">
+              <Label>Host port (optional)</Label>
+              <Input
+                type="number"
+                placeholder="Auto-pick"
+                value={customForm.hostPort}
+                onChange={(e) => setCustomForm({ ...customForm, hostPort: e.target.value })}
+              />
+              <p className="text-[10px] text-muted-foreground">Leave empty to auto-pick from 18000+</p>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Domain (optional)</Label>
+            <Select
+              value={customForm.domainId}
+              onChange={(e) => setCustomForm({ ...customForm, domainId: e.target.value })}
+            >
+              <option value="">No domain</option>
+              {allDomains.filter((d: any) => !d.applicationId).map((d: any) => (
+                <option key={d.id} value={d.id}>{d.domain}</option>
+              ))}
+            </Select>
+            <p className="text-[10px] text-muted-foreground">Caddy will route this domain (with HTTPS) to your container.</p>
+          </div>
+
+          <div className="space-y-2">
+            <Label>Custom command (optional)</Label>
+            <Input
+              placeholder="e.g. server /data"
+              value={customForm.command}
+              onChange={(e) => setCustomForm({ ...customForm, command: e.target.value })}
+              className="font-mono text-sm"
+            />
+          </div>
+
+          {/* Env vars */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Environment variables</Label>
+              <Button size="sm" variant="outline" onClick={() => setCustomEnvList([...customEnvList, { key: '', value: '' }])}>
+                <Plus size={12} /> Add
+              </Button>
+            </div>
+            {customEnvList.length === 0 && (
+              <p className="text-[10px] text-muted-foreground">None — most images run with sensible defaults.</p>
+            )}
+            {customEnvList.map((env, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <Input
+                  placeholder="KEY"
+                  value={env.key}
+                  onChange={(e) => {
+                    const next = [...customEnvList];
+                    next[i] = { ...next[i], key: e.target.value };
+                    setCustomEnvList(next);
+                  }}
+                  className="font-mono text-xs"
+                />
+                <Input
+                  placeholder="value"
+                  value={env.value}
+                  onChange={(e) => {
+                    const next = [...customEnvList];
+                    next[i] = { ...next[i], value: e.target.value };
+                    setCustomEnvList(next);
+                  }}
+                  className="font-mono text-xs"
+                />
+                <Button size="icon" variant="ghost" onClick={() => setCustomEnvList(customEnvList.filter((_, j) => j !== i))}>
+                  <Trash2 size={12} />
+                </Button>
+              </div>
+            ))}
+          </div>
+
+          {/* Volumes */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label>Volumes</Label>
+              <Button size="sm" variant="outline" onClick={() => setCustomVolList([...customVolList, ''])}>
+                <Plus size={12} /> Add
+              </Button>
+            </div>
+            {customVolList.length === 0 && (
+              <p className="text-[10px] text-muted-foreground">Add a host:container mount to persist data, e.g. <span className="font-mono">/data/jellyfin:/config</span>.</p>
+            )}
+            {customVolList.map((vol, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <Input
+                  placeholder="/host/path:/container/path"
+                  value={vol}
+                  onChange={(e) => {
+                    const next = [...customVolList];
+                    next[i] = e.target.value;
+                    setCustomVolList(next);
+                  }}
+                  className="font-mono text-xs"
+                />
+                <Button size="icon" variant="ghost" onClick={() => setCustomVolList(customVolList.filter((_, j) => j !== i))}>
+                  <Trash2 size={12} />
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setShowCustom(false)}>{t('common.cancel')}</Button>
+          <Button onClick={handleCustomDeploy} disabled={customMutation.isPending}>
+            {customMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+            Deploy
+          </Button>
         </DialogFooter>
       </Dialog>
     </div>

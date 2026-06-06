@@ -1,6 +1,7 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
-import { COMPOSE_TEMPLATES, PORT_MAP } from './templates';
+import { COMPOSE_TEMPLATES, PORT_MAP, renderCustomComposeTemplate } from './templates';
+import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -52,7 +53,10 @@ const WEBMAIL_SLUGS = new Set(['roundcube', 'snappymail', 'rainloop']);
 
 @Injectable()
 export class MarketplaceService {
-  constructor(private prisma: PrismaService) {
+  constructor(
+    private prisma: PrismaService,
+    private proxy: ReverseProxyService,
+  ) {
     if (!fs.existsSync(APPS_DIR)) {
       fs.mkdirSync(APPS_DIR, { recursive: true });
     }
@@ -83,30 +87,57 @@ export class MarketplaceService {
 
     const isWebmail = WEBMAIL_SLUGS.has(data.appSlug);
 
-    if (isWebmail) {
-      // Allow multiple webmail installs — one per mail server. Block only when
-      // there's already a webmail of this slug pointing at the same domain.
-      if (data.domainId) {
-        const dup = await this.prisma.application.findFirst({
-          where: { domains: { some: { id: data.domainId } } },
-        });
-        if (dup) {
-          throw new ConflictException(
-            `An app is already linked to this domain — unlink it first`,
-          );
-        }
+    // Every domain may only be linked to ONE app at a time — switching is
+    // explicit. Refuse if the user picked a domain that's already attached
+    // to a different application (regardless of slug).
+    if (data.domainId) {
+      const dup = await this.prisma.application.findFirst({
+        where: { domains: { some: { id: data.domainId } } },
+        select: { id: true, name: true },
+      });
+      if (dup) {
+        throw new ConflictException(
+          `Domain is already linked to "${dup.name}". Detach it first from /dashboard/applications/${dup.id}.`,
+        );
       }
-    } else {
+    }
+
+    // Webmail (Roundcube/SnappyMail/Rainloop) → multi-install allowed
+    //   (one per mail server, dedup is on the domainId check above).
+    // Everything else → uniqueness on (slug, projectId) so the user doesn't
+    //   accidentally spin up two Grafanas in the same project.
+    if (!isWebmail) {
       const existing = await this.prisma.application.findFirst({
         where: { name: app.name, projectId: data.projectId },
+        select: { id: true },
       });
       if (existing) {
         throw new ConflictException(`${app.name} is already installed in this project`);
       }
     }
 
+    // Port resolution:
+    //   1. User-supplied port wins (must be free across all apps + host).
+    //   2. Multi-install apps → search upward from the template default.
+    //   3. Single-install apps → use the template default; refuse with a
+    //      clear error if it's busy (instead of silently changing it).
     const basePort = PORT_MAP[data.appSlug] || app.ports[0];
-    const realPort = data.port || (isWebmail ? await this.allocateFreePort(basePort) : basePort);
+    let realPort: number;
+    if (data.port) {
+      if (!(await this.isPortFree(data.port))) {
+        throw new ConflictException(`Port ${data.port} is already in use on the host. Pick another.`);
+      }
+      realPort = data.port;
+    } else if (isWebmail) {
+      realPort = await this.allocateFreePort(basePort);
+    } else {
+      if (!(await this.isPortFree(basePort))) {
+        throw new ConflictException(
+          `Default port ${basePort} for ${app.name} is taken. Provide a custom port in the install form.`,
+        );
+      }
+      realPort = basePort;
+    }
 
     // Pre-compute auto-resolved values for webmail-style apps that need to
     // point at an existing Kryptalis mail server. The compose template is
@@ -188,6 +219,12 @@ export class MarketplaceService {
         where: { id: data.domainId },
         data: { applicationId: application.id },
       });
+      // CRITICAL: rewrite Caddyfile so the domain actually routes to the new
+      // app. Without this, the domain is linked in the DB but Caddy keeps
+      // serving the 503 "reserved" placeholder until the next regenerate.
+      // Don't await — Caddy reload happens in the background; if it fails
+      // (Caddy down), the next regenerate picks it up.
+      this.proxy.regenerate().catch(() => {});
     }
 
     const task = await this.prisma.agentTask.create({
@@ -217,7 +254,10 @@ export class MarketplaceService {
       });
     }
 
-    this.runDockerCompose(data.appSlug, composeContent, application.id, task.id, envOverride, isWebmail);
+    // Every template now uses __INSTANCE_ID__ — so EVERY install needs its
+    // own dir (no more single-install bucket). This also enables clean
+    // multi-install for non-webmail apps the day we lift that restriction.
+    this.runDockerCompose(data.appSlug, composeContent, application.id, task.id, envOverride, true);
 
     return {
       message: `Installing ${app.name}...`,
@@ -233,6 +273,23 @@ export class MarketplaceService {
       try {
         await execAsync('docker compose down -v', { cwd: appDir });
       } catch {}
+    }
+  }
+
+  /** True when no running container holds this host port. */
+  private async isPortFree(port: number): Promise<boolean> {
+    try {
+      const { stdout } = await execAsync('docker ps --format "{{.Ports}}"', { timeout: 5000 });
+      const re = /:(\d+)->/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(stdout)) !== null) {
+        if (parseInt(m[1], 10) === port) return false;
+      }
+      return true;
+    } catch {
+      // If we can't probe docker, assume free — installs will surface the
+      // real conflict via `docker compose up` failing with a clear bind error.
+      return true;
     }
   }
 
@@ -253,6 +310,143 @@ export class MarketplaceService {
     let p = base;
     while (used.has(p)) p += 10;
     return p;
+  }
+
+  /**
+   * Deploy an arbitrary Docker Hub image — no template required. This is
+   * the "open marketplace" path: the user types `linuxserver/jellyfin:latest`
+   * + a container port + (optionally) env vars / volumes / a domain, and we
+   * spin up the same compose pipeline as a marketplace install.
+   *
+   * Image format is light-validated to block obvious junk (whitespace,
+   * shell metas) but we let Docker itself reject pulls that fail — the
+   * user gets the docker error verbatim via deployments.lastError.
+   */
+  async installCustom(
+    data: {
+      name: string;
+      image: string;
+      serverId: string;
+      projectId: string;
+      containerPort: number;
+      hostPort?: number;
+      domainId?: string;
+      envVars?: Record<string, string>;
+      volumes?: string[];
+      command?: string;
+    },
+    userId?: string,
+  ) {
+    if (!data.name?.trim()) throw new BadRequestException('Name required');
+    if (!data.image?.trim()) throw new BadRequestException('Image required');
+    if (!Number.isInteger(data.containerPort) || data.containerPort < 1 || data.containerPort > 65535) {
+      throw new BadRequestException('containerPort must be 1-65535');
+    }
+    // Reject obvious shell injection / whitespace in the image ref.
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._\-\/:@]*$/.test(data.image)) {
+      throw new BadRequestException('Invalid image reference');
+    }
+
+    // Name dedup within project — same rule as template installs.
+    const existing = await this.prisma.application.findFirst({
+      where: { name: data.name.trim(), projectId: data.projectId },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new ConflictException(`An app called "${data.name}" already exists in this project`);
+    }
+
+    if (data.domainId) {
+      const dup = await this.prisma.application.findFirst({
+        where: { domains: { some: { id: data.domainId } } },
+        select: { id: true, name: true },
+      });
+      if (dup) {
+        throw new ConflictException(`Domain is already linked to "${dup.name}". Detach it first.`);
+      }
+    }
+
+    // Port: user-supplied OR find one starting at 18000 (high range to avoid
+    // colliding with marketplace defaults).
+    let hostPort: number;
+    if (data.hostPort) {
+      if (!(await this.isPortFree(data.hostPort))) {
+        throw new ConflictException(`Port ${data.hostPort} is already in use on the host`);
+      }
+      hostPort = data.hostPort;
+    } else {
+      hostPort = await this.allocateFreePort(18000);
+    }
+
+    let composeContent = renderCustomComposeTemplate({
+      image: data.image,
+      containerPort: data.containerPort,
+      envVars: data.envVars,
+      volumes: data.volumes,
+      command: data.command,
+    });
+
+    const application = await this.prisma.application.create({
+      data: {
+        name: data.name.trim(),
+        projectId: data.projectId,
+        framework: 'DOCKER_COMPOSE',
+        status: 'DEPLOYING',
+        port: hostPort,
+        envVars: (data.envVars || {}) as any,
+      },
+    });
+
+    const instanceId = application.id.slice(0, 12);
+    composeContent = composeContent
+      .replace(/__INSTANCE_ID__/g, instanceId)
+      .replace(/__HOST_PORT__/g, String(hostPort));
+
+    if (data.domainId) {
+      await this.prisma.domain.update({
+        where: { id: data.domainId },
+        data: { applicationId: application.id },
+      });
+      this.proxy.regenerate().catch(() => {});
+    }
+
+    const task = await this.prisma.agentTask.create({
+      data: {
+        serverId: data.serverId,
+        type: 'DEPLOY',
+        status: 'RUNNING',
+        startedAt: new Date(),
+        payload: {
+          appSlug: 'custom',
+          appName: application.name,
+          applicationId: application.id,
+          image: data.image,
+          hostPort,
+        },
+      },
+    });
+    if (userId) {
+      await this.prisma.deployment.create({
+        data: {
+          applicationId: application.id,
+          status: 'DEPLOYING',
+          commitMessage: `Install custom image ${data.image}`,
+          triggeredById: userId,
+          startedAt: new Date(),
+        },
+      });
+    }
+
+    // perInstanceDir = true: custom installs always isolate (slug is "custom"
+    // so a shared dir would clobber across installs).
+    this.runDockerCompose('custom', composeContent, application.id, task.id, data.envVars || {}, true);
+
+    return {
+      message: `Deploying ${data.image}…`,
+      taskId: task.id,
+      applicationId: application.id,
+      hostPort,
+    };
   }
 
   private async runDockerCompose(
@@ -283,8 +477,8 @@ export class MarketplaceService {
     }
 
     try {
-      await execAsync('docker compose pull', { cwd: appDir, timeout: 120000 });
-      await execAsync('docker compose up -d', { cwd: appDir, timeout: 60000 });
+      await execAsync('docker compose pull', { cwd: appDir, timeout: 600000 });
+      await execAsync('docker compose up -d', { cwd: appDir, timeout: 120000 });
 
       await this.prisma.agentTask.update({
         where: { id: taskId },
@@ -298,6 +492,10 @@ export class MarketplaceService {
         where: { applicationId, status: 'DEPLOYING' },
         data: { status: 'RUNNING', finishedAt: new Date() },
       });
+      // Container is up — refresh Caddy so the linked domain (if any) starts
+      // routing to it RIGHT NOW. Without this, the user has to wait for the
+      // hourly SSL sync or hit "Redeploy" again.
+      this.proxy.regenerate().catch(() => {});
     } catch (err: any) {
       await this.prisma.agentTask.update({
         where: { id: taskId },

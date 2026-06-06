@@ -1111,8 +1111,25 @@ export class ApplicationsService {
         ...(firstHost && firstHost !== app.port ? { port: firstHost } : {}),
       },
     });
+    // Recreate the container so the new port binding takes effect. Compose's
+    // `up -d` is idempotent — it stops/recreates ONLY services whose config
+    // changed (i.e. the port-mapped one) and leaves the rest alone. Without
+    // this the file is rewritten but the running container keeps the old
+    // port until the next manual restart, which is the "ça fait rien" UX.
+    try {
+      await execFileAsync('docker', ['compose', 'up', '-d', '--remove-orphans'], {
+        cwd: appDir,
+        timeout: 120_000,
+      });
+    } catch (err: any) {
+      // Surface the failure but don't roll back the DB — the file is correct
+      // on disk; the user can hit "Redeploy" to retry.
+      throw new BadRequestException(
+        `Ports written but docker compose up failed: ${err?.stderr || err?.message || 'unknown'}`,
+      );
+    }
     this.proxy.regenerate().catch(() => {});
-    return { message: 'Ports remapped', mapping };
+    return { message: 'Ports remapped and container restarted', mapping };
   }
 
   // ── env vars ───────────────────────────────────────────────────────
