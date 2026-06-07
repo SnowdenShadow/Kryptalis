@@ -11,6 +11,7 @@ import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
+import * as net from 'net';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
@@ -220,7 +221,25 @@ export class MailServerService implements OnApplicationBootstrap {
   async deploy(userId: string, domainId: string) {
     const domain = await this.assertDomainAccess(userId, domainId, 'ADMIN');
 
-    let server = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    // Mail server is intended for the APEX domain. If the user picked a
+    // subdomain we'd build hostname mail.<sub>.<apex>, generate DKIM/SPF/
+    // DMARC against the subdomain (not the parent), and the user would
+    // never receive mail addressed to user@apex. Block it with a clear
+    // error pointing at the right domain. Skip the check when there's an
+    // existing server (re-deploy of an already-set-up subdomain shouldn't
+    // suddenly fail).
+    const existing = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    if (!existing) {
+      const labels = domain.domain.split('.').filter(Boolean);
+      if (labels.length > 2) {
+        const apex = labels.slice(-2).join('.');
+        throw new BadRequestException(
+          `Mail servers must be attached to the apex domain. "${domain.domain}" is a subdomain — attach the mail server to "${apex}" instead, and your addresses will be user@${apex}.`,
+        );
+      }
+    }
+
+    let server = existing;
 
     // generate DKIM keypair if first time
     let dkimKey = server?.dkimPrivateKey;
@@ -296,6 +315,137 @@ export class MailServerService implements OnApplicationBootstrap {
     await this.assertDomainAccess(userId, domainId, 'ADMIN');
     await this.removeForDomain(domainId);
     return { message: 'Mail server removed' };
+  }
+
+  /**
+   * Send a real test email to verify end-to-end deliverability.
+   *
+   * We submit via tcp/25 from the host (where the API runs) — Postfix accepts
+   * messages from 127.0.0.1 with no auth (mynetworks). The mail enters the
+   * outbound queue, Postfix opens a tcp/25 connection to the recipient's MX,
+   * and delivers (or queues with a bounce on failure). The user gets back a
+   * transcript of the SMTP conversation between us and the local Postfix —
+   * which is enough to confirm "your mail server accepted the message".
+   *
+   * What this does NOT prove: that the recipient's MX actually accepted
+   * delivery. That requires:
+   *   - outbound tcp/25 unblocked at the VPS-provider level (checked
+   *     separately in /dns/:domainId/health → outboundSmtp)
+   *   - DKIM/SPF/DMARC records propagated
+   *   - PTR (rDNS) set
+   * The summary string returned tells the user to check those if the test
+   * "succeeds" but mail still doesn't arrive.
+   */
+  async sendTestEmail(userId: string, domainId: string, fromMailboxId: string, to: string) {
+    await this.assertDomainAccess(userId, domainId, 'DEVELOPER');
+    const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    if (!server) throw new NotFoundException('Mail server not deployed for this domain');
+    const mailbox = await this.prisma.mailbox.findFirst({
+      where: { id: fromMailboxId, domainId },
+    });
+    if (!mailbox) throw new NotFoundException('Mailbox not found on this domain');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+      throw new BadRequestException(`"${to}" is not a valid email address.`);
+    }
+
+    const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
+    if (!domain) throw new NotFoundException('Domain not found');
+
+    const transcript: string[] = [];
+    const log = (line: string) => transcript.push(line);
+
+    const host = '127.0.0.1';
+    const port = server.smtpPort;
+    const from = `${mailbox.localPart}@${domain.domain}`;
+
+    return await new Promise<{
+      success: boolean;
+      transcript: string[];
+      durationMs: number;
+      summary: string;
+    }>((resolve) => {
+      const started = Date.now();
+      const socket = new net.Socket();
+      let buffer = '';
+      let step = 0;
+      const out = (data: string) => {
+        log(`> ${data.trim()}`);
+        socket.write(data);
+      };
+      const finish = (success: boolean, summary: string) => {
+        try { socket.destroy(); } catch {}
+        resolve({ success, transcript, durationMs: Date.now() - started, summary });
+      };
+
+      socket.setTimeout(20_000);
+      socket.once('timeout', () => finish(false, 'Connection to local Postfix timed out — is the mail server running?'));
+      socket.once('error', (e: any) => finish(false, `Connection error: ${e?.message || e}`));
+
+      socket.on('data', (chunk) => {
+        buffer += chunk.toString();
+        let idx;
+        while ((idx = buffer.indexOf('\r\n')) !== -1) {
+          const line = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          if (!line) continue;
+          log(`< ${line}`);
+          if (line.length >= 4 && line[3] === '-') continue; // multi-line continuation
+          const code = parseInt(line.slice(0, 3), 10);
+
+          if (step === 0 && code === 220) { out(`EHLO kryptalis.local\r\n`); step = 1; return; }
+          if (step === 1 && code === 250) { out(`MAIL FROM:<${from}>\r\n`); step = 2; return; }
+          if (step === 2 && code === 250) { out(`RCPT TO:<${to}>\r\n`); step = 3; return; }
+          if (step === 3) {
+            if (code === 250 || code === 251) { out(`DATA\r\n`); step = 4; return; }
+            return finish(false, `Recipient rejected by local Postfix (${code} ${line.slice(4)}). The mail server isn't configured to relay to external addresses — check that mynetworks includes 127.0.0.0/8.`);
+          }
+          if (step === 4 && code === 354) {
+            const subject = `Kryptalis test email from ${domain.domain}`;
+            const body = [
+              `From: ${from}`,
+              `To: ${to}`,
+              `Subject: ${subject}`,
+              `Date: ${new Date().toUTCString()}`,
+              `Message-ID: <${Date.now()}.${Math.random().toString(36).slice(2)}@${domain.domain}>`,
+              `Content-Type: text/plain; charset=utf-8`,
+              ``,
+              `This is a test message sent from your Kryptalis mail server.`,
+              ``,
+              `If you received it, outbound delivery from ${domain.domain} works end-to-end.`,
+              `If it landed in spam: DKIM/SPF/DMARC/PTR likely need attention.`,
+              `If it never arrived: outbound tcp/25 may be blocked at your VPS provider.`,
+              ``,
+              `-- Kryptalis`,
+              `.`,
+              ``,
+            ].join('\r\n');
+            out(body);
+            step = 5;
+            return;
+          }
+          if (step === 5) {
+            if (code === 250) {
+              out(`QUIT\r\n`);
+              return finish(
+                true,
+                `Local Postfix accepted the message (queue ID: ${line.slice(4)}). It's now being relayed to the recipient's MX. If it doesn't arrive within a minute: 1) check the DNS health tab (DKIM/SPF/DMARC/PTR), 2) verify outbound tcp/25 isn't blocked at your VPS provider, 3) check the mail server's logs.`,
+              );
+            }
+            return finish(false, `Message rejected after DATA (${code} ${line.slice(4)}).`);
+          }
+          if (code >= 400) {
+            return finish(false, `SMTP error ${code}: ${line.slice(4)}`);
+          }
+        }
+      });
+
+      try {
+        log(`-- connecting to ${host}:${port} (local Postfix) --`);
+        socket.connect(port, host);
+      } catch (e: any) {
+        finish(false, `Could not connect: ${e?.message || e}`);
+      }
+    });
   }
 
   /**
@@ -616,8 +766,15 @@ ${sslExternalVolumes}`;
   }
 
   /**
-   * Find free ports for this mail server. Default smtp=25 must be on host,
-   * but we offset each new domain by +10 to avoid collisions in dev/local.
+   * Find free ports for this mail server.
+   *
+   * Inbound mail from the public Internet ALWAYS arrives on tcp/25 — that's
+   * not configurable on the sender side. So the first mail server we deploy
+   * gets the standard set (25/465/587/143/993). Additional mail servers
+   * cannot share tcp/25 (only one process can bind a host port at a time);
+   * we offset them to 2525+10*n. The DNS hints UI clearly marks those as
+   * non-default so the operator knows there's only ever ONE inbound mail
+   * server per host.
    */
   private async allocatePorts(
     domainId: string,
@@ -647,6 +804,12 @@ ${sslExternalVolumes}`;
     // also include any ports currently bound on the docker host — guards against
     // orphan containers whose DB row was wiped (crash, manual cleanup, etc.).
     for (const p of await this.listDockerHostPorts()) used.add(p);
+
+    // Try the canonical SMTP port set first. Anyone sending mail to us via
+    // the public Internet hits tcp/25 — if it's free, take it.
+    const standard = { smtp: 25, submission: 587, smtps: 465, imap: 143, imaps: 993 };
+    const standardFree = Object.values(standard).every((p) => !used.has(p));
+    if (standardFree) return standard;
 
     let base = 2525;
     while (

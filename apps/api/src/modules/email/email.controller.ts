@@ -128,4 +128,14 @@ export class EmailController {
   removeMailServer(@CurrentUser('id') userId: string, @Param('domainId') domainId: string) {
     return this.mailServer.remove(userId, domainId);
   }
+
+  @Post('server/:domainId/test')
+  @ApiOperation({ summary: 'Send a test email from a mailbox to any address' })
+  sendTestEmail(
+    @CurrentUser('id') userId: string,
+    @Param('domainId') domainId: string,
+    @Body() body: { fromMailboxId: string; to: string },
+  ) {
+    return this.mailServer.sendTestEmail(userId, domainId, body.fromMailboxId, body.to);
+  }
 }

@@ -8,7 +8,7 @@ import {
   Mail, AtSign, Globe, Plus, Trash2, Loader2, Eye, EyeOff,
   Shield, ShieldCheck, Copy, Check, RefreshCw, AlertTriangle,
   KeyRound, Inbox, ArrowLeft, ExternalLink, Server as ServerIcon,
-  Power, AlertCircle,
+  Power, AlertCircle, Send,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -61,6 +61,7 @@ interface DnsHealth {
   checks: {
     a: DnsCheck; mx: DnsCheck; ptr: DnsCheck; spf: DnsCheck;
     dkim: DnsCheck; dmarc: DnsCheck; autodiscover: DnsCheck; apexA: DnsCheck;
+    outboundSmtp?: DnsCheck;
   };
   counts: { ok: number; warn: number; fail: number; unknown: number };
   overall: 'OK' | 'PARTIAL' | 'FAIL';
@@ -88,6 +89,9 @@ export default function EmailDomainPage() {
   // dialogs
   const [showCreateMb, setShowCreateMb] = useState(false);
   const [newMb, setNewMb] = useState({ localPart: '', password: '', quotaMb: 2048, forwardTo: '', catchAll: false });
+  const [showTestEmail, setShowTestEmail] = useState(false);
+  const [testEmail, setTestEmail] = useState({ fromMailboxId: '', to: '' });
+  const [testResult, setTestResult] = useState<{ success: boolean; summary: string; transcript: string[]; durationMs: number } | null>(null);
   const [showPw, setShowPw] = useState(false);
   const [showCreateAlias, setShowCreateAlias] = useState(false);
   const [newAlias, setNewAlias] = useState({ localPart: '', targetMailboxId: '', forwardTo: '' });
@@ -207,6 +211,20 @@ export default function EmailDomainPage() {
       qc.invalidateQueries({ queryKey: ['email-aliases', domainId] });
       qc.invalidateQueries({ queryKey: ['emails-overview'] });
       setDeleteAliasId(null);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const sendTestEmail = useMutation({
+    mutationFn: (body: { fromMailboxId: string; to: string }) =>
+      api.post<{ success: boolean; summary: string; transcript: string[]; durationMs: number }>(
+        `/email/server/${domainId}/test`,
+        body,
+      ),
+    onSuccess: (r) => {
+      setTestResult(r);
+      if (r.success) toast.success('Test email accepted by mail server');
+      else toast.error(r.summary);
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -463,13 +481,20 @@ export default function EmailDomainPage() {
       {/* ─── Mailboxes ───────────────────────────────────────── */}
       {activeTab === 'mailboxes' && (
         <>
-          <div className="flex justify-between items-center">
+          <div className="flex justify-between items-center gap-2 flex-wrap">
             <p className="text-xs text-muted-foreground">
               {mailboxes.length} {mailboxes.length === 1 ? t('emails.cardMailbox') : t('emails.cardMailboxes')}
             </p>
-            <Button size="sm" onClick={() => setShowCreateMb(true)} disabled={!dnsHints?.mailServer}>
-              <Plus size={14} /> {t('emails.mailboxCreate')}
-            </Button>
+            <div className="flex gap-2">
+              {mailboxes.length > 0 && (
+                <Button size="sm" variant="outline" onClick={() => setShowTestEmail(true)}>
+                  <Send size={14} /> Send test email
+                </Button>
+              )}
+              <Button size="sm" onClick={() => setShowCreateMb(true)} disabled={!dnsHints?.mailServer}>
+                <Plus size={14} /> {t('emails.mailboxCreate')}
+              </Button>
+            </div>
           </div>
           {mbLoading ? (
             <div className="py-12 flex justify-center"><Loader2 size={20} className="animate-spin text-muted-foreground" /></div>
@@ -657,6 +682,7 @@ export default function EmailDomainPage() {
                     ['DMARC', dnsHealth.checks.dmarc],
                     ['Autodiscover', dnsHealth.checks.autodiscover],
                     ['A (apex)', dnsHealth.checks.apexA],
+                    ...(dnsHealth.checks.outboundSmtp ? [['Outbound tcp/25', dnsHealth.checks.outboundSmtp] as const] : []),
                   ] as const).map(([label, check]) => {
                     const colorRing =
                       check.status === 'OK' ? 'border-emerald-500/40 bg-emerald-500/5' :
@@ -898,6 +924,80 @@ export default function EmailDomainPage() {
             })}
           >
             {createAlias.isPending ? t('emails.mailboxCreating') : t('common.create')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ─── Send test email ─── */}
+      <Dialog
+        open={showTestEmail}
+        onClose={() => { setShowTestEmail(false); setTestResult(null); setTestEmail({ fromMailboxId: '', to: '' }); }}
+        className="max-w-2xl"
+      >
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Send size={16} /> Send a test email</DialogTitle>
+          <DialogDescription>
+            Sends a message through your mail server to verify the entire send path
+            (local Postfix → recipient's MX). If outbound tcp/25 is blocked or DKIM/SPF/DMARC
+            are misconfigured, this catches it.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <div>
+            <Label className="text-xs">From mailbox</Label>
+            <Select
+              value={testEmail.fromMailboxId}
+              onChange={(e) => setTestEmail((t) => ({ ...t, fromMailboxId: e.target.value }))}
+            >
+              <option value="">Select mailbox…</option>
+              {mailboxes.filter(m => m.status === 'ACTIVE').map(m => (
+                <option key={m.id} value={m.id}>{m.address}</option>
+              ))}
+            </Select>
+          </div>
+          <div>
+            <Label className="text-xs">Send to</Label>
+            <Input
+              type="email"
+              placeholder="you@gmail.com"
+              value={testEmail.to}
+              onChange={(e) => setTestEmail((t) => ({ ...t, to: e.target.value }))}
+            />
+            <p className="text-[11px] text-muted-foreground mt-1">
+              Tip: send to mail-tester.com to get a deliverability score.
+            </p>
+          </div>
+
+          {testResult && (
+            <div className={cn(
+              'rounded-md border p-3 space-y-2',
+              testResult.success ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-red-500/40 bg-red-500/5',
+            )}>
+              <p className={cn('text-sm font-semibold', testResult.success ? 'text-emerald-600' : 'text-red-600')}>
+                {testResult.success ? '✓ Accepted' : '✗ Failed'} <span className="text-muted-foreground font-normal">({testResult.durationMs}ms)</span>
+              </p>
+              <p className="text-xs">{testResult.summary}</p>
+              <details className="mt-2">
+                <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground">SMTP transcript ({testResult.transcript.length} lines)</summary>
+                <pre className="mt-2 text-[10px] font-mono bg-muted/40 rounded p-2 max-h-64 overflow-auto whitespace-pre-wrap">
+                  {testResult.transcript.join('\n')}
+                </pre>
+              </details>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => { setShowTestEmail(false); setTestResult(null); setTestEmail({ fromMailboxId: '', to: '' }); }}>
+            Close
+          </Button>
+          <Button
+            disabled={!testEmail.fromMailboxId || !testEmail.to.trim() || sendTestEmail.isPending}
+            onClick={() => sendTestEmail.mutate(testEmail)}
+          >
+            {sendTestEmail.isPending && <Loader2 size={12} className="animate-spin" />}
+            <Send size={12} /> Send
           </Button>
         </DialogFooter>
       </Dialog>

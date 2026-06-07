@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import * as dns from 'dns';
+import * as net from 'net';
 import { promisify } from 'util';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateMailboxDto } from './dto/create-mailbox.dto';
@@ -421,6 +422,31 @@ export class EmailService {
       apexA: apexARecords && apexARecords.length > 0
         ? { status: 'OK' as const, message: `${apex} A → ${apexARecords.join(', ')}` }
         : { status: 'WARN' as const, message: `${apex} has no A record (only matters if you also host a website on the apex).` },
+
+      // Outbound :25 connectivity. Many VPS providers (AWS/GCP/Azure/Oracle,
+      // Hetzner trial accounts, OVH cheapest plans, …) block egress on tcp/25
+      // by default. Postfix will queue forever, no bounce, no DSN — the user
+      // just sees "mail sent" with no delivery. We probe Gmail's public MX
+      // on tcp/25 with a 4s timeout; if we can't connect, mail will silently
+      // fail.
+      outboundSmtp: await (async () => {
+        const probe = (host: string, port: number, timeoutMs = 4000): Promise<boolean> =>
+          new Promise<boolean>((resolve) => {
+            const socket = new net.Socket();
+            let done = false;
+            const finish = (ok: boolean) => { if (done) return; done = true; try { socket.destroy(); } catch {} resolve(ok); };
+            socket.setTimeout(timeoutMs);
+            socket.once('connect', () => finish(true));
+            socket.once('error', () => finish(false));
+            socket.once('timeout', () => finish(false));
+            try { socket.connect(port, host); } catch { finish(false); }
+          });
+        // gmail-smtp-in is the canonical "public Internet :25 reachable" probe.
+        const ok = await probe('gmail-smtp-in.l.google.com', 25);
+        return ok
+          ? { status: 'OK' as const, message: 'Outbound tcp/25 to public MX servers works.' }
+          : { status: 'FAIL' as const, message: 'Outbound tcp/25 is blocked on this host. Mail will silently fail to deliver. Most cloud providers block port 25 by default — request unblocking (or use an SMTP relay like Postmark, Mailgun, AWS SES).' };
+      })(),
     };
 
     const counts = {
