@@ -32,6 +32,8 @@ import {
   AlertTriangle,
   Loader2,
   Check,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -154,14 +156,17 @@ const FRAMEWORK_LABELS: Record<string, string> = {
 
 const HTTPS_PORTS = [443, 8443, 9443];
 const LOG_LINE_OPTIONS = [50, 100, 200, 500] as const;
+// Order matches the actual user journey: see → check history → debug live
+// → poke at runtime → tweak config. Settings always last (potentially
+// dangerous), Files/Terminal further right because they're rarely needed.
 const TABS: { id: TabId; label: string }[] = [
   { id: 'overview', label: 'Overview' },
-  { id: 'logs', label: 'Logs' },
-  { id: 'terminal', label: 'Terminal' },
   { id: 'deployments', label: 'Deployments' },
-  { id: 'files', label: 'Files' },
+  { id: 'logs', label: 'Logs' },
+  { id: 'env', label: 'Env vars' },
   { id: 'ports', label: 'Ports' },
-  { id: 'env', label: 'Env' },
+  { id: 'terminal', label: 'Terminal' },
+  { id: 'files', label: 'Files' },
   { id: 'settings', label: 'Settings' },
 ];
 
@@ -235,6 +240,57 @@ function publicUrl(
 // ---------------------------------------------------------------------------
 // Status dot
 // ---------------------------------------------------------------------------
+
+/**
+ * Single editable env-var row with secret masking. The value is masked by
+ * default for keys that smell like a secret (TOKEN/SECRET/KEY/PASSWORD/PWD)
+ * so they're not leaked in screenshares. Toggling reveals the value.
+ */
+function EnvRow({
+  row,
+  onChange,
+  onDelete,
+}: {
+  row: { key: string; value: string };
+  onChange: (next: { key: string; value: string }) => void;
+  onDelete: () => void;
+}) {
+  const looksSecret = /token|secret|key|password|pwd|api/i.test(row.key);
+  const [show, setShow] = useState(!looksSecret);
+  // Re-mask when the key turns into a secret-looking name
+  useEffect(() => { if (looksSecret && row.value) setShow(false); }, [looksSecret, row.key]);
+  return (
+    <div className="flex items-center gap-2">
+      <Input
+        placeholder="KEY"
+        className="font-mono"
+        value={row.key}
+        onChange={(e) => onChange({ ...row, key: e.target.value })}
+      />
+      <span className="text-muted-foreground">=</span>
+      <div className="flex-1 relative">
+        <Input
+          type={show ? 'text' : 'password'}
+          placeholder="value"
+          className="font-mono pr-8"
+          value={row.value}
+          onChange={(e) => onChange({ ...row, value: e.target.value })}
+        />
+        <button
+          type="button"
+          onClick={() => setShow((s) => !s)}
+          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          title={show ? 'Hide value' : 'Show value'}
+        >
+          {show ? <EyeOff size={12} /> : <Eye size={12} />}
+        </button>
+      </div>
+      <Button size="icon" variant="ghost" onClick={onDelete}>
+        <Trash2 size={14} />
+      </Button>
+    </div>
+  );
+}
 
 function RenameRow({
   current,
@@ -676,7 +732,10 @@ export default function ApplicationDetailPage() {
               </Badge>
               <Badge variant="outline">{FRAMEWORK_LABELS[app.framework] || app.framework}</Badge>
             </div>
-            {isRunning && app.port && (() => {
+            {(() => {
+              // Show URLs whenever there's at least one — even when the app is
+              // stopped — so users diagnosing an outage can still see where it
+              // *should* be reachable. The link is disabled visually when down.
               const urls = publicUrls(app, hostname);
               if (urls.length === 0) return null;
               return (
@@ -687,7 +746,11 @@ export default function ApplicationDetailPage() {
                       href={url}
                       target="_blank"
                       rel="noreferrer"
-                      className="text-primary hover:underline font-mono truncate"
+                      className={cn(
+                        'font-mono truncate',
+                        isRunning ? 'text-primary hover:underline' : 'text-muted-foreground line-through',
+                      )}
+                      title={isRunning ? url : `${url} — app is not running`}
                     >
                       {url}
                     </a>
@@ -839,8 +902,13 @@ export default function ApplicationDetailPage() {
                               <Badge
                                 variant={r.sslStatus === 'ACTIVE' ? 'success' : r.sslStatus === 'PENDING' ? 'warning' : 'destructive'}
                                 className="text-[10px]"
+                                title={
+                                  r.sslStatus === 'ACTIVE' ? 'SSL certificate active and valid' :
+                                  r.sslStatus === 'PENDING' ? "Let's Encrypt is provisioning a certificate — usually <30s after DNS propagates" :
+                                  'SSL provisioning failed. Check that DNS A/CNAME records point to this server.'
+                                }
                               >
-                                {r.sslStatus === 'ACTIVE' ? '🔒 SSL' : r.sslStatus === 'PENDING' ? '⏳ SSL' : '⚠️ SSL'}
+                                {r.sslStatus === 'ACTIVE' ? 'SSL OK' : r.sslStatus === 'PENDING' ? 'SSL pending' : 'SSL error'}
                               </Badge>
                             )}
                             {r.kind === 'ip' && (
@@ -1331,28 +1399,12 @@ export default function ApplicationDetailPage() {
             <CardContent>
               <div className="space-y-2">
                 {envDraft.map((row, i) => (
-                  <div key={i} className="flex items-center gap-2">
-                    <Input
-                      placeholder="KEY"
-                      className="font-mono"
-                      value={row.key}
-                      onChange={(e) => setEnvDraft(d => d.map((r, j) => j === i ? { ...r, key: e.target.value } : r))}
-                    />
-                    <span className="text-muted-foreground">=</span>
-                    <Input
-                      placeholder="value"
-                      className="font-mono"
-                      value={row.value}
-                      onChange={(e) => setEnvDraft(d => d.map((r, j) => j === i ? { ...r, value: e.target.value } : r))}
-                    />
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      onClick={() => setEnvDraft(d => d.filter((_, j) => j !== i))}
-                    >
-                      <Trash2 size={14} />
-                    </Button>
-                  </div>
+                  <EnvRow
+                    key={i}
+                    row={row}
+                    onChange={(next) => setEnvDraft(d => d.map((r, j) => j === i ? next : r))}
+                    onDelete={() => setEnvDraft(d => d.filter((_, j) => j !== i))}
+                  />
                 ))}
                 <Button
                   size="sm"
@@ -1398,31 +1450,41 @@ export default function ApplicationDetailPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg">
-                  <Settings size={18} /> Configuration
+                  <Settings size={18} /> Build configuration
                 </CardTitle>
-                <CardDescription>Application settings and build configuration</CardDescription>
+                <CardDescription>
+                  Snapshot of the build settings used the last time this app was deployed. Edit via Files → Compose / Dockerfile when needed.
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="space-y-3">
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Git URL</p>
-                      <p className="mt-0.5 font-mono text-sm truncate">
-                        {app.gitUrl || <span className="text-muted-foreground">Not set</span>}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Branch</p>
-                      <p className="mt-0.5 text-sm">
-                        {app.gitBranch ? (
-                          <Badge variant="outline" className="gap-1">
-                            <GitBranch size={10} /> {app.gitBranch}
-                          </Badge>
-                        ) : (
-                          <span className="text-muted-foreground">Not set</span>
-                        )}
-                      </p>
-                    </div>
+                    {app.gitUrl && (
+                      <>
+                        <div>
+                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Git URL</p>
+                          <p className="mt-0.5 font-mono text-sm truncate" title={app.gitUrl}>{app.gitUrl}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Branch</p>
+                          <p className="mt-0.5 text-sm">
+                            {app.gitBranch ? (
+                              <Badge variant="outline" className="gap-1">
+                                <GitBranch size={10} /> {app.gitBranch}
+                              </Badge>
+                            ) : (
+                              <span className="text-muted-foreground">Not set</span>
+                            )}
+                          </p>
+                        </div>
+                      </>
+                    )}
+                    {app.dockerImage && (
+                      <div>
+                        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Docker image</p>
+                        <p className="mt-0.5 font-mono text-sm break-all">{app.dockerImage}</p>
+                      </div>
+                    )}
                     <div>
                       <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Port</p>
                       <p className="mt-0.5 font-mono text-sm">
@@ -1431,18 +1493,22 @@ export default function ApplicationDetailPage() {
                     </div>
                   </div>
                   <div className="space-y-3">
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Build Command</p>
-                      <p className="mt-0.5 font-mono text-sm">
-                        {app.buildCommand || <span className="text-muted-foreground">Not set</span>}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Start Command</p>
-                      <p className="mt-0.5 font-mono text-sm">
-                        {app.startCommand || <span className="text-muted-foreground">Not set</span>}
-                      </p>
-                    </div>
+                    {(app.buildCommand || app.startCommand) && (
+                      <>
+                        <div>
+                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Build Command</p>
+                          <p className="mt-0.5 font-mono text-sm">
+                            {app.buildCommand || <span className="text-muted-foreground">Not set</span>}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Start Command</p>
+                          <p className="mt-0.5 font-mono text-sm">
+                            {app.startCommand || <span className="text-muted-foreground">Not set</span>}
+                          </p>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               </CardContent>
@@ -1583,7 +1649,9 @@ export default function ApplicationDetailPage() {
               </CardContent>
             </Card>
 
-            {/* Auto-deploy + webhook */}
+            {/* Auto-deploy + webhook — only relevant for git-deployed apps.
+                Docker-image apps have no upstream to receive push events from. */}
+            {app.gitUrl && (
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg">
@@ -1655,6 +1723,7 @@ export default function ApplicationDetailPage() {
                 </div>
               </CardContent>
             </Card>
+            )}
 
             {/* Danger zone */}
             <Card className="border-destructive/50">

@@ -202,6 +202,7 @@ export default function ApplicationsPage() {
   // --- Search + filter ---
   const [search, setSearch] = useState('');
   const [filterProject, setFilterProject] = useState('');
+  const [filterStatus, setFilterStatus] = useState<'' | 'RUNNING' | 'STOPPED' | 'ERROR' | 'DEPLOYING'>('');
 
   // --- List ---
   const { data: applications = [], isLoading } = useQuery<Application[]>({
@@ -214,12 +215,23 @@ export default function ApplicationsPage() {
     if (filterProject) {
       result = result.filter((a) => a.project?.id === filterProject);
     }
+    if (filterStatus) {
+      result = result.filter((a) =>
+        filterStatus === 'DEPLOYING'
+          ? a.status === 'DEPLOYING' || a.status === 'BUILDING'
+          : a.status === filterStatus,
+      );
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
-      result = result.filter((a) => a.name.toLowerCase().includes(q));
+      result = result.filter((a) =>
+        a.name.toLowerCase().includes(q) ||
+        (a.gitUrl?.toLowerCase().includes(q) ?? false) ||
+        (a.domains || []).some((d) => d.domain.toLowerCase().includes(q)),
+      );
     }
     return result;
-  }, [applications, search, filterProject]);
+  }, [applications, search, filterProject, filterStatus]);
 
   // --- Projects for dropdown ---
   const { data: projects = [] } = useQuery<ProjectOption[]>({
@@ -604,24 +616,51 @@ export default function ApplicationsPage() {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant={filterProject === '' ? 'default' : 'outline'}
-              onClick={() => setFilterProject('')}
+          <div className="flex items-center gap-2 flex-wrap">
+            <Select
+              value={filterStatus}
+              onChange={(e) => setFilterStatus(e.target.value as any)}
+              className="h-9 w-auto min-w-[140px]"
             >
-              All
-            </Button>
-            {projects.map((p) => (
-              <Button
-                key={p.id}
-                size="sm"
-                variant={filterProject === p.id ? 'default' : 'outline'}
-                onClick={() => setFilterProject(filterProject === p.id ? '' : p.id)}
+              <option value="">All statuses</option>
+              <option value="RUNNING">Running</option>
+              <option value="STOPPED">Stopped</option>
+              <option value="DEPLOYING">Deploying / Building</option>
+              <option value="ERROR">Error</option>
+            </Select>
+            {projects.length <= 6 ? (
+              <>
+                <Button size="sm" variant={filterProject === '' ? 'default' : 'outline'} onClick={() => setFilterProject('')}>
+                  All projects
+                </Button>
+                {projects.map((p) => (
+                  <Button
+                    key={p.id}
+                    size="sm"
+                    variant={filterProject === p.id ? 'default' : 'outline'}
+                    onClick={() => setFilterProject(filterProject === p.id ? '' : p.id)}
+                  >
+                    {p.name}
+                  </Button>
+                ))}
+              </>
+            ) : (
+              <Select
+                value={filterProject}
+                onChange={(e) => setFilterProject(e.target.value)}
+                className="h-9 w-auto min-w-[160px]"
               >
-                {p.name}
+                <option value="">All projects</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </Select>
+            )}
+            {(search || filterProject || filterStatus) && (
+              <Button size="sm" variant="ghost" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); }}>
+                Clear
               </Button>
-            ))}
+            )}
           </div>
         </div>
       )}
@@ -656,11 +695,14 @@ export default function ApplicationsPage() {
             </Button>
           </CardContent>
         </Card>
-      ) : filtered.length === 0 && search ? (
+      ) : filtered.length === 0 && (search || filterProject || filterStatus) ? (
         <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <Search size={40} className="mb-3 text-muted-foreground" />
-            <p className="text-muted-foreground">No applications matching &quot;{search}&quot;</p>
+          <CardContent className="flex flex-col items-center justify-center py-12 gap-3">
+            <Search size={40} className="text-muted-foreground" />
+            <p className="text-muted-foreground">No applications match the current filters.</p>
+            <Button size="sm" variant="outline" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); }}>
+              Clear filters
+            </Button>
           </CardContent>
         </Card>
       ) : (
@@ -698,10 +740,12 @@ export default function ApplicationsPage() {
                           </span>
                         </div>
                       </div>
-                      {isRunning && app.port && (
+                      {publicAppUrl(app) && (
                         <Button
                           size="sm"
                           className="shrink-0"
+                          disabled={!isRunning}
+                          title={isRunning ? 'Open public URL' : 'App must be running'}
                           onClick={(e) => {
                             stop(e);
                             const url = publicAppUrl(app);
@@ -713,7 +757,7 @@ export default function ApplicationsPage() {
                       )}
                     </div>
 
-                    {/* Info grid */}
+                    {/* Info grid — project + port (port hidden for custom-port apps; visible in domain badges below) */}
                     <div className="grid grid-cols-2 gap-3 text-sm">
                       {app.project?.name && (
                         <div>
@@ -727,7 +771,7 @@ export default function ApplicationsPage() {
                           </Link>
                         </div>
                       )}
-                      {app.port && (
+                      {app.port && !app.customPort && (
                         <div>
                           <p className="text-xs text-muted-foreground">Port</p>
                           <p className="font-mono font-medium">{app.port}</p>
@@ -736,7 +780,7 @@ export default function ApplicationsPage() {
                       {app.gitUrl && (
                         <div className="col-span-2">
                           <p className="text-xs text-muted-foreground">Git Repository</p>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2" title={app.gitUrl}>
                             <span className="font-mono text-xs truncate">{truncateGitUrl(app.gitUrl)}</span>
                             {app.gitBranch && (
                               <Badge variant="outline" className="text-[10px] gap-1 shrink-0">
@@ -746,39 +790,58 @@ export default function ApplicationsPage() {
                           </div>
                         </div>
                       )}
-                      {((app.domains && app.domains.length > 0) || (app.portBindings && app.portBindings.length > 0)) && (
-                        <div className="col-span-2">
-                          <p className="text-xs text-muted-foreground">Routes</p>
-                          <div className="flex flex-wrap gap-1.5 mt-0.5">
-                            {(app.domains || []).map((d) => (
-                              <Badge key={d.id} variant={d.sslStatus === 'ACTIVE' ? 'success' : 'outline'} className="text-[10px] gap-1 font-mono">
-                                <Globe size={9} /> {app.customPort && app.port ? `${d.domain}:${app.port}` : d.domain}
-                              </Badge>
-                            ))}
-                            {(app.portBindings || []).map((b) => (
-                              <Badge key={b.id} variant={b.domain.sslStatus === 'ACTIVE' ? 'success' : 'outline'} className="text-[10px] gap-1 font-mono">
-                                <Globe size={9} /> {b.domain.domain}:{b.port}
-                              </Badge>
-                            ))}
-                          </div>
-                        </div>
-                      )}
                     </div>
 
-                    {/* Domains */}
-                    {app.domains && app.domains.length > 0 && (
-                      <div className="rounded-lg border border-border bg-muted/30 p-3">
-                        <p className="text-xs font-medium text-muted-foreground mb-2">Domains</p>
-                        <div className="space-y-1.5">
-                          {app.domains.map((d) => (
-                            <div key={d.id} className="flex items-center justify-between">
-                              <span className="font-mono text-sm">{d.domain}</span>
-                              <Badge variant={d.sslStatus === 'ACTIVE' ? 'success' : d.sslStatus === 'PENDING' ? 'warning' : 'destructive'} className="text-[10px]">
-                                {d.sslStatus === 'ACTIVE' ? '🔒 SSL' : d.sslStatus === 'PENDING' ? '⏳ SSL Pending' : '⚠️ SSL Error'}
+                    {/* Routes — single source of truth for URLs + SSL state */}
+                    {((app.domains && app.domains.length > 0) || (app.portBindings && app.portBindings.length > 0)) && (
+                      <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1.5">
+                        <p className="text-xs font-medium text-muted-foreground">URLs</p>
+                        {(app.domains || []).map((d) => {
+                          const url = app.customPort && app.port ? `https://${d.domain}:${app.port}` : `https://${d.domain}`;
+                          return (
+                            <div key={d.id} className="flex items-center justify-between gap-2">
+                              <a
+                                href={url}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="font-mono text-sm truncate hover:underline text-primary"
+                              >
+                                {app.customPort && app.port ? `${d.domain}:${app.port}` : d.domain}
+                              </a>
+                              <Badge
+                                variant={d.sslStatus === 'ACTIVE' ? 'success' : d.sslStatus === 'PENDING' ? 'warning' : 'destructive'}
+                                className="text-[10px] shrink-0"
+                                title={
+                                  d.sslStatus === 'ACTIVE' ? 'SSL certificate active' :
+                                  d.sslStatus === 'PENDING' ? "Let's Encrypt provisioning…" :
+                                  'SSL provisioning failed — check DNS records'
+                                }
+                              >
+                                {d.sslStatus === 'ACTIVE' ? 'SSL OK' : d.sslStatus === 'PENDING' ? 'SSL pending' : 'SSL error'}
                               </Badge>
                             </div>
-                          ))}
-                        </div>
+                          );
+                        })}
+                        {(app.portBindings || []).map((b) => (
+                          <div key={b.id} className="flex items-center justify-between gap-2">
+                            <a
+                              href={`https://${b.domain.domain}:${b.port}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="font-mono text-sm truncate hover:underline text-primary"
+                            >
+                              {b.domain.domain}:{b.port}
+                            </a>
+                            <Badge
+                              variant={b.domain.sslStatus === 'ACTIVE' ? 'success' : 'outline'}
+                              className="text-[10px] shrink-0"
+                            >
+                              {b.domain.sslStatus === 'ACTIVE' ? 'SSL OK' : 'SSL pending'}
+                            </Badge>
+                          </div>
+                        ))}
                       </div>
                     )}
 
@@ -824,20 +887,22 @@ export default function ApplicationsPage() {
 
       {/* ---- Deploy Wizard ---- */}
       <Dialog open={showDeploy} onClose={() => { setShowDeploy(false); setDeployStep(0); }} className="max-w-2xl max-h-[90vh] overflow-y-auto">
-        {/* Step indicators */}
-        <div className="flex items-center gap-2 mb-4">
-          {['Source', 'Config', 'Files', 'Deploy'].map((label, i) => (
-            <div key={label} className="flex items-center gap-2 flex-1">
-              <div className={cn(
-                'flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold shrink-0',
-                deployStep >= i ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'
-              )}>
-                {i + 1}
+        {/* Step indicators — sticky so user always sees progress when content scrolls */}
+        <div className="sticky top-0 z-10 -mx-6 -mt-6 px-6 pt-6 pb-3 mb-4 bg-card border-b border-border">
+          <div className="flex items-center gap-2">
+            {['Source', 'Config', 'Files', 'Deploy'].map((label, i) => (
+              <div key={label} className="flex items-center gap-2 flex-1">
+                <div className={cn(
+                  'flex h-7 w-7 items-center justify-center rounded-full text-xs font-bold shrink-0',
+                  deployStep >= i ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'
+                )}>
+                  {i + 1}
+                </div>
+                <span className={cn('text-sm', deployStep >= i ? 'text-foreground' : 'text-muted-foreground')}>{label}</span>
+                {i < 3 && <div className={cn('flex-1 h-px', deployStep > i ? 'bg-primary' : 'bg-muted')} />}
               </div>
-              <span className={cn('text-sm', deployStep >= i ? 'text-foreground' : 'text-muted-foreground')}>{label}</span>
-              {i < 3 && <div className={cn('flex-1 h-px', deployStep > i ? 'bg-primary' : 'bg-muted')} />}
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
 
         {/* Step 0: Source */}
@@ -1059,7 +1124,12 @@ export default function ApplicationsPage() {
             <DialogFooter>
               <Button variant="outline" onClick={() => { setShowDeploy(false); setDeployStep(0); setDeployMode(null); }}>Cancel</Button>
               <Button onClick={() => setDeployStep(1)}
-                disabled={!deployMode || (deployMode !== 'docker' && !deployForm.gitUrl)}>
+                disabled={
+                  !deployMode ||
+                  (deployMode === 'git-url' && !deployForm.gitUrl) ||
+                  (deployMode === 'git-provider' && !deployForm.gitUrl) ||
+                  (deployMode === 'docker' && !deployForm.dockerImage.trim())
+                }>
                 Next
               </Button>
             </DialogFooter>
@@ -1173,6 +1243,14 @@ export default function ApplicationsPage() {
                 <p className="text-xs text-muted-foreground mt-1">
                   Imported into the form below: {envFilesFound.map(f => <code key={f.name} className="mx-1 font-mono">{f.name}</code>)}
                 </p>
+                {envFilesFound.some(f => /example|sample|template/i.test(f.name)) && (
+                  <p className="text-xs text-orange-600 mt-1.5 flex items-start gap-1">
+                    <AlertTriangle size={11} className="shrink-0 mt-0.5" />
+                    <span>
+                      <code className="font-mono">.env.example</code>-style file detected — these are placeholders, not real secrets. Replace values before deploying.
+                    </span>
+                  </p>
+                )}
               </div>
             )}
 
@@ -1386,7 +1464,7 @@ export default function ApplicationsPage() {
                 <option value="">No domain</option>
                 {availableDomains.map((d: any) => (
                   <option key={d.id} value={d.id}>
-                    {d.domain}{d.applicationId ? ' (main :443 used — will bind on the app port)' : ''}
+                    {d.domain}{d.applicationId ? ' (already attached to an app — will share with port suffix)' : ''}
                   </option>
                 ))}
                 <option value="__new__">+ Add a new domain…</option>
