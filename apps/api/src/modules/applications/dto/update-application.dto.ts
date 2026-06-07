@@ -11,10 +11,14 @@ import { ApiProperty } from '@nestjs/swagger';
 import { AppFramework, GitProviderType } from '@prisma/client';
 
 export class UpdateApplicationDto {
-  @ApiProperty({ required: false })
+  // Note: `name` is intentionally NOT exposed here. It's the slug source and
+  // changing it would break the container, on-disk dir, and Caddy bindings.
+  // Use `displayName` to rename for UI purposes only.
+
+  @ApiProperty({ required: false, description: 'Cosmetic name shown in the UI. Slug, container, and paths are unaffected.' })
   @IsOptional()
   @IsString()
-  name?: string;
+  displayName?: string;
 
   @ApiProperty({ required: false, enum: AppFramework })
   @IsOptional()

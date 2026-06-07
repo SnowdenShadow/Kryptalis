@@ -312,6 +312,24 @@ export class ApplicationsService {
     // ports also count — the user knows that port belongs in the URL.
     const userPickedPort = !!(firstMappedHost || dbData.port);
 
+    // Up-front port collision check so the user gets a clear error in the
+    // create dialog instead of a cryptic "docker compose up failed" 30s
+    // into the deploy. Only applies when the user actually picked a host
+    // port (mapping or dbData.port). Marketplace already does this; do it
+    // here for manual create too.
+    const portToCheck = (firstMappedHost as number | undefined) ?? dbData.port;
+    if (portToCheck && typeof portToCheck === 'number') {
+      const otherUsed = await this.prisma.application.findFirst({
+        where: { port: portToCheck, NOT: { id: undefined } },
+        select: { id: true, name: true },
+      });
+      if (otherUsed) {
+        throw new ConflictException(
+          `Port ${portToCheck} is already used by "${otherUsed.name}". Pick another host port.`,
+        );
+      }
+    }
+
     const app = await this.prisma.application.create({
       data: {
         ...dbData,
@@ -382,6 +400,14 @@ export class ApplicationsService {
         dockerfileOverride,
         portMapping,
       }).catch(() => {});
+    } else if (dto.dockerImage) {
+      // Docker-image-only deploy: synthesize a minimal docker-compose.yml so
+      // the rest of the lifecycle (start/stop/restart/logs/redeploy) is
+      // identical to a git-deploy app. No clone, no build.
+      this.runDockerImageDeploy(deployment.id, app.id, dto.name, dto.dockerImage, {
+        port: dto.port,
+        envVars: dto.envVars,
+      }).catch(() => {});
     } else {
       await this.prisma.application.update({ where: { id: app.id }, data: { status: 'STOPPED' } });
       await this.prisma.deployment.update({
@@ -391,6 +417,120 @@ export class ApplicationsService {
     }
 
     return app;
+  }
+
+  /**
+   * Pull-and-run path for "I just want this Docker image" deploys. Writes a
+   * synthesized docker-compose.yml into the app dir so the agent + dashboard
+   * treat it like any other compose stack — start/stop/restart all keep
+   * working, and a redeploy means "re-pull + recreate".
+   */
+  private async runDockerImageDeploy(
+    deploymentId: string,
+    appId: string,
+    name: string,
+    image: string,
+    opts: { port?: number; envVars?: Record<string, string> },
+  ) {
+    const slug = slugify(name);
+    const containerNm = containerName(slug);
+    const appDir = resolveAppDir(slug, appId);
+    const started = Date.now();
+    const buildLogs: string[] = [];
+    const log = (line: string) => {
+      buildLogs.push(line);
+    };
+
+    try {
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { status: 'DEPLOYING', startedAt: new Date() },
+      });
+      log(`> deploying docker image ${image}`);
+
+      // Resolve project network to attach the container — same multi-app
+      // discovery story as a normal compose deploy.
+      const appRow = await this.prisma.application.findUnique({
+        where: { id: appId },
+        select: { projectId: true, project: { select: { server: { select: { host: true } } } } },
+      });
+      const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
+      if (projectNet) {
+        try {
+          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5000 });
+        } catch {
+          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
+        }
+      }
+
+      // Fresh dir + minimal compose. If the user supplied a port, publish it
+      // on host; otherwise Caddy proxies over the project network.
+      if (fs.existsSync(appDir)) {
+        try { await dockerCompose(appDir, ['down', '-v', '--remove-orphans'], undefined, 60_000); } catch {}
+        fs.rmSync(appDir, { recursive: true, force: true });
+      }
+      fs.mkdirSync(appDir, { recursive: true });
+
+      const env = opts.envVars || {};
+      const envBlock = Object.keys(env).length
+        ? `    environment:\n${Object.entries(env).map(([k, v]) => `      ${k}: ${JSON.stringify(v)}`).join('\n')}\n`
+        : '';
+      const portsBlock = opts.port ? `    ports:\n      - "${opts.port}:${opts.port}"\n` : '';
+      const networksBlock = projectNet
+        ? `    networks:\n      - kryptalis_project\nnetworks:\n  kryptalis_project:\n    external: true\n    name: ${projectNet}\n`
+        : '';
+
+      const compose = `services:
+  app:
+    image: ${image}
+    container_name: ${containerNm}
+    restart: unless-stopped
+${envBlock}${portsBlock}    pull_policy: always
+${networksBlock}`;
+      fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), compose);
+      log('> wrote docker-compose.yml');
+
+      log(`> docker compose pull`);
+      await dockerCompose(appDir, ['pull'], undefined, 300_000);
+      log(`> docker compose up -d`);
+      await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], undefined, 180_000);
+
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: {
+          status: AppStatus.RUNNING,
+          containerName: containerNm,
+          containerPort: opts.port ?? null,
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.RUNNING,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+    } catch (err: any) {
+      const msg = err?.message || 'docker image deploy failed';
+      log(`✖ ${msg}`);
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: AppStatus.ERROR },
+      });
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.FAILED,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          deployLogs: msg.slice(0, 10_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+    }
   }
 
   private buildAuthHeader(provider: string, token: string): string {
@@ -799,6 +939,20 @@ export class ApplicationsService {
 
   // ── read / list ────────────────────────────────────────────────────
 
+  /**
+   * Map an Application row so the API surface exposes the user-friendly
+   * name. `displayName` (when set) overrides `name` in the response, while
+   * the original `name` (which drives slug/container/dir) is stashed in
+   * `slugName` for advanced UI that needs both. The dashboard treats
+   * `app.name` as the display name — no client-side changes required.
+   */
+  private withDisplayName<T extends { name: string; displayName?: string | null }>(
+    app: T,
+  ): T & { slugName: string } {
+    const displayName = app.displayName || app.name;
+    return { ...app, name: displayName, slugName: app.name };
+  }
+
   async findAll(userId: string) {
     const projectIds = await listAccessibleProjectIds(this.prisma, userId);
     if (projectIds.length === 0) return [];
@@ -821,7 +975,8 @@ export class ApplicationsService {
         },
       },
     });
-    return Promise.all(apps.map((app) => this.syncStatus(app)));
+    const synced = await Promise.all(apps.map((app) => this.syncStatus(app)));
+    return synced.map((a) => this.withDisplayName(a));
   }
 
   async findOne(userId: string, id: string) {
@@ -841,17 +996,22 @@ export class ApplicationsService {
     });
     if (!application) throw new NotFoundException('Application not found');
     await assertProjectAccess(this.prisma, userId, application.projectId, 'VIEWER');
-    return application;
+    return this.withDisplayName(application);
   }
 
   async update(userId: string, id: string, dto: UpdateApplicationDto) {
     await this.assertOwnership(userId, id, 'DEVELOPER');
-    const result = await this.prisma.application.update({ where: { id }, data: dto });
+    // Empty string on displayName means "revert to canonical name".
+    const data: any = { ...dto };
+    if (dto.displayName !== undefined && dto.displayName.trim() === '') {
+      data.displayName = null;
+    }
+    const result = await this.prisma.application.update({ where: { id }, data });
     // if port changed and app is running, redeploy to apply
     if (dto.port !== undefined) {
       this.redeploy(userId, id).catch(() => {});
     }
-    return result;
+    return this.withDisplayName(result);
   }
 
   async remove(userId: string, id: string) {
@@ -938,8 +1098,21 @@ export class ApplicationsService {
 
   async redeploy(userId: string, id: string) {
     const app = await this.assertOwnership(userId, id, 'DEVELOPER');
+
+    // Docker-image-only app: re-pull + recreate. No git clone needed.
+    if (!app.gitUrl && app.dockerImage) {
+      const deployment = await this.prisma.deployment.create({
+        data: { applicationId: app.id, status: 'PENDING', triggeredById: userId },
+      });
+      await this.runDockerImageDeploy(deployment.id, app.id, app.name, app.dockerImage, {
+        port: app.port ?? undefined,
+        envVars: (app.envVars as Record<string, string>) || undefined,
+      });
+      return { message: 'Image re-pulled and stack recreated', deploymentId: deployment.id };
+    }
+
     if (!app.gitUrl) {
-      throw new BadRequestException('Application has no git URL');
+      throw new BadRequestException('Application has no git URL or docker image to redeploy from');
     }
 
     // resolve auth header from the persisted git provider — providers stay private per user,

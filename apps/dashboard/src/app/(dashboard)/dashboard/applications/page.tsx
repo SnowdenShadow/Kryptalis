@@ -73,6 +73,19 @@ interface Application {
 interface ProjectOption {
   id: string;
   name: string;
+  server?: { id: string; name: string; host?: string } | null;
+}
+
+// Mirror of slugify() in apps/api/.../applications.service.ts — must stay
+// byte-for-byte equivalent so the preview matches what the backend creates.
+function slugifyPreview(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'app';
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +243,7 @@ export default function ApplicationsPage() {
     buildCommand: '',
     startCommand: '',
     gitToken: '',
+    dockerImage: '',
   });
   const [showToken, setShowToken] = useState(false);
   const [composeOverride, setComposeOverride] = useState<string | null>(null);
@@ -324,6 +338,7 @@ export default function ApplicationsPage() {
         buildCommand: '',
         startCommand: '',
         gitToken: '',
+        dockerImage: '',
       });
     },
     onError: (err: Error) => {
@@ -451,6 +466,7 @@ export default function ApplicationsPage() {
     };
     if (deployForm.gitUrl) body.gitUrl = deployForm.gitUrl;
     if (deployForm.gitBranch) body.gitBranch = deployForm.gitBranch;
+    if (deployForm.dockerImage) body.dockerImage = deployForm.dockerImage;
     if (deployForm.port) body.port = Number(deployForm.port);
     if (deployForm.buildCommand) body.buildCommand = deployForm.buildCommand;
     if (deployForm.startCommand) body.startCommand = deployForm.startCommand;
@@ -875,9 +891,23 @@ export default function ApplicationsPage() {
                 <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted text-lg">🐳</div>
                 <div>
                   <p className="font-medium">Docker Image</p>
-                  <p className="text-xs text-muted-foreground">Deploy from a Docker image or Dockerfile</p>
+                  <p className="text-xs text-muted-foreground">Pull and run a public Docker image (Docker Hub / GHCR)</p>
                 </div>
               </button>
+
+              {deployMode === 'docker' && (
+                <div className="space-y-2 pt-2 pl-2 border-l-2 border-primary/30">
+                  <Label>Docker image</Label>
+                  <Input
+                    placeholder="nginx:latest, ghcr.io/owner/image:tag, …"
+                    value={deployForm.dockerImage}
+                    onChange={(e) => setDeployForm((f) => ({ ...f, dockerImage: e.target.value }))}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Pulled directly with <code className="font-mono">docker pull</code>. For private registries, use an image you've already pulled or pre-authenticate with <code className="font-mono">docker login</code> on the host.
+                  </p>
+                </div>
+              )}
 
               {gitProviders.length === 0 && (
                 <div className="rounded-lg border border-dashed border-border p-3 text-center text-xs text-muted-foreground">
@@ -1052,6 +1082,11 @@ export default function ApplicationsPage() {
                   value={deployForm.name}
                   onChange={(e) => setDeployForm(f => ({ ...f, name: e.target.value }))}
                 />
+                {deployForm.name && (
+                  <p className="text-[11px] text-muted-foreground">
+                    Container will be named <code className="font-mono">kryptalis-{slugifyPreview(deployForm.name)}</code>. You can rename the display name later.
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -1060,6 +1095,15 @@ export default function ApplicationsPage() {
                   <option value="">Select project</option>
                   {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </Select>
+                {deployForm.projectId && (() => {
+                  const proj = projects.find(p => p.id === deployForm.projectId);
+                  if (!proj?.server) return null;
+                  return (
+                    <p className="text-[11px] text-muted-foreground">
+                      Will deploy on <span className="font-mono">{proj.server.name}</span>
+                    </p>
+                  );
+                })()}
               </div>
 
               {repoDetection?.hasCompose ? (

@@ -69,6 +69,7 @@ interface ApplicationDetail {
   status: string;
   gitUrl: string | null;
   gitBranch: string | null;
+  dockerImage?: string | null;
   port: number | null;
   customPort?: boolean;
   buildCommand?: string | null;
@@ -235,6 +236,52 @@ function publicUrl(
 // Status dot
 // ---------------------------------------------------------------------------
 
+function RenameRow({
+  current,
+  slugName,
+  onSave,
+  saving,
+}: {
+  current: string;
+  slugName: string;
+  onSave: (value: string) => void;
+  saving: boolean;
+}) {
+  const [value, setValue] = useState(current);
+  const dirty = value.trim() !== current.trim();
+  return (
+    <div className="flex items-end gap-2">
+      <div className="flex-1">
+        <Label className="text-xs text-muted-foreground">Display name</Label>
+        <Input
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={slugName}
+          disabled={saving}
+        />
+      </div>
+      <Button
+        size="sm"
+        disabled={!dirty || saving || !value.trim()}
+        onClick={() => onSave(value.trim())}
+      >
+        {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />} Save
+      </Button>
+      {current !== slugName && (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={saving}
+          onClick={() => { setValue(slugName); onSave(''); }}
+          title="Revert to the canonical slug name"
+        >
+          Reset
+        </Button>
+      )}
+    </div>
+  );
+}
+
 function StatusDot({ status, size = 'sm' }: { status: string; size?: 'sm' | 'lg' }) {
   const dim = size === 'lg' ? 'h-3.5 w-3.5' : 'h-2.5 w-2.5';
   const pulse = ['RUNNING', 'DEPLOYING', 'BUILDING', 'PENDING'].includes(status);
@@ -389,6 +436,16 @@ export default function ApplicationDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['applications'] });
       toast.success('Port updated');
       setEditingPort(false);
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const renameMutation = useMutation({
+    mutationFn: (displayName: string) => api.patch(`/applications/${id}`, { displayName }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['application', id] });
+      queryClient.invalidateQueries({ queryKey: ['applications'] });
+      toast.success('Name updated');
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -663,11 +720,12 @@ export default function ApplicationDetailPage() {
                 <RotateCcw size={14} /> {t('apps.restart')}
               </Button>
             )}
-            {app.gitUrl && (
+            {(app.gitUrl || app.dockerImage) && (
               <Button
                 variant="outline"
                 disabled={redeployMutation.isPending || app.status === 'DEPLOYING'}
                 onClick={() => redeployMutation.mutate()}
+                title={app.gitUrl ? 'Pull latest commit and rebuild' : 'Re-pull image and recreate container'}
               >
                 <Rocket size={14} /> Redeploy
               </Button>
@@ -1313,6 +1371,30 @@ export default function ApplicationDetailPage() {
         {/* ============================================================== */}
         {activeTab === 'settings' && (
           <>
+            {/* Display name — cosmetic rename. The slug, container, and on-disk
+                directory all stay frozen on the canonical `slugName` so
+                start/stop/restart/logs keep working. */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <Settings size={18} /> Name
+                </CardTitle>
+                <CardDescription>
+                  Change how this app appears in the dashboard. The internal slug
+                  (<code className="font-mono text-[11px]">{(app as any).slugName || app.name}</code>) and container name stay locked
+                  to avoid breaking the running stack.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <RenameRow
+                  current={app.name}
+                  slugName={(app as any).slugName || app.name}
+                  onSave={(v) => renameMutation.mutate(v)}
+                  saving={renameMutation.isPending}
+                />
+              </CardContent>
+            </Card>
+
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg">

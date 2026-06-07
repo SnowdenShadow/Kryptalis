@@ -189,7 +189,14 @@ enum ProjectRole {
 
 model Application {
   id                String          @id @default(cuid())
+  // Canonical name — drives slugify(), container_name, on-disk dir. Locked
+  // after creation: changing it would break stop/start/restart/logs (they
+  // resolve paths from slugify(name)). To rename for display purposes,
+  // use displayName instead.
   name              String
+  // Optional human-friendly name shown in the UI. Falls back to `name` when
+  // null. Safe to change anytime — purely cosmetic, no infra impact.
+  displayName       String?
   projectId         String
   framework         AppFramework    @default(DOCKER)
   status            AppStatus       @default(STOPPED)
