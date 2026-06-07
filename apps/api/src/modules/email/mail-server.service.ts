@@ -262,6 +262,34 @@ export class MailServerService implements OnApplicationBootstrap {
     // claim a free port range
     const ports = await this.allocatePorts(domainId, server);
 
+    // Preflight: confirm the host ports we're about to bind aren't already
+    // held by a non-Docker process. Classic case: Ubuntu ships with Postfix
+    // already running on tcp/25 — `docker compose up` would error with a
+    // cryptic "address already in use" and the operator would have no
+    // actionable signal. Probe ALL the ports we're going to publish; if any
+    // is taken, throw with the exact remediation command.
+    const portsToCheck = [
+      { port: ports.smtp, label: 'SMTP' },
+      { port: ports.submission, label: 'Submission' },
+      { port: ports.smtps, label: 'SMTPS' },
+      { port: ports.imap, label: 'IMAP' },
+      { port: ports.imaps, label: 'IMAPS' },
+    ];
+    const conflicts: { port: number; label: string }[] = [];
+    for (const { port, label } of portsToCheck) {
+      const occupied = await this.isHostPortOccupied(port);
+      if (occupied) conflicts.push({ port, label });
+    }
+    if (conflicts.length > 0) {
+      const list = conflicts.map((c) => `${c.label} (${c.port})`).join(', ');
+      const remediation = conflicts.some((c) => c.port === 25 || c.port === 587 || c.port === 465)
+        ? `\n\nMost common cause: the system's native Postfix or sendmail. To free the ports:\n  sudo systemctl stop postfix && sudo systemctl disable postfix\n  sudo systemctl stop sendmail 2>/dev/null && sudo systemctl disable sendmail 2>/dev/null`
+        : `\n\nUse \`sudo lsof -i :${conflicts[0].port}\` on the host to find the offending process.`;
+      throw new BadRequestException(
+        `Cannot deploy mail server: host ports already in use: ${list}.${remediation}`,
+      );
+    }
+
     server = await this.prisma.mailServer.upsert({
       where: { domainId },
       create: {
@@ -710,6 +738,12 @@ ${sslExternalVolumes}`;
           // initial account sync
           const srv = await this.prisma.mailServer.findUnique({ where: { id: serverId } });
           if (srv) await this.syncAccounts(srv.domainId);
+          // Reconcile any webmail apps (Roundcube/SnappyMail/Rainloop) that
+          // were installed against this domain. Their compose was generated
+          // with placeholder host.docker.internal because the mail server
+          // didn't exist yet — restart them so they pick up the right host
+          // + ports. Best-effort, never blocks the mail server deploy.
+          await this.reconcileWebmails(serverId).catch(() => {});
         } catch {}
       }, 5000);
     } catch (err: any) {
@@ -776,6 +810,111 @@ ${sslExternalVolumes}`;
       return [...ports];
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * Kick all live IMAP/POP3 sessions for a given email address on this
+   * mail server. Used after a mailbox is deleted/renamed to terminate
+   * any client that's still reading mail. Best-effort: if the container
+   * isn't running, returns silently.
+   */
+  async kickMailboxSessions(domainId: string, address: string): Promise<void> {
+    const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
+    if (!domain) return;
+    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    try {
+      await execFileAsync(
+        'docker',
+        ['exec', containerName, 'doveadm', 'kick', address],
+        { timeout: 5_000 },
+      );
+    } catch {
+      // Container down, doveadm not in PATH, no sessions — all fine.
+    }
+  }
+
+  /**
+   * Rewrite the compose file of every webmail app (Roundcube / SnappyMail /
+   * Rainloop) linked to a freshly-deployed mail server, then `docker compose
+   * up -d --force-recreate` it. Handles the install-order race: user installs
+   * Roundcube before the mail server, Roundcube boots with placeholder values
+   * and the SMTP/IMAP env vars are wrong. Re-templating from the live
+   * mailServer + domain row brings everything into sync.
+   */
+  private async reconcileWebmails(mailServerId: string): Promise<void> {
+    const server = await this.prisma.mailServer.findUnique({
+      where: { id: mailServerId },
+      include: { domain: { select: { id: true, domain: true } } },
+    });
+    if (!server || !server.domain) return;
+
+    const WEBMAIL_NAMES = ['Roundcube', 'SnappyMail', 'Rainloop'];
+    const apps = await this.prisma.application.findMany({
+      where: {
+        name: { in: WEBMAIL_NAMES },
+        domains: { some: { id: server.domain.id } },
+      },
+      select: { id: true, name: true },
+    });
+    if (apps.length === 0) return;
+
+    const mailHost = `mail.${server.domain.domain}`;
+    for (const app of apps) {
+      try {
+        const slugify = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'app';
+        const slug = slugify(app.name);
+        const appDir = path.join(DATA_DIR, 'apps', `${slug}-${app.id.slice(0, 12)}`);
+        const composePath = path.join(appDir, 'docker-compose.yml');
+        if (!fs.existsSync(composePath)) continue;
+        let content = fs.readFileSync(composePath, 'utf-8');
+
+        // Replace any prior host (host.docker.internal or an old mail.<sub>)
+        // with the current mail host + ports.
+        const before = content;
+        content = content
+          .replace(/ROUNDCUBEMAIL_DEFAULT_HOST:\s*(?:ssl|tls|tcp):\/\/[^\s\n]+/g, `ROUNDCUBEMAIL_DEFAULT_HOST: ssl://${mailHost}`)
+          .replace(/ROUNDCUBEMAIL_DEFAULT_PORT:\s*"?\d+"?/g, `ROUNDCUBEMAIL_DEFAULT_PORT: "${server.imapsPort}"`)
+          .replace(/ROUNDCUBEMAIL_SMTP_SERVER:\s*(?:ssl|tls|tcp):\/\/[^\s\n]+/g, `ROUNDCUBEMAIL_SMTP_SERVER: tls://${mailHost}`)
+          .replace(/ROUNDCUBEMAIL_SMTP_PORT:\s*"?\d+"?/g, `ROUNDCUBEMAIL_SMTP_PORT: "${server.submissionPort}"`);
+        if (content === before) continue; // nothing to reconcile
+
+        fs.writeFileSync(composePath, content);
+        await execFileAsync('docker', ['compose', 'up', '-d', '--force-recreate'], { cwd: appDir, timeout: 180_000 });
+      } catch (e: any) {
+        this.logger.warn(`Webmail reconcile failed for app ${app.id}: ${e?.message || e}`);
+      }
+    }
+  }
+
+  /**
+   * Check if a TCP port on the HOST is currently bound — by anything,
+   * including non-Docker processes. Runs `ss` or `lsof` via `docker exec`
+   * on a privileged sidecar... or actually no, we just try to listen on it
+   * ourselves from the API container's network namespace... no, that's
+   * the API container, not the host.
+   *
+   * Real approach: ask `docker run --rm --net host` to test for us. That
+   * container shares the host network namespace, so a `nc -z` from inside
+   * really probes the host port. Single docker exec, no extra deps on the
+   * host (every install has `docker` and the `busybox` image).
+   *
+   * Returns false if the probe itself fails — we don't want to block deploys
+   * on a flaky docker daemon; the user will see the real bind error later.
+   */
+  private async isHostPortOccupied(port: number): Promise<boolean> {
+    try {
+      // -z = scan only (no data), -w 1 = 1s timeout.
+      // exit 0 → port is OPEN (something is listening) → occupied.
+      // exit ≠ 0 → port refused → free.
+      await execFileAsync(
+        'docker',
+        ['run', '--rm', '--network', 'host', 'busybox:latest', 'nc', '-zw', '1', '127.0.0.1', String(port)],
+        { timeout: 10_000 },
+      );
+      return true;
+    } catch {
+      return false;
     }
   }
 

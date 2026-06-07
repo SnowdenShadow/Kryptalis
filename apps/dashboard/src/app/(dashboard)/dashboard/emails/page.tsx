@@ -27,6 +27,7 @@ interface EmailDomain {
     lastError: string | null;
     smtpPort: number; submissionPort: number; smtpsPort: number;
     imapPort: number; imapsPort: number;
+    inboundCapable?: boolean | null;
   } | null;
   mailboxCount: number;
   aliasCount: number;
@@ -176,6 +177,16 @@ export default function EmailsPage() {
                     <div className="px-4 py-2 bg-orange-500/10 border-t border-b border-orange-500/20 flex items-start gap-2">
                       <AlertTriangle size={13} className="text-orange-500 shrink-0 mt-0.5" />
                       <p className="text-[11px] text-orange-300">{t('emails.warnNoMailbox')}</p>
+                    </div>
+                  )}
+
+                  {/* Inbound-incapable warning — second+ mail server on host */}
+                  {d.mailServer && d.mailServer.inboundCapable === false && (
+                    <div className="px-4 py-2 bg-orange-500/10 border-t border-b border-orange-500/20 flex items-start gap-2">
+                      <AlertTriangle size={13} className="text-orange-500 shrink-0 mt-0.5" />
+                      <p className="text-[11px] text-orange-300">
+                        Inbound mail won't work for this server (SMTP is on :{d.mailServer.smtpPort}, not :25). Senders on the public Internet always reach tcp/25 — only one mail server per host can have it.
+                      </p>
                     </div>
                   )}
 

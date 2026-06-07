@@ -174,7 +174,20 @@ export class MarketplaceService {
         }
       }
 
-      if (mailServer && domain) {
+      // Refuse to install a webmail with no mail server in sight — Roundcube
+      // would boot with placeholder host.docker.internal credentials and the
+      // user would get "connection refused" on every login attempt with no
+      // explanation. Tell them to deploy a mail server first.
+      if (!mailServer || !domain) {
+        const existing = await this.prisma.mailServer.count();
+        throw new ConflictException(
+          existing === 0
+            ? `Deploy a mail server first. ${app.name} is a webmail client — it needs a Postfix/Dovecot stack to connect to. Go to /dashboard/emails, deploy a mail server on your apex domain, then come back here.`
+            : `Multiple mail servers exist — pick one explicitly via the "Domain" field so ${app.name} knows which one to connect to.`,
+        );
+      }
+
+      {
         // CRITICAL: use the public hostname (mail.<domain>) — not host.docker.internal.
         // The mail server's TLS cert is issued for mail.<domain>, so any other
         // hostname would fail the certificate validation. Roundcube must hit

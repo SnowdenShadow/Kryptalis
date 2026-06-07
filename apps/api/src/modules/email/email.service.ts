@@ -194,6 +194,10 @@ export class EmailService {
     const mb = await this.assertMailboxAccess(userId, id, 'ADMIN');
     await this.prisma.mailbox.delete({ where: { id } });
     this.mailServer.syncAccounts(mb.domainId).catch(() => {});
+    // Kick any live IMAP/POP sessions for the deleted address — otherwise
+    // a webmail tab that was already open keeps reading mail until idle
+    // timeout (potentially hours). Best-effort.
+    this.mailServer.kickMailboxSessions(mb.domainId, mb.address).catch(() => {});
     return { message: 'Mailbox deleted' };
   }
 
@@ -541,16 +545,24 @@ export class EmailService {
     for (const w of webmails) {
       for (const d of w.domains) wmBy.set(d.id, { id: w.id, name: w.name, port: w.port, status: w.status });
     }
-    return domains.map((d) => ({
-      id: d.id,
-      domain: d.domain,
-      project: d.project,
-      application: d.application,
-      mailServer: srvBy.get(d.id) || null,
-      mailboxCount: mbBy.get(d.id) || 0,
-      aliasCount: alBy.get(d.id) || 0,
-      webmail: wmBy.get(d.id) || null,
-      subdomains: subsByApex.get(d.domain) || [],
-    }));
+    return domains.map((d) => {
+      const ms = srvBy.get(d.id) || null;
+      // Only one mail server on a host can bind tcp/25, which is the only
+      // port public-Internet senders ever connect to. Servers offset to
+      // 2525+ can SEND but cannot RECEIVE inbound mail from Gmail/Yahoo.
+      // Surface that distinction so the dashboard can warn clearly.
+      const inboundCapable = ms ? ms.smtpPort === 25 : null;
+      return {
+        id: d.id,
+        domain: d.domain,
+        project: d.project,
+        application: d.application,
+        mailServer: ms ? { ...ms, inboundCapable } : null,
+        mailboxCount: mbBy.get(d.id) || 0,
+        aliasCount: alBy.get(d.id) || 0,
+        webmail: wmBy.get(d.id) || null,
+        subdomains: subsByApex.get(d.domain) || [],
+      };
+    });
   }
 }
