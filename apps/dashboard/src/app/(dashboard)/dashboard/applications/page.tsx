@@ -705,13 +705,38 @@ export default function ApplicationsPage() {
             </Button>
           </CardContent>
         </Card>
-      ) : (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {filtered.map((app) => {
-            const isRunning = app.status === 'RUNNING';
-            const isStopped = app.status === 'STOPPED';
-            const isDeploying = app.status === 'DEPLOYING' || app.status === 'BUILDING';
-            const statusLabel = app.status === 'RUNNING' ? 'Running' : app.status === 'STOPPED' ? 'Stopped' : app.status === 'ERROR' ? 'Error' : app.status === 'DEPLOYING' ? 'Deploying' : app.status;
+      ) : (() => {
+        // Group filtered apps by project. Within each group, sort by status
+        // (running first → then deploying → stopped → error), then alpha.
+        // When a project filter is active we skip the headers — they'd
+        // duplicate the active filter.
+        const STATUS_ORDER: Record<string, number> = {
+          RUNNING: 0, DEPLOYING: 1, BUILDING: 1, STOPPED: 2, ERROR: 3,
+        };
+        const sortApps = (apps: Application[]) =>
+          [...apps].sort((a, b) => {
+            const sa = STATUS_ORDER[a.status] ?? 99;
+            const sb = STATUS_ORDER[b.status] ?? 99;
+            if (sa !== sb) return sa - sb;
+            return a.name.localeCompare(b.name);
+          });
+        const groups = new Map<string, { id: string; name: string; apps: Application[] }>();
+        const orphan: Application[] = [];
+        for (const app of filtered) {
+          const proj = app.project;
+          if (!proj?.id) { orphan.push(app); continue; }
+          let g = groups.get(proj.id);
+          if (!g) { g = { id: proj.id, name: proj.name, apps: [] }; groups.set(proj.id, g); }
+          g.apps.push(app);
+        }
+        const groupList = Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
+        const showHeaders = !filterProject;
+
+        const renderCard = (app: Application) => {
+          const isRunning = app.status === 'RUNNING';
+          const isStopped = app.status === 'STOPPED';
+          const isDeploying = app.status === 'DEPLOYING' || app.status === 'BUILDING';
+          const statusLabel = app.status === 'RUNNING' ? 'Running' : app.status === 'STOPPED' ? 'Stopped' : app.status === 'ERROR' ? 'Error' : app.status === 'DEPLOYING' ? 'Deploying' : app.status;
 
             return (
               <Card
@@ -881,9 +906,56 @@ export default function ApplicationsPage() {
                 </CardContent>
               </Card>
             );
-          })}
-        </div>
-      )}
+        };
+
+        return (
+          <div className="space-y-6">
+            {groupList.map((g) => (
+              <section key={g.id} className="space-y-3">
+                {showHeaders && (
+                  <div className="flex items-center justify-between border-b border-border pb-1.5">
+                    <Link
+                      href={`/dashboard/projects/${g.id}`}
+                      className="flex items-center gap-2 text-sm font-semibold hover:text-primary transition-colors"
+                    >
+                      <Plug size={14} className="text-muted-foreground" />
+                      {g.name}
+                      <Badge variant="secondary" className="text-[10px]">{g.apps.length}</Badge>
+                    </Link>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-xs"
+                      onClick={() => {
+                        setDeployForm(f => ({ ...f, projectId: g.id }));
+                        setShowDeploy(true);
+                      }}
+                    >
+                      <Plus size={12} /> Add app
+                    </Button>
+                  </div>
+                )}
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  {sortApps(g.apps).map(renderCard)}
+                </div>
+              </section>
+            ))}
+            {orphan.length > 0 && (
+              <section className="space-y-3">
+                {showHeaders && (
+                  <div className="flex items-center justify-between border-b border-border pb-1.5">
+                    <span className="text-sm font-semibold text-muted-foreground">No project</span>
+                    <Badge variant="secondary" className="text-[10px]">{orphan.length}</Badge>
+                  </div>
+                )}
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  {sortApps(orphan).map(renderCard)}
+                </div>
+              </section>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ---- Deploy Wizard ---- */}
       <Dialog open={showDeploy} onClose={() => { setShowDeploy(false); setDeployStep(0); }} className="max-w-2xl max-h-[90vh] overflow-y-auto">
