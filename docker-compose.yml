@@ -108,6 +108,13 @@ services:
       # bindings). Mounting the override file individually keeps the rest
       # of the repo read-only.
       - ./docker-compose.override.yml:/app/install-root/docker-compose.override.yml
+    networks:
+      # default — talk to postgres/redis here.
+      - default
+      # kryptalis-apps — shared bridge with Caddy + every user-deployed
+      # container (including mail servers). Lets the API resolve other
+      # containers by name (e.g. for the 'send test email' loopback).
+      - kryptalis-apps
     depends_on:
       postgres:
         condition: service_healthy
