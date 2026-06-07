@@ -117,9 +117,18 @@ export class FilesController {
     @Req() req: Request,
   ) {
     if (!name) throw new BadRequestException('name query param required');
+    const max = 50 * 1024 * 1024;
+    // Hard fail on Content-Length too big BEFORE we start reading. Saves
+    // bandwidth on obvious abuse and protects against slow-trickle DoS.
+    const declared = parseInt(String(req.headers['content-length'] ?? ''), 10);
+    if (Number.isFinite(declared) && declared > max) {
+      throw new BadRequestException('Upload exceeds 50MB limit');
+    }
+    // Per-request idle timeout so a half-open stream can't hold a worker
+    // forever (slowloris-style).
+    try { (req as any).setTimeout?.(60_000); } catch {}
     const chunks: Buffer[] = [];
     let size = 0;
-    const max = 50 * 1024 * 1024;
     return new Promise<{ path: string; size: number }>((resolve, reject) => {
       req.on('data', (chunk: Buffer) => {
         size += chunk.length;
@@ -153,7 +162,14 @@ export class FilesController {
     @Res() res: Response,
   ) {
     const meta = await this.svc.downloadFile(userId, parseScope(scope), scopeId, p);
-    res.setHeader('Content-Disposition', `attachment; filename="${meta.filename}"`);
+    // RFC 5987 encoded filename + ASCII-safe fallback. Prevents
+    // Content-Disposition header injection via CRLF or " in the basename.
+    const asciiSafe = meta.filename.replace(/[^\x20-\x7e]/g, '_');
+    const encoded = encodeURIComponent(meta.filename);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${asciiSafe}"; filename*=UTF-8''${encoded}`,
+    );
     res.setHeader('Content-Length', String(meta.size));
     res.sendFile(meta.absPath);
   }

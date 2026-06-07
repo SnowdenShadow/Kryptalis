@@ -321,11 +321,16 @@ export class ApplicationsService {
     if (portToCheck && typeof portToCheck === 'number') {
       const otherUsed = await this.prisma.application.findFirst({
         where: { port: portToCheck, NOT: { id: undefined } },
-        select: { id: true, name: true },
+        select: { id: true, name: true, projectId: true },
       });
       if (otherUsed) {
+        // Don't leak the other app's name across tenants — host ports are
+        // a shared host resource, but cross-project naming should stay private.
+        const sameProject = otherUsed.projectId === dbData.projectId;
         throw new ConflictException(
-          `Port ${portToCheck} is already used by "${otherUsed.name}". Pick another host port.`,
+          sameProject
+            ? `Port ${portToCheck} is already used by "${otherUsed.name}" in this project. Pick another host port.`
+            : `Port ${portToCheck} is already in use on this host. Pick another host port.`,
         );
       }
     }
@@ -1032,7 +1037,13 @@ ${networksBlock}`;
       try { await execFileAsync('docker', ['rm', '-f', containerName(slug)]); } catch {}
       try { await execFileAsync('docker', ['rm', '-f', `${containerName(slug)}-${id.slice(0, 12)}`]); } catch {}
     } else if (server) {
-      await this.agent.enqueueTask(server.id, 'REMOVE', { slug, containerName: containerName(slug) });
+      // User-initiated delete → purge volumes (databases + uploads). The agent
+      // defaults to keeping volumes (safe for migration); flip it on here.
+      await this.agent.enqueueTask(server.id, 'REMOVE', {
+        slug,
+        containerName: containerName(slug),
+        purgeVolumes: true,
+      });
     }
 
     await this.prisma.application.delete({ where: { id } });

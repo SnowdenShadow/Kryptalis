@@ -7,6 +7,35 @@ type RequestOptions = {
 };
 
 /**
+ * Structured error every page can branch on. Replaces the old `new Error(msg)`
+ * pipeline that discarded HTTP status + NestJS ValidationPipe field arrays.
+ *
+ * `status` is the HTTP status code (4xx = user-actionable, 5xx = server bug),
+ * `fields` is the array form Nest emits for class-validator failures
+ * (e.g. `['port must be an integer', 'domain must match ...']`),
+ * `endpoint` is the path that errored (handy for debugging).
+ *
+ * The default `message` is the best one-line summary we could synthesize
+ * (fields joined with ' • ', or the raw `message` field, or the HTTP text).
+ * `toString()` returns that summary too, so legacy `toast.error(err.message)`
+ * sites keep working.
+ */
+export class ApiError extends Error {
+  status: number;
+  fields: string[];
+  endpoint: string;
+  raw: unknown;
+  constructor(opts: { status: number; message: string; fields?: string[]; endpoint: string; raw?: unknown }) {
+    super(opts.message);
+    this.name = 'ApiError';
+    this.status = opts.status;
+    this.fields = opts.fields ?? [];
+    this.endpoint = opts.endpoint;
+    this.raw = opts.raw;
+  }
+}
+
+/**
  * API client with transparent JWT refresh.
  *
  * The access token has a short TTL (15m); the refresh token lasts 7 days.
@@ -106,13 +135,29 @@ class ApiClient {
       }
       if (res.status === 401) {
         this.clearTokensAndRedirect();
-        throw new Error('Unauthorized');
+        throw new ApiError({ status: 401, message: 'Session expired — please log in again.', endpoint });
       }
     }
 
     if (!res.ok) {
-      const error = await res.json().catch(() => ({ message: 'Request failed' }));
-      throw new Error(error.message || 'Request failed');
+      const error: any = await res.json().catch(() => ({}));
+      // NestJS ValidationPipe emits `message` as a string[] for field errors.
+      // Normalize: keep the array on `fields`, and join into a readable summary.
+      let fields: string[] = [];
+      let summary: string;
+      if (Array.isArray(error?.message)) {
+        fields = error.message;
+        summary = fields.join(' • ');
+      } else if (typeof error?.message === 'string' && error.message) {
+        summary = error.message;
+      } else if (typeof error?.error === 'string' && error.error) {
+        summary = error.error;
+      } else {
+        summary = res.status >= 500
+          ? `Server error (${res.status}) — try again in a moment.`
+          : `Request failed (${res.status}).`;
+      }
+      throw new ApiError({ status: res.status, message: summary, fields, endpoint, raw: error });
     }
 
     return res.json();

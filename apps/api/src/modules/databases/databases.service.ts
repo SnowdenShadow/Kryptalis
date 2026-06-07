@@ -221,8 +221,35 @@ export class DatabasesService {
     }
     await assertProjectAccess(this.prisma, userId, projectId, 'DEVELOPER');
 
-    const existing = await this.prisma.database.findFirst({ where: { name: dto.name } });
-    if (existing) throw new ConflictException(`Database "${dto.name}" already exists`);
+    // Pin the database to the project's server. Letting the client choose
+    // dto.serverId freely was a cross-tenant resource-placement vector: a
+    // DEVELOPER on project A could pin a database container onto another
+    // tenant's host. The DB always belongs to its project; the project
+    // belongs to one server.
+    const parentProject = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { serverId: true },
+    });
+    if (!parentProject) throw new NotFoundException('Project not found');
+    if (dto.serverId && dto.serverId !== parentProject.serverId) {
+      throw new BadRequestException(
+        "serverId must match the project's server. Move the project first if you need to relocate.",
+      );
+    }
+    const effectiveServerId = parentProject.serverId;
+
+    // Database name is project-scoped now — two tenants can both have
+    // 'app-db' without colliding on a global namespace. The on-disk dir
+    // also uses db.id (set after create) instead of db.name to avoid
+    // cross-tenant collisions in /databases/<name>.
+    const existing = await this.prisma.database.findFirst({
+      where: { name: dto.name, projectId },
+    });
+    if (existing) {
+      throw new ConflictException(
+        `Database "${dto.name}" already exists in this project. Pick another name.`,
+      );
+    }
 
     const username = dto.username || dto.name;
     const password = dto.password || `kryptalis_${Math.random().toString(36).slice(2, 10)}`;
@@ -232,7 +259,7 @@ export class DatabasesService {
       data: {
         name: dto.name,
         type: dto.type as DbType,
-        serverId: dto.serverId,
+        serverId: effectiveServerId,
         projectId,
         applicationId,
         port: hostPort,
@@ -361,7 +388,11 @@ export class DatabasesService {
       }
       try { await execAsync(`docker rm -f ${containerName}`, { timeout: 10000 }); } catch {}
     } else if (server) {
-      await this.agent.enqueueTask(server.id, 'REMOVE', { slug, containerName });
+      await this.agent.enqueueTask(server.id, 'REMOVE', {
+        slug,
+        containerName,
+        purgeVolumes: true,
+      });
     }
 
     await this.prisma.database.delete({ where: { id } });

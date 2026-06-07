@@ -51,9 +51,12 @@ export class ReverseProxyService implements OnApplicationBootstrap, OnModuleDest
       this.logger.warn(`Caddy bootstrap deferred: ${e?.message || e}`);
     }
     // Background SSL status reconciliation — catches certs issued asynchronously
-    // by Caddy after a regenerate() call OR after manual changes.
+    // by Caddy after a regenerate() call OR after manual changes. Also
+    // detects mail-server cert renewals and triggers Postfix/Dovecot reload
+    // so they stop presenting the old in-memory cert past renewal.
     this.sslSyncInterval = setInterval(() => {
       this.syncSslStatuses().catch(() => {});
+      this.syncMailCertReloads().catch(() => {});
     }, 60_000);
   }
 
@@ -435,6 +438,92 @@ ${portLines.length > 0 ? portLines.join('\n') : '      []'}
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Detect when a mail-server cert (mail.<apex>) has been renewed by Caddy
+   * and signal the mail container to reload Postfix + Dovecot.
+   *
+   * Why: docker-mailserver reads SSL_CERT_PATH/SSL_KEY_PATH at boot only.
+   * When Caddy renews the cert in-place every ~60 days, the on-disk file
+   * changes but the running Postfix/Dovecot keep presenting the OLD cert
+   * (in-memory). At 90d expiry, TLS handshakes start failing.
+   *
+   * We track the cert's mtime by host. When it shifts on a known mail
+   * domain, fire a reload via MailServerService.reloadMailServer().
+   *
+   * Mtime tracking lives in `mail-cert-mtime.json` under PROXY_DIR. Cheap,
+   * survives restarts.
+   */
+  private mailCertMtimeFile = path.join(PROXY_DIR, 'mail-cert-mtime.json');
+  private mailCertMtime: Record<string, number> = {};
+
+  private loadMailCertMtime() {
+    try {
+      if (fs.existsSync(this.mailCertMtimeFile)) {
+        this.mailCertMtime = JSON.parse(fs.readFileSync(this.mailCertMtimeFile, 'utf-8'));
+      }
+    } catch {
+      this.mailCertMtime = {};
+    }
+  }
+
+  private saveMailCertMtime() {
+    try {
+      fs.writeFileSync(this.mailCertMtimeFile, JSON.stringify(this.mailCertMtime));
+    } catch {}
+  }
+
+  private async getCertMtime(host: string): Promise<number | null> {
+    try {
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['exec', CONTAINER_NAME, 'sh', '-c',
+          `stat -c %Y /data/caddy/certificates/*/${host}/${host}.crt 2>/dev/null | head -1`],
+        { timeout: 5000 },
+      );
+      const n = parseInt(stdout.trim(), 10);
+      return Number.isFinite(n) ? n : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Iterate every mail server. If its cert's mtime moved since the last
+   * check, call the registered reload hook. The MailServerService injects
+   * itself via setMailReloadHook to avoid a circular dependency.
+   */
+  private mailReloadHook: ((domainId: string) => Promise<void>) | null = null;
+  setMailReloadHook(fn: (domainId: string) => Promise<void>) {
+    this.mailReloadHook = fn;
+  }
+
+  async syncMailCertReloads(): Promise<void> {
+    if (!this.mailReloadHook) return;
+    if (Object.keys(this.mailCertMtime).length === 0) this.loadMailCertMtime();
+    const servers = await this.prisma.mailServer.findMany({
+      include: { domain: { select: { id: true, domain: true } } },
+    });
+    let changed = false;
+    for (const s of servers) {
+      if (!s.domain) continue;
+      const host = `mail.${s.domain.domain}`;
+      const mt = await this.getCertMtime(host);
+      if (mt == null) continue;
+      const prev = this.mailCertMtime[host] || 0;
+      if (mt !== prev) {
+        if (prev !== 0) {
+          // First sighting (prev === 0) shouldn't trigger a reload — that's
+          // just bootstrapping the tracker. Real change → reload.
+          this.logger.log(`Mail cert for ${host} changed (mtime ${prev} → ${mt}) — reloading mail server`);
+          try { await this.mailReloadHook(s.domain.id); } catch {}
+        }
+        this.mailCertMtime[host] = mt;
+        changed = true;
+      }
+    }
+    if (changed) this.saveMailCertMtime();
   }
 
   // ── helpers ───────────────────────────────────────────────────────

@@ -154,13 +154,18 @@ export class ProjectsService {
     const oldServerId = project.serverId;
     const slugify = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'app';
 
-    // Best-effort tear down on old server.
+    // Best-effort tear down on old server. CRITICAL: purgeVolumes is FALSE
+    // here so the source server stops the containers but KEEPS the named
+    // volumes intact. Until VOLUME_EXPORT/VOLUME_IMPORT lands, this is the
+    // safe default — the user can still recover the source state by
+    // flipping back, instead of losing every database/upload on migrate.
     const teardownErrors: string[] = [];
     for (const app of project.applications) {
       try {
         await this.agent.enqueueTask(oldServerId, 'REMOVE', {
           slug: slugify(app.name),
           containerName: `kryptalis-${slugify(app.name)}`,
+          purgeVolumes: false,
         });
       } catch (e: any) {
         teardownErrors.push(`${app.name}: ${e?.message || e}`);
@@ -171,6 +176,7 @@ export class ProjectsService {
         await this.agent.enqueueTask(oldServerId, 'REMOVE', {
           slug: slugify(db.name),
           containerName: `kryptalis-db-${slugify(db.name)}`,
+          purgeVolumes: false,
         });
       } catch (e: any) {
         teardownErrors.push(`db ${db.name}: ${e?.message || e}`);
@@ -211,11 +217,13 @@ export class ProjectsService {
     // Caddy regen so domains follow the move.
     this.proxy.regenerate().catch(() => {});
 
-    return {
-      message: `Project migrated from ${project.server?.name || oldServerId} → ${target.name}`,
-      queued,
-      warnings: teardownErrors,
-    };
+    const hasRedeployErrors = teardownErrors.some((e) => e.startsWith('redeploy '));
+    const status = hasRedeployErrors ? 'partial' : 'ok';
+    const message =
+      status === 'partial'
+        ? `Project migration started with errors — check warnings. Source volumes are KEPT for recovery.`
+        : `Project migrated from ${project.server?.name || oldServerId} → ${target.name}. NOTE: Docker volumes were not copied; databases and uploads will start empty on the target until VOLUME_EXPORT/IMPORT is implemented.`;
+    return { status, message, queued, warnings: teardownErrors };
   }
 
   /**

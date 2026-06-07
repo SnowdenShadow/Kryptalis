@@ -349,10 +349,25 @@ func (p *Poller) runRemove(task Task) (map[string]interface{}, string) {
 	if slug == "" {
 		return nil, "missing slug"
 	}
+	// `purgeVolumes` defaults to FALSE for safety — `docker compose down -v`
+	// nukes named volumes (databases, uploads). The previous behaviour was
+	// to always pass -v on user-initiated app delete AND on project
+	// migration, the latter being a silent data-loss bug. The API now
+	// passes purgeVolumes:true ONLY when the user explicitly opts into a
+	// destructive delete; migrations pass false so data survives until
+	// VOLUME_EXPORT/IMPORT lands.
+	purgeVolumes := false
+	if v, ok := task.Payload["purgeVolumes"].(bool); ok {
+		purgeVolumes = v
+	}
 	dir := appDir(slug)
 	logs := bytes.Buffer{}
 	if _, err := os.Stat(dir); err == nil {
-		c := exec.Command("docker", "compose", "down", "-v", "--remove-orphans")
+		args := []string{"compose", "down", "--remove-orphans"}
+		if purgeVolumes {
+			args = []string{"compose", "down", "-v", "--remove-orphans"}
+		}
+		c := exec.Command("docker", args...)
 		c.Dir = dir
 		c.Stdout = &logs
 		c.Stderr = &logs
@@ -364,8 +379,16 @@ func (p *Poller) runRemove(task Task) (map[string]interface{}, string) {
 		c.Stderr = &logs
 		_ = c.Run()
 	}
-	_ = os.RemoveAll(dir)
-	return map[string]interface{}{"status": "removed", "logs": tail(logs.String(), 2000)}, ""
+	// Only wipe the on-disk app dir when we're also purging volumes.
+	// Otherwise leave it so a later restore can recover state.
+	if purgeVolumes {
+		_ = os.RemoveAll(dir)
+	}
+	return map[string]interface{}{
+		"status":       "removed",
+		"purgedVolumes": purgeVolumes,
+		"logs":         tail(logs.String(), 2000),
+	}, ""
 }
 
 func (p *Poller) runLogs(task Task) (map[string]interface{}, string) {

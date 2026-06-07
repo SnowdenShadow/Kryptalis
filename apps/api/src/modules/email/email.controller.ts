@@ -138,4 +138,34 @@ export class EmailController {
   ) {
     return this.mailServer.sendTestEmail(userId, domainId, body.fromMailboxId, body.to);
   }
+
+  @Get('server/:domainId/logs')
+  @ApiOperation({ summary: 'Tail Postfix/Dovecot/rspamd/fail2ban logs' })
+  getMailLogs(
+    @CurrentUser('id') userId: string,
+    @Param('domainId') domainId: string,
+    @Query('lines') lines?: string,
+    @Query('service') service?: string,
+  ) {
+    return this.mailServer.getLogs(userId, domainId, {
+      lines: lines ? parseInt(lines, 10) : 200,
+      service: (service as any) || 'all',
+    });
+  }
+
+  @Get('server/:domainId/bans')
+  @ApiOperation({ summary: 'List currently banned IPs (fail2ban)' })
+  getBans(@CurrentUser('id') userId: string, @Param('domainId') domainId: string) {
+    return this.mailServer.getBans(userId, domainId);
+  }
+
+  @Post('server/:domainId/unban')
+  @ApiOperation({ summary: 'Unban an IP in the mail server fail2ban jails' })
+  unban(
+    @CurrentUser('id') userId: string,
+    @Param('domainId') domainId: string,
+    @Body() body: { ip: string },
+  ) {
+    return this.mailServer.unbanIp(userId, domainId, body.ip);
+  }
 }

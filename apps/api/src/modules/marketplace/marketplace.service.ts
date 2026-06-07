@@ -24,27 +24,39 @@ export interface MarketplaceApp {
   containerPort: number;
 }
 
+// Apps removed from the visible marketplace until proper packaging exists:
+//   - Supabase: standalone studio template is non-functional (needs the
+//     full 8-service stack — postgres/kong/gotrue/postgrest/realtime/
+//     storage-api/postgres-meta/etc).
+//   - Appwrite: same story — single-container `appwrite/appwrite` boots
+//     into a crashloop without mariadb/redis/influxdb wired up.
+//   - Postal: refuses to start without a /config/postal.yml that the
+//     template never generates; depends_on doesn't wait for MariaDB,
+//     hardcoded port collisions.
+//   - Mailu: container_name mismatch with Caddy routing + missing redis +
+//     placeholder SECRET_KEY / DOMAIN that we don't substitute. Kryptalis's
+//     own mail server feature (Postfix+Dovecot+rspamd) is the supported
+//     mail path.
+//   - Rainloop: upstream is dead since 2022 with unpatched XSS CVEs.
+//     SnappyMail is its actively-maintained successor and is the
+//     recommended webmail client. Until we ship a maintained fork pin,
+//     don't recommend it.
 const APPS: MarketplaceApp[] = [
   { id: '1', name: 'Portainer', slug: 'portainer', description: 'Container management UI', category: 'DevOps', icon: 'container', version: '2.21', ports: [9443], containerPort: 9443 },
   { id: '2', name: 'Grafana', slug: 'grafana', description: 'Observability dashboards', category: 'DevOps', icon: 'chart', version: '11.0', ports: [3001], containerPort: 3000 },
   { id: '3', name: 'Uptime Kuma', slug: 'uptime-kuma', description: 'Self-hosted monitoring tool', category: 'DevOps', icon: 'heartbeat', version: '1.23', ports: [3002], containerPort: 3001 },
   { id: '4', name: 'n8n', slug: 'n8n', description: 'Workflow automation', category: 'Automation', icon: 'workflow', version: '1.64', ports: [5678], containerPort: 5678 },
-  { id: '5', name: 'Supabase', slug: 'supabase', description: 'Open-source Firebase alternative', category: 'Backend', icon: 'lightning', version: '2.0', ports: [3003], containerPort: 3000 },
   { id: '6', name: 'WordPress', slug: 'wordpress', description: 'Popular CMS', category: 'CMS', icon: 'edit', version: '6.6', ports: [8080], containerPort: 80 },
   { id: '7', name: 'Ghost', slug: 'ghost', description: 'Publishing platform', category: 'CMS', icon: 'ghost', version: '5.94', ports: [2368], containerPort: 2368 },
   { id: '8', name: 'MinIO', slug: 'minio', description: 'S3-compatible object storage', category: 'Storage', icon: 'bucket', version: '2024', ports: [9001], containerPort: 9001 },
   { id: '9', name: 'Nextcloud', slug: 'nextcloud', description: 'File hosting platform', category: 'Storage', icon: 'cloud', version: '29', ports: [8081], containerPort: 80 },
   { id: '10', name: 'PostgreSQL', slug: 'postgresql', description: 'Relational database', category: 'Databases', icon: 'database', version: '16', ports: [5433], containerPort: 5432 },
   { id: '11', name: 'Redis', slug: 'redis', description: 'In-memory data store', category: 'Databases', icon: 'zap', version: '7.4', ports: [6380], containerPort: 6379 },
-  { id: '12', name: 'Appwrite', slug: 'appwrite', description: 'Backend-as-a-Service', category: 'Backend', icon: 'server', version: '1.6', ports: [8082], containerPort: 80 },
 
   // ── Email & webmail ─────────────────────────────────────────────
   { id: '13', name: 'Roundcube', slug: 'roundcube', description: 'Polished IMAP webmail client', category: 'Email', icon: 'mail', version: '1.6', ports: [8083], containerPort: 80 },
   { id: '14', name: 'SnappyMail', slug: 'snappymail', description: 'Modern lightweight webmail (Rainloop successor)', category: 'Email', icon: 'mail-check', version: '2.36', ports: [8084], containerPort: 8888 },
-  { id: '15', name: 'Rainloop', slug: 'rainloop', description: 'Legacy webmail client (read-only fork)', category: 'Email', icon: 'inbox', version: '1.16', ports: [8085], containerPort: 8888 },
   { id: '16', name: 'Mailpit', slug: 'mailpit', description: 'SMTP testing tool with web UI — catches outgoing mail in dev', category: 'Email', icon: 'send', version: '1.20', ports: [8086, 1025], containerPort: 8025 },
-  { id: '17', name: 'Postal', slug: 'postal', description: 'Modern SMTP server alternative for transactional mail', category: 'Email', icon: 'server-cog', version: '3.0', ports: [8087], containerPort: 5000 },
-  { id: '18', name: 'Mailu', slug: 'mailu', description: 'Mail server admin panel — manage mailboxes & aliases', category: 'Email', icon: 'shield-mail', version: '2024.06', ports: [8088], containerPort: 8080 },
 ];
 
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
@@ -53,7 +65,11 @@ const APPS_DIR = path.join(DATA_DIR, 'apps');
 // Webmail apps that bind to a specific Kryptalis mail server. Multi-install
 // is allowed (one instance per mail server) — uniqueness is enforced on
 // (slug, domainId) instead of (slug, projectId).
-const WEBMAIL_SLUGS = new Set(['roundcube', 'snappymail', 'rainloop']);
+// Webmail apps the install wizard auto-wires to a Kryptalis mail server.
+// Rainloop was here previously but its compose template never had IMAP/SMTP
+// env keys to substitute, so the wiring promise was a lie. Dropped along
+// with the app itself.
+const WEBMAIL_SLUGS = new Set(['roundcube', 'snappymail']);
 
 @Injectable()
 export class MarketplaceService {

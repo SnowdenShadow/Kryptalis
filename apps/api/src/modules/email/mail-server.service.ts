@@ -53,6 +53,12 @@ export class MailServerService implements OnApplicationBootstrap {
    * configs are no-ops.
    */
   async onApplicationBootstrap() {
+    // Register the cert-renewal callback with the reverse-proxy so it can
+    // ping us when Caddy rotates a mail.<apex> certificate. Avoids the
+    // circular dep that direct injection would create.
+    try {
+      this.proxy.setMailReloadHook((domainId: string) => this.reloadMailServer(domainId));
+    } catch {}
     // Run async; never block the API from coming up if reconcile hangs.
     setImmediate(() => this.reconcileAll().catch((e) =>
       this.logger.error(`Reconcile failed: ${e?.message || e}`),
@@ -532,18 +538,28 @@ export class MailServerService implements OnApplicationBootstrap {
     const dir = path.join(MAIL_DIR, server.id);
     if (!fs.existsSync(dir)) return;
 
-    // postfix-accounts.cf — dovecot reads bcrypt hashes via {CRYPT} (the generic
-    // crypt(3) scheme, which recognizes $2y$ / $2a$ / $2b$ bcrypt prefixes).
-    // Dovecot does NOT have a {BCRYPT} scheme — that name is rejected with
-    // "Unknown scheme BCRYPT" and every login fails. Also normalize the legacy
-    // $2a$/$2b$ identifier to $2y$, which is what crypt_blowfish (dovecot's
-    // backend) expects. The hash payload is byte-compatible across $2a/$2b/$2y.
+    // postfix-accounts.cf — Dovecot's canonical bcrypt scheme is
+    // {BLF-CRYPT}, which has a native verifier inside Dovecot since 2.3 and
+    // does not depend on the host libc's crypt(3). The previous {CRYPT}
+    // implementation only worked because the docker-mailserver base image
+    // happens to ship libxcrypt with $2y$ support — fragile across base
+    // image rebuilds and not what doveadm pw produces. We also normalize
+    // the legacy $2a$/$2b$ prefix to $2y$ so Dovecot's bcrypt verifier
+    // doesn't choke on the identifier; the hash payload is identical
+    // across the three variants.
     const accountsPath = path.join(dir, 'config', 'postfix-accounts.cf');
-    const accountsLines = mailboxes.map((m) => {
-      const hash = m.passwordHash.replace(/^\$2[ab]\$/, '$2y$');
-      return `${m.address}|{CRYPT}${hash}`;
-    });
-    fs.writeFileSync(accountsPath, accountsLines.join('\n') + '\n');
+    const newAccounts =
+      mailboxes
+        .map((m) => {
+          const hash = m.passwordHash.replace(/^\$2[ab]\$/, '$2y$');
+          return `${m.address}|{BLF-CRYPT}${hash}`;
+        })
+        .join('\n') + '\n';
+    const prevAccounts = fs.existsSync(accountsPath) ? fs.readFileSync(accountsPath, 'utf-8') : '';
+    const accountsChanged = prevAccounts !== newAccounts;
+    if (accountsChanged) {
+      fs.writeFileSync(accountsPath, newAccounts);
+    }
 
     const virtualPath = path.join(dir, 'config', 'postfix-virtual.cf');
     const virtualLines: string[] = [];
@@ -552,13 +568,157 @@ export class MailServerService implements OnApplicationBootstrap {
       const dest = a.mailbox?.address || a.forwardTo;
       if (dest) virtualLines.push(`${a.address}  ${dest}`);
     }
-    fs.writeFileSync(virtualPath, virtualLines.join('\n') + '\n');
+    const newVirtual = virtualLines.join('\n') + '\n';
+    const prevVirtual = fs.existsSync(virtualPath) ? fs.readFileSync(virtualPath, 'utf-8') : '';
+    const virtualChanged = prevVirtual !== newVirtual;
+    if (virtualChanged) {
+      fs.writeFileSync(virtualPath, newVirtual);
+    }
 
-    // reload postfix in-place if container is running
+    // Skip the reload entirely when nothing changed. The reload itself is
+    // a no-op semantically, but the OLD code triggered one on every mailbox
+    // CRUD which (a) wasted ~50ms per request, (b) hid the absence of a
+    // proper cert-renewal reload behind accidental side-effects.
+    if (!accountsChanged && !virtualChanged) return;
+
     const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
     try {
-      await execFileAsync('docker', ['exec', containerName, 'postfix', 'reload'], { timeout: 5000 });
+      await execFileAsync('docker', ['exec', containerName, 'postfix', 'reload'], { timeout: 5_000 });
     } catch {}
+    // Also force Dovecot to flush its auth cache + re-read userdb so the new
+    // mailbox is loggable immediately (the docker-mailserver image's
+    // changedetector usually catches this within 2s, but we don't want to
+    // gamble on timing).
+    try {
+      await execFileAsync('docker', ['exec', containerName, 'doveadm', 'reload'], { timeout: 5_000 });
+    } catch {}
+    try {
+      await execFileAsync('docker', ['exec', containerName, 'doveadm', 'auth', 'cache', 'flush'], { timeout: 5_000 });
+    } catch {}
+  }
+
+  /**
+   * Tail mail container logs. Defaults to last 200 combined lines from
+   * Postfix + Dovecot + rspamd + fail2ban. `service` filters to one
+   * stream. Project-scoped via assertDomainAccess.
+   */
+  async getLogs(
+    userId: string,
+    domainId: string,
+    opts: { lines?: number; service?: 'all' | 'postfix' | 'dovecot' | 'rspamd' | 'fail2ban' } = {},
+  ): Promise<{ logs: string }> {
+    await this.assertDomainAccess(userId, domainId, 'DEVELOPER');
+    const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
+    if (!domain) throw new NotFoundException('Domain not found');
+    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    const lines = Math.min(Math.max(opts.lines || 200, 10), 5000);
+    const service = opts.service || 'all';
+    try {
+      if (service === 'all') {
+        const { stdout } = await execFileAsync(
+          'docker',
+          ['logs', '--tail', String(lines), '--timestamps', containerName],
+          { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 },
+        );
+        return { logs: stdout };
+      }
+      // Service-scoped logs live under /var/log/mail in the container,
+      // mounted at ${hostDir}/logs. Use tail on the right file.
+      const fileMap: Record<string, string> = {
+        postfix: '/var/log/mail/mail.log',
+        dovecot: '/var/log/mail/dovecot.log',
+        rspamd: '/var/log/mail/rspamd.log',
+        fail2ban: '/var/log/mail/fail2ban.log',
+      };
+      const file = fileMap[service];
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['exec', containerName, 'tail', '-n', String(lines), file],
+        { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 },
+      );
+      return { logs: stdout };
+    } catch (e: any) {
+      return { logs: `(failed to read logs: ${e?.message || e})` };
+    }
+  }
+
+  /**
+   * List fail2ban jails + their currently-banned IPs. Lets a project
+   * member see whether their own IP / a user's IP got auto-banned by
+   * dovecot/postfix and gives them a way to unblock without SSH.
+   */
+  async getBans(userId: string, domainId: string): Promise<{ jails: { name: string; banned: string[] }[] }> {
+    await this.assertDomainAccess(userId, domainId, 'DEVELOPER');
+    const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
+    if (!domain) throw new NotFoundException('Domain not found');
+    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    try {
+      const { stdout: statusOut } = await execFileAsync(
+        'docker',
+        ['exec', containerName, 'fail2ban-client', 'status'],
+        { timeout: 5_000 },
+      );
+      const jailLine = statusOut.split('\n').find((l) => l.includes('Jail list:'));
+      const jailNames = (jailLine ? jailLine.split(':').slice(1).join(':') : '')
+        .split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+      const jails: { name: string; banned: string[] }[] = [];
+      for (const name of jailNames) {
+        try {
+          const { stdout } = await execFileAsync(
+            'docker',
+            ['exec', containerName, 'fail2ban-client', 'status', name],
+            { timeout: 5_000 },
+          );
+          const ipLine = stdout.split('\n').find((l) => l.includes('Banned IP list:'));
+          const ips = ipLine
+            ? ipLine.split(':').slice(1).join(':').trim().split(/\s+/).filter(Boolean)
+            : [];
+          jails.push({ name, banned: ips });
+        } catch {}
+      }
+      return { jails };
+    } catch (e: any) {
+      throw new NotFoundException(`fail2ban not reachable in mail container: ${e?.message || e}`);
+    }
+  }
+
+  async unbanIp(userId: string, domainId: string, ip: string): Promise<{ unbanned: string }> {
+    await this.assertDomainAccess(userId, domainId, 'ADMIN');
+    // Tight validation — IP only, no shell metacharacters slipping in.
+    if (!/^[0-9.:a-fA-F]+$/.test(ip)) {
+      throw new BadRequestException('Invalid IP.');
+    }
+    const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
+    if (!domain) throw new NotFoundException('Domain not found');
+    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    try {
+      await execFileAsync(
+        'docker',
+        ['exec', containerName, 'fail2ban-client', 'unban', ip],
+        { timeout: 5_000 },
+      );
+      return { unbanned: ip };
+    } catch (e: any) {
+      throw new NotFoundException(`Could not unban: ${e?.message || e}`);
+    }
+  }
+
+  /**
+   * Reload Postfix + Dovecot inside the mail container. Used by the SSL
+   * cert watcher (see reverse-proxy.service.ts) and by the daily cron
+   * pulse. Safe to call when the container is down — failures are logged
+   * but never thrown.
+   */
+  async reloadMailServer(domainId: string): Promise<void> {
+    const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
+    if (!domain) return;
+    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    try {
+      await execFileAsync('docker', ['exec', containerName, 'postfix', 'reload'], { timeout: 5_000 });
+      await execFileAsync('docker', ['exec', containerName, 'doveadm', 'reload'], { timeout: 5_000 });
+    } catch (e: any) {
+      this.logger.warn(`Mail reload failed for ${domain.domain}: ${e?.message || e}`);
+    }
   }
 
   // ── internal: write compose + start ──────────────────────────────

@@ -34,6 +34,25 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /**
+   * Sanitized list of servers the caller can reach via project membership.
+   * Used by the dashboard sidebar / project picker. Never includes
+   * agentTokens, IPs of remote servers, or other infra secrets.
+   */
+  async findAccessible(userId: string) {
+    const memberships = await this.prisma.projectMember.findMany({
+      where: { userId },
+      select: { project: { select: { serverId: true } } },
+    });
+    const ids = Array.from(new Set(memberships.map((m) => m.project.serverId).filter(Boolean)));
+    if (ids.length === 0) return [];
+    const rows = await this.prisma.server.findMany({
+      where: { id: { in: ids as string[] } },
+      select: { id: true, name: true, host: true, status: true, os: true, arch: true },
+    });
+    return rows;
+  }
+
   async findLocal() {
     let server = await this.prisma.server.findFirst({
       include: { agentTokens: true },

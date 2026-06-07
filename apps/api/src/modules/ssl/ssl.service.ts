@@ -1,23 +1,42 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import {
+  assertProjectAccess,
+  listAccessibleProjectIds,
+} from '../../common/rbac/project-access';
 
+/**
+ * SSL operations are project-scoped: only members of the project that owns
+ * the domain can issue/renew/list certs for it. Orphan domains (no project)
+ * are only touchable by platform admins — handled in the controller.
+ *
+ * Previously this service threw `new Error(...)` which NestJS surfaces as
+ * 500 with no useful body. We now throw `NotFoundException` so the
+ * dashboard sees a clean 404 with the original message.
+ */
 @Injectable()
 export class SslService {
   constructor(private prisma: PrismaService) {}
 
-  async issue(domainId: string) {
+  async issue(userId: string, domainId: string) {
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
-    if (!domain) throw new Error('Domain not found');
+    if (!domain) throw new NotFoundException('Domain not found');
 
-    const server = await this.prisma.application.findFirst({
+    // Project-scoped check; orphan domains fall through to admin enforcement
+    // at the controller layer.
+    if (domain.projectId) {
+      await assertProjectAccess(this.prisma, userId, domain.projectId, 'DEVELOPER');
+    }
+
+    const app = await this.prisma.application.findFirst({
       where: { id: domain.applicationId || '' },
       include: { project: { include: { server: true } } },
     });
 
-    if (server?.project?.server) {
+    if (app?.project?.server) {
       await this.prisma.agentTask.create({
         data: {
-          serverId: server.project.server.id,
+          serverId: app.project.server.id,
           type: 'SSL_ISSUE',
           payload: { domainId, domain: domain.domain },
         },
@@ -32,18 +51,32 @@ export class SslService {
     return { message: 'SSL issuance queued' };
   }
 
-  async renew(certificateId: string) {
+  async renew(userId: string, certificateId: string) {
     const cert = await this.prisma.sSLCertificate.findUnique({
       where: { id: certificateId },
       include: { domain: true },
     });
-    if (!cert) throw new Error('Certificate not found');
-    return this.issue(cert.domainId);
+    if (!cert) throw new NotFoundException('Certificate not found');
+    return this.issue(userId, cert.domainId);
   }
 
-  async getCertificates(domainId?: string) {
+  async getCertificates(userId: string, domainId?: string) {
+    if (domainId) {
+      const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
+      if (!domain) throw new NotFoundException('Domain not found');
+      if (domain.projectId) {
+        await assertProjectAccess(this.prisma, userId, domain.projectId, 'VIEWER');
+      }
+      return this.prisma.sSLCertificate.findMany({
+        where: { domainId },
+        include: { domain: { select: { id: true, domain: true } } },
+      });
+    }
+    // No domainId → scope to certs whose domain belongs to a project the
+    // caller can access.
+    const projectIds = await listAccessibleProjectIds(this.prisma, userId);
     return this.prisma.sSLCertificate.findMany({
-      where: domainId ? { domainId } : {},
+      where: { domain: { projectId: { in: projectIds } } },
       include: { domain: { select: { id: true, domain: true } } },
     });
   }
