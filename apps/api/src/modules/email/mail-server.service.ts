@@ -354,8 +354,12 @@ export class MailServerService implements OnApplicationBootstrap {
     const transcript: string[] = [];
     const log = (line: string) => transcript.push(line);
 
-    const host = '127.0.0.1';
-    const port = server.smtpPort;
+    // Connect via the shared docker network using the container's name.
+    // 127.0.0.1 wouldn't work because the API runs inside its own container
+    // (loopback ≠ host). The mail server's internal port is always 25 — the
+    // host-mapped port (server.smtpPort) is irrelevant for in-cluster traffic.
+    const host = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    const port = 25;
     const from = `${mailbox.localPart}@${domain.domain}`;
 
     return await new Promise<{
@@ -628,6 +632,12 @@ export class MailServerService implements OnApplicationBootstrap {
     container_name: ${containerName}
     hostname: mail.${domain}
     restart: unless-stopped
+    networks:
+      # default network for inbound/outbound traffic
+      - default
+      # join the shared bridge so the API container can talk to us by name
+      # for the 'Send test email' loopback (container-to-container SMTP).
+      - kryptalis-apps
     ports:
       - "${ports.smtp}:25"
       - "${ports.submission}:587"
@@ -665,6 +675,10 @@ ${sslVolume}    cap_add:
       interval: 30s
       timeout: 10s
       retries: 3
+networks:
+  kryptalis-apps:
+    external: true
+    name: kryptalis-apps
 ${sslExternalVolumes}`;
     fs.writeFileSync(path.join(dir, 'docker-compose.yml'), compose);
 
