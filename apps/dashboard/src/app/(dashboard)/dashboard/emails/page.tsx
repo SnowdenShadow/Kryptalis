@@ -31,6 +31,7 @@ interface EmailDomain {
   mailboxCount: number;
   aliasCount: number;
   webmail: { id: string; name: string; port: number | null; status: string } | null;
+  subdomains: { id: string; domain: string }[];
 }
 
 const STATUS_COLOR: Record<ServerStatus | 'NONE', string> = {
@@ -115,16 +116,18 @@ export default function EmailsPage() {
             return (
               <Card key={d.id} className="overflow-hidden hover:border-primary/50 transition-colors">
                 <CardContent className="p-0">
-                  {/* Top row: status + domain */}
+                  {/* Top row: domain + status + project */}
                   <div className="flex items-start justify-between gap-3 p-4">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className={cn('h-2.5 w-2.5 rounded-full shrink-0', color)} />
-                        <h3 className="font-mono text-base font-semibold truncate">
-                          {d.mailServer?.hostname || `mail.${d.domain}`}
+                        <h3 className="font-mono text-base font-semibold truncate" title={d.domain}>
+                          {d.domain}
                         </h3>
                       </div>
-                      <p className="text-xs text-muted-foreground mt-1">{statusLabel(status)}</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        <span className="font-mono">user@{d.domain}</span> · {statusLabel(status)}
+                      </p>
                     </div>
                     {d.project && (
                       <Badge variant="outline" className="text-[10px] shrink-0 gap-1">
@@ -132,6 +135,23 @@ export default function EmailsPage() {
                       </Badge>
                     )}
                   </div>
+
+                  {/* Subdomain coverage — informational only. Mail servers don't
+                      bind per-subdomain; we list them so the user knows what
+                      else is hosted under this apex. */}
+                  {d.subdomains.length > 0 && (
+                    <div className="px-4 pb-3 flex flex-wrap gap-1.5">
+                      <span className="text-[10px] text-muted-foreground self-center">Apex covers:</span>
+                      {d.subdomains.slice(0, 4).map((s) => (
+                        <Badge key={s.id} variant="outline" className="text-[10px] font-mono">
+                          {s.domain}
+                        </Badge>
+                      ))}
+                      {d.subdomains.length > 4 && (
+                        <Badge variant="outline" className="text-[10px]">+{d.subdomains.length - 4}</Badge>
+                      )}
+                    </div>
+                  )}
 
                   {/* Counts row */}
                   <div className="px-4 pb-3 grid grid-cols-2 gap-2 text-center">

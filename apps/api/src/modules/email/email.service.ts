@@ -480,7 +480,7 @@ export class EmailService {
   async overview(userId: string) {
     const projectIds = await listAccessibleProjectIds(this.prisma, userId);
     if (projectIds.length === 0) return [];
-    const domains = await this.prisma.domain.findMany({
+    const allDomains = await this.prisma.domain.findMany({
       where: { projectId: { in: projectIds } },
       include: {
         project: { select: { id: true, name: true } },
@@ -488,6 +488,22 @@ export class EmailService {
       },
       orderBy: { createdAt: 'desc' },
     });
+    // Mail servers live on apex domains only — user@apex is what people
+    // actually want, not user@sub.apex. Subdomains can still serve web
+    // traffic / SSL; they just don't get their own mail server card here.
+    // We DO carry them along as "siblings" of their apex so the UI can
+    // show "this apex covers 3 subdomains" without polluting the list.
+    const isApex = (d: { domain: string }) => d.domain.split('.').filter(Boolean).length <= 2;
+    const apexOf = (host: string) => host.split('.').filter(Boolean).slice(-2).join('.');
+    const domains = allDomains.filter(isApex);
+    const subsByApex = new Map<string, { id: string; domain: string }[]>();
+    for (const d of allDomains) {
+      if (isApex(d)) continue;
+      const apex = apexOf(d.domain);
+      const arr = subsByApex.get(apex) || [];
+      arr.push({ id: d.id, domain: d.domain });
+      subsByApex.set(apex, arr);
+    }
     if (domains.length === 0) return [];
     const domainIds = domains.map((d) => d.id);
     const [servers, mailboxAgg, aliasAgg, webmails] = await Promise.all([
@@ -534,6 +550,7 @@ export class EmailService {
       mailboxCount: mbBy.get(d.id) || 0,
       aliasCount: alBy.get(d.id) || 0,
       webmail: wmBy.get(d.id) || null,
+      subdomains: subsByApex.get(d.domain) || [],
     }));
   }
 }
