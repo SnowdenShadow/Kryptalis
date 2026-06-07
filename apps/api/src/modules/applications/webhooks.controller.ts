@@ -12,6 +12,7 @@ import type { Request } from 'express';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { ApplicationsService } from './applications.service';
 
 type RawRequest = Request & { rawBody?: Buffer };
@@ -29,6 +30,7 @@ export class ApplicationWebhooksController {
   constructor(
     private prisma: PrismaService,
     private apps: ApplicationsService,
+    private encryption: EncryptionService,
   ) {}
 
   @Post(':id')
@@ -51,21 +53,23 @@ export class ApplicationWebhooksController {
     if (!app.webhookSecret) throw new ForbiddenException('Webhooks disabled');
     if (!app.autoDeploy) return { skipped: true, reason: 'autoDeploy disabled' };
 
+    // Decrypt the at-rest HMAC key for in-memory verification. Never logged.
+    const secret = this.encryption.decrypt(app.webhookSecret);
+
     // HMAC the EXACT raw bytes the provider signed — never the re-stringified body.
     const raw = req.rawBody ?? Buffer.from(JSON.stringify(body ?? {}));
 
     let verified = false;
     if (ghSig) {
-      const h = crypto.createHmac('sha256', app.webhookSecret).update(raw).digest('hex');
+      const h = crypto.createHmac('sha256', secret).update(raw).digest('hex');
       verified = timingSafeStrEq(`sha256=${h}`, ghSig);
     } else if (glToken) {
-      verified = timingSafeStrEq(glToken, app.webhookSecret);
+      verified = timingSafeStrEq(glToken, secret);
     } else if (bbSig) {
-      // Bitbucket sends an optional HMAC-SHA256 header when a secret is set on the hook.
-      const h = crypto.createHmac('sha256', app.webhookSecret).update(raw).digest('hex');
+      const h = crypto.createHmac('sha256', secret).update(raw).digest('hex');
       verified = timingSafeStrEq(h, bbSig) || timingSafeStrEq(`sha256=${h}`, bbSig);
     } else if (ghLegacy) {
-      const h = crypto.createHmac('sha1', app.webhookSecret).update(raw).digest('hex');
+      const h = crypto.createHmac('sha1', secret).update(raw).digest('hex');
       verified = timingSafeStrEq(`sha1=${h}`, ghLegacy);
     }
     if (!verified) {

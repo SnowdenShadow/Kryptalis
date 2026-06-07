@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { CreateGitProviderDto } from './dto/create-git-provider.dto';
 
 export interface Repo {
@@ -15,7 +16,18 @@ export interface Repo {
 
 @Injectable()
 export class GitProvidersService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private encryption: EncryptionService,
+  ) {}
+
+  /**
+   * Decrypt the stored token. Legacy plaintext rows return as-is via the
+   * EncryptionService prefix check; new rows are encrypted at-rest.
+   */
+  private getToken(gp: { token: string }): string {
+    return this.encryption.decrypt(gp.token);
+  }
 
   async create(userId: string, dto: CreateGitProviderDto) {
     const userInfo = await this.fetchUserInfo(dto.provider, dto.token);
@@ -26,7 +38,7 @@ export class GitProvidersService {
         userId,
         provider: dto.provider,
         name: dto.name,
-        token: dto.token,
+        token: this.encryption.encrypt(dto.token),
         username: userInfo.username,
         avatarUrl: userInfo.avatarUrl,
       },
@@ -65,7 +77,7 @@ export class GitProvidersService {
       if (gp.provider === 'GITHUB') {
         for (const file of files) {
           const res = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${file}?ref=${branch}`, {
-            headers: { 'Authorization': `Bearer ${gp.token}`, 'Accept': 'application/vnd.github+json' },
+            headers: { 'Authorization': `Bearer ${this.getToken(gp)}`, 'Accept': 'application/vnd.github+json' },
           });
           if (res.ok) {
             found[file] = true;
@@ -81,7 +93,7 @@ export class GitProvidersService {
         const projectPath = encodeURIComponent(repoFullName);
         for (const file of files) {
           const res = await fetch(`https://gitlab.com/api/v4/projects/${projectPath}/repository/files/${encodeURIComponent(file)}?ref=${branch}`, {
-            headers: { 'PRIVATE-TOKEN': gp.token },
+            headers: { 'PRIVATE-TOKEN': this.getToken(gp) },
           });
           if (res.ok) {
             found[file] = true;
@@ -146,7 +158,7 @@ export class GitProvidersService {
     try {
       if (gp.provider === 'GITHUB') {
         const res = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(filePath)}?ref=${branch}`, {
-          headers: { 'Authorization': `Bearer ${gp.token}`, 'Accept': 'application/vnd.github+json' },
+          headers: { 'Authorization': `Bearer ${this.getToken(gp)}`, 'Accept': 'application/vnd.github+json' },
         });
         if (!res.ok) return { content: '', exists: false };
         const data: any = await res.json();
@@ -156,14 +168,14 @@ export class GitProvidersService {
       if (gp.provider === 'GITLAB') {
         const projectPath = encodeURIComponent(repoFullName);
         const res = await fetch(`https://gitlab.com/api/v4/projects/${projectPath}/repository/files/${encodeURIComponent(filePath)}/raw?ref=${branch}`, {
-          headers: { 'PRIVATE-TOKEN': gp.token },
+          headers: { 'PRIVATE-TOKEN': this.getToken(gp) },
         });
         if (!res.ok) return { content: '', exists: false };
         return { content: await res.text(), exists: true };
       }
       if (gp.provider === 'BITBUCKET') {
         const res = await fetch(`https://api.bitbucket.org/2.0/repositories/${repoFullName}/src/${branch}/${filePath}`, {
-          headers: { 'Authorization': `Bearer ${gp.token}` },
+          headers: { 'Authorization': `Bearer ${this.getToken(gp)}` },
         });
         if (!res.ok) return { content: '', exists: false };
         return { content: await res.text(), exists: true };
@@ -177,9 +189,10 @@ export class GitProvidersService {
     if (!gp) throw new NotFoundException('Provider not found');
 
     try {
-      if (gp.provider === 'GITHUB') return await this.fetchGitHubRepos(gp.token);
-      if (gp.provider === 'GITLAB') return await this.fetchGitLabRepos(gp.token);
-      if (gp.provider === 'BITBUCKET') return await this.fetchBitbucketRepos(gp.token);
+      const token = this.getToken(gp);
+      if (gp.provider === 'GITHUB') return await this.fetchGitHubRepos(token);
+      if (gp.provider === 'GITLAB') return await this.fetchGitLabRepos(token);
+      if (gp.provider === 'BITBUCKET') return await this.fetchBitbucketRepos(token);
     } catch (err: any) {
       throw new BadRequestException(err.message || 'Failed to fetch repos');
     }

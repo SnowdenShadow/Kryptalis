@@ -2,9 +2,17 @@ import { IsString, IsOptional, IsObject, IsIn } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class TaskResultDto {
+  @ApiProperty({ description: 'Reporting agent server id.' })
+  @IsString()
+  serverId!: string;
+
+  @ApiProperty({ description: 'Reporting agent token.' })
+  @IsString()
+  token!: string;
+
   @ApiProperty({ enum: ['COMPLETED', 'FAILED'] })
   @IsIn(['COMPLETED', 'FAILED'])
-  status: string;
+  status!: string;
 
   @ApiProperty({ required: false })
   @IsOptional()

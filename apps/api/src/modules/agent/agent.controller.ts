@@ -112,9 +112,9 @@ export class AgentController {
   }
 
   @Post('tasks/:id/result')
-  @ApiOperation({ summary: 'Report task result' })
+  @ApiOperation({ summary: 'Report task result (requires server id + agent token)' })
   taskResult(@Param('id') id: string, @Body() dto: TaskResultDto) {
-    return this.svc.taskResult(id, dto.status, dto.result, dto.error);
+    return this.svc.taskResult(id, dto.serverId, dto.token, dto.status, dto.result, dto.error);
   }
 
   // ─── operator routes (JWT) ────────────────────────────────────────

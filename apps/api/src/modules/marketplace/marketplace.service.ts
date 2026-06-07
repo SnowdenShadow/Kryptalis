@@ -1,5 +1,6 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { assertProjectAccess } from '../../common/rbac/project-access';
 import { COMPOSE_TEMPLATES, PORT_MAP, renderCustomComposeTemplate } from './templates';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
@@ -102,6 +103,26 @@ export class MarketplaceService {
     },
     userId?: string,
   ) {
+    // Cross-tenant app-planting fix: the user must be a member of the
+    // project. DEVELOPER is the minimum role to provision an app.
+    if (!userId) {
+      throw new ForbiddenException('userId is required.');
+    }
+    await assertProjectAccess(this.prisma, userId, data.projectId, 'DEVELOPER');
+
+    // Pin serverId to the project's server, ignore whatever the client passed.
+    const project = await this.prisma.project.findUnique({
+      where: { id: data.projectId },
+      select: { serverId: true },
+    });
+    if (!project) throw new NotFoundException('Project not found.');
+    if (data.serverId && data.serverId !== project.serverId) {
+      throw new BadRequestException(
+        "serverId must match the project's server. Move the project first if you need to relocate.",
+      );
+    }
+    data.serverId = project.serverId;
+
     const app = this.getApp(data.appSlug);
     const template = COMPOSE_TEMPLATES[data.appSlug];
     if (!template) throw new NotFoundException(`No template for ${app.name}`);
@@ -408,6 +429,17 @@ export class MarketplaceService {
     },
     userId?: string,
   ) {
+    if (!userId) throw new ForbiddenException('userId is required.');
+    await assertProjectAccess(this.prisma, userId, data.projectId, 'DEVELOPER');
+    const project = await this.prisma.project.findUnique({
+      where: { id: data.projectId },
+      select: { serverId: true },
+    });
+    if (!project) throw new NotFoundException('Project not found.');
+    if (data.serverId && data.serverId !== project.serverId) {
+      throw new BadRequestException("serverId must match the project's server.");
+    }
+    data.serverId = project.serverId;
     if (!data.name?.trim()) throw new BadRequestException('Name required');
     if (!data.image?.trim()) throw new BadRequestException('Image required');
     if (!Number.isInteger(data.containerPort) || data.containerPort < 1 || data.containerPort > 65535) {

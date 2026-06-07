@@ -22,12 +22,14 @@ model User {
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
 
-  sessions     Session[]
-  projects     Project[]
-  deployments  Deployment[]
-  auditLogs    AuditLog[]
-  gitProviders GitProvider[]
-  memberships  ProjectMember[] @relation("ProjectMembership")
+  sessions            Session[]
+  projects            Project[]
+  deployments         Deployment[]
+  auditLogs           AuditLog[]
+  gitProviders        GitProvider[]
+  memberships         ProjectMember[]       @relation("ProjectMembership")
+  passwordResetTokens PasswordResetToken[]
+  backupCodes         TwoFactorBackupCode[]
 
   @@map("users")
 }
@@ -71,18 +73,63 @@ model SystemSetting {
 }
 
 model Session {
-  id           String   @id @default(cuid())
-  userId       String
-  refreshToken String   @unique
-  userAgent    String?
-  ipAddress    String?
-  expiresAt    DateTime
-  createdAt    DateTime @default(now())
+  id                String   @id @default(cuid())
+  userId            String
+  // Stored as sha256(refreshToken). Never store raw. DB leak = no usable tokens.
+  refreshTokenHash  String   @unique
+  // Rotation chain — every refresh creates a new session and marks the old
+  // one as ROTATED. Re-using a ROTATED/REVOKED token revokes the whole
+  // family (RFC 6819 §5.2.2.3 — refresh token replay detection).
+  familyId          String
+  status            SessionStatus @default(ACTIVE)
+  replacedById      String?
+  userAgent         String?
+  ipAddress         String?
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([familyId])
   @@map("sessions")
+}
+
+enum SessionStatus {
+  ACTIVE
+  ROTATED
+  REVOKED
+}
+
+// Password-reset tokens. Stored as sha256 hash so DB leak doesn't yield
+// usable reset links. Tokens are single-use (usedAt marks consumption)
+// and expire after ~30 minutes.
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// TOTP backup codes (10 codes per user, bcrypt-hashed). Used once.
+model TwoFactorBackupCode {
+  id        String   @id @default(cuid())
+  userId    String
+  codeHash  String
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("two_factor_backup_codes")
 }
 
 // ─── Servers ─────────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
 import * as Joi from 'joi';
 import { PrismaModule } from './prisma/prisma.module';
+import { CryptoModule } from './common/crypto/crypto.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { ServersModule } from './modules/servers/servers.module';
@@ -32,15 +34,21 @@ import { SystemModule } from './modules/system/system.module';
       validationSchema: Joi.object({
         DATABASE_URL: Joi.string().required(),
         API_PORT: Joi.number().default(4000),
-        JWT_SECRET: Joi.string().required(),
-        JWT_REFRESH_SECRET: Joi.string().required(),
+        JWT_SECRET: Joi.string().min(32).required(),
+        JWT_REFRESH_SECRET: Joi.string().min(32).required(),
         JWT_EXPIRATION: Joi.string().default('15m'),
         JWT_REFRESH_EXPIRATION: Joi.string().default('7d'),
-        ENCRYPTION_KEY: Joi.string().required(),
+        ENCRYPTION_KEY: Joi.string().min(32).required(),
+        CORS_ORIGINS: Joi.string().optional(),
+        SWAGGER_PUBLIC: Joi.string().optional(),
       }),
     }),
-    ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
+    // Global throttler — defaults are conservative; tight per-route limits
+    // live next to the relevant controller (auth/login etc.). Registering
+    // ThrottlerGuard via APP_GUARD activates it across the whole API.
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     PrismaModule,
+    CryptoModule,
     AuthModule,
     UsersModule,
     ServersModule,
@@ -62,6 +70,9 @@ import { SystemModule } from './modules/system/system.module';
     EmailModule,
     ReverseProxyModule,
     SystemModule,
+  ],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
   ],
 })
 export class AppModule {}

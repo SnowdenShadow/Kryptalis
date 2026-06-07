@@ -16,6 +16,7 @@ import {
 import type { ProjectRole } from '@prisma/client';
 import { AgentService } from '../agent/agent.service';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
+import { MailServerService } from '../email/mail-server.service';
 
 @Injectable()
 export class ProjectsService {
@@ -24,6 +25,7 @@ export class ProjectsService {
     private admin: AdminService,
     private agent: AgentService,
     private proxy: ReverseProxyService,
+    private mailServer: MailServerService,
   ) {}
 
   async create(userId: string, dto: CreateProjectDto) {
@@ -114,7 +116,53 @@ export class ProjectsService {
 
   async remove(id: string, userId: string) {
     await assertProjectAccess(this.prisma, userId, id, 'OWNER');
+
+    // Tear down infra BEFORE the DB cascade wipes the rows. Without this,
+    // containers + volumes + mail server + Caddy entries all stay alive on
+    // the host while the user thinks the project is gone.
+    const project = await this.prisma.project.findUnique({
+      where: { id },
+      include: {
+        applications: { select: { id: true, name: true } },
+        databases: { select: { id: true, name: true } },
+        domains: { select: { id: true, domain: true } },
+      },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+
+    const slugify = (n: string) =>
+      n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'app';
+
+    // Best-effort REMOVE on every container the project owns. purgeVolumes:
+    // true because the user explicitly chose to delete the project.
+    for (const app of project.applications) {
+      try {
+        await this.agent.enqueueTask(project.serverId, 'REMOVE', {
+          slug: slugify(app.name),
+          containerName: `kryptalis-${slugify(app.name)}`,
+          purgeVolumes: true,
+        });
+      } catch {}
+    }
+    for (const db of project.databases) {
+      try {
+        await this.agent.enqueueTask(project.serverId, 'REMOVE', {
+          slug: `db-${slugify(db.name)}`,
+          containerName: `kryptalis-db-${slugify(db.name)}`,
+          purgeVolumes: true,
+        });
+      } catch {}
+    }
+
+    // Tear down per-domain mail servers (if any). The cascade would orphan
+    // the on-disk DKIM + compose dir otherwise.
+    for (const d of project.domains) {
+      try { await this.mailServer.removeForDomain(d.id); } catch {}
+    }
+
     await this.prisma.project.delete({ where: { id } });
+    // Regenerate Caddy so domains aren't kept routing to dead containers.
+    this.proxy.regenerate().catch(() => {});
     return { message: 'Project deleted' };
   }
 

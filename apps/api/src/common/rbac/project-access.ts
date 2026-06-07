@@ -10,6 +10,14 @@ import type { ProjectRole } from '@prisma/client';
  *   VIEWER    — read-only
  *
  * Rank is used to compare (higher number = more rights).
+ *
+ * **Platform-admin bypass.** A user whose global `role` is `ADMIN` or
+ * `SUPERADMIN` is treated as an implicit OWNER on every project. This
+ * mirrors the ad-hoc bypasses that used to live across services (domains,
+ * email, databases…) and keeps them in one place. Per-project membership
+ * is still checked first so a regular user with explicit project access
+ * gets their actual role (avoids the case where ADMIN's project role
+ * shadows their explicit member role).
  */
 export const ROLE_RANK: Record<ProjectRole, number> = {
   OWNER: 100,
@@ -22,11 +30,14 @@ export function hasRole(role: ProjectRole, min: ProjectRole): boolean {
   return ROLE_RANK[role] >= ROLE_RANK[min];
 }
 
-/**
- * Returns the user's role on the project, throwing if no access at all.
- * The "legacy" project.userId field is treated as an implicit OWNER membership
- * so older projects (pre-RBAC) keep working without backfill races.
- */
+async function isPlatformAdmin(prisma: PrismaService, userId: string): Promise<boolean> {
+  const me = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true },
+  });
+  return me?.role === 'ADMIN' || me?.role === 'SUPERADMIN';
+}
+
 export async function getProjectRole(
   prisma: PrismaService,
   userId: string,
@@ -37,13 +48,13 @@ export async function getProjectRole(
     select: { role: true },
   });
   if (member) return member.role;
-  // legacy fallback: original creator
   const proj = await prisma.project.findUnique({
     where: { id: projectId },
     select: { userId: true },
   });
   if (!proj) throw new NotFoundException('Project not found');
   if (proj.userId === userId) return 'OWNER';
+  if (await isPlatformAdmin(prisma, userId)) return 'OWNER';
   throw new ForbiddenException('You are not a member of this project');
 }
 
@@ -62,11 +73,15 @@ export async function assertProjectAccess(
   return role;
 }
 
-/** All project IDs the user has any role on (membership OR legacy owner). */
+/** All project IDs the user has any role on. Platform admins see them all. */
 export async function listAccessibleProjectIds(
   prisma: PrismaService,
   userId: string,
 ): Promise<string[]> {
+  if (await isPlatformAdmin(prisma, userId)) {
+    const all = await prisma.project.findMany({ select: { id: true } });
+    return all.map((p) => p.id);
+  }
   const [memberships, owned] = await Promise.all([
     prisma.projectMember.findMany({
       where: { userId },

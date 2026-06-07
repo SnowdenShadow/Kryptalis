@@ -16,6 +16,7 @@ import {
   assertProjectAccess,
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { AgentService } from '../agent/agent.service';
 
 const execAsync = promisify(exec);
@@ -140,8 +141,14 @@ export class DatabasesService {
   constructor(
     private prisma: PrismaService,
     private agent: AgentService,
+    private encryption: EncryptionService,
   ) {
     if (!fs.existsSync(DBS_DIR)) fs.mkdirSync(DBS_DIR, { recursive: true });
+  }
+
+  /** Decrypt a stored DB password. Legacy plaintext rows are returned as-is. */
+  private dbPassword(db: { password: string }): string {
+    return this.encryption.decrypt(db.password);
   }
 
   /**
@@ -264,7 +271,7 @@ export class DatabasesService {
         applicationId,
         port: hostPort,
         username,
-        password,
+        password: this.encryption.encrypt(password),
       },
     });
 
@@ -322,7 +329,7 @@ export class DatabasesService {
 
     return Promise.all(dbs.map(async (db) => {
       const status = await this.getContainerStatus(db.name);
-      const connectionString = this.getConnectionString(db.type, db.username, db.password, db.port, db.name);
+      const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name);
       return { ...db, status, connectionString };
     }));
   }
@@ -338,7 +345,7 @@ export class DatabasesService {
     });
     if (!db) throw new NotFoundException('Database not found');
     const status = await this.getContainerStatus(db.name);
-    const connectionString = this.getConnectionString(db.type, db.username, db.password, db.port, db.name);
+    const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name);
     return { ...db, status, connectionString };
   }
 

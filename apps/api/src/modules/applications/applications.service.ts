@@ -6,6 +6,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { UpdateApplicationDto } from './dto/update-application.dto';
@@ -242,6 +243,7 @@ export class ApplicationsService {
     private proxy: ReverseProxyService,
     private agent: AgentService,
     private domainAttach: DomainAttachService,
+    private encryption: EncryptionService,
   ) {}
 
   /**
@@ -319,18 +321,26 @@ export class ApplicationsService {
     // here for manual create too.
     const portToCheck = (firstMappedHost as number | undefined) ?? dbData.port;
     if (portToCheck && typeof portToCheck === 'number') {
+      // Scope the port-conflict check to the target SERVER, not globally.
+      // Two apps on different hosts can share the same host port — they
+      // never collide on a single Docker daemon.
+      const targetProject = await this.prisma.project.findUnique({
+        where: { id: dbData.projectId },
+        select: { serverId: true },
+      });
       const otherUsed = await this.prisma.application.findFirst({
-        where: { port: portToCheck, NOT: { id: undefined } },
+        where: {
+          port: portToCheck,
+          project: { serverId: targetProject?.serverId },
+        },
         select: { id: true, name: true, projectId: true },
       });
       if (otherUsed) {
-        // Don't leak the other app's name across tenants — host ports are
-        // a shared host resource, but cross-project naming should stay private.
         const sameProject = otherUsed.projectId === dbData.projectId;
         throw new ConflictException(
           sameProject
             ? `Port ${portToCheck} is already used by "${otherUsed.name}" in this project. Pick another host port.`
-            : `Port ${portToCheck} is already in use on this host. Pick another host port.`,
+            : `Port ${portToCheck} is already in use on this server. Pick another host port.`,
         );
       }
     }
@@ -343,7 +353,7 @@ export class ApplicationsService {
         port: firstMappedHost ?? dbData.port,
         customPort: userPickedPort,
         status: 'DEPLOYING',
-        webhookSecret: crypto.randomBytes(24).toString('hex'),
+        webhookSecret: this.encryption.encrypt(crypto.randomBytes(24).toString('hex')),
       },
     });
 
@@ -380,7 +390,7 @@ export class ApplicationsService {
         where: { id: gitProviderId, userId },
       });
       if (!gp) throw new ForbiddenException('Git provider not yours');
-      cloneHeader = this.buildAuthHeader(gp.provider, gp.token);
+      cloneHeader = this.buildAuthHeader(gp.provider, this.encryption.decrypt(gp.token));
     } else if (dto.gitUrl && gitToken) {
       // one-shot token: still inject via http header, never written to .git/config
       cloneHeader = `Authorization: Bearer ${gitToken}`;
@@ -442,8 +452,17 @@ export class ApplicationsService {
     const appDir = resolveAppDir(slug, appId);
     const started = Date.now();
     const buildLogs: string[] = [];
+    // Scrubs git bearer tokens and basic-auth blobs from any log line before
+    // persisting. Defense in depth on top of the redacted log() in clone
+    // paths — any future codepath that calls log() with a stderr blob from
+    // git (e.g. clone failure echoing the auth header) is also protected.
+    const scrub = (line: string): string =>
+      line
+        .replace(/(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9_\-+/.=]+/gi, '$1<redacted>')
+        .replace(/(http\.extraheader=)[^\s'"]+/g, '$1<redacted>')
+        .replace(/(x-access-token:)[^@\s]+/gi, '$1<redacted>');
     const log = (line: string) => {
-      buildLogs.push(line);
+      buildLogs.push(scrub(line));
     };
 
     try {
@@ -576,6 +595,13 @@ ${networksBlock}`;
     const appDir = path.join(APPS_DIR, slug);
     const started = Date.now();
     const buildLogs: string[] = [];
+    // Same scrub as runDockerImageDeploy — strips git bearer tokens and
+    // basic-auth blobs from any log line before persistence.
+    const scrub = (line: string): string =>
+      line
+        .replace(/(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9_\-+/.=]+/gi, '$1<redacted>')
+        .replace(/(http\.extraheader=)[^\s'"]+/g, '$1<redacted>')
+        .replace(/(x-access-token:)[^@\s]+/gi, '$1<redacted>');
     let flushPending = false;
     const flush = async () => {
       if (flushPending) return;
@@ -589,7 +615,7 @@ ${networksBlock}`;
       flushPending = false;
     };
     const log = (s: string) => {
-      buildLogs.push(s);
+      buildLogs.push(scrub(s));
       void flush();
     };
 
@@ -701,7 +727,12 @@ ${networksBlock}`;
         cloneArgs.unshift('-c', `http.extraheader=${opts.cloneHeader}`);
       }
       cloneArgs.push(gitUrl, appDir);
-      log(`> git ${cloneArgs.join(' ')}`);
+      // Never echo the cloneArgs verbatim — the http.extraheader contains
+      // the git provider's bearer token. Log a redacted form.
+      const redactedArgs = cloneArgs.map((a) =>
+        a.startsWith('http.extraheader=') ? 'http.extraheader=<redacted>' : a,
+      );
+      log(`> git ${redactedArgs.join(' ')}`);
       await execFileAsync('git', cloneArgs, { timeout: 180_000 });
 
       // 3. defensive: strip any token from .git/config
@@ -1134,7 +1165,7 @@ ${networksBlock}`;
       const gp = await this.prisma.gitProvider.findUnique({
         where: { id: app.gitProviderId },
       });
-      if (gp) cloneHeader = this.buildAuthHeader(gp.provider, gp.token);
+      if (gp) cloneHeader = this.buildAuthHeader(gp.provider, this.encryption.decrypt(gp.token));
     }
 
     const deployment = await this.prisma.deployment.create({
@@ -1449,7 +1480,9 @@ ${networksBlock}`;
     const base = process.env.PUBLIC_API_URL || process.env.API_URL || '';
     return {
       url: `${base.replace(/\/$/, '')}/api/webhooks/applications/${id}`,
-      secret: app.webhookSecret,
+      // Decrypted on the way out so the user can copy it into their
+      // GitHub/GitLab webhook config.
+      secret: app.webhookSecret ? this.encryption.decrypt(app.webhookSecret) : null,
       autoDeploy: app.autoDeploy,
       contentType: 'application/json',
     };
@@ -1460,7 +1493,7 @@ ${networksBlock}`;
     const secret = crypto.randomBytes(24).toString('hex');
     await this.prisma.application.update({
       where: { id },
-      data: { webhookSecret: secret },
+      data: { webhookSecret: this.encryption.encrypt(secret) },
     });
     return { secret };
   }

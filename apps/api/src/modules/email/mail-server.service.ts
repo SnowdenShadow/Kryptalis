@@ -12,6 +12,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import * as net from 'net';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
@@ -38,6 +39,7 @@ export class MailServerService implements OnApplicationBootstrap {
   constructor(
     private prisma: PrismaService,
     private proxy: ReverseProxyService,
+    private encryption: EncryptionService,
   ) {
     if (!fs.existsSync(MAIL_DIR)) fs.mkdirSync(MAIL_DIR, { recursive: true });
   }
@@ -145,7 +147,7 @@ export class MailServerService implements OnApplicationBootstrap {
         imap: server.imapPort,
         imaps: server.imapsPort,
       },
-      server.dkimPrivateKey,
+      this.encryption.decrypt(server.dkimPrivateKey),
     ).catch(() => {});
   }
 
@@ -247,8 +249,11 @@ export class MailServerService implements OnApplicationBootstrap {
 
     let server = existing;
 
-    // generate DKIM keypair if first time
-    let dkimKey = server?.dkimPrivateKey;
+    // Generate DKIM keypair on first deploy. Private key is encrypted at
+    // rest (AES-256-GCM) — a DB leak no longer hands DKIM signing material
+    // to an attacker. Public key stays plain since it's already in DNS
+    // (TXT record on the user's domain).
+    let dkimKey = server?.dkimPrivateKey ? this.encryption.decrypt(server.dkimPrivateKey) : undefined;
     let dkimPub = server?.dkimPublicKey;
     if (!dkimKey || !dkimPub) {
       const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
@@ -257,13 +262,13 @@ export class MailServerService implements OnApplicationBootstrap {
         privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
       });
       dkimKey = privateKey;
-      // extract base64 of public key for DNS TXT record
       const pubB64 = publicKey
         .replace(/-----BEGIN PUBLIC KEY-----/, '')
         .replace(/-----END PUBLIC KEY-----/, '')
         .replace(/\s+/g, '');
       dkimPub = pubB64;
     }
+    const dkimKeyEncrypted = this.encryption.encrypt(dkimKey);
 
     // claim a free port range
     const ports = await this.allocatePorts(domainId, server);
@@ -308,12 +313,12 @@ export class MailServerService implements OnApplicationBootstrap {
         imapPort: ports.imap,
         imapsPort: ports.imaps,
         dkimSelector: 'kryptalis',
-        dkimPrivateKey: dkimKey,
+        dkimPrivateKey: dkimKeyEncrypted,
         dkimPublicKey: dkimPub,
       },
       update: {
         status: 'DEPLOYING',
-        dkimPrivateKey: dkimKey,
+        dkimPrivateKey: dkimKeyEncrypted,
         dkimPublicKey: dkimPub,
         lastError: null,
       },

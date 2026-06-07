@@ -305,12 +305,60 @@ export default function SettingsPage() {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
   const { locale, setLocale, t } = useTranslation();
   const [mounted, setMounted] = useState(false);
   const [serverMode, setServerModeState] = useState<'local' | 'multi'>('local');
   const [notifications, setNotifications] = useState<Record<string, Record<string, boolean>>>({});
   const queryClient = useQueryClient();
+
+  // Load the current user so profile fields aren't empty on mount.
+  const { data: me } = useQuery<{ id: string; name: string; email: string; twoFactorEnabled?: boolean }>({
+    queryKey: ['auth-me'],
+    queryFn: () => api.get('/auth/me'),
+  });
+  useEffect(() => {
+    if (me) {
+      setProfileName(me.name || '');
+      setProfileEmail(me.email || '');
+    }
+  }, [me]);
+  const twoFactorEnabled = !!me?.twoFactorEnabled;
+
+  // 2FA enrollment dialog state.
+  const [twoFa, setTwoFa] = useState<{
+    step: 'idle' | 'enroll' | 'done' | 'disable';
+    secret?: string;
+    otpauth?: string;
+    code?: string;
+    backupCodes?: string[];
+    disablePassword?: string;
+    disableCode?: string;
+  }>({ step: 'idle' });
+
+  const setup2faMutation = useMutation({
+    mutationFn: () => api.post<{ secret: string; otpauth: string }>('/auth/2fa/setup'),
+    onSuccess: (data) => setTwoFa({ step: 'enroll', secret: data.secret, otpauth: data.otpauth, code: '' }),
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const enable2faMutation = useMutation({
+    mutationFn: (code: string) => api.post<{ backupCodes: string[] }>('/auth/2fa/enable', { code }),
+    onSuccess: (data) => {
+      setTwoFa((t) => ({ ...t, step: 'done', backupCodes: data.backupCodes }));
+      queryClient.invalidateQueries({ queryKey: ['auth-me'] });
+      toast.success('Two-factor enabled');
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const disable2faMutation = useMutation({
+    mutationFn: (body: { password: string; code: string }) =>
+      api.post('/auth/2fa/disable', body),
+    onSuccess: () => {
+      setTwoFa({ step: 'idle' });
+      queryClient.invalidateQueries({ queryKey: ['auth-me'] });
+      toast.success('Two-factor disabled');
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
 
   // Git Providers
   const [showAddGit, setShowAddGit] = useState(false);
@@ -567,7 +615,14 @@ export default function SettingsPage() {
                 <Button
                   variant={twoFactorEnabled ? 'destructive' : 'default'}
                   size="sm"
-                  onClick={() => setTwoFactorEnabled(!twoFactorEnabled)}
+                  disabled={setup2faMutation.isPending}
+                  onClick={() => {
+                    if (twoFactorEnabled) {
+                      setTwoFa({ step: 'disable', disablePassword: '', disableCode: '' });
+                    } else {
+                      setup2faMutation.mutate();
+                    }
+                  }}
                 >
                   {twoFactorEnabled ? 'Disable' : 'Enable'}
                 </Button>
@@ -996,6 +1051,105 @@ export default function SettingsPage() {
           )}
         </div>
       )}
+
+      {/* 2FA enrollment dialog */}
+      <Dialog open={twoFa.step === 'enroll'} onClose={() => setTwoFa({ step: 'idle' })}>
+        <DialogHeader>
+          <DialogTitle>Enable two-factor authentication</DialogTitle>
+          <DialogDescription>
+            Scan the QR code in your authenticator app (or paste the secret manually),
+            then enter the 6-digit code to confirm.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          {twoFa.otpauth && (
+            <p className="text-xs font-mono break-all text-muted-foreground">
+              {twoFa.otpauth}
+            </p>
+          )}
+          {twoFa.secret && (
+            <div className="rounded-md border border-border bg-muted/30 p-2.5">
+              <Label className="text-[10px] uppercase text-muted-foreground">Secret</Label>
+              <p className="font-mono text-xs select-all break-all mt-1">{twoFa.secret}</p>
+            </div>
+          )}
+          <div>
+            <Label className="text-xs">Verification code</Label>
+            <Input
+              placeholder="123456"
+              value={twoFa.code || ''}
+              onChange={(e) => setTwoFa((t) => ({ ...t, code: e.target.value }))}
+              maxLength={6}
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setTwoFa({ step: 'idle' })}>Cancel</Button>
+          <Button
+            disabled={!twoFa.code || enable2faMutation.isPending}
+            onClick={() => twoFa.code && enable2faMutation.mutate(twoFa.code)}
+          >
+            Confirm
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* 2FA backup codes shown once */}
+      <Dialog open={twoFa.step === 'done'} onClose={() => setTwoFa({ step: 'idle' })}>
+        <DialogHeader>
+          <DialogTitle>Save your backup codes</DialogTitle>
+          <DialogDescription>
+            Each can be used once if you lose your authenticator. Store them somewhere safe.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid grid-cols-2 gap-2">
+          {(twoFa.backupCodes || []).map((c) => (
+            <code key={c} className="font-mono text-xs bg-muted/30 rounded p-2 text-center">{c}</code>
+          ))}
+        </div>
+        <DialogFooter>
+          <Button onClick={() => setTwoFa({ step: 'idle' })}>Done</Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* 2FA disable dialog */}
+      <Dialog open={twoFa.step === 'disable'} onClose={() => setTwoFa({ step: 'idle' })}>
+        <DialogHeader>
+          <DialogTitle>Disable two-factor</DialogTitle>
+          <DialogDescription>Confirm with your password and a current TOTP code.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div>
+            <Label className="text-xs">Password</Label>
+            <Input
+              type="password"
+              value={twoFa.disablePassword || ''}
+              onChange={(e) => setTwoFa((t) => ({ ...t, disablePassword: e.target.value }))}
+            />
+          </div>
+          <div>
+            <Label className="text-xs">Current TOTP code</Label>
+            <Input
+              maxLength={6}
+              value={twoFa.disableCode || ''}
+              onChange={(e) => setTwoFa((t) => ({ ...t, disableCode: e.target.value }))}
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setTwoFa({ step: 'idle' })}>Cancel</Button>
+          <Button
+            variant="destructive"
+            disabled={!twoFa.disablePassword || !twoFa.disableCode || disable2faMutation.isPending}
+            onClick={() => disable2faMutation.mutate({
+              password: twoFa.disablePassword || '',
+              code: twoFa.disableCode || '',
+            })}
+          >
+            Disable
+          </Button>
+        </DialogFooter>
+      </Dialog>
     </div>
   );
 }

@@ -230,8 +230,21 @@ ${email ? `  email ${email}\n` : ''}}
         : `  reverse_proxy ${target}`;
     };
 
+    // Defense-in-depth Caddyfile injection check. DTO validation should
+    // already have rejected malformed domains at create time, but if a
+    // legacy row slipped in we skip it rather than render syntax that
+    // could let an attacker break out of the site block.
+    const SAFE_DOMAIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+
     for (const d of allDomains) {
       const host = d.domain;
+      if (!SAFE_DOMAIN_RE.test(host)) {
+        this.logger.warn(`Refusing to render Caddyfile block for unsafe domain '${host}'`);
+        continue;
+      }
+      // App and binding names also reach the Caddyfile via the 'respond'
+      // string literal. Sanitize any non-printable / quote chars.
+      const safeMainAppName = (d.application?.name || '').replace(/["\r\n\\]/g, ' ');
       const isLocal = this.isLocalHostname(host);
 
       // Main app on :443 (clean-URL slot). Tracked via Domain.applicationId.
@@ -251,7 +264,7 @@ ${email ? `  email ${email}\n` : ''}}
           blocks.push(proxyFor(mainApp!, mainPort!));
         } else if (portBindings.length > 0) {
           const first = portBindings[0];
-          blocks.push(`  respond "Open https://${host}:${first.port} for ${first.application.name}." 200`);
+          blocks.push(`  respond "Open https://${host}:${first.port} for ${(first.application.name || '').replace(/["\r\n\\]/g, ' ')}." 200`);
         } else {
           blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
         }

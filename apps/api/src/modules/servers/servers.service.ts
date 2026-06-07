@@ -1,5 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { UpdateServerDto } from './dto/update-server.dto';
 import { randomBytes } from 'crypto';
 import { exec } from 'child_process';
@@ -14,7 +15,16 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
   private collectInterval: ReturnType<typeof setInterval> | null = null;
   private prevNet: { rx: number; tx: number; ts: number } | null = null;
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private encryption: EncryptionService,
+  ) {}
+
+  /** Generate a fresh install/agent token and return both raw + hash. */
+  private mintToken(): { raw: string; hash: string } {
+    const raw = randomBytes(32).toString('hex');
+    return { raw, hash: this.encryption.hash(raw) };
+  }
 
   async onModuleInit() {
     this.collectInterval = setInterval(() => this.collectMetrics(), 30000);
@@ -71,9 +81,12 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
         include: { agentTokens: true },
       });
 
-      const token = randomBytes(32).toString('hex');
+      // Bootstrap token for the built-in local server. Stored as hash; the
+      // raw value isn't exposed via any endpoint because the in-process
+      // agent doesn't need it (LOCAL mode shells out directly).
+      const { hash } = this.mintToken();
       await this.prisma.agentToken.create({
-        data: { serverId: server.id, token },
+        data: { serverId: server.id, token: hash },
       });
 
       server = await this.prisma.server.findFirst({
@@ -331,18 +344,18 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
         status: 'PENDING_INSTALL',
       },
     });
-    const token = randomBytes(32).toString('hex');
+    const { raw, hash } = this.mintToken();
     await this.prisma.agentToken.create({
       data: {
         serverId: server.id,
-        token,
+        token: hash,
         expiresAt: new Date(Date.now() + 24 * 3600 * 1000), // valid 24h to claim
       },
     });
     return {
       ...server,
-      installToken: token,
-      installCommand: `curl -fsSL ${this.publicApiUrl()}/api/agent/install.sh?token=${token} | sudo sh`,
+      installToken: raw,
+      installCommand: `curl -fsSL ${this.publicApiUrl()}/api/agent/install.sh?token=${raw} | sudo sh`,
     };
   }
 
@@ -362,16 +375,19 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
       },
     });
     if (!server) throw new NotFoundException('Server not found');
-    let token = server.agentTokens[0]?.token;
-    if (!token) {
-      token = randomBytes(32).toString('hex');
-      await this.prisma.agentToken.create({
-        data: { serverId: server.id, token, expiresAt: new Date(Date.now() + 24 * 3600 * 1000) },
-      });
-    }
+    // We don't have the raw token after creation — the DB stores a hash.
+    // If an active token row exists we cannot return its raw form. Mint a
+    // new one and superseded the old.
+    await this.prisma.agentToken.deleteMany({
+      where: { serverId: id, expiresAt: { gt: new Date() } },
+    });
+    const { raw, hash } = this.mintToken();
+    await this.prisma.agentToken.create({
+      data: { serverId: server.id, token: hash, expiresAt: new Date(Date.now() + 24 * 3600 * 1000) },
+    });
     return {
-      installCommand: `curl -fsSL ${this.publicApiUrl()}/api/agent/install.sh?token=${token} | sudo sh`,
-      token,
+      installCommand: `curl -fsSL ${this.publicApiUrl()}/api/agent/install.sh?token=${raw} | sudo sh`,
+      token: raw,
     };
   }
 
@@ -386,14 +402,17 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
     await this.prisma.agentToken.deleteMany({
       where: { serverId: id },
     });
-    const token = randomBytes(32).toString('hex');
+    const { raw, hash } = this.mintToken();
     await this.prisma.agentToken.create({
       data: {
         serverId: id,
-        token,
+        token: hash,
         expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
       },
     });
+    // Tag the raw token onto the returned object so the caller can echo it.
+    // This is the only point at which the raw token exists outside the
+    // agent's own memory.
     // back to PENDING_INSTALL so the agent re-registers and re-establishes long-token
     if (server.status === 'ONLINE') {
       await this.prisma.server.update({
@@ -402,8 +421,8 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
       });
     }
     return {
-      installCommand: `curl -fsSL ${this.publicApiUrl()}/api/agent/install.sh?token=${token} | sudo sh`,
-      token,
+      installCommand: `curl -fsSL ${this.publicApiUrl()}/api/agent/install.sh?token=${raw} | sudo sh`,
+      token: raw,
     };
   }
 
