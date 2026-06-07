@@ -221,8 +221,8 @@ export class ProjectsService {
     const status = hasRedeployErrors ? 'partial' : 'ok';
     const message =
       status === 'partial'
-        ? `Project migration started with errors — check warnings. Source volumes are KEPT for recovery.`
-        : `Project migrated from ${project.server?.name || oldServerId} → ${target.name}. NOTE: Docker volumes were not copied; databases and uploads will start empty on the target until VOLUME_EXPORT/IMPORT is implemented.`;
+        ? `Project migration started with errors — check warnings. Source volumes are KEPT on the old server for recovery.`
+        : `Project migrated from ${project.server?.name || oldServerId} → ${target.name}. NOTE: Docker volumes were not copied; databases and uploads will start empty on the target until VOLUME_EXPORT/IMPORT is implemented. Source volumes are preserved on the old server for recovery.`;
     return { status, message, queued, warnings: teardownErrors };
   }
 

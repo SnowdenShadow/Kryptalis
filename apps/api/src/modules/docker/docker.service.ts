@@ -2,9 +2,12 @@ import {
   Injectable,
   InternalServerErrorException,
   BadRequestException,
+  ForbiddenException,
+  Logger,
 } from '@nestjs/common';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import * as crypto from 'crypto';
 
 const execFileAsync = promisify(execFile);
 
@@ -25,6 +28,25 @@ const CONTAINER_ACTION_VERBS: Record<string, string[]> = {
 // names allow [a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}. We accept both.
 const CONTAINER_ID_RE = /^([a-f0-9]{12}|[a-f0-9]{64}|[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127})$/;
 
+// serverId is currently a no-op path param — every call hits the local
+// daemon. Validate it now so the inevitable multi-host refactor inherits
+// the regex check rather than dropping it into argv unchecked.
+const SERVER_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+// Protected platform containers. Destructive actions against these would
+// take down the control plane itself or its dependencies. Configurable via
+// env so the same image can be used in environments that name things
+// differently.
+const PROTECTED_CONTAINERS = new Set(
+  (process.env.KRYPTALIS_PROTECTED_CONTAINERS ||
+    'kryptalis-api,kryptalis-dashboard,kryptalis-postgres,kryptalis-redis,kryptalis-caddy,kryptalis-agent')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+);
+
+const DESTRUCTIVE_ACTIONS = new Set(['stop', 'restart', 'remove', 'kill']);
+
 /**
  * Docker management — exposed only to platform admins (gated at the
  * controller). All shell invocations use `execFile` (no shell) with argv
@@ -41,7 +63,16 @@ const CONTAINER_ID_RE = /^([a-f0-9]{12}|[a-f0-9]{64}|[a-zA-Z0-9][a-zA-Z0-9_.-]{0
  */
 @Injectable()
 export class DockerService {
-  async listContainers(_serverId: string) {
+  private readonly logger = new Logger(DockerService.name);
+
+  private assertServerId(serverId: string) {
+    if (typeof serverId !== 'string' || !SERVER_ID_RE.test(serverId)) {
+      throw new BadRequestException('Invalid serverId.');
+    }
+  }
+
+  async listContainers(serverId: string) {
+    this.assertServerId(serverId);
     const { stdout } = await this.runDocker(
       ['ps', '-a', '--format', '{{json .}}'],
       10_000,
@@ -59,7 +90,8 @@ export class DockerService {
     }));
   }
 
-  async containerAction(_serverId: string, containerId: string, action: string) {
+  async containerAction(serverId: string, containerId: string, action: string) {
+    this.assertServerId(serverId);
     const verbArgs = CONTAINER_ACTION_VERBS[action];
     if (!verbArgs) {
       throw new BadRequestException(`Unknown container action: ${action}`);
@@ -67,11 +99,22 @@ export class DockerService {
     if (typeof containerId !== 'string' || !CONTAINER_ID_RE.test(containerId)) {
       throw new BadRequestException('Invalid container id or name.');
     }
-    await this.runDocker([...verbArgs, containerId], 30_000);
+    if (DESTRUCTIVE_ACTIONS.has(action) && PROTECTED_CONTAINERS.has(containerId)) {
+      throw new ForbiddenException(
+        `Refusing destructive action on protected container '${containerId}'. ` +
+        `Use the platform's deploy / update flow instead.`,
+      );
+    }
+    // The `--` separator stops docker from interpreting any future
+    // leading-dash content as a flag. The regex above already rejects
+    // dashes at position 0, but layering both keeps the safety from
+    // depending on a single regression-prone class.
+    await this.runDocker([...verbArgs, '--', containerId], 30_000);
     return { message: `Container ${action} successful` };
   }
 
-  async listImages(_serverId: string) {
+  async listImages(serverId: string) {
+    this.assertServerId(serverId);
     const { stdout } = await this.runDocker(
       ['images', '--format', '{{json .}}'],
       10_000,
@@ -84,7 +127,8 @@ export class DockerService {
     }));
   }
 
-  async listNetworks(_serverId: string) {
+  async listNetworks(serverId: string) {
+    this.assertServerId(serverId);
     const { stdout } = await this.runDocker(
       ['network', 'ls', '--format', '{{json .}}'],
       10_000,
@@ -97,7 +141,8 @@ export class DockerService {
     }));
   }
 
-  async listVolumes(_serverId: string) {
+  async listVolumes(serverId: string) {
+    this.assertServerId(serverId);
     const { stdout } = await this.runDocker(
       ['volume', 'ls', '--format', '{{json .}}'],
       10_000,
@@ -120,9 +165,16 @@ export class DockerService {
         maxBuffer: 8 * 1024 * 1024,
       });
     } catch (err: any) {
+      // Log full argv + stderr server-side; expose only a correlation id
+      // to the client so we don't leak adjacent container names from
+      // docker's stderr to admins (who could otherwise enumerate the host).
+      const correlationId = crypto.randomBytes(4).toString('hex');
       const msg = err?.stderr || err?.message || 'docker command failed';
+      this.logger.error(
+        `[docker ${correlationId}] argv=${args.join(' ')} err=${String(msg).split('\n').slice(0, 5).join(' | ')}`,
+      );
       throw new InternalServerErrorException(
-        `docker ${args.join(' ')}: ${String(msg).split('\n')[0]}`,
+        `docker command failed (ref ${correlationId})`,
       );
     }
   }

@@ -88,16 +88,35 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 
 // Files Kryptalis owns — never expose, never let the user mutate.
+// Lowercase entries; all checks lowercase the basename before lookup so
+// case-insensitive filesystems (NTFS, default APFS) can't bypass via
+// `.KRYPTALIS.ENV`.
 const MANAGED_FILES = new Set([
   '.kryptalis.env',
-  'docker-compose.override.yml', // managed by reconcileWebmails / project-network plumbing
+  'docker-compose.override.yml',
 ]);
 
 // Hidden by default in listings + read requires ADMIN. These often contain
-// raw credentials/tokens (auth keys, git history with leaks, OS keys).
-const SENSITIVE_DOTFILES = [
+// raw credentials/tokens (git remotes with embedded tokens, ssh private
+// keys, registry credentials, cloud-provider creds). Checks look at every
+// path COMPONENT, not just the leaf, because `.git/config` has basename
+// `config` and would otherwise leak.
+const SENSITIVE_DOTFILES = new Set([
   '.git', '.ssh', '.docker', '.npmrc', '.gitconfig', '.aws',
+]);
+
+// Anything that should be treated as a secret-bearing dotenv. Case-insensitive
+// regex set lets us catch `.env`, `.env.production`, `.envrc` (direnv),
+// backup forms like `.env.bak`, and the windows-casing variants. Read of
+// these requires project ADMIN.
+const DOTENV_PATTERNS = [
+  /^\.env(\.[^/]+)?$/i,
+  /^\.envrc(\.[^/]+)?$/i,
 ];
+
+function isDotenvName(name: string): boolean {
+  return DOTENV_PATTERNS.some((re) => re.test(name));
+}
 
 const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024; // 2MB
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50MB
@@ -179,11 +198,37 @@ export class FilesService {
   }
 
   private isManaged(name: string): boolean {
-    return MANAGED_FILES.has(name);
+    return MANAGED_FILES.has(name.toLowerCase());
   }
 
   private isSensitiveDotfile(name: string): boolean {
-    return SENSITIVE_DOTFILES.includes(name);
+    return SENSITIVE_DOTFILES.has(name.toLowerCase());
+  }
+
+  /**
+   * Walk every component of a relative path and return true if ANY of them
+   * is a sensitive dotfile root. `.git/config` → component `.git` matches
+   * even though basename is `config`. Empty string and root return false.
+   */
+  private pathTraversesSensitive(relPath: string): boolean {
+    if (!relPath) return false;
+    return relPath
+      .split('/')
+      .filter(Boolean)
+      .some((c) => this.isSensitiveDotfile(c));
+  }
+
+  /**
+   * True if the leaf or any component matches a managed file. Used for ops
+   * that should refuse regardless of whether the managed file is reached
+   * directly or nested.
+   */
+  private pathTraversesManaged(relPath: string): boolean {
+    if (!relPath) return false;
+    return relPath
+      .split('/')
+      .filter(Boolean)
+      .some((c) => this.isManaged(c));
   }
 
   /**
@@ -298,32 +343,132 @@ export class FilesService {
   }
 
   /**
-   * Throw if `name` is a Kryptalis-managed file. Apply on every op that
-   * accepts a target path (read/write/upload/rename FROM, rename TO,
-   * download, remove).
+   * Throw if `relPath` traverses or lands on a Kryptalis-managed file.
+   * Case-insensitive and checks every path component (so 'sub/.kryptalis.env'
+   * is refused, not just the leaf).
    */
-  private assertNotManaged(name: string) {
-    if (this.isManaged(name)) {
-      throw new ForbiddenException(`${name} is managed by Kryptalis and cannot be touched.`);
+  private assertNotManaged(relPath: string) {
+    if (this.pathTraversesManaged(relPath)) {
+      throw new ForbiddenException(
+        `Path '${relPath}' touches a Kryptalis-managed file.`,
+      );
     }
   }
 
-  /** Validate an uploaded/renamed basename. */
+  /**
+   * Throw if `relPath` traverses a sensitive dotfile directory unless the
+   * caller has platform ADMIN. Used for read/download paths so a VIEWER
+   * cannot exfiltrate `.git/config`, `.ssh/id_*`, etc.
+   */
+  private async assertSensitiveOrAdmin(userId: string, relPath: string) {
+    if (this.pathTraversesSensitive(relPath)) {
+      if (!(await this.isAdmin(userId))) {
+        throw new ForbiddenException(
+          'Sensitive dotfile read requires platform ADMIN.',
+        );
+      }
+    }
+  }
+
+  /** Validate an uploaded/renamed basename. Returns the sanitized form. */
   private sanitizeBasename(input: string): string {
     if (typeof input !== 'string') throw new BadRequestException('Invalid filename.');
     if (input.includes('\0')) throw new BadRequestException('Null byte in filename.');
-    // Take only the basename; strip CR/LF; reject empty/./..
     const raw = path.basename(input.replace(/[\r\n]/g, ''));
     if (!raw || raw === '.' || raw === '..') {
       throw new BadRequestException('Invalid filename.');
     }
-    // Replace anything that looks like a control char or path separator.
     const safe = raw.replace(/[\x00-\x1f/\\]/g, '_');
     if (!safe) throw new BadRequestException('Invalid filename.');
     if (this.isManaged(safe)) {
       throw new ForbiddenException(`${safe} is managed by Kryptalis and cannot be touched.`);
     }
     return safe;
+  }
+
+  // ── O_NOFOLLOW-based file IO ──────────────────────────────────────
+  //
+  // The earlier code used fs.readFileSync/writeFileSync/sendFile, which
+  // happily follow symbolic links. Even with a leaf lstat check before the
+  // operation, a TOCTOU swap (`ln -sf /etc/passwd <target>` between check
+  // and write) escaped the sandbox. We now open the path with O_NOFOLLOW
+  // and operate on the file descriptor. The kernel refuses to follow a
+  // symlink at the FINAL component, so the swap window collapses.
+  //
+  // For intermediate-component swaps (parent dir replaced by a symlink
+  // before write) we additionally lstat-walk each component on write paths
+  // and refuse if any component is a symlink. Slow but bounded by relPath
+  // depth; cheaper than reimplementing openat on top of Node.
+
+  private O_RDONLY = fs.constants.O_RDONLY;
+  private O_WRONLY = fs.constants.O_WRONLY;
+  private O_CREAT = fs.constants.O_CREAT;
+  private O_TRUNC = fs.constants.O_TRUNC;
+  private O_NOFOLLOW = (fs.constants as any).O_NOFOLLOW || 0;
+
+  private assertNoSymlinkInPath(rootAbs: string, absPath: string) {
+    // Walk from root to leaf parent dir; refuse if any existing component
+    // is a symbolic link. (Leaf is handled by O_NOFOLLOW on the actual op.)
+    if (this.O_NOFOLLOW === 0) return; // platform doesn't support — best effort
+    const parts = path.relative(rootAbs, path.dirname(absPath)).split(path.sep).filter(Boolean);
+    let cursor = rootAbs;
+    for (const p of parts) {
+      cursor = path.join(cursor, p);
+      if (!fs.existsSync(cursor)) break;
+      const st = fs.lstatSync(cursor);
+      if (st.isSymbolicLink()) {
+        throw new ForbiddenException('Refusing to traverse a symlink in the path.');
+      }
+    }
+  }
+
+  private readFileNoFollow(absPath: string): string {
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(absPath, this.O_RDONLY | this.O_NOFOLLOW);
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile()) throw new BadRequestException('Not a regular file.');
+      const buf = Buffer.alloc(stat.size);
+      let read = 0;
+      while (read < stat.size) {
+        const n = fs.readSync(fd, buf, read, stat.size - read, null);
+        if (n === 0) break;
+        read += n;
+      }
+      return buf.slice(0, read).toString('utf-8');
+    } catch (e: any) {
+      if (e?.code === 'ELOOP' || e?.code === 'EMLINK') {
+        throw new ForbiddenException('Refusing to read through a symlink.');
+      }
+      throw e;
+    } finally {
+      if (fd != null) try { fs.closeSync(fd); } catch {}
+    }
+  }
+
+  private writeFileNoFollow(absPath: string, data: Buffer | string) {
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(
+        absPath,
+        this.O_WRONLY | this.O_CREAT | this.O_TRUNC | this.O_NOFOLLOW,
+        0o644,
+      );
+      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf-8');
+      let written = 0;
+      while (written < buf.length) {
+        const n = fs.writeSync(fd, buf, written, buf.length - written);
+        if (n === 0) break;
+        written += n;
+      }
+    } catch (e: any) {
+      if (e?.code === 'ELOOP' || e?.code === 'EMLINK') {
+        throw new ForbiddenException('Refusing to write through a symlink.');
+      }
+      throw e;
+    } finally {
+      if (fd != null) try { fs.closeSync(fd); } catch {}
+    }
   }
 
   // ── listing ───────────────────────────────────────────────────────
@@ -346,6 +491,12 @@ export class FilesService {
 
     const isAdmin = await this.isAdmin(userId);
     const showSensitive = opts.showSensitive && isAdmin;
+
+    // If any path component already traversed a sensitive dotfile dir
+    // (e.g. we're listing INSIDE .git/), refuse for non-admins entirely.
+    if (!showSensitive && this.pathTraversesSensitive(resolved.relPath)) {
+      throw new ForbiddenException('Listing this directory requires platform ADMIN.');
+    }
 
     const entries: FileEntry[] = [];
     for (const name of fs.readdirSync(resolved.absPath)) {
@@ -399,21 +550,16 @@ export class FilesService {
 
   async readFile(userId: string, scope: 'app' | 'db', scopeId: string, relPath: string) {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'VIEWER');
+    this.assertNotManaged(resolved.relPath);
     const basename = path.basename(resolved.absPath);
-    this.assertNotManaged(basename);
 
-    // .env files contain secrets — gate raw read behind project ADMIN.
-    const isDotenv = basename === '.env' || basename.startsWith('.env.');
-    if (isDotenv) {
-      // re-check at ADMIN level — throws on insufficient
+    // Dotenv files contain secrets — gate raw read behind project ADMIN.
+    if (isDotenvName(basename)) {
       await this.resolvePath(userId, scope, scopeId, relPath, 'ADMIN');
     }
-    if (this.isSensitiveDotfile(basename)) {
-      // raw read of these requires platform ADMIN
-      if (!(await this.isAdmin(userId))) {
-        throw new ForbiddenException('Sensitive dotfile read requires platform ADMIN.');
-      }
-    }
+    // Any sensitive-dotfile path component (e.g. .git/, .ssh/) requires
+    // platform ADMIN regardless of leaf name.
+    await this.assertSensitiveOrAdmin(userId, resolved.relPath);
 
     if (!fs.existsSync(resolved.absPath)) {
       throw new NotFoundException('File not found');
@@ -432,7 +578,7 @@ export class FilesService {
       lowerName === 'makefile' ||
       lowerName === 'license' ||
       lowerName === 'readme' ||
-      lowerName.startsWith('.env');
+      isDotenvName(basename);
 
     if (!isText) {
       return {
@@ -450,7 +596,8 @@ export class FilesService {
         message: 'File too large to edit in-browser (>2 MB)',
       };
     }
-    const content = fs.readFileSync(resolved.absPath, 'utf-8');
+    // Open with O_NOFOLLOW to defeat the TOCTOU symlink-swap attack.
+    const content = this.readFileNoFollow(resolved.absPath);
     return {
       path: resolved.relPath,
       binary: false,
@@ -468,20 +615,17 @@ export class FilesService {
     content: string,
   ) {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
-    this.assertNotManaged(path.basename(resolved.absPath));
+    this.assertNotManaged(resolved.relPath);
     if (typeof content !== 'string') throw new BadRequestException('content must be a string');
     if (Buffer.byteLength(content, 'utf-8') > MAX_TEXT_FILE_BYTES) {
       throw new BadRequestException('File too large (>2MB). Use upload instead.');
     }
-    // refuse to overwrite through a symlink even if it points back inside the sandbox
-    if (fs.existsSync(resolved.absPath)) {
-      const stat = fs.lstatSync(resolved.absPath);
-      if (stat.isSymbolicLink()) {
-        throw new ForbiddenException('Refusing to write through a symlink.');
-      }
-    }
+    // Refuse if any intermediate path component is a symlink (defends against
+    // a parent-dir swap between mkdir and write). The leaf is handled by
+    // O_NOFOLLOW in writeFileNoFollow.
     fs.mkdirSync(path.dirname(resolved.absPath), { recursive: true });
-    fs.writeFileSync(resolved.absPath, content, 'utf-8');
+    this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
+    this.writeFileNoFollow(resolved.absPath, content);
     await this.audit(userId, scope, scopeId, 'write', resolved.relPath);
     const stat = fs.statSync(resolved.absPath);
     return {
@@ -507,14 +651,10 @@ export class FilesService {
     const safeName = this.sanitizeBasename(filename);
     const targetRel = relPath ? `${relPath}/${safeName}` : safeName;
     const resolved = await this.resolvePath(userId, scope, scopeId, targetRel, 'DEVELOPER');
-    if (fs.existsSync(resolved.absPath)) {
-      const stat = fs.lstatSync(resolved.absPath);
-      if (stat.isSymbolicLink()) {
-        throw new ForbiddenException('Refusing to overwrite a symlink.');
-      }
-    }
+    this.assertNotManaged(resolved.relPath);
     fs.mkdirSync(path.dirname(resolved.absPath), { recursive: true });
-    fs.writeFileSync(resolved.absPath, buffer);
+    this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
+    this.writeFileNoFollow(resolved.absPath, buffer);
     await this.audit(userId, scope, scopeId, 'upload', resolved.relPath);
     const stat = fs.statSync(resolved.absPath);
     return { path: resolved.relPath, size: stat.size };
@@ -524,20 +664,34 @@ export class FilesService {
 
   async downloadFile(userId: string, scope: 'app' | 'db', scopeId: string, relPath: string) {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'VIEWER');
-    this.assertNotManaged(path.basename(resolved.absPath));
+    this.assertNotManaged(resolved.relPath);
+    await this.assertSensitiveOrAdmin(userId, resolved.relPath);
     if (!fs.existsSync(resolved.absPath)) throw new NotFoundException('File not found');
     const stat = fs.lstatSync(resolved.absPath);
     if (stat.isSymbolicLink()) {
       throw new ForbiddenException('Refusing to download through a symlink.');
     }
     if (!stat.isFile()) throw new BadRequestException('Path is not a file');
+    // Open with O_NOFOLLOW and hand the fd to the controller so even a
+    // last-microsecond TOCTOU swap (symlinking the path right before
+    // sendFile opens it) is defeated. The controller streams via the fd.
+    let fd: number;
+    try {
+      fd = fs.openSync(resolved.absPath, this.O_RDONLY | this.O_NOFOLLOW);
+    } catch (e: any) {
+      if (e?.code === 'ELOOP' || e?.code === 'EMLINK') {
+        throw new ForbiddenException('Refusing to download through a symlink.');
+      }
+      throw e;
+    }
+    const fstat = fs.fstatSync(fd);
     return {
-      absPath: resolved.absPath,
+      fd,
       // strip CR/LF and double-quote from the filename used in the
       // Content-Disposition header — caller still applies its own RFC5987
       // encoding for unicode safety.
-      filename: path.basename(resolved.absPath).replace(/[\r\n"]/g, '_'),
-      size: stat.size,
+      filename: path.basename(resolved.absPath).replace(/[\r\n";\\]/g, '_'),
+      size: fstat.size,
     };
   }
 
@@ -545,10 +699,11 @@ export class FilesService {
 
   async mkdir(userId: string, scope: 'app' | 'db', scopeId: string, relPath: string) {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
-    this.assertNotManaged(path.basename(resolved.absPath));
+    this.assertNotManaged(resolved.relPath);
     if (fs.existsSync(resolved.absPath)) {
       throw new BadRequestException('Path already exists');
     }
+    this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
     fs.mkdirSync(resolved.absPath, { recursive: true });
     await this.audit(userId, scope, scopeId, 'mkdir', resolved.relPath);
     return { path: resolved.relPath };
@@ -562,17 +717,20 @@ export class FilesService {
     toRel: string,
   ) {
     const src = await this.resolvePath(userId, scope, scopeId, fromRel, 'DEVELOPER');
-    this.assertNotManaged(path.basename(src.absPath));
-    // The destination basename is user-supplied — sanitize it before passing
-    // through resolvePath, so a `to: 'subdir/.kryptalis.env'` is refused
-    // before hitting disk.
+    this.assertNotManaged(src.relPath);
+    // Sanitize the destination basename first so a `to: 'subdir/.kryptalis.env'`
+    // is refused before any disk hit, regardless of intermediate prefix.
     const dstParts = toRel.replace(/\\/g, '/').split('/').filter(Boolean);
     const dstName = dstParts.pop() || '';
-    this.sanitizeBasename(dstName);
-    const dst = await this.resolvePath(userId, scope, scopeId, toRel, 'DEVELOPER');
-    this.assertNotManaged(path.basename(dst.absPath));
+    const safeDstName = this.sanitizeBasename(dstName);
+    const reconstructedToRel = dstParts.length
+      ? `${dstParts.join('/')}/${safeDstName}`
+      : safeDstName;
+    const dst = await this.resolvePath(userId, scope, scopeId, reconstructedToRel, 'DEVELOPER');
+    this.assertNotManaged(dst.relPath);
     if (!fs.existsSync(src.absPath)) throw new NotFoundException('Source not found');
     if (fs.existsSync(dst.absPath)) throw new BadRequestException('Destination already exists');
+    this.assertNoSymlinkInPath(dst.rootDir, dst.absPath);
     fs.mkdirSync(path.dirname(dst.absPath), { recursive: true });
     fs.renameSync(src.absPath, dst.absPath);
     await this.audit(userId, scope, scopeId, 'rename', `${src.relPath} → ${dst.relPath}`);
@@ -584,8 +742,9 @@ export class FilesService {
       throw new BadRequestException('Cannot delete the root');
     }
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'ADMIN');
-    this.assertNotManaged(path.basename(resolved.absPath));
+    this.assertNotManaged(resolved.relPath);
     if (!fs.existsSync(resolved.absPath)) throw new NotFoundException('Path not found');
+    this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
     fs.rmSync(resolved.absPath, { recursive: true, force: true });
     await this.audit(userId, scope, scopeId, 'remove', resolved.relPath);
     return { path: resolved.relPath, deleted: true };
@@ -608,9 +767,10 @@ export class FilesService {
     action: string,
     pathInfo: string,
   ) {
-    // Best-effort audit log; do not block the operation if the audit table
-    // is missing (it should exist via Prisma migrations, but we don't want
-    // to bubble a logging failure as a file op error).
+    // Audit log writes are post-action. We don't roll back the file op when
+    // logging fails — that would surprise users with errors after a
+    // visually-successful save. Instead we log the failure so ops sees it
+    // and can investigate (schema drift, DB outage, etc.).
     try {
       await (this.prisma as any).auditLog?.create?.({
         data: {
@@ -621,6 +781,9 @@ export class FilesService {
           metadata: { path: pathInfo },
         },
       });
-    } catch {}
+    } catch (e: any) {
+      // eslint-disable-next-line no-console
+      console.error('[files] audit log failed:', e?.message || e);
+    }
   }
 }

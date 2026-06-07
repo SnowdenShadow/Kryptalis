@@ -161,6 +161,11 @@ export class FilesController {
     @Query('path') p: string,
     @Res() res: Response,
   ) {
+    // Service hands back an O_NOFOLLOW-opened fd so a TOCTOU symlink swap
+    // between the access check and the read is impossible. We stream via
+    // createReadStream(null, { fd }) which consumes the fd and closes it
+    // on stream end.
+    const fs = await import('fs');
     const meta = await this.svc.downloadFile(userId, parseScope(scope), scopeId, p);
     // RFC 5987 encoded filename + ASCII-safe fallback. Prevents
     // Content-Disposition header injection via CRLF or " in the basename.
@@ -171,6 +176,11 @@ export class FilesController {
       `attachment; filename="${asciiSafe}"; filename*=UTF-8''${encoded}`,
     );
     res.setHeader('Content-Length', String(meta.size));
-    res.sendFile(meta.absPath);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    const stream = fs.createReadStream(null as any, { fd: meta.fd, autoClose: true });
+    stream.on('error', (err) => {
+      try { res.destroy(err); } catch {}
+    });
+    stream.pipe(res);
   }
 }

@@ -56,35 +56,30 @@ export class UsersController {
   @Get(':id')
   @Roles('ADMIN', 'SUPERADMIN')
   @ApiOperation({ summary: 'Get user by ID (admin only)' })
-  findOne(@CurrentUser('id') actorId: string, @Param('id') id: string) {
-    if (actorId === id) return this.usersService.findOne(id);
+  findOne(@Param('id') id: string) {
     return this.usersService.findOne(id);
   }
 
   @Patch(':id')
   @Roles('ADMIN', 'SUPERADMIN')
-  @ApiOperation({ summary: 'Update user (admin only)' })
+  @ApiOperation({ summary: 'Update user (admin only — ADMIN cannot modify other ADMIN/SUPERADMIN)' })
   update(
     @CurrentUser('id') actorId: string,
     @Param('id') id: string,
     @Body() dto: UpdateUserDto,
   ) {
-    if (actorId === id) {
-      // Even ADMINs editing themselves should go through the same DTO; OK.
-      return this.usersService.update(id, dto);
-    }
-    return this.usersService.update(id, dto);
+    return this.usersService.updateAsAdmin(actorId, id, dto);
   }
 
   @Delete(':id')
   @Roles('ADMIN', 'SUPERADMIN')
-  @ApiOperation({ summary: 'Delete user (admin only)' })
+  @ApiOperation({ summary: 'Delete user (admin only — hierarchy enforced)' })
   remove(@CurrentUser('id') actorId: string, @Param('id') id: string) {
     if (actorId === id) {
       throw new ForbiddenException(
         'You cannot delete yourself — ask another admin or use the admin panel.',
       );
     }
-    return this.usersService.remove(id);
+    return this.usersService.removeAsAdmin(actorId, id);
   }
 }

@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import {
   assertProjectAccess,
@@ -22,9 +26,12 @@ export class SslService {
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) throw new NotFoundException('Domain not found');
 
-    // Project-scoped check; orphan domains fall through to admin enforcement
-    // at the controller layer.
-    if (domain.projectId) {
+    // Orphan domains (no project) are touchable only by platform admins.
+    // Previously the service silently let any JWT bearer through, which
+    // let them queue SSL_ISSUE tasks against arbitrary domains.
+    if (!domain.projectId) {
+      await this.assertPlatformAdmin(userId);
+    } else {
       await assertProjectAccess(this.prisma, userId, domain.projectId, 'DEVELOPER');
     }
 
@@ -64,7 +71,9 @@ export class SslService {
     if (domainId) {
       const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
       if (!domain) throw new NotFoundException('Domain not found');
-      if (domain.projectId) {
+      if (!domain.projectId) {
+        await this.assertPlatformAdmin(userId);
+      } else {
         await assertProjectAccess(this.prisma, userId, domain.projectId, 'VIEWER');
       }
       return this.prisma.sSLCertificate.findMany({
@@ -79,5 +88,15 @@ export class SslService {
       where: { domain: { projectId: { in: projectIds } } },
       include: { domain: { select: { id: true, domain: true } } },
     });
+  }
+
+  private async assertPlatformAdmin(userId: string) {
+    const me = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (me?.role !== 'ADMIN' && me?.role !== 'SUPERADMIN') {
+      throw new ForbiddenException('Orphan-domain SSL operations require platform ADMIN.');
+    }
   }
 }
