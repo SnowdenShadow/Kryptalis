@@ -604,47 +604,56 @@ export default function ApplicationsPage() {
         </Button>
       </div>
 
-      {/* Search + Project Filter */}
-      {applications.length > 0 && (
-        <div className="flex items-center gap-3">
-          <div className="relative flex-1 max-w-md">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              placeholder="Search applications..."
-              className="pl-9"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <Select
-              value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value as any)}
-              className="h-9 w-auto min-w-[140px]"
+      {/* Filter bar — compact, all in one row. Status chips on the left
+          (visual), search center, project select right. Counts shown next
+          to each status chip when something is filtered out. */}
+      {applications.length > 0 && (() => {
+        const counts = {
+          all: applications.length,
+          RUNNING: applications.filter(a => a.status === 'RUNNING').length,
+          STOPPED: applications.filter(a => a.status === 'STOPPED').length,
+          DEPLOYING: applications.filter(a => a.status === 'DEPLOYING' || a.status === 'BUILDING').length,
+          ERROR: applications.filter(a => a.status === 'ERROR').length,
+        };
+        const StatusChip = ({ value, label, dotClass }: { value: string; label: string; dotClass?: string }) => {
+          const active = filterStatus === value;
+          const count = value === '' ? counts.all : (counts as any)[value];
+          if (value !== '' && count === 0) return null;
+          return (
+            <button
+              onClick={() => setFilterStatus(value as any)}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors',
+                active ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground hover:bg-accent hover:text-foreground',
+              )}
             >
-              <option value="">All statuses</option>
-              <option value="RUNNING">Running</option>
-              <option value="STOPPED">Stopped</option>
-              <option value="DEPLOYING">Deploying / Building</option>
-              <option value="ERROR">Error</option>
-            </Select>
-            {projects.length <= 6 ? (
-              <>
-                <Button size="sm" variant={filterProject === '' ? 'default' : 'outline'} onClick={() => setFilterProject('')}>
-                  All projects
-                </Button>
-                {projects.map((p) => (
-                  <Button
-                    key={p.id}
-                    size="sm"
-                    variant={filterProject === p.id ? 'default' : 'outline'}
-                    onClick={() => setFilterProject(filterProject === p.id ? '' : p.id)}
-                  >
-                    {p.name}
-                  </Button>
-                ))}
-              </>
-            ) : (
+              {dotClass && <span className={cn('h-1.5 w-1.5 rounded-full', dotClass)} />}
+              {label}
+              <span className={cn('text-[10px] font-mono', active ? 'text-primary' : 'text-muted-foreground/70')}>
+                {count}
+              </span>
+            </button>
+          );
+        };
+        return (
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-1.5">
+              <StatusChip value="" label="All" />
+              <StatusChip value="RUNNING" label="Running" dotClass="bg-emerald-500" />
+              <StatusChip value="STOPPED" label="Stopped" dotClass="bg-zinc-400" />
+              <StatusChip value="DEPLOYING" label="Deploying" dotClass="bg-orange-500 animate-pulse" />
+              <StatusChip value="ERROR" label="Error" dotClass="bg-red-500" />
+            </div>
+            <div className="relative flex-1 min-w-[200px] max-w-md">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                placeholder="Search by name, repo, or domain…"
+                className="pl-9 h-9"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            {projects.length > 1 && (
               <Select
                 value={filterProject}
                 onChange={(e) => setFilterProject(e.target.value)}
@@ -662,21 +671,32 @@ export default function ApplicationsPage() {
               </Button>
             )}
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* List */}
       {isLoading ? (
-        <div className="space-y-3">
-          {[1, 2, 3].map((i) => (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {[1, 2, 3, 4].map((i) => (
             <Card key={i} className="animate-pulse">
-              <CardContent className="flex items-center gap-4 py-4">
-                <div className="h-3 w-3 rounded-full bg-muted" />
-                <div className="h-5 w-40 rounded bg-muted" />
-                <div className="h-5 w-16 rounded bg-muted" />
-                <div className="flex-1" />
-                <div className="h-5 w-48 rounded bg-muted" />
-                <div className="h-8 w-24 rounded bg-muted" />
+              <CardContent className="p-0">
+                <div className="flex">
+                  <div className="w-1 bg-muted" />
+                  <div className="flex-1 p-4 space-y-3">
+                    <div className="flex items-start justify-between">
+                      <div className="space-y-2">
+                        <div className="h-4 w-32 rounded bg-muted" />
+                        <div className="h-3 w-48 rounded bg-muted" />
+                      </div>
+                      <div className="h-7 w-16 rounded bg-muted" />
+                    </div>
+                    <div className="h-3 w-40 rounded bg-muted" />
+                    <div className="flex gap-2">
+                      <div className="h-5 w-32 rounded bg-muted" />
+                      <div className="h-5 w-24 rounded bg-muted" />
+                    </div>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           ))}
@@ -705,13 +725,43 @@ export default function ApplicationsPage() {
             </Button>
           </CardContent>
         </Card>
-      ) : (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {filtered.map((app) => {
-            const isRunning = app.status === 'RUNNING';
-            const isStopped = app.status === 'STOPPED';
-            const isDeploying = app.status === 'DEPLOYING' || app.status === 'BUILDING';
-            const statusLabel = app.status === 'RUNNING' ? 'Running' : app.status === 'STOPPED' ? 'Stopped' : app.status === 'ERROR' ? 'Error' : app.status === 'DEPLOYING' ? 'Deploying' : app.status;
+      ) : (() => {
+        // Group filtered apps by project so the list reads as a series of
+        // sections (Project A → its apps, Project B → its apps…). When a
+        // project filter is active we skip the header — it would just
+        // duplicate the active chip. Within a project, apps are sorted by
+        // (status priority, name): running first, then deploying, then
+        // stopped, then errors, alphabetical within each bucket.
+        const STATUS_ORDER: Record<string, number> = {
+          RUNNING: 0, DEPLOYING: 1, BUILDING: 1, STOPPED: 2, ERROR: 3,
+        };
+        const sortApps = (apps: Application[]) =>
+          [...apps].sort((a, b) => {
+            const sa = STATUS_ORDER[a.status] ?? 99;
+            const sb = STATUS_ORDER[b.status] ?? 99;
+            if (sa !== sb) return sa - sb;
+            return a.name.localeCompare(b.name);
+          });
+        const groups = new Map<string, { id: string; name: string; apps: Application[] }>();
+        const orphan: Application[] = [];
+        for (const app of filtered) {
+          const proj = app.project;
+          if (!proj?.id) { orphan.push(app); continue; }
+          let g = groups.get(proj.id);
+          if (!g) {
+            g = { id: proj.id, name: proj.name, apps: [] };
+            groups.set(proj.id, g);
+          }
+          g.apps.push(app);
+        }
+        const groupList = Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
+        const showHeaders = !filterProject;
+
+        const renderCard = (app: Application) => {
+          const isRunning = app.status === 'RUNNING';
+          const isStopped = app.status === 'STOPPED';
+          const isDeploying = app.status === 'DEPLOYING' || app.status === 'BUILDING';
+          const statusLabel = app.status === 'RUNNING' ? 'Running' : app.status === 'STOPPED' ? 'Stopped' : app.status === 'ERROR' ? 'Error' : app.status === 'DEPLOYING' ? 'Deploying' : app.status;
 
             return (
               <Card
@@ -720,160 +770,175 @@ export default function ApplicationsPage() {
                 onClick={() => router.push(`/dashboard/applications/${app.id}`)}
               >
                 <CardContent className="p-0">
-                  {/* Status bar top */}
-                  <div className={`h-1 w-full ${isRunning ? 'bg-emerald-500' : app.status === 'ERROR' ? 'bg-red-500' : isDeploying ? 'bg-orange-500' : 'bg-zinc-600'}`} />
+                  {/* Status accent — thin vertical bar */}
+                  <div className="flex">
+                    <div className={cn(
+                      'w-1 shrink-0',
+                      isRunning ? 'bg-emerald-500' : app.status === 'ERROR' ? 'bg-red-500' : isDeploying ? 'bg-orange-500 animate-pulse' : 'bg-zinc-500',
+                    )} />
+                    <div className="flex-1 p-4 space-y-3 min-w-0">
 
-                  <div className="p-5 space-y-4">
-                    {/* Header: name + status + framework */}
-                    <div className="flex items-start justify-between">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <StatusDot status={app.status} />
-                          <h3 className="text-lg font-semibold">{app.name}</h3>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <Badge variant="outline" className="text-[11px]">
-                            {FRAMEWORK_LABELS[app.framework] || app.framework}
-                          </Badge>
-                          <span className={`text-xs font-medium ${isRunning ? 'text-emerald-500' : app.status === 'ERROR' ? 'text-red-500' : isDeploying ? 'text-orange-500' : 'text-muted-foreground'}`}>
-                            {statusLabel}
-                          </span>
-                        </div>
-                      </div>
-                      {publicAppUrl(app) && (
-                        <Button
-                          size="sm"
-                          className="shrink-0"
-                          disabled={!isRunning}
-                          title={isRunning ? 'Open public URL' : 'App must be running'}
-                          onClick={(e) => {
-                            stop(e);
-                            const url = publicAppUrl(app);
-                            if (url) window.open(url, '_blank');
-                          }}
-                        >
-                          <ExternalLink size={12} /> Open
-                        </Button>
-                      )}
-                    </div>
-
-                    {/* Info grid — project + port (port hidden for custom-port apps; visible in domain badges below) */}
-                    <div className="grid grid-cols-2 gap-3 text-sm">
-                      {app.project?.name && (
-                        <div>
-                          <p className="text-xs text-muted-foreground">Project</p>
-                          <Link
-                            href={`/dashboard/projects/${app.project.id}`}
-                            className="font-medium hover:underline"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {app.project.name}
-                          </Link>
-                        </div>
-                      )}
-                      {app.port && !app.customPort && (
-                        <div>
-                          <p className="text-xs text-muted-foreground">Port</p>
-                          <p className="font-mono font-medium">{app.port}</p>
-                        </div>
-                      )}
-                      {app.gitUrl && (
-                        <div className="col-span-2">
-                          <p className="text-xs text-muted-foreground">Git Repository</p>
-                          <div className="flex items-center gap-2" title={app.gitUrl}>
-                            <span className="font-mono text-xs truncate">{truncateGitUrl(app.gitUrl)}</span>
-                            {app.gitBranch && (
-                              <Badge variant="outline" className="text-[10px] gap-1 shrink-0">
-                                <GitBranch size={9} /> {app.gitBranch}
-                              </Badge>
+                      {/* Header: name + status + framework + open button */}
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <h3 className="text-base font-semibold truncate" title={app.name}>{app.name}</h3>
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <span className={cn(
+                              'text-[11px] font-medium',
+                              isRunning ? 'text-emerald-600' : app.status === 'ERROR' ? 'text-red-500' : isDeploying ? 'text-orange-600' : 'text-muted-foreground',
+                            )}>
+                              {statusLabel}
+                            </span>
+                            <span className="text-muted-foreground/40">·</span>
+                            <span className="text-[11px] text-muted-foreground">
+                              {FRAMEWORK_LABELS[app.framework] || app.framework}
+                            </span>
+                            {app.port && !app.customPort && (
+                              <>
+                                <span className="text-muted-foreground/40">·</span>
+                                <span className="text-[11px] font-mono text-muted-foreground">:{app.port}</span>
+                              </>
                             )}
+                            <span className="text-muted-foreground/40">·</span>
+                            <span className="text-[11px] text-muted-foreground" title={new Date(app.createdAt).toLocaleString()}>
+                              {timeAgo(app.createdAt)}
+                            </span>
                           </div>
                         </div>
-                      )}
-                    </div>
+                        {publicAppUrl(app) && (
+                          <Button
+                            size="sm"
+                            className="shrink-0 h-7"
+                            disabled={!isRunning}
+                            title={isRunning ? 'Open public URL' : 'App must be running'}
+                            onClick={(e) => {
+                              stop(e);
+                              const url = publicAppUrl(app);
+                              if (url) window.open(url, '_blank');
+                            }}
+                          >
+                            <ExternalLink size={11} /> Open
+                          </Button>
+                        )}
+                      </div>
 
-                    {/* Routes — single source of truth for URLs + SSL state */}
-                    {((app.domains && app.domains.length > 0) || (app.portBindings && app.portBindings.length > 0)) && (
-                      <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1.5">
-                        <p className="text-xs font-medium text-muted-foreground">URLs</p>
-                        {(app.domains || []).map((d) => {
-                          const url = app.customPort && app.port ? `https://${d.domain}:${app.port}` : `https://${d.domain}`;
-                          return (
-                            <div key={d.id} className="flex items-center justify-between gap-2">
+                      {/* Source: git URL OR docker image */}
+                      {app.gitUrl ? (
+                        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground" title={app.gitUrl}>
+                          <GitBranch size={11} />
+                          <span className="font-mono truncate">{truncateGitUrl(app.gitUrl)}</span>
+                          {app.gitBranch && (
+                            <span className="font-mono text-muted-foreground/70">@{app.gitBranch}</span>
+                          )}
+                        </div>
+                      ) : (app as any).dockerImage ? (
+                        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                          <Plug size={11} />
+                          <span className="font-mono truncate">{(app as any).dockerImage}</span>
+                        </div>
+                      ) : null}
+
+                      {/* URLs row — chips with SSL state */}
+                      {((app.domains && app.domains.length > 0) || (app.portBindings && app.portBindings.length > 0)) && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {(app.domains || []).map((d) => {
+                            const url = app.customPort && app.port ? `https://${d.domain}:${app.port}` : `https://${d.domain}`;
+                            const label = app.customPort && app.port ? `${d.domain}:${app.port}` : d.domain;
+                            return (
                               <a
+                                key={d.id}
                                 href={url}
                                 target="_blank"
                                 rel="noreferrer"
                                 onClick={(e) => e.stopPropagation()}
-                                className="font-mono text-sm truncate hover:underline text-primary"
-                              >
-                                {app.customPort && app.port ? `${d.domain}:${app.port}` : d.domain}
-                              </a>
-                              <Badge
-                                variant={d.sslStatus === 'ACTIVE' ? 'success' : d.sslStatus === 'PENDING' ? 'warning' : 'destructive'}
-                                className="text-[10px] shrink-0"
+                                className={cn(
+                                  'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-mono hover:bg-accent transition-colors',
+                                  d.sslStatus === 'ACTIVE' ? 'border-emerald-500/40 text-foreground' :
+                                  d.sslStatus === 'PENDING' ? 'border-orange-500/40 text-foreground' :
+                                  'border-red-500/40 text-foreground',
+                                )}
                                 title={
-                                  d.sslStatus === 'ACTIVE' ? 'SSL certificate active' :
-                                  d.sslStatus === 'PENDING' ? "Let's Encrypt provisioning…" :
-                                  'SSL provisioning failed — check DNS records'
+                                  d.sslStatus === 'ACTIVE' ? `${url} — SSL OK` :
+                                  d.sslStatus === 'PENDING' ? `${url} — SSL provisioning` :
+                                  `${url} — SSL error`
                                 }
                               >
-                                {d.sslStatus === 'ACTIVE' ? 'SSL OK' : d.sslStatus === 'PENDING' ? 'SSL pending' : 'SSL error'}
-                              </Badge>
-                            </div>
-                          );
-                        })}
-                        {(app.portBindings || []).map((b) => (
-                          <div key={b.id} className="flex items-center justify-between gap-2">
-                            <a
-                              href={`https://${b.domain.domain}:${b.port}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="font-mono text-sm truncate hover:underline text-primary"
-                            >
-                              {b.domain.domain}:{b.port}
-                            </a>
-                            <Badge
-                              variant={b.domain.sslStatus === 'ACTIVE' ? 'success' : 'outline'}
-                              className="text-[10px] shrink-0"
-                            >
-                              {b.domain.sslStatus === 'ACTIVE' ? 'SSL OK' : 'SSL pending'}
-                            </Badge>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                                <Globe size={9} className={cn(
+                                  d.sslStatus === 'ACTIVE' ? 'text-emerald-500' :
+                                  d.sslStatus === 'PENDING' ? 'text-orange-500' : 'text-red-500',
+                                )} />
+                                {label}
+                              </a>
+                            );
+                          })}
+                          {(app.portBindings || []).map((b) => {
+                            const url = `https://${b.domain.domain}:${b.port}`;
+                            return (
+                              <a
+                                key={b.id}
+                                href={url}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className={cn(
+                                  'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-mono hover:bg-accent transition-colors',
+                                  b.domain.sslStatus === 'ACTIVE' ? 'border-emerald-500/40' : 'border-border',
+                                )}
+                                title={url}
+                              >
+                                <Globe size={9} className={cn(b.domain.sslStatus === 'ACTIVE' ? 'text-emerald-500' : 'text-muted-foreground')} />
+                                {b.domain.domain}:{b.port}
+                              </a>
+                            );
+                          })}
+                        </div>
+                      )}
 
-                    {/* Footer: actions + date */}
-                    <div className="flex items-center justify-between pt-2 border-t border-border">
-                      <span className="text-xs text-muted-foreground">{timeAgo(app.createdAt)}</span>
-                      <div className="flex items-center gap-2">
+                      {/* Footer actions — compact icon buttons */}
+                      <div className="flex items-center justify-end gap-1 pt-1">
                         {isStopped && (
-                          <Button size="sm" variant="outline" disabled={actionMutation.isPending}
-                            onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'start' }); }}>
-                            <Play size={14} /> Start
+                          <Button
+                            size="sm" variant="ghost" className="h-7 px-2"
+                            disabled={actionMutation.isPending}
+                            onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'start' }); }}
+                            title="Start"
+                          >
+                            <Play size={12} /> <span className="text-xs">Start</span>
                           </Button>
                         )}
                         {isRunning && (
                           <>
-                            <Button size="sm" variant="outline" disabled={actionMutation.isPending}
-                              onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'stop' }); }}>
-                              <Square size={14} /> Stop
+                            <Button
+                              size="sm" variant="ghost" className="h-7 px-2"
+                              disabled={actionMutation.isPending}
+                              onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'restart' }); }}
+                              title="Restart"
+                            >
+                              <RotateCcw size={12} />
                             </Button>
-                            <Button size="sm" variant="outline" disabled={actionMutation.isPending}
-                              onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'restart' }); }}>
-                              <RotateCcw size={14} /> Restart
+                            <Button
+                              size="sm" variant="ghost" className="h-7 px-2"
+                              disabled={actionMutation.isPending}
+                              onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'stop' }); }}
+                              title="Stop"
+                            >
+                              <Square size={12} />
                             </Button>
                           </>
                         )}
-                        <Button size="sm" variant="outline"
-                          onClick={(e) => { stop(e); setLogsAppId(app.id); setLogsAppName(app.name); }}>
-                          <Terminal size={14} /> Logs
+                        <Button
+                          size="sm" variant="ghost" className="h-7 px-2"
+                          onClick={(e) => { stop(e); setLogsAppId(app.id); setLogsAppName(app.name); }}
+                          title="Logs"
+                        >
+                          <Terminal size={12} />
                         </Button>
-                        <Button size="sm" variant="destructive"
-                          onClick={(e) => { stop(e); setDeleteTarget(app); }}>
-                          <Trash2 size={14} />
+                        <Button
+                          size="sm" variant="ghost" className="h-7 px-2 text-destructive hover:text-destructive hover:bg-destructive/10"
+                          onClick={(e) => { stop(e); setDeleteTarget(app); }}
+                          title="Delete"
+                        >
+                          <Trash2 size={12} />
                         </Button>
                       </div>
                     </div>
@@ -881,9 +946,56 @@ export default function ApplicationsPage() {
                 </CardContent>
               </Card>
             );
-          })}
-        </div>
-      )}
+        };
+
+        return (
+          <div className="space-y-6">
+            {groupList.map((g) => (
+              <section key={g.id} className="space-y-3">
+                {showHeaders && (
+                  <div className="flex items-center justify-between border-b border-border pb-1.5">
+                    <Link
+                      href={`/dashboard/projects/${g.id}`}
+                      className="flex items-center gap-2 text-sm font-semibold hover:text-primary transition-colors"
+                    >
+                      <Plug size={14} className="text-muted-foreground" />
+                      {g.name}
+                      <Badge variant="secondary" className="text-[10px]">{g.apps.length}</Badge>
+                    </Link>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-xs"
+                      onClick={() => {
+                        setDeployForm(f => ({ ...f, projectId: g.id }));
+                        setShowDeploy(true);
+                      }}
+                    >
+                      <Plus size={12} /> Add app
+                    </Button>
+                  </div>
+                )}
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  {sortApps(g.apps).map(renderCard)}
+                </div>
+              </section>
+            ))}
+            {orphan.length > 0 && (
+              <section className="space-y-3">
+                {showHeaders && (
+                  <div className="flex items-center justify-between border-b border-border pb-1.5">
+                    <span className="text-sm font-semibold text-muted-foreground">No project</span>
+                    <Badge variant="secondary" className="text-[10px]">{orphan.length}</Badge>
+                  </div>
+                )}
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  {sortApps(orphan).map(renderCard)}
+                </div>
+              </section>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ---- Deploy Wizard ---- */}
       <Dialog open={showDeploy} onClose={() => { setShowDeploy(false); setDeployStep(0); }} className="max-w-2xl max-h-[90vh] overflow-y-auto">
