@@ -10,8 +10,16 @@ import {
   Trash2,
   Folder,
   File as FileIcon,
+  FileCode,
+  FileText,
+  FileJson,
+  FileImage,
+  FileArchive,
+  FileAudio,
+  FileVideo,
   ChevronRight,
   ChevronDown,
+  ChevronUp,
   Rocket,
   Database as DbIcon,
   FolderKanban,
@@ -22,6 +30,8 @@ import {
   Loader2,
   Search,
   AlertTriangle,
+  Pencil,
+  ArrowUpDown,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -78,6 +88,67 @@ const TYPE_EMOJI: Record<string, string> = {
   POSTGRESQL: '🐘', MYSQL: '🐬', MARIADB: '🦭', REDIS: '🔴', MONGODB: '🍃',
 };
 
+// ── per-extension icon + color hint ──────────────────────────────────────
+// Keeps the listing scan-able even with hundreds of mixed-type files.
+// Group by category rather than mint a unique icon per extension — three
+// dozen lucide icons would clash visually and slow the eye down.
+function iconForFile(name: string) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  // Code
+  if (/^(ts|tsx|js|jsx|mjs|cjs|py|rb|php|go|rs|java|c|cpp|h|hpp|cs|sh|bash|zsh|fish|ps1|vue|svelte|astro|sql|graphql|gql|proto)$/.test(ext)) {
+    return { Icon: FileCode, color: 'text-blue-400' };
+  }
+  if (ext === 'json') return { Icon: FileJson, color: 'text-yellow-500' };
+  if (/^(yml|yaml|toml|ini|cfg|conf|config|env|gitignore|gitattributes|dockerignore|editorconfig)$/.test(ext)) {
+    return { Icon: FileText, color: 'text-emerald-400' };
+  }
+  if (/^(md|markdown|txt|rst|readme|license)$/.test(ext)) {
+    return { Icon: FileText, color: 'text-zinc-400' };
+  }
+  if (/^(html|htm|css|scss|sass|less)$/.test(ext)) {
+    return { Icon: FileCode, color: 'text-orange-400' };
+  }
+  if (/^(png|jpg|jpeg|gif|webp|svg|bmp|ico|avif|tiff?)$/.test(ext)) {
+    return { Icon: FileImage, color: 'text-pink-400' };
+  }
+  if (/^(mp3|wav|ogg|flac|m4a|aac|wma)$/.test(ext)) {
+    return { Icon: FileAudio, color: 'text-purple-400' };
+  }
+  if (/^(mp4|mkv|avi|mov|webm|flv|wmv)$/.test(ext)) {
+    return { Icon: FileVideo, color: 'text-red-400' };
+  }
+  if (/^(zip|tar|gz|tgz|bz2|xz|7z|rar)$/.test(ext)) {
+    return { Icon: FileArchive, color: 'text-amber-500' };
+  }
+  if (/^(pdf|doc|docx|xls|xlsx|ppt|pptx|odt|ods)$/.test(ext)) {
+    return { Icon: FileText, color: 'text-rose-400' };
+  }
+  return { Icon: FileIcon, color: 'text-muted-foreground' };
+}
+
+// ── relative date formatter ──────────────────────────────────────────────
+// Twitter-style ("just now", "2m ago", "yesterday", "Mar 14") with a tooltip
+// hint for the exact ISO timestamp so users can hover for precision.
+function fmtRelativeDate(iso: string) {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return iso;
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 5) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  const d = Math.floor(s / 86400);
+  if (d === 1) return 'yesterday';
+  if (d < 7) return `${d}d ago`;
+  if (d < 365) {
+    return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+  return new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short' });
+}
+
+type SortKey = 'name' | 'size' | 'modified' | 'type';
+type SortDir = 'asc' | 'desc';
+
 function fmtSize(bytes: number) {
   if (bytes === 0) return '—';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -120,6 +191,45 @@ export default function FilesPage() {
   const [search, setSearch] = useState('');
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
+  // ── sort state ────────────────────────────────────────────────────
+  // Click on a column header cycles through asc → desc → asc. We sort
+  // CLIENT-side because we already have the full listing in memory and
+  // the API returns at most O(few hundred) entries per dir; pagination
+  // would push us to server-side but that's not in scope.
+  const [sortKey, setSortKey] = useState<SortKey>('name');
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  }
+
+  // ── multi-selection ────────────────────────────────────────────────
+  // We track a Set of paths so "select all", "delete N", "download
+  // selected" all become trivial. Reset whenever the user navigates or
+  // changes scope.
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  useEffect(() => { setSelectedPaths(new Set()); }, [currentPath, selected?.id]);
+  function toggleSelected(p: string) {
+    setSelectedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(p)) next.delete(p); else next.add(p);
+      return next;
+    });
+  }
+
+  // ── drag & drop upload ────────────────────────────────────────────
+  // We treat the listing card as a single drop zone. dragOver counts
+  // depth — Chrome fires dragleave on every child element traversal so
+  // a naive boolean flickers; counting matches React's standard pattern.
+  const [dragDepth, setDragDepth] = useState(0);
+
+  // ── bulk delete dialog ────────────────────────────────────────────
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+
   // ── scopes (left panel) ────────────────────────────────────────────
   const { data: scopes = [], isLoading: scopesLoading } = useQuery<ProjectScope[]>({
     queryKey: ['file-scopes'],
@@ -155,9 +265,56 @@ export default function FilesPage() {
   const barColor = pct > 95 ? 'bg-red-500' : pct > 80 ? 'bg-orange-500' : 'bg-primary';
   const labelColor = pct > 95 ? 'text-red-500' : pct > 80 ? 'text-orange-500' : 'text-muted-foreground';
 
-  const filteredEntries = (listing?.entries || []).filter(e =>
-    !search.trim() || e.name.toLowerCase().includes(search.toLowerCase())
-  );
+  // Filter → sort. We ALWAYS keep folders first regardless of sort key
+  // — that's the convention every file manager (Finder, Explorer,
+  // Filezilla) follows, and breaking it confuses muscle memory.
+  const filteredEntries = (() => {
+    const raw = (listing?.entries || []).filter((e) =>
+      !search.trim() || e.name.toLowerCase().includes(search.toLowerCase()),
+    );
+    const mult = sortDir === 'asc' ? 1 : -1;
+    const cmp = (a: FileEntry, b: FileEntry) => {
+      // Folders → top, regardless of sort key.
+      const aDir = a.type === 'directory';
+      const bDir = b.type === 'directory';
+      if (aDir !== bDir) return aDir ? -1 : 1;
+      switch (sortKey) {
+        case 'size': {
+          // Directories share size=0; tie-break on name so the order is
+          // stable when sorting by size with many folders.
+          if (a.size !== b.size) return mult * (a.size - b.size);
+          return a.name.localeCompare(b.name);
+        }
+        case 'modified': {
+          const at = new Date(a.modifiedAt).getTime();
+          const bt = new Date(b.modifiedAt).getTime();
+          if (at !== bt) return mult * (at - bt);
+          return a.name.localeCompare(b.name);
+        }
+        case 'type': {
+          const ae = (a.name.split('.').pop() || '').toLowerCase();
+          const be = (b.name.split('.').pop() || '').toLowerCase();
+          if (ae !== be) return mult * ae.localeCompare(be);
+          return a.name.localeCompare(b.name);
+        }
+        case 'name':
+        default:
+          return mult * a.name.localeCompare(b.name, undefined, { numeric: true });
+      }
+    };
+    return [...raw].sort(cmp);
+  })();
+
+  const allSelected =
+    filteredEntries.length > 0 &&
+    filteredEntries.every((e) => selectedPaths.has(e.path));
+  function toggleAll() {
+    if (allSelected) {
+      setSelectedPaths(new Set());
+    } else {
+      setSelectedPaths(new Set(filteredEntries.map((e) => e.path)));
+    }
+  }
 
   // ── mutations ──────────────────────────────────────────────────────
   const mkdirMutation = useMutation({
@@ -193,6 +350,30 @@ export default function FilesPage() {
     onSuccess: () => {
       toast.success('Deleted');
       setDeleteTarget(null);
+      refetchListing();
+      refetchUsage();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  // Bulk delete — fan out N parallel DELETEs, then collect outcomes
+  // so the user sees a single toast with the count + a list of failures
+  // rather than one toast per file.
+  const bulkDeleteMutation = useMutation({
+    mutationFn: async (paths: string[]) => {
+      const results = await Promise.allSettled(
+        paths.map((p) =>
+          api.delete(`/files/${selected!.scope}/${selected!.id}/entry?path=${encodeURIComponent(p)}`),
+        ),
+      );
+      const fails = results.filter((r) => r.status === 'rejected').length;
+      return { total: paths.length, fails };
+    },
+    onSuccess: ({ total, fails }) => {
+      if (fails === 0) toast.success(`Deleted ${total} item${total === 1 ? '' : 's'}`);
+      else toast.warning(`${total - fails} deleted, ${fails} failed`);
+      setBulkDeleteOpen(false);
+      setSelectedPaths(new Set());
       refetchListing();
       refetchUsage();
     },
@@ -493,7 +674,75 @@ export default function FilesPage() {
                   onClose={() => setEditing(null)}
                 />
               ) : (
-                <CardContent className="p-0">
+                <CardContent
+                  className={cn(
+                    'p-0 relative',
+                    dragDepth > 0 && canEdit && 'ring-2 ring-primary ring-inset bg-primary/5',
+                  )}
+                  onDragEnter={(ev) => {
+                    if (!canEdit) return;
+                    ev.preventDefault();
+                    setDragDepth((d) => d + 1);
+                  }}
+                  onDragLeave={(ev) => {
+                    if (!canEdit) return;
+                    ev.preventDefault();
+                    setDragDepth((d) => Math.max(0, d - 1));
+                  }}
+                  onDragOver={(ev) => {
+                    if (!canEdit) return;
+                    ev.preventDefault();
+                  }}
+                  onDrop={(ev) => {
+                    if (!canEdit) return;
+                    ev.preventDefault();
+                    setDragDepth(0);
+                    if (ev.dataTransfer.files?.length) {
+                      void handleUpload(ev.dataTransfer.files);
+                    }
+                  }}
+                >
+                  {dragDepth > 0 && canEdit && (
+                    <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+                      <div className="bg-primary/90 text-primary-foreground rounded-lg px-6 py-4 shadow-lg flex items-center gap-2 font-medium">
+                        <Upload size={18} /> Drop to upload into {currentPath || 'root'}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Bulk action bar — only when something is selected. */}
+                  {selectedPaths.size > 0 && (
+                    <div className="border-b border-border bg-primary/5 px-3 py-1.5 flex items-center gap-2 text-xs">
+                      <span className="font-medium">
+                        {selectedPaths.size} selected
+                      </span>
+                      <button
+                        onClick={() => setSelectedPaths(new Set())}
+                        className="text-muted-foreground hover:text-foreground"
+                      >
+                        Clear
+                      </button>
+                      <div className="flex-1" />
+                      {canDelete && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-xs h-7 text-destructive hover:bg-destructive/10"
+                          onClick={() => {
+                            // Treat bulk delete as a confirm step: show the
+                            // standard delete dialog with the count instead
+                            // of just nuking everything on click.
+                            const list = filteredEntries.filter((e) => selectedPaths.has(e.path));
+                            if (list.length === 1) setDeleteTarget(list[0]);
+                            else setBulkDeleteOpen(true);
+                          }}
+                        >
+                          <Trash2 size={12} /> Delete
+                        </Button>
+                      )}
+                    </div>
+                  )}
+
                   {listingLoading ? (
                     <div className="p-8 flex justify-center">
                       <Loader2 size={20} className="animate-spin text-muted-foreground" />
@@ -501,62 +750,113 @@ export default function FilesPage() {
                   ) : filteredEntries.length === 0 ? (
                     <div className="py-16 text-center text-muted-foreground text-sm">
                       {search ? `No file matches "${search}"` : 'Empty directory'}
+                      {canEdit && !search && (
+                        <p className="mt-2 text-xs">Drop files here or click Upload above.</p>
+                      )}
                     </div>
                   ) : (
                     <table className="w-full text-sm">
-                      <thead className="border-b border-border bg-muted/30">
+                      <thead className="border-b border-border bg-muted/30 select-none">
                         <tr className="text-left text-muted-foreground">
-                          <th className="px-4 py-2 font-medium">Name</th>
-                          <th className="px-4 py-2 font-medium w-24">Size</th>
-                          <th className="px-4 py-2 font-medium w-44">Modified</th>
-                          <th className="px-4 py-2 font-medium w-20 font-mono text-xs">Perm</th>
-                          <th className="px-4 py-2 font-medium w-32 text-right">Actions</th>
+                          <th className="w-8 px-3 py-2">
+                            <input
+                              type="checkbox"
+                              checked={allSelected}
+                              onChange={toggleAll}
+                              className="h-3.5 w-3.5 cursor-pointer accent-primary"
+                              title={allSelected ? 'Deselect all' : 'Select all'}
+                            />
+                          </th>
+                          <SortableTh
+                            label="Name"
+                            active={sortKey === 'name'}
+                            dir={sortDir}
+                            onClick={() => toggleSort('name')}
+                          />
+                          <SortableTh
+                            label="Size"
+                            active={sortKey === 'size'}
+                            dir={sortDir}
+                            onClick={() => toggleSort('size')}
+                            className="w-24"
+                          />
+                          <SortableTh
+                            label="Modified"
+                            active={sortKey === 'modified'}
+                            dir={sortDir}
+                            onClick={() => toggleSort('modified')}
+                            className="w-32"
+                          />
+                          <th className="px-3 py-2 font-medium w-20 font-mono text-[11px]">Perm</th>
+                          <th className="px-3 py-2 font-medium w-28 text-right">Actions</th>
                         </tr>
                       </thead>
                       <tbody>
                         {filteredEntries.map((e) => {
                           const isDir = e.type === 'directory';
+                          const isSym = e.type === 'symlink';
+                          const isSelected = selectedPaths.has(e.path);
+                          const { Icon, color } = isDir
+                            ? { Icon: Folder, color: 'text-primary' }
+                            : iconForFile(e.name);
                           return (
-                            <tr key={e.path} className="border-b last:border-0 hover:bg-accent/40">
-                              <td className="px-4 py-2">
+                            <tr
+                              key={e.path}
+                              className={cn(
+                                'border-b last:border-0 hover:bg-accent/40 group',
+                                isSelected && 'bg-primary/5',
+                              )}
+                            >
+                              <td className="px-3 py-1.5">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => toggleSelected(e.path)}
+                                  className="h-3.5 w-3.5 cursor-pointer accent-primary"
+                                  onClick={(ev) => ev.stopPropagation()}
+                                />
+                              </td>
+                              <td className="px-3 py-1.5">
                                 <button
                                   onClick={() => {
                                     if (isDir) setCurrentPath(e.path);
                                     else setReadingPath(e.path);
                                   }}
-                                  className="flex items-center gap-2 text-left hover:underline"
+                                  className="flex items-center gap-2 text-left hover:underline w-full"
                                 >
-                                  {isDir ? (
-                                    <Folder size={14} className="text-primary shrink-0" />
-                                  ) : (
-                                    <FileIcon size={14} className="text-muted-foreground shrink-0" />
-                                  )}
-                                  <span className={cn('truncate', e.isHidden && 'text-muted-foreground')}>
+                                  <Icon size={15} className={cn(color, 'shrink-0')} />
+                                  <span className={cn('truncate', e.isHidden && 'text-muted-foreground italic')}>
                                     {e.name}
+                                    {isSym && <span className="text-muted-foreground ml-1">↗</span>}
                                   </span>
                                 </button>
                               </td>
-                              <td className="px-4 py-2 text-muted-foreground text-xs">
+                              <td className="px-3 py-1.5 text-muted-foreground text-xs tabular-nums">
                                 {isDir ? '—' : fmtSize(e.size)}
                               </td>
-                              <td className="px-4 py-2 text-muted-foreground text-xs">{fmtDate(e.modifiedAt)}</td>
-                              <td className="px-4 py-2 text-muted-foreground font-mono text-xs">{e.permissions}</td>
-                              <td className="px-4 py-2">
-                                <div className="flex justify-end gap-1">
+                              <td
+                                className="px-3 py-1.5 text-muted-foreground text-xs"
+                                title={new Date(e.modifiedAt).toLocaleString()}
+                              >
+                                {fmtRelativeDate(e.modifiedAt)}
+                              </td>
+                              <td className="px-3 py-1.5 text-muted-foreground font-mono text-[11px]">{e.permissions}</td>
+                              <td className="px-3 py-1.5">
+                                <div className="flex justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                                   {!isDir && (
-                                    <Button size="icon" variant="ghost" title="Download"
+                                    <Button size="icon" variant="ghost" className="h-7 w-7" title="Download"
                                       onClick={() => handleDownload(e.path, e.name)}>
                                       <Download size={13} />
                                     </Button>
                                   )}
                                   {canEdit && (
-                                    <Button size="icon" variant="ghost" title="Rename"
+                                    <Button size="icon" variant="ghost" className="h-7 w-7" title="Rename"
                                       onClick={() => { setRenameTarget(e); setRenameValue(e.name); }}>
-                                      <FolderPlus size={13} />
+                                      <Pencil size={13} />
                                     </Button>
                                   )}
                                   {canDelete && (
-                                    <Button size="icon" variant="ghost" title="Delete"
+                                    <Button size="icon" variant="ghost" className="h-7 w-7 hover:text-destructive" title="Delete"
                                       onClick={() => setDeleteTarget(e)}>
                                       <Trash2 size={13} />
                                     </Button>
@@ -643,6 +943,29 @@ export default function FilesPage() {
           </Button>
         </DialogFooter>
       </Dialog>
+
+      {/* ── bulk delete dialog ── */}
+      <Dialog open={bulkDeleteOpen} onClose={() => setBulkDeleteOpen(false)}>
+        <DialogHeader>
+          <DialogTitle>Delete {selectedPaths.size} items</DialogTitle>
+          <DialogDescription>
+            Permanently delete the selected files and folders? Folders are
+            removed recursively. This cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setBulkDeleteOpen(false)}>Cancel</Button>
+          <Button
+            variant="destructive"
+            disabled={bulkDeleteMutation.isPending}
+            onClick={() => bulkDeleteMutation.mutate(Array.from(selectedPaths))}
+          >
+            {bulkDeleteMutation.isPending
+              ? `Deleting ${selectedPaths.size}...`
+              : `Delete ${selectedPaths.size} items`}
+          </Button>
+        </DialogFooter>
+      </Dialog>
     </div>
   );
 }
@@ -713,5 +1036,40 @@ function Editor({
         />
       </CardContent>
     </>
+  );
+}
+
+// ── Sortable table header cell ────────────────────────────────────────
+// Standalone so each header arrow stays in sync with the active sort
+// without prop-drilling through every td. The dim ArrowUpDown shows
+// which columns ARE sortable (vs read-only ones like Perm / Actions).
+function SortableTh({
+  label, active, dir, onClick, className,
+}: {
+  label: string;
+  active: boolean;
+  dir: SortDir;
+  onClick: () => void;
+  className?: string;
+}) {
+  return (
+    <th
+      onClick={onClick}
+      className={cn(
+        'px-3 py-2 font-medium cursor-pointer select-none hover:text-foreground transition-colors',
+        className,
+      )}
+    >
+      <span className="inline-flex items-center gap-1">
+        {label}
+        {active ? (
+          dir === 'asc'
+            ? <ChevronUp size={12} className="text-primary" />
+            : <ChevronDown size={12} className="text-primary" />
+        ) : (
+          <ArrowUpDown size={11} className="text-muted-foreground/40" />
+        )}
+      </span>
+    </th>
   );
 }
