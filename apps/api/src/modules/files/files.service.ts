@@ -309,18 +309,33 @@ export class FilesService {
 
     const slug = this.slugify(app.name);
     const hostDir = this.appRootDir(appId, slug);
-    // If the host dir actually has source code (more than the managed
-    // compose / env file), prefer host-fs. Detected by counting non-
-    // managed entries.
+    // If the host dir actually has source code (more than platform-
+    // managed deploy artefacts), prefer host-fs. Otherwise the host
+    // dir is just the compose + .env + a handful of side-files the
+    // marketplace install path drops in (e.g. PrestaShop's
+    // prestashop-proxy.conf bind-mounted into Apache). Those don't
+    // count as "user files" for the purpose of picking a backend —
+    // we still want to docker-fs into the container.
+    //
+    // Conservative whitelist: anything that's either a known managed
+    // marker, the compose, the env, OR a top-level *.conf file
+    // (marketplace side-files are always shallow). Anything else
+    // (a directory of source, a Dockerfile, a package.json…) flips
+    // us to host-fs.
+    const isPlatformArtefact = (name: string): boolean => {
+      if (this.isManaged(name)) return true;
+      if (name === '.env') return true;
+      if (/^docker-compose\.(yml|yaml)$/i.test(name)) return true;
+      // Marketplace side-files land here (PrestaShop's apache conf,
+      // future Postfix main.cf / sshd_config / php.ini drops).
+      if (/\.conf$/i.test(name)) return true;
+      return false;
+    };
     let hasUserFiles = false;
     try {
       const entries = fs.readdirSync(hostDir);
       for (const e of entries) {
-        if (this.isManaged(e)) continue;
-        // .env / docker-compose variants the deploy path drops in are
-        // expected — skip those even though they aren't in MANAGED_FILES
-        // (we explicitly want them browsable on git deploys).
-        if (e === '.env' || /^docker-compose\.(yml|yaml)$/i.test(e)) continue;
+        if (isPlatformArtefact(e)) continue;
         hasUserFiles = true;
         break;
       }
