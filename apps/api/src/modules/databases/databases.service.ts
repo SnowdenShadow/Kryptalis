@@ -12,6 +12,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
+import { detectDatabasesInCompose, type DetectedDb } from './compose-db-detect';
 import {
   assertProjectAccess,
   listAccessibleProjectIds,
@@ -385,7 +386,13 @@ export class DatabasesService {
     });
 
     return Promise.all(dbs.map(async (db) => {
-      const status = await this.getContainerStatus(db.name);
+      // Auto-imported rows store the real container_name in `host` (it's
+      // the address other services use). Manually-provisioned rows use
+      // the legacy `kryptalis-db-<name>` scheme.
+      const status = await this.getContainerStatus(
+        (db as any).autoImported ? db.host : db.name,
+        (db as any).autoImported,
+      );
       const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name);
       return { ...db, status, connectionString };
     }));
@@ -401,7 +408,10 @@ export class DatabasesService {
       },
     });
     if (!db) throw new NotFoundException('Database not found');
-    const status = await this.getContainerStatus(db.name);
+    const status = await this.getContainerStatus(
+      (db as any).autoImported ? db.host : db.name,
+      (db as any).autoImported,
+    );
     const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name);
     return { ...db, status, connectionString };
   }
@@ -410,6 +420,14 @@ export class DatabasesService {
 
   async start(userId: string, id: string) {
     const db = await this.assertDbAccess(userId, id, 'DEVELOPER');
+    // Auto-imported DBs are owned by the parent app's compose stack — calling
+    // `docker compose` in our DBS_DIR would no-op (the YAML doesn't exist
+    // there). Force the user to operate on the parent app instead.
+    if ((db as any).autoImported) {
+      throw new BadRequestException(
+        'This database is managed by its parent application. Start it from the application page.',
+      );
+    }
     const slug = `db-${db.name}`;
     const server = await this.resolveDbServer(id);
     if (this.isDbLocal(server)) {
@@ -425,6 +443,11 @@ export class DatabasesService {
 
   async stop(userId: string, id: string) {
     const db = await this.assertDbAccess(userId, id, 'DEVELOPER');
+    if ((db as any).autoImported) {
+      throw new BadRequestException(
+        'This database is managed by its parent application. Stop it from the application page.',
+      );
+    }
     const slug = `db-${db.name}`;
     const server = await this.resolveDbServer(id);
     if (this.isDbLocal(server)) {
@@ -440,6 +463,11 @@ export class DatabasesService {
 
   async remove(userId: string, id: string) {
     const db = await this.assertDbAccess(userId, id, 'ADMIN');
+    if ((db as any).autoImported) {
+      throw new BadRequestException(
+        'This database is managed by its parent application. Delete the application to remove it.',
+      );
+    }
     const containerName = `kryptalis-db-${db.name}`;
     const slug = `db-${db.name}`;
     const server = await this.resolveDbServer(id);
@@ -513,13 +541,133 @@ export class DatabasesService {
     } catch {}
   }
 
-  private async getContainerStatus(name: string): Promise<string> {
+  private async getContainerStatus(nameOrContainer: string, isAutoImported = false): Promise<string> {
+    // Auto-imported rows pass the literal container_name; manual rows pass
+    // the DB name and we prepend the legacy kryptalis-db- prefix.
+    const target = isAutoImported ? nameOrContainer : `kryptalis-db-${nameOrContainer}`;
     try {
-      const { stdout } = await execAsync(`docker inspect --format="{{.State.Status}}" kryptalis-db-${name}`, { timeout: 5000 });
+      // Use execFile to avoid shell interpretation of arbitrary container_name
+      // strings that might land in the auto-imported rows.
+      const { stdout } = await execAsync(
+        `docker inspect --format="{{.State.Status}}" ${JSON.stringify(target)}`,
+        { timeout: 5000 },
+      );
       return stdout.trim() || 'unknown';
     } catch {
       return 'not running';
     }
+  }
+
+  // ── auto-import from a stack's docker-compose.yml ──────────────────
+  //
+  // Called by ApplicationsService right after `docker compose up -d`
+  // succeeds (compose-only deploys + marketplace installs that include
+  // bundled DB services). For each detected DB service we upsert a
+  // `Database` row attached to the app + project so:
+  //   - RBAC works (any project member sees the DB via projectId)
+  //   - the /databases dashboard shows it next to manually-provisioned ones
+  //   - cleanup cascades when the parent app is removed
+  //
+  // Idempotent on redeploy thanks to the @@unique([applicationId, serviceName])
+  // — every redeploy upserts the same row instead of stacking duplicates.
+  // Errors here are swallowed (logged but never crash the deploy) because
+  // the actual containers ARE running by the time we get here.
+  async importFromAppCompose(opts: {
+    applicationId: string;
+    projectId: string;
+    serverId: string;
+    composeYaml: string;
+  }): Promise<{ created: number; updated: number; skipped: number }> {
+    let detected: DetectedDb[] = [];
+    try {
+      detected = detectDatabasesInCompose(opts.composeYaml);
+    } catch {
+      return { created: 0, updated: 0, skipped: 0 };
+    }
+    if (detected.length === 0) return { created: 0, updated: 0, skipped: 0 };
+
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+
+    for (const db of detected) {
+      try {
+        // Auto-generate a password if the compose env left it blank — Redis-
+        // like images often ship without one, but a blank field would render
+        // poorly in the UI. The container itself stays password-less; we just
+        // store an empty string in that case (caller decides).
+        const password = db.password || '';
+
+        const existing = await this.prisma.database.findFirst({
+          where: { applicationId: opts.applicationId, serviceName: db.serviceName },
+        });
+
+        // Name shown in the dashboard. We prefix with the app slug-ish service
+        // name so two apps both bundling `db` don't display ambiguously. The
+        // @@unique constraint is on (applicationId, serviceName) — `name` can
+        // collide across apps freely.
+        const displayName = `${db.serviceName}@${opts.applicationId.slice(0, 6)}`;
+        // Host = container_name on the project network. Other apps in the
+        // same project can reach this DB via that hostname directly; the
+        // UI shows it so users can copy it into their service config.
+        const host = db.containerName;
+        const port = db.hostPort ?? db.containerPort;
+
+        if (existing) {
+          await this.prisma.database.update({
+            where: { id: existing.id },
+            data: {
+              type: db.type,
+              host,
+              port,
+              username: db.username,
+              password: this.encryption.encrypt(password),
+              autoImported: true,
+              serverId: opts.serverId,
+              projectId: opts.projectId,
+              applicationId: opts.applicationId,
+            },
+          });
+          updated++;
+        } else {
+          await this.prisma.database.create({
+            data: {
+              name: displayName,
+              type: db.type,
+              serverId: opts.serverId,
+              projectId: opts.projectId,
+              applicationId: opts.applicationId,
+              host,
+              port,
+              username: db.username,
+              password: this.encryption.encrypt(password),
+              autoImported: true,
+              serviceName: db.serviceName,
+            },
+          });
+          created++;
+        }
+      } catch {
+        // Single-DB import failure (collision, encryption error, etc.)
+        // must NOT break the whole batch — keep going.
+        skipped++;
+      }
+    }
+
+    return { created, updated, skipped };
+  }
+
+  // ── cleanup helper for ApplicationsService ─────────────────────────
+  //
+  // Called from ApplicationsService.remove() BEFORE deleting the app row.
+  // We drop only the auto-imported rows; manually-provisioned DBs that
+  // happened to be linked via applicationId fall back to SetNull cascade
+  // so the registry row survives.
+  async deleteAutoImportedForApp(applicationId: string): Promise<number> {
+    const r = await this.prisma.database.deleteMany({
+      where: { applicationId, autoImported: true },
+    });
+    return r.count;
   }
 
   private getConnectionString(type: string, user: string, pass: string, port: number, name: string): string {

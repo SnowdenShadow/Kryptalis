@@ -587,13 +587,28 @@ model Database {
   username      String
   password      String
   size          BigInt?
+  // True when this row was created by the auto-importer (compose / marketplace
+  // bundled DBs). Lifecycle is owned by the parent app — start/stop/remove
+  // cascade through the app, NOT through the /databases dialog. The UI shows
+  // a badge so users understand they shouldn't try to manage it standalone.
+  autoImported  Boolean  @default(false)
+  // The service name (`db`, `mariadb`, `prestashop-db-xxx`) inside the parent
+  // compose project. Used as the idempotency key on redeploy so we update
+  // the existing row instead of inserting a duplicate every redeploy.
+  serviceName   String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
   server      Server       @relation(fields: [serverId], references: [id], onDelete: Cascade)
   project     Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  // Auto-imported DBs follow their parent app — Cascade so removing the
+  // app drops them. Manually-created DBs use applicationId only as a
+  // soft link (SetNull) so the registry row survives the app deletion;
+  // we run an extra prisma.database.deleteMany({ applicationId, autoImported })
+  // before deleting the app to cover the cascade for those.
   application Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
 
+  @@unique([applicationId, serviceName])
   @@index([serverId])
   @@index([projectId])
   @@index([applicationId])

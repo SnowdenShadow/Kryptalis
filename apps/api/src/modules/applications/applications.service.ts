@@ -20,6 +20,7 @@ import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { AgentService } from '../agent/agent.service';
 import { isLocalHost, DeploymentTargetService } from '../deployment-target/deployment-target.service';
 import { detectStack, FRAMEWORK_DOCKERFILES, FRAMEWORK_INTERNAL_PORT } from './dockerfile-templates';
+import { DatabasesService } from '../databases/databases.service';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
@@ -364,6 +365,7 @@ export class ApplicationsService {
     private encryption: EncryptionService,
     private notifications: NotificationsService,
     private deploymentTarget: DeploymentTargetService,
+    private databases: DatabasesService,
   ) {}
 
   /**
@@ -987,6 +989,27 @@ export class ApplicationsService {
         },
       });
       this.notifyDeploymentOutcome(deploymentId, name, 'success');
+
+      // Post-deploy: auto-import any DB services declared in the user's
+      // compose so they show up in /dashboard/databases with the same RBAC
+      // (inherited via projectId). Idempotent on redeploy via the
+      // @@unique([applicationId, serviceName]) constraint. Errors here
+      // are swallowed — the stack is already running by this point and
+      // a registry-import failure must not flip the deploy red.
+      try {
+        const appRowForImport = await this.prisma.application.findUnique({
+          where: { id: appId },
+          select: { projectId: true, project: { select: { serverId: true } } },
+        });
+        if (appRowForImport?.project?.serverId) {
+          await this.databases.importFromAppCompose({
+            applicationId: appId,
+            projectId: appRowForImport.projectId,
+            serverId: appRowForImport.project.serverId,
+            composeYaml: finalCompose,
+          });
+        }
+      } catch {}
     } catch (err: any) {
       const msg = err?.message || 'compose deploy failed';
       log(`✖ ${msg}`);
@@ -1838,6 +1861,12 @@ export class ApplicationsService {
         purgeVolumes: true,
       });
     }
+
+    // Purge auto-imported Database rows BEFORE the app delete. The
+    // schema uses SetNull cascade for application → database (so manual
+    // DBs survive), so without this step the auto-imported registry
+    // rows would linger and confuse the /databases dashboard.
+    try { await this.databases.deleteAutoImportedForApp(id); } catch {}
 
     await this.prisma.application.delete({ where: { id } });
     this.proxy.regenerate().catch(() => {});

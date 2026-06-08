@@ -4,6 +4,7 @@ import { assertProjectAccess } from '../../common/rbac/project-access';
 import { COMPOSE_TEMPLATES, PORT_MAP, renderCustomComposeTemplate } from './templates';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
+import { DatabasesService } from '../databases/databases.service';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -101,6 +102,7 @@ export class MarketplaceService {
     private prisma: PrismaService,
     private proxy: ReverseProxyService,
     private domainAttach: DomainAttachService,
+    private databases: DatabasesService,
   ) {
     if (!fs.existsSync(APPS_DIR)) {
       fs.mkdirSync(APPS_DIR, { recursive: true });
@@ -671,6 +673,26 @@ export class MarketplaceService {
       // routing to it RIGHT NOW. Without this, the user has to wait for the
       // hourly SSL sync or hit "Redeploy" again.
       this.proxy.regenerate().catch(() => {});
+
+      // Auto-import any DB sidecar declared in the template (e.g. PrestaShop +
+      // MariaDB, WordPress + MariaDB) so it shows up in /dashboard/databases
+      // with the parent app's RBAC inherited via projectId. Errors swallowed
+      // — install is already RUNNING and a registry import failure must not
+      // flip the deploy red. Idempotent on retry via the @@unique constraint.
+      try {
+        const appRow = await this.prisma.application.findUnique({
+          where: { id: applicationId },
+          select: { projectId: true, project: { select: { serverId: true } } },
+        });
+        if (appRow?.project?.serverId) {
+          await this.databases.importFromAppCompose({
+            applicationId,
+            projectId: appRow.projectId,
+            serverId: appRow.project.serverId,
+            composeYaml: compose,
+          });
+        }
+      } catch {}
     } catch (err: any) {
       await this.prisma.agentTask.update({
         where: { id: taskId },

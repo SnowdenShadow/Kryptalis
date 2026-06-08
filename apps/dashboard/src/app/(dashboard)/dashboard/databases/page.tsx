@@ -57,6 +57,8 @@ interface DatabaseItem {
   createdAt: string;
   status: string;
   connectionString: string;
+  autoImported?: boolean;
+  serviceName?: string | null;
   project?: { id: string; name: string } | null;
   application?: { id: string; name: string } | null;
 }
@@ -400,42 +402,76 @@ export default function DatabasesPage() {
                               </Badge>
                             </Link>
                           )}
+                          {db.autoImported && (
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] border-amber-500/40 text-amber-500"
+                              title={`Detected from the parent app's docker-compose.yml${db.serviceName ? ` (service: ${db.serviceName})` : ''}. Lifecycle is owned by the app.`}
+                            >
+                              auto
+                            </Badge>
+                          )}
                         </div>
                       </div>
                     </div>
                     <div className="flex gap-1">
-                      {!deploying && running && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-orange-500"
-                          disabled={dbActionMutation.isPending}
-                          onClick={() => dbActionMutation.mutate({ id: db.id, action: 'stop' })}
-                          title="Stop"
-                        >
-                          <Square size={14} />
-                        </Button>
+                      {/* Auto-imported DBs are owned by the parent app's
+                          compose stack — start/stop/delete must go through
+                          the application page so the whole stack stays
+                          consistent. We show a quick jump-link instead. */}
+                      {db.autoImported ? (
+                        db.application ? (
+                          <Link
+                            href={`/dashboard/applications/${db.application.id}`}
+                            onClick={(e: MouseEvent<HTMLAnchorElement>) => e.stopPropagation()}
+                          >
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 text-xs"
+                              title="Managed by parent app — open app to start/stop/delete"
+                            >
+                              <Rocket size={12} className="mr-1" />
+                              Manage in app
+                            </Button>
+                          </Link>
+                        ) : null
+                      ) : (
+                        <>
+                          {!deploying && running && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-orange-500"
+                              disabled={dbActionMutation.isPending}
+                              onClick={() => dbActionMutation.mutate({ id: db.id, action: 'stop' })}
+                              title="Stop"
+                            >
+                              <Square size={14} />
+                            </Button>
+                          )}
+                          {!deploying && !running && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-emerald-500"
+                              disabled={dbActionMutation.isPending}
+                              onClick={() => dbActionMutation.mutate({ id: db.id, action: 'start' })}
+                              title="Start"
+                            >
+                              <Play size={14} />
+                            </Button>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => setDeleteId(db.id)}
+                          >
+                            <Trash2 size={15} />
+                          </Button>
+                        </>
                       )}
-                      {!deploying && !running && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-emerald-500"
-                          disabled={dbActionMutation.isPending}
-                          onClick={() => dbActionMutation.mutate({ id: db.id, action: 'start' })}
-                          title="Start"
-                        >
-                          <Play size={14} />
-                        </Button>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                        onClick={() => setDeleteId(db.id)}
-                      >
-                        <Trash2 size={15} />
-                      </Button>
                     </div>
                   </div>
                 </CardHeader>
