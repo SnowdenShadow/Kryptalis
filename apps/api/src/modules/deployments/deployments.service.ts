@@ -1,5 +1,6 @@
 import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { SystemConfigService } from '../system/system-config.service';
 import { TriggerDeploymentDto } from './dto/trigger-deployment.dto';
 import {
   assertProjectAccess,
@@ -15,7 +16,10 @@ export class DeploymentsService implements OnModuleInit {
   private readonly logger = new Logger(DeploymentsService.name);
   private pruneTimer?: NodeJS.Timeout;
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private systemConfig: SystemConfigService,
+  ) {}
 
   onModuleInit() {
     // Run once shortly after boot, then on a fixed interval.
@@ -31,9 +35,11 @@ export class DeploymentsService implements OnModuleInit {
 
   async pruneOldDeployments() {
     try {
-      const retentionDays = Number(
-        process.env.DEPLOYMENT_RETENTION_DAYS ?? 90,
-      );
+      const retentionDays = this.systemConfig.getNumber(
+        'deployment_retention_days',
+        'DEPLOYMENT_RETENTION_DAYS',
+        90,
+      ) ?? 90;
       const days =
         Number.isFinite(retentionDays) && retentionDays > 0
           ? retentionDays

@@ -49,6 +49,32 @@ export class AdminController {
     return this.svc.updateSetting(key, value, userId);
   }
 
+  // ── runtime config (Admin → System Config tab) ────────────────────
+
+  @Get('config')
+  @ApiOperation({ summary: 'Public snapshot of runtime config (secrets masked)' })
+  getConfig() {
+    return this.svc.getConfigSnapshot();
+  }
+
+  @Patch('config')
+  @ApiOperation({ summary: 'Update runtime config (SMTP, URLs, retention, etc.)' })
+  updateConfig(
+    @CurrentUser('id') userId: string,
+    @Body() body: Record<string, any>,
+  ) {
+    return this.svc.updateConfigBulk(body, userId);
+  }
+
+  @Post('config/test-smtp')
+  @ApiOperation({ summary: 'Send a test email using current SMTP config' })
+  testSmtp(
+    @CurrentUser('id') userId: string,
+    @Body() body: { to?: string },
+  ) {
+    return this.svc.testSmtp(userId, body.to);
+  }
+
   // ── users ─────────────────────────────────────────────────────────
 
   @Get('users')

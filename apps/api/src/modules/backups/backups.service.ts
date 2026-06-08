@@ -5,6 +5,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { SystemConfigService } from '../system/system-config.service';
 import { CreateBackupDto } from './dto/create-backup.dto';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
@@ -46,7 +47,10 @@ import { pipeline } from 'stream/promises';
  */
 @Injectable()
 export class BackupsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private systemConfig: SystemConfigService,
+  ) {}
 
   // ── access helpers ─────────────────────────────────────────────────
 
@@ -94,13 +98,10 @@ export class BackupsService {
   }
 
   private backupEncryptionKey(): Buffer | null {
-    const raw = process.env.BACKUP_ENCRYPTION_KEY;
+    // DB (admin UI) wins, env fallback for legacy installs.
+    const raw = this.systemConfig.get<string>('backup_encryption_key', 'BACKUP_ENCRYPTION_KEY');
     if (!raw) return null;
-    // Joi already enforces min 32 chars when set, but re-check defensively.
     if (raw.length < 32) return null;
-    // Use raw bytes of the env string; HKDF below stretches them to a 32-byte
-    // AES key with a per-file salt, so the env value is effectively a master
-    // secret rather than the literal AES key.
     return Buffer.from(raw, 'utf8');
   }
 

@@ -10,6 +10,8 @@ import {
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Role, UserStatus } from '@prisma/client';
+import { SystemConfigService } from '../system/system-config.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const AUDIT_LOG_RETENTION_DAYS = 365;
 const AUDIT_LOG_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
@@ -29,7 +31,67 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(AdminService.name);
   private auditLogCleanupTimer: NodeJS.Timeout | null = null;
 
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private systemConfig: SystemConfigService,
+    private notifications: NotificationsService,
+  ) {}
+
+  /** Snapshot of runtime config for the Admin UI. Secrets are masked. */
+  getConfigSnapshot() {
+    return this.systemConfig.getPublicSnapshot();
+  }
+
+  /**
+   * Bulk update of runtime config. The frontend posts the full diff;
+   * any key whose value is empty string AND was previously a secret is
+   * treated as 'no change' (so users can leave the SMTP password field
+   * blank to keep the existing one). Any key explicitly set to null
+   * deletes that override (reverts to env / default).
+   */
+  async updateConfigBulk(updates: Record<string, any>, actorId: string) {
+    const SECRET_KEYS = new Set(['smtp_pass', 'backup_encryption_key', 'github_webhook_secret']);
+    const cleaned: Record<string, any> = {};
+    const removed: string[] = [];
+    for (const [k, v] of Object.entries(updates)) {
+      if (v === null) {
+        removed.push(k);
+        continue;
+      }
+      if (SECRET_KEYS.has(k) && (v === '' || v === undefined)) {
+        // Blank field on a secret → keep existing value.
+        continue;
+      }
+      cleaned[k] = v;
+    }
+    if (Object.keys(cleaned).length > 0) {
+      await this.systemConfig.setMany(cleaned, actorId);
+    }
+    for (const k of removed) {
+      await this.systemConfig.unset(k);
+    }
+    return { updated: Object.keys(cleaned).length, removed: removed.length };
+  }
+
+  /**
+   * Send a test email to verify SMTP creds without leaving the dashboard.
+   * Defaults the recipient to the actor's own email.
+   */
+  async testSmtp(actorId: string, to?: string): Promise<{ ok: true; sentTo: string }> {
+    const actor = await this.prisma.user.findUnique({
+      where: { id: actorId },
+      select: { email: true, name: true },
+    });
+    if (!actor) {
+      throw new BadRequestException('Actor not found.');
+    }
+    const recipient = (to || actor.email).trim();
+    if (!recipient || !/.+@.+\..+/.test(recipient)) {
+      throw new BadRequestException('Invalid recipient email.');
+    }
+    await this.notifications.sendTestEmail(recipient, actor.name);
+    return { ok: true, sentTo: recipient };
+  }
 
   onModuleInit() {
     // Run once at startup, then hourly

@@ -1,7 +1,8 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AlertRule } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { SystemConfigService } from '../system/system-config.service';
 import { renderEmail, escapeHtml } from './email-templates';
 
 /**
@@ -21,11 +22,12 @@ import { renderEmail, escapeHtml } from './email-templates';
  * so developers can copy-paste it during a password reset.
  */
 @Injectable()
-export class NotificationsService implements OnModuleDestroy {
+export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(NotificationsService.name);
   private transporter: any = null;
   private smtpFrom: string | null = null;
   private smtpReady = false;
+  private unsubscribeConfig: (() => void) | null = null;
 
   /**
    * In-memory dedupe ledger for alert dispatch. `sendAlert` consults this
@@ -41,43 +43,62 @@ export class NotificationsService implements OnModuleDestroy {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly systemConfig: SystemConfigService,
   ) {
-    this.initTransport();
-    // Periodic sweep so the Set/Map never grows unbounded if rule IDs
-    // come and go. Cheap O(n) over a tiny collection — refresh every TTL.
     this.cleanupTimer = setInterval(
       () => this.sweepExpiredAlerts(),
       NotificationsService.ALERT_TTL_MS,
     );
-    // Unref so this timer doesn't hold the event loop open at shutdown.
     this.cleanupTimer.unref?.();
+  }
+
+  async onModuleInit() {
+    this.initTransport();
+    // Live-reload the SMTP transport whenever any smtp_* setting changes
+    // in the Admin UI. No API restart needed — admin saves, transport
+    // gets recreated, the next email goes via the new server.
+    this.unsubscribeConfig = this.systemConfig.onChange((keys) => {
+      if (keys.some((k) => k.startsWith('smtp_') || k === 'public_dashboard_url')) {
+        this.logger.log('SMTP config changed — re-initialising transport');
+        this.closeTransport();
+        this.initTransport();
+      }
+    });
   }
 
   onModuleDestroy() {
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
+    if (this.unsubscribeConfig) this.unsubscribeConfig();
+    this.closeTransport();
+  }
+
+  private closeTransport() {
     if (this.transporter?.close) {
       try {
         this.transporter.close();
       } catch {}
     }
+    this.transporter = null;
+    this.smtpReady = false;
   }
 
   // ── transport bootstrap ───────────────────────────────────────────
 
   private initTransport() {
-    const host = this.config.get<string>('SMTP_HOST');
+    // Resolution: DB (SystemSetting) wins → env fallback → no-op.
+    const host = this.systemConfig.get<string>('smtp_host', 'SMTP_HOST');
     if (!host) {
       this.logger.warn(
-        'SMTP_HOST not configured — email notifications will be no-ops. ' +
-          'Set SMTP_HOST/PORT/USER/PASS/FROM to enable outbound mail.',
+        'SMTP not configured — email notifications will be no-ops. ' +
+          'Set it up in Admin → System Config to enable outbound mail.',
       );
       return;
     }
-    const port = Number(this.config.get<string>('SMTP_PORT') ?? 587);
-    const user = this.config.get<string>('SMTP_USER');
-    const pass = this.config.get<string>('SMTP_PASS');
+    const port = this.systemConfig.getNumber('smtp_port', 'SMTP_PORT', 587) ?? 587;
+    const user = this.systemConfig.get<string>('smtp_user', 'SMTP_USER');
+    const pass = this.systemConfig.get<string>('smtp_pass', 'SMTP_PASS');
     this.smtpFrom =
-      this.config.get<string>('SMTP_FROM') ?? user ?? 'no-reply@kryptalis.local';
+      this.systemConfig.get<string>('smtp_from', 'SMTP_FROM') ?? user ?? 'no-reply@kryptalis.local';
 
     try {
       // Lazy-require so missing optional dep doesn't crash the app at
@@ -102,6 +123,31 @@ export class NotificationsService implements OnModuleDestroy {
   }
 
   // ── public API ────────────────────────────────────────────────────
+
+  /**
+   * Admin-triggered SMTP probe. Throws BadRequestException if SMTP isn't
+   * configured so the UI can surface a precise error instead of a silent
+   * no-op. Throws the underlying transport error verbatim so admins see
+   * EAUTH / ECONNREFUSED / etc. directly.
+   */
+  async sendTestEmail(to: string, actorName: string): Promise<void> {
+    if (!this.smtpReady) {
+      throw new Error(
+        'SMTP is not configured. Save the SMTP settings first, then try again.',
+      );
+    }
+    const html = renderEmail({
+      title: 'Kryptalis test email',
+      preheader: 'If you can read this, SMTP works.',
+      body: `
+        <p style="margin:0 0 12px 0;">Hi ${escapeHtml(actorName)},</p>
+        <p style="margin:0;">
+          This is a test email triggered from Admin → System Config. If you
+          received it, your SMTP transport is healthy.
+        </p>`,
+    });
+    await this.sendMail({ to, subject: 'Kryptalis SMTP test', html });
+  }
 
   async sendPasswordReset(email: string, token: string, userName: string): Promise<void> {
     const url = this.buildDashboardUrl(`/auth/reset-password?token=${encodeURIComponent(token)}`);
@@ -403,7 +449,7 @@ export class NotificationsService implements OnModuleDestroy {
 
   private buildDashboardUrl(path: string): string {
     const base =
-      this.config.get<string>('PUBLIC_DASHBOARD_URL') ??
+      this.systemConfig.get<string>('public_dashboard_url', 'PUBLIC_DASHBOARD_URL') ??
       'http://localhost:3000';
     const trimmed = base.replace(/\/+$/, '');
     const suffix = path.startsWith('/') ? path : `/${path}`;

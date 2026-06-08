@@ -19,6 +19,7 @@ import { useAuthStore } from '@/lib/store';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { SystemConfigTab } from './system-config-tab';
 
 type Role = 'SUPERADMIN' | 'ADMIN' | 'USER' | 'VIEWER';
 type Status = 'ACTIVE' | 'SUSPENDED' | 'BANNED';
@@ -43,7 +44,7 @@ interface Overview {
   recentSignups: { id: string; name: string; email: string; status: Status; createdAt: string }[];
 }
 
-type Tab = 'overview' | 'users' | 'settings' | 'audit';
+type Tab = 'overview' | 'users' | 'settings' | 'system' | 'updates' | 'infrastructure' | 'audit';
 
 const ROLE_BADGE: Record<Role, { variant: 'success' | 'warning' | 'secondary' | 'outline'; icon: typeof Crown }> = {
   SUPERADMIN: { variant: 'success', icon: Crown },
@@ -194,6 +195,9 @@ export default function AdminPage() {
     { id: 'overview', label: t('admin.tab.overview'), icon: Activity },
     { id: 'users', label: t('admin.tab.users'), icon: Users },
     { id: 'settings', label: t('admin.tab.settings'), icon: Settings },
+    { id: 'system', label: t('admin.tab.system') || 'System Config', icon: Settings },
+    { id: 'infrastructure', label: t('admin.tab.infrastructure') || 'Infrastructure', icon: Activity },
+    { id: 'updates', label: t('admin.tab.updates') || 'Updates', icon: RefreshCw },
     { id: 'audit', label: t('admin.tab.audit'), icon: ShieldAlert },
   ];
 
@@ -485,6 +489,27 @@ export default function AdminPage() {
             </div>
           )}
         </div>
+      )}
+
+      {/* ─────────────── System config ─────────────── */}
+      {activeTab === 'system' && <SystemConfigTab />}
+
+      {/* ─────────────── Infrastructure / Updates placeholders ─────────────── */}
+      {(activeTab === 'infrastructure' || activeTab === 'updates') && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">
+              {activeTab === 'infrastructure' ? 'Infrastructure mode' : 'System updates'}
+            </CardTitle>
+            <CardDescription>
+              These controls are being migrated from /settings to /admin in the
+              ongoing config-consolidation work. Use the existing CLI in the
+              meantime: <span className="font-mono">/opt/kryptalis/update.sh</span>{' '}
+              for manual updates, and edit <span className="font-mono">.env</span>
+              {' '}for the LOCAL/MULTI deployment mode toggle.
+            </CardDescription>
+          </CardHeader>
+        </Card>
       )}
 
       {/* ─────────────── Audit ─────────────── */}

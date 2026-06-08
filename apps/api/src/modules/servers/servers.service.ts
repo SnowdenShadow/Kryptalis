@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
+import { SystemConfigService } from '../system/system-config.service';
 import { UpdateServerDto } from './dto/update-server.dto';
 import { randomBytes } from 'crypto';
 import { exec } from 'child_process';
@@ -19,6 +20,7 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private prisma: PrismaService,
     private encryption: EncryptionService,
+    private systemConfig: SystemConfigService,
   ) {}
 
   /** Generate a fresh install/agent token and return both raw + hash. */
@@ -53,7 +55,7 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
   /** Drop ServerMetric rows older than the configured window. */
   private async pruneOldMetrics() {
     try {
-      const days = parseInt(process.env.METRIC_RETENTION_DAYS || '30', 10);
+      const days = this.systemConfig.getNumber('metric_retention_days', 'METRIC_RETENTION_DAYS', 30) ?? 30;
       const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
       await this.prisma.serverMetric.deleteMany({
         where: { timestamp: { lt: cutoff } },

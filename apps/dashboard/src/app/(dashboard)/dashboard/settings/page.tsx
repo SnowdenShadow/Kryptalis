@@ -54,19 +54,19 @@ import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } fr
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
-type Tab = 'profile' | 'security' | 'git' | 'notifications' | 'appearance' | 'infrastructure' | 'updates';
+// User-scoped settings only. Platform-wide controls (Infrastructure
+// mode, Updates, SMTP, registration, retention) live under /admin/system
+// where they belong — Settings is for the user's own profile / security
+// / preferences. The /admin redirect button below covers admins arriving
+// here looking for the old tabs.
+type Tab = 'profile' | 'security' | 'git' | 'notifications' | 'appearance';
 
-// `adminOnly` tabs touch platform-wide infrastructure / control plane and
-// must not be reachable by regular USERs. The sidebar guard hides them and
-// any direct navigation falls back to the profile tab.
-const tabDefs: { key: Tab; labelKey: string; icon: React.ElementType; adminOnly?: boolean }[] = [
+const tabDefs: { key: Tab; labelKey: string; icon: React.ElementType }[] = [
   { key: 'profile', labelKey: 'settings.profile', icon: User },
   { key: 'security', labelKey: 'settings.security', icon: Shield },
   { key: 'git', labelKey: 'settings.git', icon: GitBranch },
   { key: 'notifications', labelKey: 'settings.notifications', icon: Bell },
   { key: 'appearance', labelKey: 'settings.appearance', icon: Palette },
-  { key: 'infrastructure', labelKey: 'settings.infrastructure', icon: Share2, adminOnly: true },
-  { key: 'updates', labelKey: 'settings.updates', icon: Download, adminOnly: true },
 ];
 
 interface UpdateStatus {
@@ -357,13 +357,8 @@ export default function SettingsPage() {
   const [notifications, setNotifications] = useState<Record<string, Record<string, boolean>>>({});
   const queryClient = useQueryClient();
 
-  // Guard: if a non-admin lands on an adminOnly tab (via URL hash, browser
-  // back button, etc.), kick them to profile so they don't see a card that
-  // 403s on every API call.
-  useEffect(() => {
-    const def = tabDefs.find((tt) => tt.key === activeTab);
-    if (def?.adminOnly && !isAdmin) setActiveTab('profile');
-  }, [activeTab, isAdmin]);
+  // Settings is user-scoped only now; platform-wide tabs moved to /admin.
+  // (Old adminOnly guard removed — no admin-tabs to gate here anymore.)
 
   // Load the current user so profile fields aren't empty on mount.
   const { data: me } = useQuery<{ id: string; name: string; email: string; twoFactorEnabled?: boolean }>({
@@ -481,7 +476,7 @@ export default function SettingsPage() {
   } = useQuery<UpdateStatus>({
     queryKey: ['system-updates'],
     queryFn: () => api.get('/system/updates'),
-    enabled: activeTab === 'updates',
+    enabled: false,
     // poll faster while an update is running so the UI flips to "done" quickly
     refetchInterval: (q) => {
       const s = (q.state.data as UpdateStatus | undefined)?.state;
@@ -567,7 +562,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="flex gap-1 rounded-lg border border-border bg-muted/50 p-1 overflow-x-auto">
-        {tabDefs.filter((tab) => !tab.adminOnly || isAdmin).map((tab) => (
+        {tabDefs.map((tab) => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
@@ -1025,193 +1020,6 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* Infrastructure Tab */}
-      {activeTab === 'infrastructure' && mounted && (
-        <InfrastructureTab
-          serverMode={serverMode}
-          onModeChange={(m) => setServerModeState(m)}
-        />
-      )}
-
-      {activeTab === 'updates' && (
-        <div className="space-y-6">
-          {/* ─── Status card ─────────────────────────────────────── */}
-          <Card>
-            <CardHeader>
-              <div className="flex items-start justify-between gap-3 flex-wrap">
-                <div>
-                  <CardTitle className="text-lg flex items-center gap-2">
-                    System updates
-                    {updateStatus && (() => {
-                      const s = updateStatus.state;
-                      const variant =
-                        s === 'UP_TO_DATE' ? 'success' :
-                        s === 'UPDATE_AVAILABLE' ? 'warning' :
-                        s === 'UPDATING' ? 'outline' :
-                        s === 'ERROR' ? 'destructive' : 'outline';
-                      const label =
-                        s === 'UP_TO_DATE' ? 'Up to date' :
-                        s === 'UPDATE_AVAILABLE' ? 'Update available' :
-                        s === 'UPDATING' ? 'Updating…' :
-                        s === 'ERROR' ? 'Error' : 'Unknown';
-                      return <Badge variant={variant as any} className="text-[10px]">{label}</Badge>;
-                    })()}
-                  </CardTitle>
-                  <CardDescription>
-                    Your installation automatically pulls the latest version from{' '}
-                    <span className="font-mono">{updateStatus?.branch || 'main'}</span> every 30 seconds.
-                  </CardDescription>
-                </div>
-                <Button size="sm" variant="outline" onClick={() => refetchUpdate()} disabled={updateFetching}>
-                  {updateFetching ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-                  Refresh
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {/* status message */}
-              {updateStatus && (
-                <div className={cn(
-                  'rounded-lg border p-3 flex items-start gap-3',
-                  updateStatus.state === 'UP_TO_DATE' ? 'border-emerald-500/30 bg-emerald-500/5' :
-                  updateStatus.state === 'UPDATE_AVAILABLE' ? 'border-orange-500/30 bg-orange-500/5' :
-                  updateStatus.state === 'UPDATING' ? 'border-blue-500/30 bg-blue-500/5' :
-                  updateStatus.state === 'ERROR' ? 'border-red-500/30 bg-red-500/5' :
-                  'border-border bg-muted/30',
-                )}>
-                  {updateStatus.state === 'UP_TO_DATE' && <CheckCircle2 size={16} className="text-emerald-500 shrink-0 mt-0.5" />}
-                  {updateStatus.state === 'UPDATE_AVAILABLE' && <Download size={16} className="text-orange-500 shrink-0 mt-0.5" />}
-                  {updateStatus.state === 'UPDATING' && <Loader2 size={16} className="text-blue-500 animate-spin shrink-0 mt-0.5" />}
-                  {updateStatus.state === 'ERROR' && <AlertCircle size={16} className="text-red-500 shrink-0 mt-0.5" />}
-                  {updateStatus.state === 'UNKNOWN' && <AlertCircle size={16} className="text-muted-foreground shrink-0 mt-0.5" />}
-                  <div className="flex-1 min-w-0 text-xs">
-                    <p className="font-medium">{updateStatus.message}</p>
-                    {updateStatus.updatedAt && (
-                      <p className="text-muted-foreground mt-0.5">
-                        Last check: {new Date(updateStatus.updatedAt).toLocaleString()}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* SHAs */}
-              {updateStatus && (updateStatus.currentSha || updateStatus.latestSha) && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="rounded-lg border border-border p-3">
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-                      <GitCommit size={10} /> Installed
-                    </p>
-                    <p className="font-mono text-xs mt-1 truncate">
-                      {updateStatus.currentSha ? updateStatus.currentSha.slice(0, 12) : '—'}
-                    </p>
-                  </div>
-                  <div className="rounded-lg border border-border p-3">
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider flex items-center gap-1">
-                      <GitCommit size={10} /> Latest on {updateStatus.branch || 'main'}
-                    </p>
-                    <p className="font-mono text-xs mt-1 truncate">
-                      {updateStatus.latestSha ? updateStatus.latestSha.slice(0, 12) : '—'}
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* action buttons */}
-              <div className="flex gap-2 flex-wrap">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => checkUpdate.mutate()}
-                  disabled={checkUpdate.isPending || !updateStatus?.manualTriggerAvailable}
-                >
-                  {checkUpdate.isPending ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
-                  Check for updates
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() => applyUpdate.mutate()}
-                  disabled={
-                    applyUpdate.isPending ||
-                    !updateStatus?.manualTriggerAvailable ||
-                    updateStatus?.state === 'UPDATING'
-                  }
-                >
-                  {applyUpdate.isPending ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
-                  Update now
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => { fetchLog.mutate(); }}
-                  disabled={fetchLog.isPending || !updateStatus?.hasUpdateLog}
-                >
-                  {fetchLog.isPending ? <Loader2 size={12} className="animate-spin" /> : null}
-                  View log
-                </Button>
-              </div>
-
-              {!updateStatus?.manualTriggerAvailable && (
-                <p className="text-[11px] text-muted-foreground">
-                  Manual trigger unavailable in this deployment — the timer runs every 30 seconds automatically.
-                </p>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* ─── Auto-update toggle ───────────────────────────────── */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
-                <Power size={16} /> Auto-update
-              </CardTitle>
-              <CardDescription>
-                When enabled, the platform pulls and applies updates every 30 seconds. Disable if you want full manual control.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-between gap-3 rounded-lg border border-border p-4">
-                <div className="flex-1">
-                  <p className="font-medium text-sm">
-                    {updateStatus?.autoUpdateEnabled === false ? 'Disabled' : 'Enabled'}
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {updateStatus?.autoUpdateEnabled === false
-                      ? 'Updates will not be applied automatically. Use "Update now" when ready.'
-                      : 'New commits on origin will land on your instance within 30 seconds.'}
-                  </p>
-                </div>
-                <Button
-                  size="sm"
-                  variant={updateStatus?.autoUpdateEnabled === false ? 'default' : 'destructive'}
-                  onClick={() => toggleAuto.mutate(updateStatus?.autoUpdateEnabled === false)}
-                  disabled={toggleAuto.isPending}
-                >
-                  {toggleAuto.isPending && <Loader2 size={12} className="animate-spin" />}
-                  {updateStatus?.autoUpdateEnabled === false ? 'Enable' : 'Disable'}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* ─── Log viewer ───────────────────────────────────────── */}
-          {updateLog && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Recent update log</CardTitle>
-                <CardDescription className="text-xs">
-                  Last 200 lines of <span className="font-mono">.kryptalis/update.log</span>
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <pre className="font-mono text-[11px] bg-muted/30 rounded p-3 overflow-x-auto max-h-96 whitespace-pre-wrap break-all">
-                  {updateLog}
-                </pre>
-              </CardContent>
-            </Card>
-          )}
-        </div>
-      )}
 
       {/* 2FA enrollment dialog */}
       <Dialog open={twoFa.step === 'enroll'} onClose={() => setTwoFa({ step: 'idle' })}>
