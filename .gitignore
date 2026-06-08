@@ -24,8 +24,10 @@ out/
 .DS_Store
 Thumbs.db
 
-# Prisma
-apps/api/prisma/migrations/
+# Prisma — migrations ARE checked in (so `prisma migrate deploy` works on
+# a fresh clone). Per-developer drafts produced by `prisma migrate dev`
+# would normally also land here; gate those behind a manual review instead
+# of hiding the whole folder.
 
 # Go
 apps/agent/bin/

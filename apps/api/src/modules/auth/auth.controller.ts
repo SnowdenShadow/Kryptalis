@@ -27,6 +27,21 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 export class AuthController {
   constructor(private authService: AuthService) {}
 
+  /**
+   * Public endpoint — tells the dashboard whether this install needs to
+   * run the first-admin wizard. Drives the redirect on the landing page:
+   * `needsSetup: true` → /register (with a "you're the first user" hint);
+   * `false` → /login as usual. Throttled lightly so a bot can't probe
+   * for "is this install fresh" cheaply, but not so tight that legit
+   * page loads get blocked.
+   */
+  @Get('setup-status')
+  @Throttle({ default: { ttl: 60_000, limit: 30 } })
+  @ApiOperation({ summary: 'Whether the first SUPERADMIN still needs to be created' })
+  setupStatus() {
+    return this.authService.getSetupStatus();
+  }
+
   // Tight throttler on the unauthenticated endpoints — defends against
   // brute-force and credential-stuffing without slowing down legit users.
   @Post('register')

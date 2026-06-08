@@ -1,9 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { Lock, Mail } from 'lucide-react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Lock, Mail, Sparkles } from 'lucide-react';
+
+// Next 15 refuses to statically prerender a page that calls
+// useSearchParams() without an enclosing <Suspense>. Same fix as
+// verify-email — opt the page out of static rendering and wrap the
+// body in Suspense.
+export const dynamic = 'force-dynamic';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -13,7 +19,17 @@ import { api } from '@/lib/api';
 import { toast } from 'sonner';
 import { useTranslation } from '@/lib/i18n';
 
+// Wrapper — keeps Next.js happy about useSearchParams() needing a
+// Suspense boundary. The real body lives in RegisterPageInner.
 export default function RegisterPage() {
+  return (
+    <Suspense fallback={null}>
+      <RegisterPageInner />
+    </Suspense>
+  );
+}
+
+function RegisterPageInner() {
   const { t } = useTranslation();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -30,6 +46,12 @@ export default function RegisterPage() {
   const [resending, setResending] = useState(false);
   const { setAuth } = useAuthStore();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // `?setup=1` is appended by the landing page when the API reports
+  // `needsSetup`. We use it ONLY to show a welcome banner — the actual
+  // "becomes SUPERADMIN" decision is server-side at register time, so a
+  // stale link or hand-typed query can't escalate privileges.
+  const isSetup = searchParams.get('setup') === '1';
 
   const strengthScore = (pw: string) => {
     let s = 0;
@@ -171,10 +193,30 @@ export default function RegisterPage() {
           <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground text-xl font-bold">
             K
           </div>
-          <CardTitle>{t('auth.registerTitle')}</CardTitle>
-          <CardDescription>{t('auth.registerDesc')}</CardDescription>
+          <CardTitle>
+            {isSetup ? 'Create your Kryptalis admin' : t('auth.registerTitle')}
+          </CardTitle>
+          <CardDescription>
+            {isSetup
+              ? 'Welcome — this is the first account on this install. It will be promoted to SUPERADMIN automatically.'
+              : t('auth.registerDesc')}
+          </CardDescription>
         </CardHeader>
         <CardContent>
+          {isSetup && (
+            <div className="mb-4 rounded-md border border-primary/30 bg-primary/5 p-3 flex items-start gap-2">
+              <Sparkles size={16} className="text-primary mt-0.5 shrink-0" />
+              <div className="text-xs space-y-1">
+                <p className="font-medium">First-install bootstrap</p>
+                <p className="text-muted-foreground">
+                  After this account is created, the setup wizard goes away
+                  and every later signup becomes a regular USER. Pick a
+                  strong password — you can't downgrade or rotate this
+                  account without root DB access.
+                </p>
+              </div>
+            </div>
+          )}
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="name">{t('auth.name')}</Label>

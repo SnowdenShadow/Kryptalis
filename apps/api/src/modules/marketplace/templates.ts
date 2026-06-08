@@ -49,7 +49,7 @@ networks:
     volumes:
       - grafana_data___INSTANCE_ID__:/var/lib/grafana
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=__RANDOM_PASSWORD__
 volumes:
   grafana_data___INSTANCE_ID__:
 networks:
@@ -107,7 +107,7 @@ networks:
     environment:
       WORDPRESS_DB_HOST: wordpress-db
       WORDPRESS_DB_USER: wordpress
-      WORDPRESS_DB_PASSWORD: wordpress
+      WORDPRESS_DB_PASSWORD: __RANDOM_PASSWORD__
       WORDPRESS_DB_NAME: wordpress
     volumes:
       - wp_data___INSTANCE_ID__:/var/www/html
@@ -122,8 +122,8 @@ networks:
     environment:
       MYSQL_DATABASE: wordpress
       MYSQL_USER: wordpress
-      MYSQL_PASSWORD: wordpress
-      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_PASSWORD: __RANDOM_PASSWORD__
+      MYSQL_ROOT_PASSWORD: __RANDOM_PASSWORD_2__
     volumes:
       - wp_db___INSTANCE_ID__:/var/lib/mysql
 volumes:
@@ -167,7 +167,7 @@ networks:
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_PASSWORD: __RANDOM_PASSWORD__
     volumes:
       - minio_data___INSTANCE_ID__:/data
 volumes:
@@ -206,7 +206,7 @@ networks:
       - "__HOST_PORT__:5432"
     environment:
       POSTGRES_USER: kryptalis
-      POSTGRES_PASSWORD: kryptalis
+      POSTGRES_PASSWORD: __RANDOM_PASSWORD__
       POSTGRES_DB: kryptalis
     volumes:
       - pg_data___INSTANCE_ID__:/var/lib/postgresql/data
@@ -247,7 +247,7 @@ networks:
     env_file:
       - .env
     environment:
-      MYSQL_ROOT_PASSWORD: \${MYSQL_ROOT_PASSWORD:-kryptalis}
+      MYSQL_ROOT_PASSWORD: \${MYSQL_ROOT_PASSWORD:-__RANDOM_PASSWORD__}
       MYSQL_DATABASE: \${MYSQL_DATABASE:-app}
     volumes:
       - mysql_data___INSTANCE_ID__:/var/lib/mysql
@@ -271,7 +271,7 @@ networks:
       - .env
     environment:
       MONGO_INITDB_ROOT_USERNAME: \${MONGO_INITDB_ROOT_USERNAME:-kryptalis}
-      MONGO_INITDB_ROOT_PASSWORD: \${MONGO_INITDB_ROOT_PASSWORD:-kryptalis}
+      MONGO_INITDB_ROOT_PASSWORD: \${MONGO_INITDB_ROOT_PASSWORD:-__RANDOM_PASSWORD__}
     volumes:
       - mongo_data___INSTANCE_ID__:/data/db
 volumes:
@@ -334,7 +334,7 @@ networks:
     networks:
       - kryptalis-apps
     environment:
-      POSTGRES_PASSWORD: plausible
+      POSTGRES_PASSWORD: __RANDOM_PASSWORD__
     volumes:
       - plausible_db___INSTANCE_ID__:/var/lib/postgresql/data
   plausible-events:
@@ -543,10 +543,10 @@ networks:
     networks:
       - kryptalis-apps
     environment:
-      MYSQL_ROOT_PASSWORD: postal_root
+      MYSQL_ROOT_PASSWORD: __RANDOM_PASSWORD__
       MYSQL_DATABASE: postal
       MYSQL_USER: postal
-      MYSQL_PASSWORD: postal
+      MYSQL_PASSWORD: __RANDOM_PASSWORD_2__
     volumes:
       - postal_db___INSTANCE_ID__:/var/lib/mysql
   postal-rabbitmq:
@@ -610,7 +610,7 @@ networks:
     environment:
       DB_SERVER: prestashop-db-__INSTANCE_ID__
       DB_USER: prestashop
-      DB_PASSWD: prestashop
+      DB_PASSWD: __RANDOM_PASSWORD__
       DB_NAME: prestashop
       DB_PREFIX: ps_
       PS_INSTALL_AUTO: \${PS_INSTALL_AUTO:-1}
@@ -636,8 +636,8 @@ networks:
     environment:
       MARIADB_DATABASE: prestashop
       MARIADB_USER: prestashop
-      MARIADB_PASSWORD: prestashop
-      MARIADB_ROOT_PASSWORD: rootpassword-change-me
+      MARIADB_PASSWORD: __RANDOM_PASSWORD__
+      MARIADB_ROOT_PASSWORD: __RANDOM_PASSWORD_2__
     volumes:
       - prestashop_db___INSTANCE_ID__:/var/lib/mysql
     healthcheck:

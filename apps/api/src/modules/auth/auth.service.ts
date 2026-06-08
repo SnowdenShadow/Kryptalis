@@ -64,6 +64,34 @@ export class AuthService {
     private notifications: NotificationsService,
   ) {}
 
+  // ── setup status ──────────────────────────────────────────────────
+  //
+  // The dashboard's landing page hits this BEFORE choosing /login vs
+  // /register. On a fresh install (no users yet) we want to send the
+  // operator straight to /register with a "you're about to become the
+  // SUPERADMIN" notice. After the first signup the wizard goes away.
+  //
+  // We additionally check the BOOTSTRAP_DONE setting so that a fully
+  // re-seeded DB after an emergency reset doesn't re-open the bootstrap
+  // — same flag the register() method already consults.
+
+  async getSetupStatus(): Promise<{ needsSetup: boolean }> {
+    const userCount = await this.prisma.user.count();
+    if (userCount > 0) return { needsSetup: false };
+    // Belt + suspenders: even at 0 users, if BOOTSTRAP_DONE was set we
+    // refuse to declare needsSetup=true. Operator must use `prisma
+    // studio` or a SQL console to reopen — protects against a
+    // misconfigured DB drop accidentally letting someone register as
+    // SUPERADMIN.
+    try {
+      const flag = await this.prisma.systemSetting.findUnique({
+        where: { key: 'BOOTSTRAP_DONE' },
+      });
+      if (flag) return { needsSetup: false };
+    } catch {}
+    return { needsSetup: true };
+  }
+
   // ── register ──────────────────────────────────────────────────────
 
   async register(dto: RegisterDto, ctx: { ip?: string; userAgent?: string } = {}) {

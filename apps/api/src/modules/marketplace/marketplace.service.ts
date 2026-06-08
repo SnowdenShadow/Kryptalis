@@ -9,6 +9,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 const execAsync = promisify(exec);
 
@@ -331,6 +332,34 @@ export class MarketplaceService {
     composeContent = composeContent
       .replace(/__INSTANCE_ID__/g, instanceId)
       .replace(/__HOST_PORT__/g, String(realPort));
+
+    // Generate strong random passwords for any __RANDOM_PASSWORD__ /
+    // __RANDOM_PASSWORD_2__ / ... placeholders the template declares.
+    // Each placeholder gets the SAME value across its occurrences so the
+    // app + bundled DB end up with matching credentials. Different
+    // numbered placeholders (__RANDOM_PASSWORD_2__) get DIFFERENT values.
+    //
+    // We stash the generated passwords on the .env file too — that way
+    // the auto-import DB rows (databases.service.ts) pick them up via
+    // their normal env parsing and the user sees the right creds in
+    // /dashboard/databases. The .env file lives inside the appDir, never
+    // committed anywhere outside the host.
+    const randomPasswords: Record<string, string> = {};
+    const placeholderRe = /__RANDOM_PASSWORD(_\d+)?__/g;
+    composeContent = composeContent.replace(placeholderRe, (match) => {
+      if (!randomPasswords[match]) {
+        // 24 bytes → 32 chars base64url. URL-safe so MySQL/Mongo/Postgres
+        // connection strings don't choke on `+` or `/`. Strip `=` padding.
+        randomPasswords[match] = crypto.randomBytes(24).toString('base64url').replace(/=+$/, '');
+      }
+      return randomPasswords[match];
+    });
+    // Merge generated passwords into the env override so they also land
+    // in the .env file (the templates that read `${VAR:-default}` will
+    // pick the .env value over the placeholder fallback). Keeps the
+    // randomization visible to both the compose substitution above AND
+    // the runtime container env at the same time.
+    Object.assign(envOverride, randomPasswords);
 
     // Templates already declare:
     //   - networks: kryptalis-apps (external) at top-level
