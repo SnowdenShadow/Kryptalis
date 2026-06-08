@@ -49,9 +49,11 @@ interface LocalPublicServer {
 export function OnboardingWizard({
   open,
   onComplete,
+  onDismiss,
 }: {
   open: boolean;
   onComplete: () => void;
+  onDismiss?: () => void;
 }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
@@ -123,11 +125,11 @@ export function OnboardingWizard({
     }
   }
 
-  // The "X" / outside-click close shouldn't be possible mid-flow — the
-  // user is meant to walk through it. We swallow onClose() entirely
-  // (no-op) so the only way out is the Finish button.
+  // Clicking outside / pressing Esc dismisses the wizard for THIS
+  // session only. The server-side completion flag stays false so it
+  // re-appears on the next login until the user clicks Finish.
   return (
-    <Dialog open={open} onClose={() => {}} className="max-w-xl">
+    <Dialog open={open} onClose={() => onDismiss?.()} className="max-w-xl">
       <StepIndicator current={step} />
 
       {step === 1 && (

@@ -302,6 +302,12 @@ model Application {
   // ports + Let's Encrypt certs work.
   containerName     String?
   containerPort     Int?
+  // Optional host-port publish for apps that have NO domain. When set,
+  // docker-compose publishes "hostPort:containerPort" so the user can
+  // reach the app at http://<serverIp>:<hostPort> without DNS/TLS. The
+  // platform refuses values that collide with reserved system ports
+  // (3000 dashboard, 4000 API, 5432 postgres, 6379 redis, 80/443 caddy).
+  hostPort          Int?
   envVars           Json?
   portMapping       Json?
   webhookSecret     String?

@@ -29,6 +29,7 @@ interface Repo {
   defaultBranch?: string;
   private?: boolean;
   description?: string | null;
+  url?: string; // canonical clone URL (works for GitLab / Bitbucket too)
 }
 interface DomainRow {
   id: string;
@@ -109,6 +110,8 @@ export function QuickDeployDialog({
   // Domain
   const [domainChoice, setDomainChoice] = useState<'skip' | 'new' | string>('skip');
   const [newDomain, setNewDomain] = useState('');
+  // Host-port publish (only meaningful when domainChoice === 'skip').
+  const [hostPort, setHostPort] = useState('');
 
   // ── Resets ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -170,7 +173,9 @@ export function QuickDeployDialog({
         body.framework = detection?.framework || 'STATIC';
         body.gitProvider = providers.find((p) => p.id === providerId)?.provider || 'GITHUB';
         body.gitProviderId = providerId;
-        body.gitUrl = `https://github.com/${repo.fullName}.git`;
+        // Use the canonical clone URL returned by the provider — works
+        // for GitLab / Bitbucket too, where the host isn't github.com.
+        body.gitUrl = repo.url || `https://github.com/${repo.fullName}.git`;
         body.gitBranch = repo.defaultBranch || 'main';
       } else if (source === 'gitUrl') {
         body.gitUrl = gitUrl.trim();
@@ -188,6 +193,12 @@ export function QuickDeployDialog({
         body.domain = newDomain.trim();
       } else if (domainChoice !== 'skip' && domainChoice !== 'new') {
         body.domainId = domainChoice;
+      } else if (domainChoice === 'skip' && hostPort.trim()) {
+        // No domain → publish on a host port for direct IP access.
+        const n = parseInt(hostPort, 10);
+        if (Number.isFinite(n) && n >= 1024 && n <= 65535) {
+          body.hostPort = n;
+        }
       }
 
       return api.post('/applications', body);
@@ -211,6 +222,7 @@ export function QuickDeployDialog({
     setNewDomain('');
     setDomainChoice('skip');
     setRepoSearch('');
+    setHostPort('');
   }
 
   const filteredRepos = repoSearch
@@ -492,6 +504,26 @@ export function QuickDeployDialog({
                   "Point this domain's A record at your server IP. Caddy auto-issues a Let's Encrypt cert on first hit."}
               </p>
             </>
+          )}
+          {domainChoice === 'skip' && (
+            <div className="space-y-2 pt-1">
+              <Label htmlFor="qd-hostport" className="text-xs text-muted-foreground">
+                {t('quickDeploy.hostPort') || 'Or publish on a host port (no domain)'}
+              </Label>
+              <Input
+                id="qd-hostport"
+                type="number"
+                min={1024}
+                max={65535}
+                placeholder="5050"
+                value={hostPort}
+                onChange={(e) => setHostPort(e.target.value)}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {t('quickDeploy.hostPortHint') ||
+                  'App reachable at http://<server-ip>:<port>. Reserved ports (3000 dashboard, 4000 API, 5432 postgres, 80/443 Caddy) are refused.'}
+              </p>
+            </div>
           )}
         </div>
       </div>

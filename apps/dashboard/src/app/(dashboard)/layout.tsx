@@ -51,12 +51,11 @@ export default function DashboardLayout({
     }
   }, [hydrated, accessToken, router]);
 
-  // Onboarding eligibility — only SUPERADMIN with zero projects and the
-  // server-side completion flag still false sees the wizard. We gate the
-  // queries on (hydrated && accessToken && user) so they don't fire before
-  // auth is ready or for logged-out viewers.
-  const isSuperadmin = user?.role === 'SUPERADMIN';
-  const enabled = hydrated && !!accessToken && isSuperadmin && !dismissed;
+  // Onboarding eligibility — every authenticated user gets the wizard
+  // on first login if they haven't dismissed it. Was previously
+  // SUPERADMIN-only, which left regular USERs landing on an empty
+  // dashboard with no guidance.
+  const enabled = hydrated && !!accessToken && !!user && !dismissed;
 
   const { data: onboarding } = useQuery<{ completed: boolean }>({
     queryKey: ['onboarding'],
@@ -102,6 +101,7 @@ export default function DashboardLayout({
         <OnboardingWizard
           open={showWizard}
           onComplete={() => setDismissed(true)}
+          onDismiss={() => setDismissed(true)}
         />
       )}
     </div>

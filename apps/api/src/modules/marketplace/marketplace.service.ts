@@ -325,7 +325,10 @@ export class MarketplaceService {
         customPort,
         port: realPort,
       });
-      this.proxy.regenerate().catch(() => {});
+      // Caddy regen is deferred until runDockerCompose() succeeds (down
+      // below) — issuing a reverse_proxy block before the container
+      // exists guarantees a ~30s window of 502s + risks tripping the
+      // Let's Encrypt issuance against an unreachable host.
     }
 
     const task = await this.prisma.agentTask.create({
@@ -655,6 +658,9 @@ export class MarketplaceService {
         where: { id: applicationId },
         data: { status: 'ERROR' },
       });
+      // Refresh Caddy so any stale block from a partially-completed
+      // install no longer points at a container that's never coming up.
+      this.proxy.regenerate().catch(() => {});
     }
   }
 }

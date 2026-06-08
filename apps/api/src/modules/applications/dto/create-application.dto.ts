@@ -123,4 +123,16 @@ export class CreateApplicationDto {
     message: 'domain must be a valid RFC 1035 hostname (e.g. app.acme.com).',
   })
   domain?: string;
+
+  /**
+   * Optional: publish the container on this host port for direct
+   * IP-based access (use when you have no domain). The platform refuses
+   * ports already in use by Kryptalis system services or other apps.
+   */
+  @ApiProperty({ required: false, description: 'Host port to publish on (no domain case)' })
+  @IsOptional()
+  @IsInt()
+  @Min(1024)
+  @Max(65535)
+  hostPort?: number;
 }

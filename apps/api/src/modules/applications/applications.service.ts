@@ -61,8 +61,17 @@ function imageName(slug: string) {
  */
 function resolveAppDir(slug: string, applicationId: string): string {
   const perInstance = path.join(APPS_DIR, `${slug}-${applicationId.slice(0, 12)}`);
+  // Per-instance dir wins always when present.
   if (fs.existsSync(perInstance)) return perInstance;
-  return path.join(APPS_DIR, slug);
+  // Legacy <slug>-only dir, IF it's already there from a pre-migration
+  // install. We DO NOT default to it for a brand-new app — two apps
+  // with the same slugged name (e.g. "blog" and "Blog") would clobber
+  // each other's compose stack.
+  const legacy = path.join(APPS_DIR, slug);
+  if (fs.existsSync(legacy)) return legacy;
+  // Brand-new app — always create a per-instance dir so the slug
+  // alone never has to be unique across the platform.
+  return perInstance;
 }
 
 /**
@@ -219,6 +228,23 @@ function projectNetworkName(projectId: string) {
 }
 
 /**
+ * Defensively ensure the shared kryptalis-apps bridge exists before any
+ * `docker run --network kryptalis-apps`. The network is normally created
+ * by the root docker-compose.yml, but on remote agents / standalone
+ * boots it might be missing. Idempotent — `network create` returns
+ * non-zero when it already exists, which we swallow.
+ */
+async function ensureSharedAppsNetwork(): Promise<void> {
+  try {
+    await execFileAsync('docker', ['network', 'inspect', 'kryptalis-apps'], { timeout: 5_000 });
+  } catch {
+    try {
+      await execFileAsync('docker', ['network', 'create', 'kryptalis-apps'], { timeout: 10_000 });
+    } catch {}
+  }
+}
+
+/**
  * Attach every service of a compose file to the shared `kryptalis-apps`
  * bridge. Caddy lives on that bridge and reaches each container by
  * `container_name:internal_port`. This is what makes zero-host-port
@@ -308,6 +334,23 @@ async function dockerCompose(
   argv.push(...args);
   return execFileAsync('docker', argv, { cwd: appDir, timeout: timeoutMs });
 }
+
+/**
+ * Host ports reserved by Kryptalis itself + common system ports. Any
+ * attempt to publish an app here is refused with a clear error so the
+ * user doesn't break their own dashboard / API / DB connection.
+ */
+const RESERVED_HOST_PORTS = new Set<number>([
+  22,    // ssh
+  80, 443, // caddy
+  3000,  // kryptalis-dashboard
+  4000,  // kryptalis-api
+  5432,  // postgres
+  6379,  // redis
+  2019,  // caddy admin API
+  53,    // dns
+  25, 465, 587, 993, 995, 110, 143, // mail
+]);
 
 // ── service ──────────────────────────────────────────────────────────────
 
@@ -402,8 +445,35 @@ export class ApplicationsService {
       domainId: dtoDomainId,
       domain: dtoDomainString,
       envVars: dtoEnvVars,
+      hostPort: dtoHostPort,
       ...dbData
     } = dto;
+
+    // Host-port collision check. Refuses reserved system ports and
+    // ports already published by another app on the same server.
+    if (dtoHostPort) {
+      if (RESERVED_HOST_PORTS.has(dtoHostPort)) {
+        throw new ConflictException(
+          `Port ${dtoHostPort} is reserved by Kryptalis (dashboard/api/proxy/db). Pick another.`,
+        );
+      }
+      const project = await this.prisma.project.findUnique({
+        where: { id: dbData.projectId },
+        select: { serverId: true },
+      });
+      const otherUsed = await this.prisma.application.findFirst({
+        where: {
+          hostPort: dtoHostPort,
+          project: { serverId: project?.serverId },
+        },
+        select: { id: true, name: true },
+      });
+      if (otherUsed) {
+        throw new ConflictException(
+          `Port ${dtoHostPort} is already used by "${otherUsed.name}" on this server.`,
+        );
+      }
+    }
 
     // Convenience: caller passed `domain: "app.acme.com"` for a brand-new
     // hostname. Create the Domain row up-front and treat the rest of the
@@ -481,16 +551,30 @@ export class ApplicationsService {
         gitProviderId: gitProviderId || null,
         portMapping: portMapping || undefined,
         port: firstMappedHost ?? dbData.port,
+        hostPort: dtoHostPort,
         customPort: userPickedPort,
         status: 'DEPLOYING',
         envVars: this.encryptEnvVars(dtoEnvVars) as any,
         webhookSecret: this.encryption.encrypt(crypto.randomBytes(24).toString('hex')),
-      },
+      } as any,
     });
 
-    // Hook the new app into a domain if one was picked. Same rules as the
-    // marketplace flow: clean-URL apps grab the :443 slot, port-pinned apps
-    // register a port binding, conflicts surface uniformly.
+    // Domain attach rules:
+    //   - We attach the DB-level Domain.applicationId now, so the user
+    //     immediately sees the link in the dashboard.
+    //   - We DO NOT regenerate Caddy yet. The container doesn't exist;
+    //     a regen now produces a reverse_proxy block pointing at a
+    //     containerName Docker can't resolve → 502s for ~30 s while
+    //     the build/up runs. The runDeploy / runDockerImageDeploy
+    //     success path calls proxy.regenerate() once they're sure the
+    //     container is up — that's the safe point.
+    //   - Blank-scaffold apps (no gitUrl + no dockerImage) can't host
+    //     anything yet, so a domain attach on them is rejected up front.
+    if (domainId && !dto.gitUrl && !dto.dockerImage) {
+      throw new BadRequestException(
+        'Cannot attach a domain to a blank app — add a Git URL or Docker image first.',
+      );
+    }
     if (domainId) {
       try {
         await this.domainAttach.attach({
@@ -500,11 +584,8 @@ export class ApplicationsService {
           customPort: userPickedPort,
           port: app.port ?? 80,
         });
-        this.proxy.regenerate().catch(() => {});
+        // Defer proxy.regenerate() to the deploy success path.
       } catch (err: any) {
-        // Domain attach failed (conflict, etc.) — the app is created anyway,
-        // and the deploy continues. The error surfaces in the deploy logs so
-        // the user can fix it from the app's Settings tab.
         await this.prisma.application.update({
           where: { id: app.id },
           data: { status: 'ERROR' },
@@ -545,6 +626,7 @@ export class ApplicationsService {
         composeOverride,
         dockerfileOverride,
         portMapping,
+        hostPort: dtoHostPort,
       }).catch(() => {});
     } else if (dto.dockerImage) {
       // Docker-image-only deploy: synthesize a minimal docker-compose.yml so
@@ -553,6 +635,7 @@ export class ApplicationsService {
       this.runDockerImageDeploy(deployment.id, app.id, dto.name, dto.dockerImage, {
         port: dto.port,
         envVars: dto.envVars,
+        hostPort: dtoHostPort,
       }).catch(() => {});
     } else {
       await this.prisma.application.update({ where: { id: app.id }, data: { status: 'STOPPED' } });
@@ -576,7 +659,7 @@ export class ApplicationsService {
     appId: string,
     name: string,
     image: string,
-    opts: { port?: number; envVars?: Record<string, string> },
+    opts: { port?: number; envVars?: Record<string, string>; hostPort?: number },
   ) {
     const slug = slugify(name);
     const containerNm = containerName(slug);
@@ -597,6 +680,7 @@ export class ApplicationsService {
     };
 
     try {
+      await ensureSharedAppsNetwork();
       await this.prisma.deployment.update({
         where: { id: deploymentId },
         data: { status: 'DEPLOYING', startedAt: new Date() },
@@ -630,7 +714,14 @@ export class ApplicationsService {
       const envBlock = Object.keys(env).length
         ? `    environment:\n${Object.entries(env).map(([k, v]) => `      ${k}: ${JSON.stringify(v)}`).join('\n')}\n`
         : '';
-      const portsBlock = opts.port ? `    ports:\n      - "${opts.port}:${opts.port}"\n` : '';
+      // ports: publish host:container when the user picked a host port
+      // (no-domain access path). With a domain, Caddy reaches the
+      // container over the bridge — no publish needed.
+      const publishHost = opts.hostPort;
+      const publishContainer = opts.port ?? opts.hostPort ?? null;
+      const portsBlock = publishHost && publishContainer
+        ? `    ports:\n      - "${publishHost}:${publishContainer}"\n`
+        : '';
       const networksBlock = projectNet
         ? `    networks:\n      - kryptalis_project\nnetworks:\n  kryptalis_project:\n    external: true\n    name: ${projectNet}\n`
         : '';
@@ -650,12 +741,35 @@ ${networksBlock}`;
       log(`> docker compose up -d`);
       await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], undefined, 180_000);
 
+      // If the user didn't pick an explicit port, ask docker what the
+      // image actually exposes. Without this, Caddy has no idea where
+      // to proxy and the domain stays in 'reserved' mode.
+      let detectedPort = opts.port ?? null;
+      if (!detectedPort) {
+        try {
+          const insp = await execFileAsync(
+            'docker',
+            ['inspect', '--format', '{{json .Config.ExposedPorts}}', containerNm],
+            { timeout: 10_000 },
+          );
+          const exposed = JSON.parse(insp.stdout || '{}') as Record<string, unknown>;
+          for (const key of Object.keys(exposed)) {
+            const n = parseInt(key.split('/')[0], 10);
+            if (Number.isFinite(n)) {
+              detectedPort = n;
+              break;
+            }
+          }
+        } catch {}
+      }
+
       await this.prisma.application.update({
         where: { id: appId },
         data: {
           status: AppStatus.RUNNING,
           containerName: containerNm,
-          containerPort: opts.port ?? null,
+          containerPort: detectedPort,
+          port: detectedPort,
         },
       });
       this.proxy.regenerate().catch(() => {});
@@ -686,6 +800,9 @@ ${networksBlock}`;
           finishedAt: new Date(),
         },
       });
+      // Refresh Caddy so any stale block from a prior successful deploy
+      // (we just failed a new one) no longer points at a dead container.
+      this.proxy.regenerate().catch(() => {});
       this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
   }
@@ -722,6 +839,7 @@ ${networksBlock}`;
       composeOverride?: string;
       dockerfileOverride?: string;
       portMapping?: Record<string, number>;
+      hostPort?: number;
     },
   ) {
     const slug = slugify(name);
@@ -760,6 +878,7 @@ ${networksBlock}`;
       where: { id: deploymentId },
       data: { status: 'BUILDING', startedAt: new Date() },
     });
+    await ensureSharedAppsNetwork();
 
     // Resolve the project scope so we can attach this app to the per-project
     // docker network — enables service-name DNS between apps of the same project.
@@ -1009,6 +1128,24 @@ ${networksBlock}`;
           }
           content = stripComposePorts(content);
           content = attachSharedAppsNetwork(content);
+        } else if (opts.hostPort) {
+          // No domain → user picked a host port to publish on. Rewrite
+          // every service's ports block to <hostPort>:<containerPort>
+          // so the app is reachable at http://<serverIp>:<hostPort>.
+          // Use the parsed container port from the compose; default to
+          // hostPort if no internal target was declared.
+          const info = readComposeContainerInfo(content, containerName(slug));
+          const containerPort = info.containerPort || opts.hostPort;
+          content = remapComposePorts(content, { [String(containerPort)]: opts.hostPort });
+          await this.prisma.application.update({
+            where: { id: appId },
+            data: {
+              containerName: info.containerName,
+              containerPort,
+              port: containerPort,
+              hostPort: opts.hostPort,
+            },
+          });
         }
 
         if (projectNet) content = attachProjectNetwork(content, projectNet);
@@ -1191,6 +1328,9 @@ ${networksBlock}`;
           finishedAt: new Date(),
         },
       });
+      // Refresh Caddy so the previous block (if any) reflects the
+      // current state — either the rollback is up, or the app is down.
+      this.proxy.regenerate().catch(() => {});
       this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
   }
