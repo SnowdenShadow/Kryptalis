@@ -78,7 +78,7 @@ export class AuthService {
     // Serializable causes one of the two to abort with a serialization
     // error; the loser is rolled back and a second attempt sees the right
     // count.
-    return this.prisma.$transaction(async (tx) => {
+    const txResult = await this.prisma.$transaction(async (tx) => {
       // First-user bootstrap is a SINGLE-SHOT event. Once we've ever
       // promoted a SUPERADMIN, that fact is recorded in SystemSetting
       // and the userCount===0 fallback can NEVER be reentered — even if
@@ -168,10 +168,15 @@ export class AuthService {
       // mailed/console-logged; they must round-trip /auth/verify-email
       // before login() will work.
       if (isBootstrapPath) {
-        const tokens = await this.issueTokenPair(user.id, user.email, user.role, ctx);
+        // Pass the tx client so Session.userId can see the just-created
+        // User row inside the same transaction (FK would otherwise fail).
+        const tokens = await this.issueTokenPair(user.id, user.email, user.role, ctx, tx);
         return {
-          user: { id: user.id, name: user.name, email: user.email, role: user.role },
-          ...tokens,
+          bootstrap: true as const,
+          response: {
+            user: { id: user.id, name: user.name, email: user.email, role: user.role },
+            ...tokens,
+          },
         };
       }
 
@@ -182,29 +187,46 @@ export class AuthService {
         data: { userId: user.id, tokenHash, expiresAt },
       });
 
-      // Same dev-mode pattern as forgotPassword(): if SMTP isn't wired
-      // (notifications module is roadmap), log the raw token so devs can
-      // copy-paste. NEVER do this in production — log access would yield
-      // arbitrary account takeovers via the verification link.
+      // Return the verification payload so SMTP send happens AFTER the
+      // transaction commits. Network I/O inside a Serializable tx holds
+      // the snapshot open across the SMTP round-trip and inflates
+      // conflict-retry chances; also avoids the rollback-but-email-sent
+      // race when the tx aborts after the send.
+      return {
+        bootstrap: false as const,
+        response: {
+          message: 'Check your email to verify your account',
+          user: { id: user.id, name: user.name, email: user.email },
+        },
+        pendingVerification: {
+          email: user.email,
+          name: user.name,
+          rawToken,
+        },
+      };
+    }, { isolationLevel: 'Serializable' });
+
+    // ── post-commit side effects ────────────────────────────────────
+    // Bootstrap path returns tokens directly. Non-bootstrap path needs
+    // to (a) log the dev-only verification token + (b) send the email.
+    // Both happen AFTER the Serializable tx commits so SMTP latency
+    // never holds the snapshot open and a rollback never leaves a
+    // sent-but-unrecorded verification mail behind.
+    if (!txResult.bootstrap && txResult.pendingVerification) {
+      const { email, name, rawToken } = txResult.pendingVerification;
       if (process.env.NODE_ENV !== 'production') {
         // eslint-disable-next-line no-console
         console.warn(
-          '[dev] email verification token for ' + user.email + ': ' + rawToken +
+          '[dev] email verification token for ' + email + ': ' + rawToken +
           ' (this log is GATED to NODE_ENV !== production)',
         );
       }
-      // Send via NotificationsService. The service swallows its own
-      // errors (logs a warn) so an SMTP outage doesn't 500 the register
-      // endpoint and lock out the signup flow.
       try {
-        await this.notifications.sendEmailVerification(user.email, rawToken, user.name);
+        await this.notifications.sendEmailVerification(email, rawToken, name);
       } catch {}
+    }
 
-      return {
-        message: 'Check your email to verify your account',
-        user: { id: user.id, name: user.name, email: user.email },
-      };
-    }, { isolationLevel: 'Serializable' });
+    return txResult.response;
   }
 
   // ── email verification ────────────────────────────────────────────
@@ -884,18 +906,20 @@ export class AuthService {
     email: string,
     role: string,
     ctx: { ip?: string; userAgent?: string } = {},
+    // Optional transaction client. When set (caller is inside a
+    // $transaction), session writes go through the tx so the FK to
+    // a freshly-created User row resolves AND the writes roll back
+    // with the rest if the outer tx aborts. When omitted, falls back
+    // to this.prisma — login/verifyEmail/etc. run outside any tx.
+    db?: any,
   ) {
-    // Create the session row FIRST with a placeholder hash so we can mint
-    // an access token whose `sid` claim points at it. The placeholder is a
-    // sha256 of random bytes — can't collide with any real refresh token,
-    // so it can't be exchanged. Once we know the row's id we sign the
-    // pair, then patch the row with the real refresh-token hash.
+    const client = db ?? this.prisma;
     const expiresAt = this.refreshTokenExpiry();
     const familyId = createHash('sha256')
       .update(randomBytes(16))
       .digest('hex');
     const placeholderHash = this.encryption.hash(randomBytes(32).toString('hex'));
-    const session = await this.prisma.session.create({
+    const session = await client.session.create({
       data: {
         userId,
         refreshTokenHash: placeholderHash,
@@ -908,7 +932,7 @@ export class AuthService {
     });
     const tokens = await this.signTokenPair(userId, email, role, session.id);
     const refreshTokenHash = this.encryption.hash(tokens.refreshToken);
-    await this.prisma.session.update({
+    await client.session.update({
       where: { id: session.id },
       data: { refreshTokenHash },
     });
