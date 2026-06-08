@@ -638,8 +638,15 @@ model Database {
 model SftpAccount {
   id            String   @id @default(cuid())
   username      String   @unique // sshd login name. Validated [a-z0-9_-]{3,32}.
-  // bcrypt-hashed password. NULL when the account is key-only.
+  // bcrypt-hashed password (Kryptalis-internal verification). NULL when
+  // the account is key-only.
   passwordHash  String?
+  // AES-encrypted plaintext password — needed because OpenSSH/PAM in
+  // the SFTP container uses crypt(3), not bcrypt, so we have to be
+  // able to re-apply the password on container recreate via
+  // `docker exec chpasswd`. Encrypted with EncryptionService (same
+  // key envelope as DB passwords). NULL for key-only accounts.
+  passwordEnc   String?
   // SSH public keys this account can use to authenticate. JSON array of
   // strings ("ssh-ed25519 AAAA... comment"). Each line is appended to
   // authorized_keys with no shell forced (we use ForceCommand internal-sftp

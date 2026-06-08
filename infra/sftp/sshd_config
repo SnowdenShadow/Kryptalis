@@ -1,0 +1,52 @@
+# Kryptalis SFTP daemon config.
+#
+# Two principles:
+#   1. SFTP-only — every non-root login is forced to internal-sftp.
+#      No shell, no port forward, no agent forward, no X11.
+#   2. Chrooted — every account's home dir is bind-mounted onto its
+#      Kryptalis app sandbox at create time; ChrootDirectory %h locks
+#      the user into that home.
+
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+# Host keys generated at first boot by the entrypoint.
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+# Logging — every login attempt visible in `docker logs`.
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+# Authentication
+PermitRootLogin no
+PasswordAuthentication yes
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+UsePAM yes
+# Brute-force defense: allow 3 auth failures per connection before
+# tarpitting; max 10 simultaneous unauthenticated connections.
+MaxAuthTries 3
+MaxStartups 10:30:60
+# Drop idle sessions after 5 minutes so FileZilla forgetting to
+# disconnect doesn't keep slots tied up.
+ClientAliveInterval 60
+ClientAliveCountMax 5
+
+# Force SFTP-only for everyone except root (which is locked anyway).
+Subsystem sftp internal-sftp -l VERBOSE
+
+# Chroot + sftp lock for every real account. The API matches against
+# the kryptalis group it creates every user under.
+Match Group sftpusers
+  ChrootDirectory %h
+  ForceCommand internal-sftp -l VERBOSE
+  AllowTcpForwarding no
+  X11Forwarding no
+  AllowAgentForwarding no
+  PermitTunnel no
+  PermitTTY no

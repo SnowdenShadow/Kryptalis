@@ -156,47 +156,52 @@ services:
         condition: service_started
 
   sftp:
-    # atmoz/sftp is a tiny, focused image: just OpenSSH with internal-sftp
-    # forced and a CSV-style /etc/sftp-users.conf reload-on-change driver.
-    # We don't use linuxserver/openssh because it's a kitchen-sink image
-    # (full sshd, supervisord, ssh_config tooling) that we'd have to
-    # untangle for a chroot-only flow.
-    image: atmoz/sftp:latest
+    # Custom alpine + openssh image. atmoz/sftp's CLI-only user model
+    # and undocumented users.conf format made hot-CRUD impossible; the
+    # tighter sshd_config + dynamic `docker exec useradd` flow here is
+    # what the Kryptalis API actually needs.
+    build:
+      context: ./infra/sftp
+    image: kryptalis-sftp:latest
     container_name: kryptalis-sftp
     restart: unless-stopped
     logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
-    # Standard SFTP port plus alt that's friendly to corp firewalls that
-    # only allow :443/:2222 outbound. Both reach the same sshd.
     ports:
       - "${SFTP_PORT:-2222}:22"
-    environment:
-      # No env-driven user list. The Kryptalis API writes
-      # /etc/sftp/users.conf + per-user authorized_keys files and reloads
-      # the container so the changes pick up without restart.
-      SSH_ENABLE_PASSWORD_AUTHENTICATION: "true"
+    # mount --bind for the per-user chroot data dirs requires
+    # CAP_SYS_ADMIN. Granting just this cap (vs --privileged) keeps the
+    # blast radius small if sshd is ever compromised.
+    cap_add:
+      - SYS_ADMIN
+    # AppArmor profile that would otherwise block `mount` inside the
+    # container; unconfined is the right default for a dedicated SFTP
+    # box. On hosts without AppArmor this key is silently ignored.
+    security_opt:
+      - apparmor:unconfined
     volumes:
-      # Persistent SSH host keys so client `known_hosts` doesn't have to
-      # be rewiped on every redeploy.
+      # Persistent SSH host keys so client `known_hosts` doesn't have
+      # to be rewiped on every redeploy.
       - sftp_host_keys:/etc/ssh
-      # SFTP config dir. We mount the WHOLE dir (not the single file) to
-      # dodge the docker daemon's bind-source-must-exist trap: if we
-      # mounted users.conf directly and the file didn't exist on the
-      # host yet, daemon would silently create an empty directory at
-      # both the mount source AND target, then API writes to "users.conf"
-      # would fail with EISDIR forever. Mounting the parent dir is
-      # idempotent: an empty .kryptalis/sftp dir is fine, and the API
-      # writes users.conf + userconf/<user>/keys/ inside it at runtime.
-      - ./.kryptalis/sftp:/etc/sftp
-      # The actual data: we bind-mount the whole apps/ tree read-write
-      # so each chrooted user maps into their app's appDir directly.
-      # The chrootDir field in users.conf points inside this volume.
+      # Persistent /etc/passwd, /etc/shadow, /etc/group, /home/* so
+      # accounts created via `docker exec useradd` survive container
+      # restarts. Without this the API would have to re-create every
+      # account on every reboot.
+      - sftp_users:/etc/sftp-state
+      - sftp_homes:/home
+      # The actual data: bind-mount the whole apps/ tree read-write so
+      # each chrooted user can be `mount --bind`-ed into their app
+      # sandbox. The API creates the user with home=/home/<user> and
+      # populates /home/<user>/<appname> as a symlink/bind into
+      # /data/apps/<slug-id12>/.
       - ./.kryptalis/apps:/data/apps
     healthcheck:
-      test: ["CMD-SHELL", "echo > /dev/tcp/127.0.0.1/22 || exit 1"]
+      # pgrep catches both straight-up crash AND the no-hostkey
+      # restart loop we hit with atmoz.
+      test: ["CMD-SHELL", "pgrep sshd || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
   dashboard:
     build:
@@ -241,3 +246,5 @@ volumes:
   caddy_data:
   caddy_config:
   sftp_host_keys:
+  sftp_users:
+  sftp_homes:

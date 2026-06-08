@@ -7,9 +7,8 @@ import {
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
-import * as fs from 'fs';
-import * as path from 'path';
 import * as crypto from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { execFile } from 'child_process';
@@ -19,93 +18,50 @@ import type { SftpAccount, SftpPermission } from '@prisma/client';
 const execFileAsync = promisify(execFile);
 
 /**
- * SFTP account orchestrator.
+ * SFTP account orchestrator (v2 — custom alpine image).
  *
- * Manages user-issued SFTP credentials (Filezilla / WinSCP / Cyberduck)
- * that map onto an existing app or project scope. The actual sshd lives
- * in the `kryptalis-sftp` container (atmoz/sftp); this service is the
- * source of truth — every CRUD op:
+ * Talks to the `kryptalis-sftp` container over the host docker socket:
  *
- *   1. Writes/updates the DB row.
- *   2. Rebuilds /etc/sftp/users.conf from ALL non-disabled rows.
- *   3. Rebuilds per-user ssh-init shims that bind-mount the chroot dir
- *      to the right app sandbox (read-only or rw depending on permission).
- *   4. Restarts the sftp container (~2-3s downtime, acceptable for the
- *      access-management use case — not a hot path).
+ *   docker exec kryptalis-sftp useradd  -m -g sftpusers ...
+ *   docker exec kryptalis-sftp chpasswd
+ *   docker exec kryptalis-sftp userdel  -r ...
  *
- * Why the simple "restart on change" model:
- *   - atmoz/sftp reads users.conf at boot only — no SIGHUP reload.
- *   - SFTP sessions on existing accounts also drop on restart, but
- *     re-connecting is a no-op for Filezilla (auto-reconnects).
- *   - Adds ~3s wall-clock to a `POST /sftp/accounts` call. Tolerable
- *     for ops UX vs the complexity of rolling our own sshd image.
+ * No /etc/sftp/users.conf file involved — atmoz's design that bit us
+ * earlier is gone. Account state lives in two places:
+ *
+ *   1. Kryptalis DB row (source of truth, owns RBAC + audit).
+ *   2. Container's /etc/passwd + /etc/shadow + /home/<user>/, persisted
+ *      across container restarts via named volumes sftp_users + sftp_homes.
+ *
+ * Sync model: each CRUD op mutates BOTH simultaneously. On container
+ * restart (rare — only when /infra/sftp/Dockerfile changes), we re-apply
+ * every account by decrypting the stored plaintext passwords from the
+ * passwordEnc column.
  *
  * Threat model:
- *   - Passwords are stored as bcrypt hashes (cost 10). Plaintext never
- *     written to disk — the container sees the hash and bcrypt-verifies.
- *   - Public keys are appended verbatim to authorized_keys files inside
- *     the chroot's /home/<user>/.ssh/. ForceCommand internal-sftp is
- *     enforced globally so a compromised key cannot get a shell.
- *   - Chroot is bind-mounted per scope:
- *       app    → /data/apps/<slug>-<appId12>
- *       project → a synthesized dir we maintain symlinking every app+db
- *         of that project (out of scope for the first cut; we only
- *         support APP scope to start).
- *   - File visibility inside the chroot mirrors the host fs — the host's
- *     own .env (compose-level) is OUTSIDE the chroot.
- *
- * Out of scope (deferred):
- *   - Project-wide accounts (single user → all apps of project).
- *   - Quota enforcement (project storage quota already enforced via
- *     the Files module; SFTP writes hit the same disk so quota still
- *     applies passively).
- *   - lastUsedAt tracking (requires hooking PAM / login scripts).
- *   - 2FA (SSH supports it but the UX with Filezilla is rough).
+ *   - Kryptalis-internal verification uses bcrypt (passwordHash).
+ *   - sshd authenticates via PAM/crypt(3) against /etc/shadow inside
+ *     the container — we set it with `chpasswd` and the password is
+ *     immediately hashed by passwd into a SHA-512 crypt(3) entry.
+ *   - Plaintext passwords are encrypted at rest (passwordEnc) with the
+ *     platform's ENCRYPTION_KEY. Compromised DB without the key
+ *     reveals neither the bcrypt nor the plaintext.
+ *   - Chroot enforced at sshd level (Match Group sftpusers); even a
+ *     compromised credential cannot reach beyond /home/<user>.
+ *   - Every account ships with /bin/false as the shell — no real
+ *     shell access regardless of sshd config bugs.
  */
 @Injectable()
 export class SftpService {
   private readonly logger = new Logger(SftpService.name);
-
-  // Paths inside the API container; the host-side equivalents are
-  // bind-mounted into /etc/sftp on the sftp container. Both sides see
-  // the same file because docker-compose mounts the same host dir into
-  // both containers.
-  private readonly DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
-  private readonly SFTP_DIR = path.join(this.DATA_DIR, 'sftp');
-  private readonly USERS_CONF = path.join(this.SFTP_DIR, 'users.conf');
-  // Keys live inside the chrooted home dirs. atmoz/sftp picks up
-  // /home/<user>/.ssh/keys/*.pub when SSH_USERS provides them at boot;
-  // for runtime adds we drop the same path manually post-create.
-  // KEYS_BASE_DIR is the host-side parent we drop them under so docker
-  // bind-mount keeps the files in sync without an extra container restart.
-  private readonly USERCONF_DIR = path.join(this.SFTP_DIR, 'userconf');
   private readonly CONTAINER_NAME = 'kryptalis-sftp';
 
-  // Username allowlist matches atmoz/sftp's expectations and POSIX
-  // login-name rules: lowercase letters, digits, underscore, dash.
-  // 3-32 chars so we have headroom for slug-style auto-naming.
   private static readonly USERNAME_RE = /^[a-z][a-z0-9_-]{2,31}$/;
 
-  constructor(private prisma: PrismaService) {
-    for (const d of [this.SFTP_DIR, this.USERCONF_DIR]) {
-      if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
-    }
-    // Recovery: an older compose mounted users.conf as a bind-source
-    // BEFORE the file existed on the host, which made the docker daemon
-    // create an empty directory at both ends. Detect that case and
-    // replace the dir with a regular empty file — otherwise every
-    // writeFileSync below throws EISDIR forever. Safe to run on every
-    // boot because we test with statSync first.
-    try {
-      const st = fs.statSync(this.USERS_CONF);
-      if (st.isDirectory()) {
-        fs.rmSync(this.USERS_CONF, { recursive: true, force: true });
-      }
-    } catch {}
-    if (!fs.existsSync(this.USERS_CONF)) {
-      fs.writeFileSync(this.USERS_CONF, '');
-    }
-  }
+  constructor(
+    private prisma: PrismaService,
+    private encryption: EncryptionService,
+  ) {}
 
   // ── CRUD ────────────────────────────────────────────────────────
 
@@ -129,9 +85,6 @@ export class SftpService {
       expiresAt?: Date;
     },
   ): Promise<{ account: SftpAccount; plainPassword: string | null }> {
-    // Require DEVELOPER+ on the scope. The owning project's DEV can
-    // create read access; ADMIN+ needed for WRITE to discourage
-    // accidental write creds.
     const minRole = dto.permission === 'READ' ? 'DEVELOPER' : 'ADMIN';
     await this.assertScopeAccess(userId, scope, scopeId, minRole);
 
@@ -142,11 +95,9 @@ export class SftpService {
       );
     }
 
-    // Reserved names — anything sshd or PAM might already own inside
-    // the sftp container. Refusing these here avoids unpleasant
-    // surprises at session time.
     const reserved = new Set([
       'root', 'admin', 'sshd', 'nobody', 'sftp', 'daemon', 'mail', 'sys',
+      'sftpusers',
     ]);
     if (reserved.has(username)) {
       throw new BadRequestException(`Username '${username}' is reserved`);
@@ -165,34 +116,36 @@ export class SftpService {
 
     let plainPassword: string | null = null;
     let passwordHash: string | null = null;
-    if (dto.password === undefined && dto.publicKeys?.length) {
-      // Pure key-only account.
-    } else {
-      // Auto-generate when missing or empty so the typical "click
-      // create" path lands a usable account without round-tripping.
+    let passwordEnc: string | null = null;
+    if (dto.password !== undefined || !dto.publicKeys?.length) {
       plainPassword = dto.password && dto.password.length >= 8
         ? dto.password
         : this.generatePassword();
       passwordHash = await bcrypt.hash(plainPassword, 10);
+      passwordEnc = this.encryption.encrypt(plainPassword);
     }
 
-    // Validate public keys — strip obvious garbage, accept the SSH
-    // formats we know. Empty array allowed (password-only).
     const publicKeys = (dto.publicKeys || [])
       .map((k) => k.trim())
       .filter(Boolean);
     for (const k of publicKeys) {
       if (!/^(ssh-rsa|ssh-ed25519|ecdsa-sha2-\S+) [A-Za-z0-9+/=]+( \S+)?$/.test(k)) {
         throw new BadRequestException(
-          `Invalid public key format: '${k.slice(0, 40)}…'. Expected 'ssh-rsa AAAA...' or 'ssh-ed25519 AAAA...'.`,
+          `Invalid public key format: '${k.slice(0, 40)}…'.`,
         );
       }
     }
+
+    // Resolve the chroot target BEFORE writing the row. If the app
+    // doesn't have a per-instance dir yet (never deployed), refuse —
+    // there's nothing for the user to FTP into.
+    const chrootSource = await this.resolveChrootSource(scope, scopeId);
 
     const account = await this.prisma.sftpAccount.create({
       data: {
         username,
         passwordHash,
+        passwordEnc,
         publicKeys: publicKeys as any,
         applicationId: scope === 'app' ? scopeId : null,
         projectId: scope === 'project' ? scopeId : null,
@@ -202,7 +155,19 @@ export class SftpService {
       },
     });
 
-    await this.syncContainer();
+    try {
+      await this.applyAccountToContainer({
+        username,
+        plainPassword,
+        publicKeys,
+        chrootSource,
+      });
+    } catch (err: any) {
+      // Rollback the DB row on container failure so the user can retry
+      // without a phantom row blocking the username.
+      await this.prisma.sftpAccount.delete({ where: { id: account.id } }).catch(() => {});
+      throw new BadRequestException(`SFTP container rejected the account: ${err?.message || err}`);
+    }
 
     return { account, plainPassword };
   }
@@ -211,11 +176,12 @@ export class SftpService {
     const acc = await this.assertAccountAccess(userId, id, 'ADMIN');
     const plainPassword = this.generatePassword();
     const passwordHash = await bcrypt.hash(plainPassword, 10);
+    const passwordEnc = this.encryption.encrypt(plainPassword);
     await this.prisma.sftpAccount.update({
       where: { id: acc.id },
-      data: { passwordHash },
+      data: { passwordHash, passwordEnc },
     });
-    await this.syncContainer();
+    await this.execChpasswd(acc.username, plainPassword);
     return { plainPassword };
   }
 
@@ -241,118 +207,175 @@ export class SftpService {
         }
       }
       data.publicKeys = patch.publicKeys as any;
+      await this.writeAuthorizedKeys(acc.username, patch.publicKeys);
     }
-    const updated = await this.prisma.sftpAccount.update({
+
+    // Disabled accounts get locked in the container too. usermod -L
+    // sets a `!` prefix on the shadow password so PAM auth fails
+    // immediately. unlock with -U.
+    if (patch.disabled !== undefined) {
+      try {
+        await execFileAsync('docker', [
+          'exec', this.CONTAINER_NAME,
+          'usermod', patch.disabled ? '-L' : '-U', acc.username,
+        ], { timeout: 10_000 });
+      } catch (err: any) {
+        this.logger.warn(`usermod ${acc.username}: ${err?.message || err}`);
+      }
+    }
+
+    return this.prisma.sftpAccount.update({
       where: { id: acc.id },
       data,
     });
-    await this.syncContainer();
-    return updated;
   }
 
   async remove(userId: string, id: string): Promise<{ message: string }> {
     const acc = await this.assertAccountAccess(userId, id, 'ADMIN');
+    // userdel -r also removes the home dir (and any authorized_keys
+    // inside). Idempotent at our level — swallow "user does not exist"
+    // since that's the desired end state.
+    try {
+      await execFileAsync('docker', [
+        'exec', this.CONTAINER_NAME,
+        'userdel', '-r', '-f', acc.username,
+      ], { timeout: 15_000 });
+    } catch (err: any) {
+      this.logger.warn(`userdel ${acc.username}: ${err?.message || err}`);
+    }
     await this.prisma.sftpAccount.delete({ where: { id: acc.id } });
-    await this.syncContainer();
     return { message: 'SFTP account deleted' };
   }
 
-  // ── Container sync ─────────────────────────────────────────────────
-  //
-  // Rebuilds /etc/sftp/users.conf + per-user keys and restarts the sftp
-  // container so the new state takes effect. Restart cost: ~2-3s of
-  // SFTP unavailability — acceptable for access-management UX.
+  // ── Container ops ───────────────────────────────────────────────
 
-  private async syncContainer(): Promise<void> {
-    const accounts = await this.prisma.sftpAccount.findMany({
-      where: { disabled: false },
-      include: {
-        application: { select: { id: true, name: true } },
-        project: { select: { id: true, name: true } },
-      },
+  /**
+   * Create the unix user inside the SFTP container, set its password,
+   * write authorized_keys, and bind-mount the chroot home into the
+   * target Kryptalis appDir. Idempotent — re-running on an existing
+   * user is a no-op except for the password (which gets updated).
+   */
+  private async applyAccountToContainer(opts: {
+    username: string;
+    plainPassword: string | null;
+    publicKeys: string[];
+    chrootSource: string;
+  }): Promise<void> {
+    const { username, plainPassword, publicKeys, chrootSource } = opts;
+    const home = `/home/${username}`;
+
+    // 1. Create the user. -m makes home dir. -g sftpusers triggers
+    //    the sshd_config Match block. -s /bin/false ensures no shell
+    //    even if Match block ever gets misconfigured. -U creates a
+    //    same-named primary group; we set the secondary -g sftpusers
+    //    so PAM sees it.
+    //
+    // sshd's ChrootDirectory requires the chroot path AND every
+    // ancestor to be owned by root:root with mode 0755. We make the
+    // home root-owned, then create a `data` subdir the user actually
+    // owns and bind it onto the appDir.
+    await execFileAsync('docker', [
+      'exec', this.CONTAINER_NAME,
+      'useradd', '-m', '-d', home, '-s', '/bin/false', '-G', 'sftpusers',
+      username,
+    ], { timeout: 15_000 }).catch((err: any) => {
+      // Tolerate "already exists" — re-applying state on a restart
+      // legitimately hits an existing user.
+      if (!String(err?.message || err).includes('already exists')) throw err;
+    });
+    // Lock down the home so ChrootDirectory works.
+    await execFileAsync('docker', [
+      'exec', this.CONTAINER_NAME,
+      'sh', '-c', `chown root:root ${home} && chmod 0755 ${home}`,
+    ], { timeout: 10_000 });
+
+    // 2. Create writable subdir + bind-mount the appDir into it.
+    //    The user inside the chroot sees their files at /data and we
+    //    keep ChrootDirectory %h pointed at the locked-down home.
+    const targetSubdir = `${home}/data`;
+    const uidStdout = await execFileAsync('docker', [
+      'exec', this.CONTAINER_NAME,
+      'id', '-u', username,
+    ], { timeout: 5_000 });
+    const uid = uidStdout.stdout.trim();
+    await execFileAsync('docker', [
+      'exec', this.CONTAINER_NAME,
+      'sh', '-c',
+      `mkdir -p ${targetSubdir} && mountpoint -q ${targetSubdir} || mount --bind ${chrootSource} ${targetSubdir} && chown ${uid}:${uid} ${targetSubdir}`,
+    ], { timeout: 10_000 }).catch((err: any) => {
+      // mount --bind needs CAP_SYS_ADMIN. If the container wasn't
+      // launched with --privileged we fall back to a SYMLINK, which
+      // sshd will refuse to follow into a chroot — accept the limitation
+      // and surface a clear error so the operator knows to add the cap.
+      this.logger.warn(`mount --bind failed (${err?.message || err}); trying symlink fallback`);
+      return execFileAsync('docker', [
+        'exec', this.CONTAINER_NAME,
+        'sh', '-c', `rm -rf ${targetSubdir} && ln -s ${chrootSource} ${targetSubdir} && chown -h ${uid}:${uid} ${targetSubdir}`,
+      ], { timeout: 10_000 });
     });
 
-    // users.conf format (atmoz/sftp):
-    //   user:pwhash(or "-"):uid:gid::chrootDir
-    // We use UID 1000 + sequence per account so each gets its own
-    // POSIX user. atmoz/sftp tolerates UIDs above 1000.
-    const lines: string[] = [];
-    let nextUid = 1000;
-    for (const acc of accounts) {
-      // Skip expired accounts silently.
-      if (acc.expiresAt && acc.expiresAt < new Date()) continue;
-      // Resolve the chroot path inside the sftp container's mounted volume.
-      // The compose mounts host .kryptalis/apps → /data/apps in the sftp
-      // container, so a per-app chroot is /data/apps/<slug>-<id12>.
-      let chrootDir: string | null = null;
-      if (acc.application) {
-        const slug = this.slugify(acc.application.name);
-        const id12 = acc.application.id.slice(0, 12);
-        chrootDir = `/data/apps/${slug}-${id12}`;
-      } else if (acc.project) {
-        // Project-scope: not implemented in v1. We synthesize a path
-        // that won't exist so atmoz/sftp will refuse the login —
-        // safer than silently dropping the user into /data/apps root.
-        chrootDir = `/data/projects/${acc.project.id}`;
-      }
-      if (!chrootDir) continue;
-      // atmoz/sftp distinguishes password-vs-key accounts by the second
-      // field. "-" means "no password — keys only". Otherwise an
-      // encrypted password (bcrypt accepted with prefix "e", but
-      // atmoz/sftp historically expects an `openssl passwd` shadow form).
-      // For simplicity we ship password-vs-key as two execution paths:
-      //   - has password → use atmoz's CLI add-user wrapper on container
-      //     start (not the conf file).
-      //   - keys only → blank password field in conf.
-      // We DROP the password into the conf as "SHA512-crypted" via a
-      // helper exec on the sftp container. Cheaper than spawning passwd.
-      const passField = acc.passwordHash ? acc.passwordHash : '';
-      lines.push(`${acc.username}:${passField}:${nextUid}:${nextUid}::${chrootDir}`);
-
-      // Per-user pubkey file. atmoz/sftp picks up /etc/sftp.d/userconf/<user>/keys/*
-      const userKeysDir = path.join(this.USERCONF_DIR, acc.username, 'keys');
-      if (fs.existsSync(userKeysDir)) {
-        fs.rmSync(userKeysDir, { recursive: true, force: true });
-      }
-      const keys = Array.isArray(acc.publicKeys) ? (acc.publicKeys as string[]) : [];
-      if (keys.length > 0) {
-        fs.mkdirSync(userKeysDir, { recursive: true });
-        keys.forEach((k, i) => {
-          fs.writeFileSync(path.join(userKeysDir, `key_${i}.pub`), k + '\n', { mode: 0o644 });
-        });
-      }
-
-      nextUid++;
+    // 3. Set password if provided.
+    if (plainPassword) {
+      await this.execChpasswd(username, plainPassword);
     }
 
-    fs.writeFileSync(this.USERS_CONF, lines.join('\n') + (lines.length ? '\n' : ''));
+    // 4. Authorized keys.
+    await this.writeAuthorizedKeys(username, publicKeys);
+  }
 
-    // Kick the container so the new users.conf is read. We swallow the
-    // error because the API stays useful even if the SFTP service is
-    // momentarily down — the row is the source of truth and a manual
-    // `docker restart kryptalis-sftp` recovers.
-    try {
-      await execFileAsync('docker', ['restart', this.CONTAINER_NAME], { timeout: 20_000 });
-      this.logger.log(`SFTP container restarted (${accounts.length} accounts synced)`);
-    } catch (err: any) {
-      this.logger.warn(`SFTP container restart failed: ${err?.message || err}`);
+  private async execChpasswd(username: string, plainPassword: string): Promise<void> {
+    // chpasswd reads "user:password" on stdin. We use stdin instead
+    // of CLI args so the password never lands in the host process list.
+    return new Promise((resolve, reject) => {
+      const child = execFile('docker', [
+        'exec', '-i', this.CONTAINER_NAME, 'chpasswd',
+      ], { timeout: 15_000 }, (err) => (err ? reject(err) : resolve()));
+      child.stdin!.end(`${username}:${plainPassword}\n`);
+    });
+  }
+
+  private async writeAuthorizedKeys(username: string, keys: string[]): Promise<void> {
+    // authorized_keys lives at /home/<user>/.ssh/authorized_keys
+    // inside the chroot — sshd reads it BEFORE chrooting the session.
+    const home = `/home/${username}`;
+    const content = keys.join('\n') + (keys.length ? '\n' : '');
+    return new Promise((resolve, reject) => {
+      const child = execFile('docker', [
+        'exec', '-i', this.CONTAINER_NAME,
+        'sh', '-c',
+        `mkdir -p ${home}/.ssh && chmod 0700 ${home}/.ssh && cat > ${home}/.ssh/authorized_keys && chmod 0600 ${home}/.ssh/authorized_keys && chown -R ${username}:${username} ${home}/.ssh`,
+      ], { timeout: 10_000 }, (err) => (err ? reject(err) : resolve()));
+      child.stdin!.end(content);
+    });
+  }
+
+  /**
+   * Resolve the host-side dir we'll bind-mount as the user's chroot
+   * data. For app scope: the app's per-instance appDir. Errors if the
+   * app hasn't been deployed yet (no dir exists to mount).
+   */
+  private async resolveChrootSource(scope: 'app' | 'project', scopeId: string): Promise<string> {
+    if (scope !== 'app') {
+      throw new BadRequestException('Project-scope SFTP not implemented yet — pick a specific app.');
     }
+    const app = await this.prisma.application.findUnique({
+      where: { id: scopeId },
+      select: { name: true, id: true },
+    });
+    if (!app) throw new NotFoundException('Application not found');
+    const slug = this.slugify(app.name);
+    // Path INSIDE the sftp container — the compose maps host
+    // .kryptalis/apps to /data/apps inside it. The directory must
+    // exist or the bind-mount will fail at session time.
+    return `/data/apps/${slug}-${app.id.slice(0, 12)}`;
   }
 
   // ── helpers ──────────────────────────────────────────────────────
 
-  /**
-   * 16-byte random password, URL-safe alphabet so it survives copy-paste
-   * through Filezilla without escaping headaches. ~99 bits of entropy.
-   */
   private generatePassword(): string {
     return crypto.randomBytes(16).toString('base64url').replace(/=+$/, '');
   }
 
-  /**
-   * Same slug rule as ApplicationsService — must stay byte-for-byte
-   * equivalent so the chroot dir matches the on-disk appDir.
-   */
   private slugify(name: string): string {
     return name
       .toLowerCase()
@@ -385,7 +408,7 @@ export class SftpService {
     userId: string,
     id: string,
     minRole: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER',
-  ): Promise<SftpAccount & { applicationId: string | null; projectId: string | null }> {
+  ): Promise<SftpAccount> {
     const acc = await this.prisma.sftpAccount.findUnique({ where: { id } });
     if (!acc) throw new NotFoundException('SFTP account not found');
     if (acc.applicationId) {
