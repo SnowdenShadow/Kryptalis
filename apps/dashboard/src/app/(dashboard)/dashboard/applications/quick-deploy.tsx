@@ -326,8 +326,10 @@ export function QuickDeployDialog({
       // Marketplace install is a separate endpoint — it stamps the
       // platform template + persistent volumes the catalog declares.
       if (mode === 'marketplace' && marketplaceApp) {
+        // appSlug is the only identifier the install endpoint uses to look
+        // up the COMPOSE_TEMPLATES entry. The catalog `id` is purely for
+        // client-side React keys — do NOT send it (DTO is forbidNonWhitelisted).
         const body: any = {
-          appId: marketplaceApp.id,
           appSlug: marketplaceApp.slug,
           name,
           projectId,
