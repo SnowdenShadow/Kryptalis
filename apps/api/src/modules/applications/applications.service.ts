@@ -441,6 +441,9 @@ export class ApplicationsService {
       gitToken,
       composeOverride,
       dockerfileOverride,
+      composeContent,
+      dockerfileContent,
+      contextFiles,
       portMapping,
       domainId: dtoDomainId,
       domain: dtoDomainString,
@@ -456,19 +459,58 @@ export class ApplicationsService {
     // succeed or neither does.
 
     // 1) Blank scaffold + domain = nonsense. There's no service to
-    // route the domain to, ever.
-    const isBlankScaffold = !dto.gitUrl && !dto.dockerImage;
+    // route the domain to, ever. A raw compose/Dockerfile counts as a
+    // real source — only refuse when ALL deploy inputs are absent.
+    const isBlankScaffold =
+      !dto.gitUrl && !dto.dockerImage && !composeContent && !dockerfileContent;
     if (isBlankScaffold && (dtoDomainId || dtoDomainString)) {
       throw new BadRequestException(
-        'Cannot attach a domain to a blank app — add a Git URL or Docker image first.',
+        'Cannot attach a domain to a blank app — add a Git URL, Docker image, Compose file, or Dockerfile first.',
       );
     }
     // 2) Blank scaffold + hostPort = also nonsense: no container is
     // ever published. Refuse to reserve the port.
     if (isBlankScaffold && dtoHostPort) {
       throw new BadRequestException(
-        'Cannot reserve a host port on a blank app — add a Git URL or Docker image first.',
+        'Cannot reserve a host port on a blank app — add a Git URL, Docker image, Compose file, or Dockerfile first.',
       );
+    }
+
+    // Mutually exclusive: only one source-of-truth wins. Refuse early
+    // so we don't have to guess which path the user meant.
+    const sourcesPicked = [
+      !!dto.gitUrl,
+      !!dto.dockerImage,
+      !!composeContent,
+      !!dockerfileContent,
+    ].filter(Boolean).length;
+    if (sourcesPicked > 1) {
+      throw new BadRequestException(
+        'Pick one source: Git URL, Docker image, raw Compose, or raw Dockerfile.',
+      );
+    }
+
+    // Compose YAML must parse — defense against typos and YAML injection.
+    if (composeContent) {
+      try {
+        const parsed: any = yaml.load(composeContent);
+        if (!parsed || typeof parsed !== 'object' || !parsed.services || typeof parsed.services !== 'object') {
+          throw new Error('compose must have a top-level "services:" map');
+        }
+      } catch (err: any) {
+        throw new BadRequestException(`Invalid docker-compose.yml: ${err?.message || 'parse error'}`);
+      }
+    }
+    if (dockerfileContent && !/^\s*FROM\s+\S+/im.test(dockerfileContent)) {
+      throw new BadRequestException('Dockerfile must contain a FROM instruction.');
+    }
+    if (contextFiles) {
+      for (const rel of Object.keys(contextFiles)) {
+        // Defense against path traversal — context files land in appDir.
+        if (rel.startsWith('/') || rel.includes('..') || /[\0]/.test(rel) || rel.length > 256) {
+          throw new BadRequestException(`Invalid context file path: ${rel}`);
+        }
+      }
     }
 
     // 3) Host-port reserved + collision check.
@@ -658,6 +700,25 @@ export class ApplicationsService {
         envVars: dto.envVars,
         hostPort: dtoHostPort,
       }).catch(() => {});
+    } else if (composeContent) {
+      // Raw compose stack — no clone, no build. The user supplied the
+      // entire stack as YAML. Lifecycle is identical to a git-cloned
+      // compose project (start/stop/restart/logs all just shell out to
+      // `docker compose` in appDir).
+      this.runComposeOnlyDeploy(deployment.id, app.id, dto.name, composeContent, {
+        envVars: dto.envVars,
+        hostPort: dtoHostPort,
+      }).catch(() => {});
+    } else if (dockerfileContent) {
+      // Raw Dockerfile + optional context files — we build the image
+      // locally and run it. Same compose-mirror trick so lifecycle ops
+      // keep working.
+      this.runDockerfileOnlyDeploy(deployment.id, app.id, dto.name, dockerfileContent, {
+        port: dto.port,
+        envVars: dto.envVars,
+        hostPort: dtoHostPort,
+        contextFiles,
+      }).catch(() => {});
     } else {
       await this.prisma.application.update({ where: { id: app.id }, data: { status: 'STOPPED' } });
       await this.prisma.deployment.update({
@@ -833,6 +894,268 @@ export class ApplicationsService {
       });
       // Refresh Caddy so any stale block from a prior successful deploy
       // (we just failed a new one) no longer points at a dead container.
+      this.proxy.regenerate().catch(() => {});
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+    }
+  }
+
+  /**
+   * Raw docker-compose.yml deploy. No git, no Docker image — the user
+   * pasted the entire stack as YAML. We write it to appDir and call
+   * `docker compose up -d`. From there every lifecycle op (start, stop,
+   * logs, restart) behaves identically to a git-cloned compose project.
+   */
+  private async runComposeOnlyDeploy(
+    deploymentId: string,
+    appId: string,
+    name: string,
+    composeYaml: string,
+    opts: { envVars?: Record<string, string> | null; hostPort?: number },
+  ) {
+    const slug = slugify(name);
+    const appDir = resolveAppDir(slug, appId);
+    const started = Date.now();
+    const buildLogs: string[] = [];
+    const log = (line: string) => buildLogs.push(line);
+
+    try {
+      await ensureSharedAppsNetwork();
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { status: 'DEPLOYING', startedAt: new Date() },
+      });
+
+      const appRow = await this.prisma.application.findUnique({
+        where: { id: appId },
+        select: { projectId: true },
+      });
+      const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
+      if (projectNet) {
+        try {
+          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5_000 });
+        } catch {
+          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
+        }
+      }
+
+      if (fs.existsSync(appDir)) {
+        try { await dockerCompose(appDir, ['down', '-v', '--remove-orphans'], undefined, 60_000); } catch {}
+        fs.rmSync(appDir, { recursive: true, force: true });
+      }
+      fs.mkdirSync(appDir, { recursive: true });
+
+      // Attach the user's compose to the per-project + shared networks
+      // so Caddy + sibling apps can reach the services by container_name.
+      let finalCompose = composeYaml;
+      if (projectNet) finalCompose = attachProjectNetwork(finalCompose, projectNet);
+      finalCompose = attachSharedAppsNetwork(finalCompose);
+      fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), finalCompose);
+      log('> wrote docker-compose.yml');
+
+      // Persist + write .env so secrets aren't inlined in the compose.
+      let envFile: string | undefined;
+      if (opts.envVars && Object.keys(opts.envVars).length) {
+        envFile = path.join(appDir, '.kryptalis.env');
+        fs.writeFileSync(envFile, this.serializeEnv(opts.envVars));
+      }
+
+      log('> docker compose pull');
+      try { await dockerCompose(appDir, ['pull'], envFile, 300_000); } catch {}
+      log('> docker compose up -d');
+      await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], envFile, 300_000);
+
+      // Pull container name + port from the first service so Caddy has a
+      // reverse-proxy target. The user's compose already declared them.
+      const info = readComposeContainerInfo(finalCompose, containerName(slug));
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: {
+          status: AppStatus.RUNNING,
+          containerName: info.containerName,
+          containerPort: info.containerPort,
+          port: info.containerPort,
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.RUNNING,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.notifyDeploymentOutcome(deploymentId, name, 'success');
+    } catch (err: any) {
+      const msg = err?.message || 'compose deploy failed';
+      log(`✖ ${msg}`);
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: AppStatus.ERROR },
+      });
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.FAILED,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          deployLogs: msg.slice(0, 10_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+    }
+  }
+
+  /**
+   * Raw Dockerfile deploy. No git clone — the user pasted the Dockerfile
+   * (and optional context files) directly. We write them to appDir and
+   * build via a synthesized one-service docker-compose.yml so every
+   * lifecycle path stays identical to git/image deploys.
+   */
+  private async runDockerfileOnlyDeploy(
+    deploymentId: string,
+    appId: string,
+    name: string,
+    dockerfile: string,
+    opts: {
+      port?: number;
+      envVars?: Record<string, string> | null;
+      hostPort?: number;
+      contextFiles?: Record<string, string>;
+    },
+  ) {
+    const slug = slugify(name);
+    const containerNm = containerName(slug);
+    const appDir = resolveAppDir(slug, appId);
+    const started = Date.now();
+    const buildLogs: string[] = [];
+    const log = (line: string) => buildLogs.push(line);
+
+    try {
+      await ensureSharedAppsNetwork();
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { status: 'BUILDING', startedAt: new Date() },
+      });
+
+      const appRow = await this.prisma.application.findUnique({
+        where: { id: appId },
+        select: { projectId: true },
+      });
+      const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
+      if (projectNet) {
+        try {
+          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5_000 });
+        } catch {
+          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
+        }
+      }
+
+      if (fs.existsSync(appDir)) {
+        try { await dockerCompose(appDir, ['down', '-v', '--remove-orphans'], undefined, 60_000); } catch {}
+        fs.rmSync(appDir, { recursive: true, force: true });
+      }
+      fs.mkdirSync(appDir, { recursive: true });
+
+      // Dockerfile + any sibling context files (already path-validated
+      // in the DTO check). Write them all then point compose `build: .`.
+      fs.writeFileSync(path.join(appDir, 'Dockerfile'), dockerfile);
+      if (opts.contextFiles) {
+        for (const [rel, content] of Object.entries(opts.contextFiles)) {
+          const dst = path.join(appDir, rel);
+          fs.mkdirSync(path.dirname(dst), { recursive: true });
+          fs.writeFileSync(dst, content);
+        }
+      }
+      log(`> wrote Dockerfile (${Object.keys(opts.contextFiles || {}).length} context files)`);
+
+      const env = opts.envVars || {};
+      const publishContainer = opts.port ?? null;
+      const publishHost = opts.hostPort;
+
+      const composeDoc: any = {
+        services: {
+          app: {
+            build: { context: '.' },
+            container_name: containerNm,
+            restart: 'unless-stopped',
+            ...(Object.keys(env).length ? { environment: { ...env } } : {}),
+            ...(publishHost && publishContainer
+              ? { ports: [`${publishHost}:${publishContainer}`] }
+              : {}),
+            ...(projectNet ? { networks: ['kryptalis_project', 'kryptalis_apps'] } : { networks: ['kryptalis_apps'] }),
+          },
+        },
+        networks: {
+          ...(projectNet ? { kryptalis_project: { external: true, name: projectNet } } : {}),
+          kryptalis_apps: { external: true, name: 'kryptalis-apps' },
+        },
+      };
+      fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), yaml.dump(composeDoc, { lineWidth: 200 }));
+      log('> wrote docker-compose.yml');
+
+      log('> docker compose build');
+      await dockerCompose(appDir, ['build'], undefined, 900_000);
+      log('> docker compose up -d');
+      await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], undefined, 180_000);
+
+      // If user didn't pin a port, ask docker what the built image exposes.
+      let detectedPort = opts.port ?? null;
+      if (!detectedPort) {
+        try {
+          const insp = await execFileAsync(
+            'docker',
+            ['inspect', '--format', '{{json .Config.ExposedPorts}}', containerNm],
+            { timeout: 10_000 },
+          );
+          const exposed = JSON.parse(insp.stdout || '{}') as Record<string, unknown>;
+          for (const key of Object.keys(exposed)) {
+            const n = parseInt(key.split('/')[0], 10);
+            if (Number.isFinite(n)) { detectedPort = n; break; }
+          }
+        } catch {}
+      }
+
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: {
+          status: AppStatus.RUNNING,
+          containerName: containerNm,
+          containerPort: detectedPort,
+          port: detectedPort,
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.RUNNING,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.notifyDeploymentOutcome(deploymentId, name, 'success');
+    } catch (err: any) {
+      const msg = err?.message || 'Dockerfile build failed';
+      log(`✖ ${msg}`);
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: AppStatus.ERROR },
+      });
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.FAILED,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          deployLogs: msg.slice(0, 10_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
       this.proxy.regenerate().catch(() => {});
       this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }

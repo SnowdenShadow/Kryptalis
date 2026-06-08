@@ -69,7 +69,10 @@ const DB_TYPES = [
   { value: 'MYSQL', label: 'MySQL', emoji: '🐬' },
   { value: 'MARIADB', label: 'MariaDB', emoji: '🦭' },
   { value: 'REDIS', label: 'Redis', emoji: '🔴' },
+  { value: 'KEYDB', label: 'KeyDB', emoji: '🗝️' },
+  { value: 'DRAGONFLY', label: 'Dragonfly', emoji: '🐉' },
   { value: 'MONGODB', label: 'MongoDB', emoji: '🍃' },
+  { value: 'CLICKHOUSE', label: 'ClickHouse', emoji: '📊' },
 ] as const;
 
 const typeBadgeColors: Record<string, string> = {
@@ -77,7 +80,10 @@ const typeBadgeColors: Record<string, string> = {
   MYSQL: 'bg-orange-500/20 text-orange-400 border-transparent',
   MARIADB: 'bg-teal-500/20 text-teal-400 border-transparent',
   REDIS: 'bg-red-500/20 text-red-400 border-transparent',
+  KEYDB: 'bg-amber-500/20 text-amber-400 border-transparent',
+  DRAGONFLY: 'bg-fuchsia-500/20 text-fuchsia-400 border-transparent',
   MONGODB: 'bg-green-500/20 text-green-400 border-transparent',
+  CLICKHOUSE: 'bg-yellow-500/20 text-yellow-400 border-transparent',
 };
 
 const typeEmoji: Record<string, string> = {
@@ -85,7 +91,10 @@ const typeEmoji: Record<string, string> = {
   MYSQL: '🐬',
   MARIADB: '🦭',
   REDIS: '🔴',
+  KEYDB: '🗝️',
+  DRAGONFLY: '🐉',
   MONGODB: '🍃',
+  CLICKHOUSE: '📊',
 };
 
 const typeLabel: Record<string, string> = {
@@ -93,7 +102,10 @@ const typeLabel: Record<string, string> = {
   MYSQL: 'MySQL',
   MARIADB: 'MariaDB',
   REDIS: 'Redis',
+  KEYDB: 'KeyDB',
+  DRAGONFLY: 'Dragonfly',
   MONGODB: 'MongoDB',
+  CLICKHOUSE: 'ClickHouse',
 };
 
 export default function DatabasesPage() {

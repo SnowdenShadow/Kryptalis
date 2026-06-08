@@ -67,7 +67,10 @@ export enum DatabaseType {
   MYSQL = 'mysql',
   MARIADB = 'mariadb',
   REDIS = 'redis',
+  KEYDB = 'keydb',
+  DRAGONFLY = 'dragonfly',
   MONGODB = 'mongodb',
+  CLICKHOUSE = 'clickhouse',
 }
 
 export enum GitProvider {

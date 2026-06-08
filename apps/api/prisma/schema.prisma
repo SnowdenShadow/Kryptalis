@@ -605,7 +605,10 @@ enum DbType {
   MYSQL
   MARIADB
   REDIS
+  KEYDB
+  DRAGONFLY
   MONGODB
+  CLICKHOUSE
 }
 
 // ─── Backups ─────────────────────────────────────────────────────────

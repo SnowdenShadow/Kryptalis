@@ -6,8 +6,8 @@ export class CreateDatabaseDto {
   @IsString()
   name: string;
 
-  @ApiProperty({ enum: ['POSTGRESQL', 'MYSQL', 'MARIADB', 'REDIS', 'MONGODB'] })
-  @IsIn(['POSTGRESQL', 'MYSQL', 'MARIADB', 'REDIS', 'MONGODB'])
+  @ApiProperty({ enum: ['POSTGRESQL', 'MYSQL', 'MARIADB', 'REDIS', 'KEYDB', 'DRAGONFLY', 'MONGODB', 'CLICKHOUSE'] })
+  @IsIn(['POSTGRESQL', 'MYSQL', 'MARIADB', 'REDIS', 'KEYDB', 'DRAGONFLY', 'MONGODB', 'CLICKHOUSE'])
   type: string;
 
   @ApiProperty()

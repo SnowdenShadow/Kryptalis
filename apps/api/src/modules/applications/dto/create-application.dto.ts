@@ -102,6 +102,23 @@ export class CreateApplicationDto {
   @IsString()
   dockerfileOverride?: string;
 
+  @ApiProperty({ required: false, description: 'Raw docker-compose.yml — deploys a compose stack without a git repo.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200_000)
+  composeContent?: string;
+
+  @ApiProperty({ required: false, description: 'Raw Dockerfile — builds & deploys an image without a git repo.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50_000)
+  dockerfileContent?: string;
+
+  @ApiProperty({ required: false, description: 'Build context files keyed by relative path (Dockerfile-only mode).' })
+  @IsOptional()
+  @IsObject()
+  contextFiles?: Record<string, string>;
+
   @ApiProperty({ required: false, description: 'Host port mapping override { "containerPort": hostPort }' })
   @IsOptional()
   @IsObject()

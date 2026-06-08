@@ -6,7 +6,7 @@ import { toast } from 'sonner';
 import {
   Rocket, Loader2, GitBranch, Globe, Github, Sparkles, AlertCircle,
   Link2, Container, Search, Package, ChevronRight, ChevronDown,
-  Plus, X, Eye, EyeOff, ArrowLeft,
+  Plus, X, Eye, EyeOff, ArrowLeft, FileCode, Layers,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -39,7 +39,7 @@ import { cn } from '@/lib/utils';
  * never has to remember which dialog to open for which case.
  */
 
-type Mode = 'git' | 'docker' | 'marketplace';
+type Mode = 'git' | 'docker' | 'compose' | 'dockerfile' | 'marketplace';
 type GitSource = 'provider' | 'url';
 
 interface Project { id: string; name: string }
@@ -105,6 +105,10 @@ export function QuickDeployDialog({
 
   // ── Docker mode state ───────────────────────────────────────────
   const [dockerImage, setDockerImage] = useState('');
+
+  // ── Raw compose / Dockerfile state ──────────────────────────────
+  const [composeContent, setComposeContent] = useState('');
+  const [dockerfileContent, setDockerfileContent] = useState('');
 
   // ── Marketplace mode state ──────────────────────────────────────
   const [marketplaceSearch, setMarketplaceSearch] = useState('');
@@ -197,8 +201,18 @@ export function QuickDeployDialog({
       if (short) setName(autoName(short));
     } else if (mode === 'marketplace' && marketplaceApp) {
       setName(autoName(marketplaceApp.slug));
+    } else if (mode === 'compose' && composeContent) {
+      // Try to lift the first service name out of the YAML for a default.
+      const m = composeContent.match(/^\s*services\s*:\s*\n\s+([a-zA-Z0-9._-]+)\s*:/m);
+      if (m) setName(autoName(m[1]));
+    } else if (mode === 'dockerfile' && dockerfileContent) {
+      const m = dockerfileContent.match(/^\s*FROM\s+([^\s:]+)/im);
+      if (m) {
+        const short = m[1].split('/').pop() || 'app';
+        setName(autoName(short));
+      }
     }
-  }, [mode, gitSource, repo, gitUrl, dockerImage, marketplaceApp, name]);
+  }, [mode, gitSource, repo, gitUrl, dockerImage, marketplaceApp, composeContent, dockerfileContent, name]);
 
   // When the suggestion arrives and the user hasn't typed yet, fill it in.
   useEffect(() => {
@@ -249,6 +263,8 @@ export function QuickDeployDialog({
     setGitBranch('main');
     setGitToken('');
     setDockerImage('');
+    setComposeContent('');
+    setDockerfileContent('');
     setMarketplaceSearch('');
     setMarketplaceApp(null);
     setProjectId('');
@@ -272,6 +288,8 @@ export function QuickDeployDialog({
     (mode === 'git' && gitSource === 'provider' && !!repo) ||
     (mode === 'git' && gitSource === 'url' && /^https?:\/\//.test(gitUrl)) ||
     (mode === 'docker' && dockerImage.trim().length > 0) ||
+    (mode === 'compose' && /services\s*:/.test(composeContent)) ||
+    (mode === 'dockerfile' && /^\s*FROM\s+\S+/im.test(dockerfileContent)) ||
     (mode === 'marketplace' && !!marketplaceApp);
 
   const hostPortNumber = hostPort.trim() ? parseInt(hostPort.trim(), 10) : null;
@@ -344,6 +362,12 @@ export function QuickDeployDialog({
       } else if (mode === 'docker') {
         body.framework = 'DOCKER';
         body.dockerImage = dockerImage.trim();
+      } else if (mode === 'compose') {
+        body.framework = 'DOCKER_COMPOSE';
+        body.composeContent = composeContent;
+      } else if (mode === 'dockerfile') {
+        body.framework = 'DOCKER';
+        body.dockerfileContent = dockerfileContent;
       }
       if (exposeMode === 'domain') {
         if (domainChoice === 'new') body.domain = newDomain.trim();
@@ -382,7 +406,7 @@ export function QuickDeployDialog({
   // ── Layout: Mode picker first ──────────────────────────────────
   if (!mode) {
     return (
-      <Dialog open={open} onClose={handleClose} className="max-w-xl">
+      <Dialog open={open} onClose={handleClose} className="max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Rocket size={18} /> {t('quickDeploy.title') || 'Deploy'}
@@ -404,6 +428,18 @@ export function QuickDeployDialog({
             title={t('quickDeploy.modeDocker') || 'Docker image'}
             desc={t('quickDeploy.modeDockerDesc') || 'Any image from Docker Hub, GHCR, or a private registry.'}
             onClick={() => setMode('docker')}
+          />
+          <ModeCard
+            icon={Layers}
+            title={t('quickDeploy.modeCompose') || 'Compose (empty)'}
+            desc={t('quickDeploy.modeComposeDesc') || 'Paste a docker-compose.yml. Multi-service stacks, no Git needed.'}
+            onClick={() => setMode('compose')}
+          />
+          <ModeCard
+            icon={FileCode}
+            title={t('quickDeploy.modeDockerfile') || 'Dockerfile (empty)'}
+            desc={t('quickDeploy.modeDockerfileDesc') || 'Paste a Dockerfile. Build & run a custom image, no Git.'}
+            onClick={() => setMode('dockerfile')}
           />
           <ModeCard
             icon={Package}
@@ -432,6 +468,8 @@ export function QuickDeployDialog({
           <Rocket size={18} />
           {mode === 'git' && (t('quickDeploy.titleGit') || 'Deploy from Git')}
           {mode === 'docker' && (t('quickDeploy.titleDocker') || 'Deploy a Docker image')}
+          {mode === 'compose' && (t('quickDeploy.titleCompose') || 'Deploy a Compose stack')}
+          {mode === 'dockerfile' && (t('quickDeploy.titleDockerfile') || 'Deploy a Dockerfile')}
           {mode === 'marketplace' && (t('quickDeploy.titleMarket') || 'Install from Marketplace')}
         </DialogTitle>
       </DialogHeader>
@@ -464,6 +502,72 @@ export function QuickDeployDialog({
             <p className="text-[11px] text-muted-foreground">
               {t('quickDeploy.dockerHint') ||
                 'Public images pull as-is. For private registries, save credentials in Admin → System Config first.'}
+            </p>
+          </div>
+        )}
+
+        {mode === 'compose' && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="qd-compose" className="text-sm">
+                {t('quickDeploy.composeYaml') || 'docker-compose.yml'}
+              </Label>
+              {!composeContent && (
+                <button
+                  type="button"
+                  onClick={() => setComposeContent(
+                    'services:\n  app:\n    image: nginx:alpine\n    container_name: my-stack-app\n    ports:\n      - "8080:80"\n',
+                  )}
+                  className="text-[11px] text-primary hover:underline"
+                >
+                  {t('quickDeploy.composeSample') || 'Load example'}
+                </button>
+              )}
+            </div>
+            <textarea
+              id="qd-compose"
+              spellCheck={false}
+              className="w-full min-h-[260px] rounded-md border border-border bg-background p-3 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-primary"
+              placeholder={'services:\n  app:\n    image: nginx:alpine\n    ports:\n      - "8080:80"\n'}
+              value={composeContent}
+              onChange={(e) => setComposeContent(e.target.value)}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              {t('quickDeploy.composeHint') ||
+                'Standard Compose v3 syntax. Kryptalis adds the project + shared networks automatically so other apps in the same project can reach yours by container_name.'}
+            </p>
+          </div>
+        )}
+
+        {mode === 'dockerfile' && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="qd-dockerfile" className="text-sm">
+                {t('quickDeploy.dockerfile') || 'Dockerfile'}
+              </Label>
+              {!dockerfileContent && (
+                <button
+                  type="button"
+                  onClick={() => setDockerfileContent(
+                    'FROM nginx:alpine\nCOPY . /usr/share/nginx/html\nEXPOSE 80\n',
+                  )}
+                  className="text-[11px] text-primary hover:underline"
+                >
+                  {t('quickDeploy.dockerfileSample') || 'Load example'}
+                </button>
+              )}
+            </div>
+            <textarea
+              id="qd-dockerfile"
+              spellCheck={false}
+              className="w-full min-h-[220px] rounded-md border border-border bg-background p-3 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-primary"
+              placeholder={'FROM node:20-alpine\nWORKDIR /app\nCOPY package.json .\nRUN npm install\nCOPY . .\nEXPOSE 3000\nCMD ["node", "server.js"]\n'}
+              value={dockerfileContent}
+              onChange={(e) => setDockerfileContent(e.target.value)}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              {t('quickDeploy.dockerfileHintEmpty') ||
+                'No git, no build context — only the Dockerfile. Pull base images and bake the app in via RUN. For multi-file projects, deploy from Git instead.'}
             </p>
           </div>
         )}

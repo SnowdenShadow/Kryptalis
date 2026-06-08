@@ -129,6 +129,68 @@ volumes:
 volumes:
   data:`,
   },
+  KEYDB: {
+    image: 'eqalpha/keydb:latest',
+    defaultPort: 6379,
+    hostPort: () => 6440 + Math.floor(Math.random() * 50),
+    compose: (name, _user, pass, port) => `services:
+  ${name}:
+    image: eqalpha/keydb:latest
+    container_name: kryptalis-db-${name}
+    restart: unless-stopped
+    ports:
+      - "${port}:6379"
+    command: keydb-server${pass ? ` --requirepass ${pass}` : ''} --server-threads 2
+    volumes:
+      - data:/data
+volumes:
+  data:`,
+  },
+  DRAGONFLY: {
+    image: 'docker.dragonflydb.io/dragonflydb/dragonfly:latest',
+    defaultPort: 6379,
+    hostPort: () => 6490 + Math.floor(Math.random() * 50),
+    compose: (name, _user, pass, port) => `services:
+  ${name}:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    container_name: kryptalis-db-${name}
+    restart: unless-stopped
+    ports:
+      - "${port}:6379"
+    ulimits:
+      memlock: -1
+    command: ["--logtostderr"${pass ? `, "--requirepass=${pass}"` : ''}]
+    volumes:
+      - data:/data
+volumes:
+  data:`,
+  },
+  CLICKHOUSE: {
+    image: 'clickhouse/clickhouse-server:latest',
+    defaultPort: 8123,
+    hostPort: () => 8130 + Math.floor(Math.random() * 50),
+    compose: (name, user, pass, port) => `services:
+  ${name}:
+    image: clickhouse/clickhouse-server:latest
+    container_name: kryptalis-db-${name}
+    restart: unless-stopped
+    ports:
+      - "${port}:8123"
+      - "${port + 1000}:9000"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    environment:
+      CLICKHOUSE_DB: ${name}
+      CLICKHOUSE_USER: ${user}
+      CLICKHOUSE_PASSWORD: ${pass}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - data:/var/lib/clickhouse
+volumes:
+  data:`,
+  },
 };
 
 @Injectable()
@@ -465,8 +527,13 @@ export class DatabasesService {
       case 'POSTGRESQL': return `postgresql://${user}:${pass}@localhost:${port}/${name}`;
       case 'MYSQL':
       case 'MARIADB': return `mysql://${user}:${pass}@localhost:${port}/${name}`;
-      case 'REDIS': return `redis://${pass ? `:${pass}@` : ''}localhost:${port}`;
+      // KeyDB + Dragonfly are wire-compatible with Redis → same scheme.
+      case 'REDIS':
+      case 'KEYDB':
+      case 'DRAGONFLY': return `redis://${pass ? `:${pass}@` : ''}localhost:${port}`;
       case 'MONGODB': return `mongodb://${user}:${pass}@localhost:${port}/${name}`;
+      // ClickHouse: HTTP scheme so libs like clickhouse-js Just Work.
+      case 'CLICKHOUSE': return `http://${user}:${pass}@localhost:${port}/?database=${name}`;
       default: return `localhost:${port}`;
     }
   }
