@@ -38,6 +38,7 @@ model User {
   passwordResetTokens PasswordResetToken[]
   backupCodes         TwoFactorBackupCode[]
   verificationTokens  EmailVerificationToken[]
+  sftpAccounts        SftpAccount[]
 
   @@map("users")
 }
@@ -236,6 +237,7 @@ model Project {
   domains      Domain[]
   mailboxes    Mailbox[]
   members      ProjectMember[]
+  sftpAccounts SftpAccount[]
 
   @@index([serverId])
   @@index([userId])
@@ -320,6 +322,7 @@ model Application {
   domains          Domain[]
   portBindings     DomainPortBinding[]
   databases        Database[]
+  sftpAccounts     SftpAccount[]
 
   @@index([projectId])
   @@map("applications")
@@ -613,6 +616,72 @@ model Database {
   @@index([projectId])
   @@index([applicationId])
   @@map("databases")
+}
+
+// ─── SFTP accounts ────────────────────────────────────────────────────
+//
+// User-issued SFTP/SSH credentials that map onto an existing app or
+// project scope. The actual sshd lives in the kryptalis-sftp container;
+// SftpService writes /etc/passwd entries + chrooted home dirs based on
+// this table at every change.
+//
+// Why a separate row instead of overloading ProjectMember?
+//   - These are NON-INTERACTIVE creds (a tool like Filezilla connects;
+//     no one types them into a browser). Different threat model.
+//   - We want short-lived & rotatable independently of dashboard login.
+//   - The chroot scope (single app vs single project) doesn't match
+//     dashboard RBAC granularity.
+//   - Tokens (hashed password / public key) live here; ProjectMember
+//     would have to absorb a foreign-key to a separate creds table
+//     anyway.
+
+model SftpAccount {
+  id            String   @id @default(cuid())
+  username      String   @unique // sshd login name. Validated [a-z0-9_-]{3,32}.
+  // bcrypt-hashed password. NULL when the account is key-only.
+  passwordHash  String?
+  // SSH public keys this account can use to authenticate. JSON array of
+  // strings ("ssh-ed25519 AAAA... comment"). Each line is appended to
+  // authorized_keys with no shell forced (we use ForceCommand internal-sftp
+  // globally in sshd_config).
+  publicKeys    Json    @default("[]")
+  // Scope: account is chrooted to either an app's appDir or a project's
+  // root. Exactly one of (applicationId, projectId) is set.
+  applicationId String?
+  projectId     String?
+  // Permission level INSIDE the chroot. READ → ChrootDirectory mounted
+  // read-only via bindfs. WRITE → r/w bindmount. ADMIN is currently
+  // identical to WRITE; reserved for future "can manage other SFTP
+  // accounts" semantics.
+  permission    SftpPermission @default(WRITE)
+  // Disabled accounts stay in the table for audit but get pulled from
+  // sshd_config on the next sync. UI lets the user re-enable.
+  disabled      Boolean  @default(false)
+  // Optional auto-expiry. NULL = never expires. Past expiry → sync
+  // treats the row as disabled.
+  expiresAt     DateTime?
+  // Last successful connection. Updated by the sshd PAM-like wrapper
+  // on each session; null until first login. Drives the "stale account"
+  // hint in the UI.
+  lastUsedAt    DateTime?
+  // Who created it — feeds the audit trail and "rotated by X" hints.
+  createdById   String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  application Application? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  project     Project?     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdBy   User         @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([applicationId])
+  @@index([projectId])
+  @@map("sftp_accounts")
+}
+
+enum SftpPermission {
+  READ
+  WRITE
+  ADMIN
 }
 
 enum DbType {

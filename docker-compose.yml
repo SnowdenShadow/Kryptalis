@@ -155,6 +155,47 @@ services:
       caddy:
         condition: service_started
 
+  sftp:
+    # atmoz/sftp is a tiny, focused image: just OpenSSH with internal-sftp
+    # forced and a CSV-style /etc/sftp-users.conf reload-on-change driver.
+    # We don't use linuxserver/openssh because it's a kitchen-sink image
+    # (full sshd, supervisord, ssh_config tooling) that we'd have to
+    # untangle for a chroot-only flow.
+    image: atmoz/sftp:latest
+    container_name: kryptalis-sftp
+    restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
+    # Standard SFTP port plus alt that's friendly to corp firewalls that
+    # only allow :443/:2222 outbound. Both reach the same sshd.
+    ports:
+      - "${SFTP_PORT:-2222}:22"
+    environment:
+      # No env-driven user list. The Kryptalis API writes
+      # /etc/sftp/users.conf + per-user authorized_keys files and reloads
+      # the container so the changes pick up without restart.
+      SSH_ENABLE_PASSWORD_AUTHENTICATION: "true"
+    volumes:
+      # Persistent SSH host keys so client `known_hosts` doesn't have to
+      # be rewiped on every redeploy.
+      - sftp_host_keys:/etc/ssh
+      # User config written by API at runtime. Format:
+      #   user:password-hash:uid:gid::chrootDir
+      # See atmoz/sftp README — one line per account.
+      - ./.kryptalis/sftp/users.conf:/etc/sftp/users.conf
+      # Per-user authorized_keys files. API writes
+      # /etc/sftp/<user>/keys/<uuid>.pub and atmoz/sftp picks them up.
+      - ./.kryptalis/sftp/userconf:/etc/sftp.d/userconf
+      # The actual data: we bind-mount the whole apps/ tree read-write
+      # so each chrooted user maps into their app's appDir directly.
+      # The chrootDir field in users.conf points inside this volume.
+      - ./.kryptalis/apps:/data/apps
+    healthcheck:
+      test: ["CMD-SHELL", "echo > /dev/tcp/127.0.0.1/22 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   dashboard:
     build:
       context: .
@@ -197,3 +238,4 @@ volumes:
   redis_data:
   caddy_data:
   caddy_config:
+  sftp_host_keys:

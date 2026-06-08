@@ -15,6 +15,7 @@ import {
   Store,
   Mail,
   FolderOpen,
+  KeyRound,
   Settings,
   ShieldAlert,
   ChevronLeft,
@@ -47,6 +48,7 @@ const navigation: Array<{
   { key: 'nav.marketplace', href: '/dashboard/marketplace', icon: Store },
   { key: 'nav.emails', href: '/dashboard/emails', icon: Mail },
   { key: 'nav.files', href: '/dashboard/files', icon: FolderOpen },
+  { key: 'nav.sftp', href: '/dashboard/sftp', icon: KeyRound },
   { key: 'nav.settings', href: '/dashboard/settings', icon: Settings },
 ];
 
