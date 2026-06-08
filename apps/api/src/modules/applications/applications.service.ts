@@ -812,6 +812,14 @@ export class ApplicationsService {
       // of its quoted form into the parent compose document. An
       // attacker who controls the dockerImage field (auth'd user) could
       // otherwise inject \\n  privileged: true or a sibling service.
+      // Attach to BOTH the per-project network (so sibling apps in the
+      // same project can resolve each other by container_name) AND the
+      // shared kryptalis-apps bridge (so Caddy can resolve us by name
+      // for HTTPS routing). Missing the second one → Caddy hits ENOTFOUND
+      // on every request → 502. Same pattern as the compose-only and
+      // marketplace install paths.
+      const networks = ['kryptalis_apps'];
+      if (projectNet) networks.unshift('kryptalis_project');
       const composeDoc: any = {
         services: {
           app: {
@@ -823,12 +831,13 @@ export class ApplicationsService {
             ...(publishHost && publishContainer
               ? { ports: [`${publishHost}:${publishContainer}`] }
               : {}),
-            ...(projectNet ? { networks: ['kryptalis_project'] } : {}),
+            networks,
           },
         },
-        ...(projectNet
-          ? { networks: { kryptalis_project: { external: true, name: projectNet } } }
-          : {}),
+        networks: {
+          ...(projectNet ? { kryptalis_project: { external: true, name: projectNet } } : {}),
+          kryptalis_apps: { external: true, name: 'kryptalis-apps' },
+        },
       };
       const compose = yaml.dump(composeDoc, { lineWidth: 200 });
       fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), compose);
