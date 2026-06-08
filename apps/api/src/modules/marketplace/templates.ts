@@ -675,6 +675,134 @@ networks:
   kryptalis-apps:
     external: true`,
   },
+  // Multi-DB modern web UI. Persistent data so saved connections survive
+  // restarts. Attached to kryptalis-apps so user-deployed DB containers
+  // are reachable by container_name from inside.
+  dbgate: {
+    compose: `services:
+  dbgate:
+    image: dbgate/dbgate:latest
+    container_name: kryptalis-dbgate-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:3000"
+    env_file:
+      - .env
+    volumes:
+      - dbgate_data___INSTANCE_ID__:/root/.dbgate
+volumes:
+  dbgate_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
+  // Single-file PHP DB browser. No persistent state — login info kept
+  // in browser session. ADMINER_DESIGN can theme it from .env.
+  adminer: {
+    compose: `services:
+  adminer:
+    image: adminer:latest
+    container_name: kryptalis-adminer-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:8080"
+    env_file:
+      - .env
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
+  // phpMyAdmin — defaults to arbitrary mode (PMA_ARBITRARY=1) so the
+  // user picks the server on the login screen. UPLOAD_LIMIT controls
+  // the SQL import cap (PHP upload_max_filesize behind the scenes).
+  phpmyadmin: {
+    compose: `services:
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: kryptalis-phpmyadmin-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:80"
+    env_file:
+      - .env
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
+  // pgAdmin — admin email + password are required env vars (the
+  // dashboard's Advanced step enforces that). PGADMIN_LISTEN_PORT
+  // overrides the in-container listen so we map it cleanly. Server
+  // connections persist in the named volume.
+  pgadmin: {
+    compose: `services:
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: kryptalis-pgadmin-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:80"
+    env_file:
+      - .env
+    volumes:
+      - pgadmin_data___INSTANCE_ID__:/var/lib/pgadmin
+volumes:
+  pgadmin_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
+  // mongo-express — ME_CONFIG_MONGODB_URL is required (the dashboard
+  // marks it as required: true). Basic auth on the UI itself so the
+  // browser admin isn't world-readable.
+  'mongo-express': {
+    compose: `services:
+  mongo-express:
+    image: mongo-express:latest
+    container_name: kryptalis-mongo-express-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:8081"
+    env_file:
+      - .env
+    environment:
+      ME_CONFIG_BASICAUTH: "true"
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
+  // RedisInsight — Redis Inc's official GUI. Volume persists connection
+  // entries so they survive a redeploy. Listens on the same internal
+  // port we publish externally (no rewrite needed).
+  redisinsight: {
+    compose: `services:
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: kryptalis-redisinsight-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:5540"
+    env_file:
+      - .env
+    volumes:
+      - redisinsight_data___INSTANCE_ID__:/data
+volumes:
+  redisinsight_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
 };
 
 /**
@@ -762,6 +890,12 @@ export const PORT_MAP: Record<string, number> = {
   plausible: 8086,
   'code-server': 8087,
   prestashop: 8090,
+  dbgate: 3300,
+  adminer: 8088,
+  phpmyadmin: 8089,
+  pgadmin: 5050,
+  'mongo-express': 8091,
+  redisinsight: 5540,
   supabase: 3003,
   appwrite: 8082,
   roundcube: 8083,

@@ -351,6 +351,116 @@
         { "key": "ADMIN_PASSWD", "defaultValue": "", "required": true, "description": "Back-office admin password (≥ 8 chars)" },
         { "key": "PS_INSTALL_AUTO", "defaultValue": "1", "required": false, "description": "Run the installer automatically on first boot (set 0 to install via the web UI)" }
       ]
+    },
+    {
+      "id": "27",
+      "name": "DBGate",
+      "slug": "dbgate",
+      "description": "Modern multi-database web UI — supports Postgres, MySQL, MariaDB, MongoDB, Redis, ClickHouse, SQLite. One tool for every database type in Kryptalis.",
+      "category": "Databases",
+      "icon": "database",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/dbgate.png",
+      "version": "6.0",
+      "dockerImage": "dbgate/dbgate:latest",
+      "ports": [3300],
+      "containerPort": 3000,
+      "defaultPort": 3300,
+      "envVars": [
+        { "key": "WEB_ROOT", "defaultValue": "", "required": false, "description": "Sub-path to mount DBGate at (leave empty to serve at /)" }
+      ]
+    },
+    {
+      "id": "28",
+      "name": "Adminer",
+      "slug": "adminer",
+      "description": "Lightweight database manager in a single PHP file — Postgres, MySQL, MariaDB, SQLite, MSSQL, MongoDB. Faster than phpMyAdmin, just as familiar.",
+      "category": "Databases",
+      "icon": "database",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/adminer.png",
+      "version": "5",
+      "dockerImage": "adminer:latest",
+      "ports": [8088],
+      "containerPort": 8080,
+      "defaultPort": 8088,
+      "envVars": [
+        { "key": "ADMINER_DEFAULT_SERVER", "defaultValue": "", "required": false, "description": "Pre-fill the server field on the login screen (e.g. kryptalis-db-mydb)" },
+        { "key": "ADMINER_DESIGN", "defaultValue": "dracula", "required": false, "description": "UI theme (dracula, hever, lucas, mancave, mvt, ng9, nicu, pappu687, pepa-linha…)" }
+      ]
+    },
+    {
+      "id": "29",
+      "name": "phpMyAdmin",
+      "slug": "phpmyadmin",
+      "description": "The de-facto standard MySQL/MariaDB web admin tool. Auto-discovers any DB on the kryptalis-apps network — pick the server on the login screen.",
+      "category": "Databases",
+      "icon": "database",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/phpmyadmin.png",
+      "version": "5.2",
+      "dockerImage": "phpmyadmin:latest",
+      "ports": [8089],
+      "containerPort": 80,
+      "defaultPort": 8089,
+      "envVars": [
+        { "key": "PMA_ARBITRARY", "defaultValue": "1", "required": false, "description": "Allow connecting to any host (1) or pin to PMA_HOST only (0)" },
+        { "key": "PMA_HOST", "defaultValue": "", "required": false, "description": "Pre-filled MySQL host (leave empty for arbitrary mode)" },
+        { "key": "PMA_PORT", "defaultValue": "3306", "required": false, "description": "MySQL port (default 3306)" },
+        { "key": "UPLOAD_LIMIT", "defaultValue": "256M", "required": false, "description": "Max import file size" }
+      ]
+    },
+    {
+      "id": "30",
+      "name": "pgAdmin",
+      "slug": "pgadmin",
+      "description": "Official PostgreSQL admin tool — query editor, ERD diagrams, server monitoring, scheduled backups. Made by the Postgres developers themselves.",
+      "category": "Databases",
+      "icon": "database",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/pgadmin.png",
+      "version": "8",
+      "dockerImage": "dpage/pgadmin4:latest",
+      "ports": [5050],
+      "containerPort": 80,
+      "defaultPort": 5050,
+      "envVars": [
+        { "key": "PGADMIN_DEFAULT_EMAIL", "defaultValue": "admin@example.com", "required": true, "description": "Admin login email" },
+        { "key": "PGADMIN_DEFAULT_PASSWORD", "defaultValue": "", "required": true, "description": "Admin login password (≥ 8 chars)" },
+        { "key": "PGADMIN_LISTEN_PORT", "defaultValue": "80", "required": false, "description": "Internal port pgAdmin listens on" }
+      ]
+    },
+    {
+      "id": "31",
+      "name": "Mongo Express",
+      "slug": "mongo-express",
+      "description": "Web-based MongoDB admin interface — collection browser, query editor, document editor. Auto-connects to a Mongo server on the same network.",
+      "category": "Databases",
+      "icon": "database",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongo-express.png",
+      "version": "1.0",
+      "dockerImage": "mongo-express:latest",
+      "ports": [8091],
+      "containerPort": 8081,
+      "defaultPort": 8091,
+      "envVars": [
+        { "key": "ME_CONFIG_MONGODB_URL", "defaultValue": "", "required": true, "description": "Mongo connection string (e.g. mongodb://user:pass@kryptalis-db-mydb:27017/)" },
+        { "key": "ME_CONFIG_BASICAUTH_USERNAME", "defaultValue": "admin", "required": false, "description": "Mongo Express UI login user (basic auth)" },
+        { "key": "ME_CONFIG_BASICAUTH_PASSWORD", "defaultValue": "", "required": true, "description": "Mongo Express UI login password" }
+      ]
+    },
+    {
+      "id": "32",
+      "name": "RedisInsight",
+      "slug": "redisinsight",
+      "description": "Official Redis GUI from Redis Inc. — works with Redis, KeyDB, Dragonfly. Visualize keys, run commands, profile slow queries, browse streams + JSON + Bloom filters.",
+      "category": "Databases",
+      "icon": "database",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/redisinsight.png",
+      "version": "2.50",
+      "dockerImage": "redis/redisinsight:latest",
+      "ports": [5540],
+      "containerPort": 5540,
+      "defaultPort": 5540,
+      "envVars": [
+        { "key": "RI_PROXY_PATH", "defaultValue": "", "required": false, "description": "Sub-path to mount RedisInsight at (leave empty for /)" }
+      ]
     }
   ]
 }

@@ -58,6 +58,9 @@ const FALLBACK_ICON: Record<string, string> = {
   gitea: '🍵', vaultwarden: '🔐', plausible: '📈', 'code-server': '💻',
   roundcube: '📮', snappymail: '✉️', rainloop: '☔', mailpit: '🧪',
   postal: '📬', mailu: '🛡️',
+  // DB management tools
+  dbgate: '🗄️', adminer: '🔍', phpmyadmin: '🐬',
+  pgadmin: '🐘', 'mongo-express': '🍃', redisinsight: '⚡',
 };
 
 export default function MarketplacePage() {
