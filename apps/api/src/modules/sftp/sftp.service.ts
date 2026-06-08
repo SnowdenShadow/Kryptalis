@@ -73,6 +73,11 @@ export class SftpService {
   private readonly DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
   private readonly SFTP_DIR = path.join(this.DATA_DIR, 'sftp');
   private readonly USERS_CONF = path.join(this.SFTP_DIR, 'users.conf');
+  // Keys live inside the chrooted home dirs. atmoz/sftp picks up
+  // /home/<user>/.ssh/keys/*.pub when SSH_USERS provides them at boot;
+  // for runtime adds we drop the same path manually post-create.
+  // KEYS_BASE_DIR is the host-side parent we drop them under so docker
+  // bind-mount keeps the files in sync without an extra container restart.
   private readonly USERCONF_DIR = path.join(this.SFTP_DIR, 'userconf');
   private readonly CONTAINER_NAME = 'kryptalis-sftp';
 
@@ -85,8 +90,18 @@ export class SftpService {
     for (const d of [this.SFTP_DIR, this.USERCONF_DIR]) {
       if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
     }
-    // Seed an empty users.conf so the sftp container can bind-mount
-    // it even before the first account is created.
+    // Recovery: an older compose mounted users.conf as a bind-source
+    // BEFORE the file existed on the host, which made the docker daemon
+    // create an empty directory at both ends. Detect that case and
+    // replace the dir with a regular empty file — otherwise every
+    // writeFileSync below throws EISDIR forever. Safe to run on every
+    // boot because we test with statSync first.
+    try {
+      const st = fs.statSync(this.USERS_CONF);
+      if (st.isDirectory()) {
+        fs.rmSync(this.USERS_CONF, { recursive: true, force: true });
+      }
+    } catch {}
     if (!fs.existsSync(this.USERS_CONF)) {
       fs.writeFileSync(this.USERS_CONF, '');
     }

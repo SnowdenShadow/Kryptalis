@@ -178,13 +178,15 @@ services:
       # Persistent SSH host keys so client `known_hosts` doesn't have to
       # be rewiped on every redeploy.
       - sftp_host_keys:/etc/ssh
-      # User config written by API at runtime. Format:
-      #   user:password-hash:uid:gid::chrootDir
-      # See atmoz/sftp README — one line per account.
-      - ./.kryptalis/sftp/users.conf:/etc/sftp/users.conf
-      # Per-user authorized_keys files. API writes
-      # /etc/sftp/<user>/keys/<uuid>.pub and atmoz/sftp picks them up.
-      - ./.kryptalis/sftp/userconf:/etc/sftp.d/userconf
+      # SFTP config dir. We mount the WHOLE dir (not the single file) to
+      # dodge the docker daemon's bind-source-must-exist trap: if we
+      # mounted users.conf directly and the file didn't exist on the
+      # host yet, daemon would silently create an empty directory at
+      # both the mount source AND target, then API writes to "users.conf"
+      # would fail with EISDIR forever. Mounting the parent dir is
+      # idempotent: an empty .kryptalis/sftp dir is fine, and the API
+      # writes users.conf + userconf/<user>/keys/ inside it at runtime.
+      - ./.kryptalis/sftp:/etc/sftp
       # The actual data: we bind-mount the whole apps/ tree read-write
       # so each chrooted user maps into their app's appDir directly.
       # The chrootDir field in users.conf points inside this volume.
