@@ -991,11 +991,16 @@ ${networksBlock}`;
           // stripping, so Caddy can route to it on the bridge.
           const info = readComposeContainerInfo(content, containerName(slug));
           if (info.containerPort) {
+            // We also write `port` so the Caddy renderer's mainLinked
+            // check (which gates on app.port being non-null) passes —
+            // otherwise the domain stays in "reserved" mode forever and
+            // the user sees the 503 placeholder.
             await this.prisma.application.update({
               where: { id: appId },
               data: {
                 containerName: info.containerName,
                 containerPort: info.containerPort,
+                port: info.containerPort,
               },
             });
             log(

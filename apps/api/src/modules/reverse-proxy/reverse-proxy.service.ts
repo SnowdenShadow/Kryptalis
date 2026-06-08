@@ -320,8 +320,16 @@ ${email ? `  email ${email}\n` : ''}}
       const isLocal = this.isLocalHostname(host);
 
       // Main app on :443 (clean-URL slot). Tracked via Domain.applicationId.
-      const mainPort = d.application?.port ?? null;
-      const mainLinked = !!d.applicationId && !!mainPort;
+      // An app is "linked" if EITHER:
+      //   - container_name + container_port are known (Caddy proxies over
+      //     the shared kryptalis-apps bridge — preferred path), OR
+      //   - app.port is set (legacy host.docker.internal:<hostPort> path)
+      // Requiring BOTH meant compose-style apps that strip host ports
+      // sat in "reserved" mode forever.
+      const mainPort = d.application?.port ?? d.application?.containerPort ?? null;
+      const hasContainerTarget =
+        !!d.application?.containerName && !!d.application?.containerPort;
+      const mainLinked = !!d.applicationId && !!d.application && (hasContainerTarget || !!mainPort);
       const mainApp = d.application;
 
       // Port-pinned apps. Caddy publishes their port on the host (override
@@ -330,10 +338,10 @@ ${email ? `  email ${email}\n` : ''}}
 
       // ── :443 block ────────────────────────────────────────────────
       if (isLocal) {
-        blocks.push(`# ${host} :80 → ${mainLinked ? `app ${safeMainAppName} (host port ${mainPort})` : 'reserved'}`);
+        blocks.push(`# ${host} :80 → ${mainLinked ? `app ${safeMainAppName}` : 'reserved'}`);
         blocks.push(`http://${host} {`);
         if (mainLinked) {
-          blocks.push(proxyFor(mainApp!, mainPort!));
+          blocks.push(proxyFor(mainApp!, mainPort ?? 0));
         } else if (portBindings.length > 0) {
           const first = portBindings[0];
           blocks.push(`  respond "Open https://${host}:${first.port} for ${sanitizeCaddyName(first.application.name)}." 200`);
@@ -342,10 +350,10 @@ ${email ? `  email ${email}\n` : ''}}
         }
         blocks.push(`}`);
       } else {
-        blocks.push(`# ${host} :443 → ${mainLinked ? `app ${safeMainAppName} (host port ${mainPort})` : (portBindings.length > 0 ? 'redirect to port-bound apps' : 'reserved')}`);
+        blocks.push(`# ${host} :443 → ${mainLinked ? `app ${safeMainAppName}` : (portBindings.length > 0 ? 'redirect to port-bound apps' : 'reserved')}`);
         blocks.push(`${host} {`);
         if (mainLinked) {
-          blocks.push(proxyFor(mainApp!, mainPort!));
+          blocks.push(proxyFor(mainApp!, mainPort ?? 0));
         } else if (portBindings.length > 0) {
           const first = portBindings[0];
           blocks.push(`  redir https://${host}:${first.port}{uri} 308`);
