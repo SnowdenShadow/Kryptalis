@@ -146,6 +146,14 @@ export function QuickDeployDialog({
     enabled: open && mode === 'marketplace',
   });
 
+  // Auto-suggest the next free host port the moment the user picks
+  // "A host port" + has a project selected. They can still override.
+  const { data: nextFreePort } = useQuery<{ port: number }>({
+    queryKey: ['next-free-port', projectId],
+    queryFn: () => api.get(`/applications/next-free-port/${projectId}`),
+    enabled: open && exposeMode === 'port' && !!projectId,
+  });
+
   const { data: repos = [], isLoading: reposLoading } = useQuery<Repo[]>({
     queryKey: ['unified-deploy-repos', providerId],
     queryFn: () => api.get(`/git-providers/${providerId}/repos`),
@@ -180,17 +188,24 @@ export function QuickDeployDialog({
     if (name) return;
     if (mode === 'git' && gitSource === 'provider' && repo) {
       const short = repo.fullName.split('/').pop() || repo.fullName;
-      setName(slug(short));
+      setName(autoName(short));
     } else if (mode === 'git' && gitSource === 'url' && gitUrl) {
       const m = gitUrl.match(/\/([^/]+?)(?:\.git)?$/);
-      if (m) setName(slug(m[1]));
+      if (m) setName(autoName(m[1]));
     } else if (mode === 'docker' && dockerImage) {
       const short = dockerImage.split('/').pop()?.split(':')[0] || '';
-      if (short) setName(slug(short));
+      if (short) setName(autoName(short));
     } else if (mode === 'marketplace' && marketplaceApp) {
-      setName(slug(marketplaceApp.slug));
+      setName(autoName(marketplaceApp.slug));
     }
   }, [mode, gitSource, repo, gitUrl, dockerImage, marketplaceApp, name]);
+
+  // When the suggestion arrives and the user hasn't typed yet, fill it in.
+  useEffect(() => {
+    if (exposeMode === 'port' && nextFreePort?.port && !hostPort.trim()) {
+      setHostPort(String(nextFreePort.port));
+    }
+  }, [exposeMode, nextFreePort, hostPort]);
 
   // Preload marketplace env vars into the editor when an app is picked.
   useEffect(() => {
@@ -210,8 +225,19 @@ export function QuickDeployDialog({
   }, [mode, marketplaceApp]);
 
   // ── Helpers ─────────────────────────────────────────────────────
-  function slug(s: string) {
-    return s.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 40);
+  // Soft sanitize for the auto-fill case: keep letters (any case),
+  // digits, and dash; drop everything else. We do NOT lowercase — the
+  // backend regex allows /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/ so the
+  // user can have CamelCase / EnopyaApp / etc. if they want.
+  function autoName(s: string) {
+    return s.replace(/[^A-Za-z0-9 ._-]/g, '-').replace(/-+/g, '-').slice(0, 40);
+  }
+  // Live filter for the name input: same allow-list as backend, no
+  // forced lowercase. Drop the leading dash/space if the user types it
+  // first (backend requires alphanumeric start).
+  function sanitizeName(s: string) {
+    const cleaned = s.replace(/[^A-Za-z0-9 ._-]/g, '');
+    return cleaned.replace(/^[^A-Za-z0-9]+/, '').slice(0, 64);
   }
 
   function reset() {
@@ -480,7 +506,7 @@ export function QuickDeployDialog({
             <Input
               id="qd-name"
               value={name}
-              onChange={(e) => setName(slug(e.target.value))}
+              onChange={(e) => setName(sanitizeName(e.target.value))}
               placeholder="my-app"
             />
           </div>
@@ -547,7 +573,7 @@ export function QuickDeployDialog({
                   type="number"
                   min={1024}
                   max={65535}
-                  placeholder="5050"
+                  placeholder={nextFreePort ? String(nextFreePort.port) : '5050'}
                   value={hostPort}
                   onChange={(e) => setHostPort(e.target.value)}
                 />
@@ -557,9 +583,14 @@ export function QuickDeployDialog({
                       'Port must be 1024–65535 and not one of the reserved Kryptalis ports.'}
                   </p>
                 )}
+                {nextFreePort && hostPort === String(nextFreePort.port) && (
+                  <p className="text-[11px] text-muted-foreground">
+                    ✨ {t('quickDeploy.hostPortSuggested') || 'Next free port on this server.'}
+                  </p>
+                )}
                 <p className="text-[11px] text-muted-foreground">
                   {t('quickDeploy.hostPortHint') ||
-                    'App reachable at http://<server-ip>:<port>. Reserved ports (3000, 4000, 5432, 80/443) are refused.'}
+                    'App reachable at http://<server-ip>:<port>. If the port you pick is taken, the platform refuses and tells you which app already has it.'}
                 </p>
               </div>
             )}

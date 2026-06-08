@@ -73,6 +73,10 @@ interface ApplicationDetail {
   gitBranch: string | null;
   dockerImage?: string | null;
   port: number | null;
+  // Host port published on the server when the app has no domain
+  // (no-DNS access path). When set the public URL is
+  // http://<server-ip>:<hostPort>, not :<port> (port = internal).
+  hostPort?: number | null;
   customPort?: boolean;
   buildCommand?: string | null;
   startCommand?: string | null;
@@ -205,6 +209,7 @@ function appUrl(hostname: string, port: number) {
 function publicUrls(
   app: {
     port?: number | null;
+    hostPort?: number | null;
     customPort?: boolean;
     domains?: { domain: string; sslStatus: string }[];
     portBindings?: { port: number; domain: { domain: string; sslStatus: string } }[];
@@ -223,7 +228,11 @@ function publicUrls(
   for (const b of app.portBindings || []) {
     urls.push(`http://${b.domain.domain}:${b.port}`);
   }
-  if (urls.length === 0 && app.port) {
+  // No-domain + host-port: published directly on the host. URL shown
+  // is the user-picked host port, NOT the internal container port.
+  if (urls.length === 0 && app.hostPort) {
+    urls.push(appUrl(fallbackHostname, app.hostPort));
+  } else if (urls.length === 0 && app.port) {
     urls.push(appUrl(fallbackHostname, app.port));
   }
   return urls;
@@ -925,6 +934,11 @@ export default function ApplicationDetailPage() {
                   <div className="rounded-lg border border-border p-3">
                     <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Internal port</p>
                     <p className="font-mono text-lg font-bold">{app.port || 'Not set'}</p>
+                    {app.hostPort && (
+                      <p className="text-[10px] text-muted-foreground mt-1">
+                        Published on host: <span className="font-mono font-semibold">:{app.hostPort}</span>
+                      </p>
+                    )}
                   </div>
                   <div className="rounded-lg border border-border p-3">
                     <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Framework</p>

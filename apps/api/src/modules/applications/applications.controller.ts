@@ -27,6 +27,12 @@ export class ApplicationsController {
     return this.svc.findAll(userId);
   }
 
+  @Get('next-free-port/:projectId')
+  @ApiOperation({ summary: 'Suggest the next free host port for a project\'s server' })
+  nextFreePort(@CurrentUser('id') userId: string, @Param('projectId') projectId: string) {
+    return this.svc.suggestNextFreePort(userId, projectId);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get application' })
   findOne(@CurrentUser('id') userId: string, @Param('id') id: string) {

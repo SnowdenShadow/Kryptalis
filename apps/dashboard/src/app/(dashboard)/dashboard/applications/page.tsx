@@ -61,6 +61,7 @@ interface Application {
   gitUrl: string | null;
   gitBranch: string | null;
   port: number | null;
+  hostPort?: number | null;
   createdAt: string;
   project?: { id: string; name: string };
   customPort?: boolean;
@@ -153,6 +154,7 @@ function appUrl(port: number) {
  */
 function publicAppUrl(app: {
   port?: number | null;
+  hostPort?: number | null;
   customPort?: boolean;
   domains?: { domain: string; sslStatus: string }[];
   portBindings?: { port: number; domain: { domain: string; sslStatus: string } }[];
@@ -165,6 +167,9 @@ function publicAppUrl(app: {
   }
   const bound = app.portBindings?.[0];
   if (bound) return `http://${bound.domain.domain}:${bound.port}`;
+  // No domain → use the host-port publish (the user-picked one). Falls
+  // back to the internal container port only when nothing else is set.
+  if (app.hostPort) return appUrl(app.hostPort);
   return app.port ? appUrl(app.port) : null;
 }
 
@@ -801,8 +806,12 @@ export default function ApplicationsPage() {
                       )}
                       {app.port && !app.customPort && (
                         <div>
-                          <p className="text-xs text-muted-foreground">Port</p>
-                          <p className="font-mono font-medium">{app.port}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {app.hostPort ? 'Port (host → container)' : 'Port'}
+                          </p>
+                          <p className="font-mono font-medium">
+                            {app.hostPort ? `${app.hostPort} → ${app.port}` : app.port}
+                          </p>
                         </div>
                       )}
                       {app.gitUrl && (

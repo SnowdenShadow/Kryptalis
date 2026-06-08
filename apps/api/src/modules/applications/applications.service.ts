@@ -1399,6 +1399,35 @@ export class ApplicationsService {
     return { ...app, name: displayName, slugName: app.name };
   }
 
+  /**
+   * Suggest the next free host port for a project's server. Walks
+   * upward from 8080, skipping reserved system ports + any hostPort
+   * already used by another app on the same server. Caps at 9999 so
+   * we never return a port too close to the 65535 ceiling.
+   */
+  async suggestNextFreePort(userId: string, projectId: string): Promise<{ port: number }> {
+    await this.assertProjectOwnership(userId, projectId);
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { serverId: true },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+    const taken = await this.prisma.application.findMany({
+      where: {
+        hostPort: { not: null },
+        project: { serverId: project.serverId },
+      },
+      select: { hostPort: true },
+    });
+    const used = new Set<number>(taken.map((a) => a.hostPort!).filter((n) => !!n));
+    for (let p = 8080; p <= 9999; p++) {
+      if (RESERVED_HOST_PORTS.has(p)) continue;
+      if (used.has(p)) continue;
+      return { port: p };
+    }
+    throw new ConflictException('No free host port available in 8080-9999.');
+  }
+
   async findAll(userId: string) {
     const projectIds = await listAccessibleProjectIds(this.prisma, userId);
     if (projectIds.length === 0) return [];
