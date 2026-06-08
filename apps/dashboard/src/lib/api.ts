@@ -126,17 +126,28 @@ class ApiClient {
 
     if (res.status === 401) {
       // /auth/refresh and /auth/login themselves shouldn't try to refresh —
-      // their 401 is the real, unrecoverable kind.
-      if (!endpoint.startsWith('/auth/refresh') && !endpoint.startsWith('/auth/login')) {
+      // their 401 is the real, unrecoverable kind. For login specifically
+      // a 401 carries an actionable message ('Two-factor code required',
+      // 'Invalid credentials', …) which the page needs verbatim — don't
+      // overwrite it with a 'Session expired' redirect.
+      const isAuthEntry =
+        endpoint.startsWith('/auth/refresh') ||
+        endpoint.startsWith('/auth/login') ||
+        endpoint.startsWith('/auth/register');
+
+      if (!isAuthEntry) {
         const newToken = await this.tryRefresh();
         if (newToken) {
           res = await doFetch(newToken);
         }
+        if (res.status === 401) {
+          this.clearTokensAndRedirect();
+          throw new ApiError({ status: 401, message: 'Session expired — please log in again.', endpoint });
+        }
       }
-      if (res.status === 401) {
-        this.clearTokensAndRedirect();
-        throw new ApiError({ status: 401, message: 'Session expired — please log in again.', endpoint });
-      }
+      // For /auth/* entry points, fall through to the generic !res.ok
+      // handler below so the backend's actual error message reaches the
+      // caller.
     }
 
     if (!res.ok) {
