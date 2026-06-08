@@ -42,24 +42,23 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
         JWT_EXPIRATION: Joi.string().default('15m'),
         JWT_REFRESH_EXPIRATION: Joi.string().default('7d'),
         ENCRYPTION_KEY: Joi.string().min(32).required(),
-        // Optional — when set, backup dumps are AES-256-GCM encrypted at rest.
-        // Deliberately separate from ENCRYPTION_KEY so backup access can be
-        // siloed (e.g. only an ops-team member holds it, app secrets unaffected
-        // if it leaks, and vice versa).
-        BACKUP_ENCRYPTION_KEY: Joi.string().min(32).optional(),
-        CORS_ORIGINS: Joi.string().optional(),
-        SWAGGER_PUBLIC: Joi.string().optional(),
-        // Notifications — all optional. If SMTP_HOST is unset the
-        // NotificationsService silently degrades to a logged no-op so
-        // dev/test environments work without an SMTP relay.
-        SMTP_HOST: Joi.string().optional(),
-        SMTP_PORT: Joi.number().optional(),
-        SMTP_USER: Joi.string().optional(),
-        SMTP_PASS: Joi.string().optional(),
-        SMTP_FROM: Joi.string().optional(),
-        // Used to render CTA links inside transactional email. Defaults
-        // to localhost:3000 when unset so dev links still resolve.
-        PUBLIC_DASHBOARD_URL: Joi.string().uri().optional(),
+        // All these env vars are now ADMIN-MANAGED through the Admin UI's
+        // System Config tab. docker-compose passes them as empty strings
+        // (`${SMTP_HOST:-}`) when not set, which Joi normally rejects even
+        // on .optional() — we use .allow('').optional() everywhere so the
+        // bootstrap doesn't break when the operator hasn't yet visited the
+        // Admin UI to fill them in.
+        BACKUP_ENCRYPTION_KEY: Joi.string().min(32).allow('').optional(),
+        CORS_ORIGINS: Joi.string().allow('').optional(),
+        SWAGGER_PUBLIC: Joi.string().allow('').optional(),
+        SMTP_HOST: Joi.string().allow('').optional(),
+        // Number() rejects empty string; use Joi.alternatives so both '' and
+        // a real number are accepted.
+        SMTP_PORT: Joi.alternatives().try(Joi.number(), Joi.string().allow('')).optional(),
+        SMTP_USER: Joi.string().allow('').optional(),
+        SMTP_PASS: Joi.string().allow('').optional(),
+        SMTP_FROM: Joi.string().allow('').optional(),
+        PUBLIC_DASHBOARD_URL: Joi.alternatives().try(Joi.string().uri(), Joi.string().allow('')).optional(),
       }),
     }),
     // Global throttler — defaults are conservative; tight per-route limits
