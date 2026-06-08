@@ -10,19 +10,11 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { randomBytes, createHash } from 'crypto';
-// otplib's CJS export shape is { authenticator, totp, hotp }. NestJS's
-// emitted code is CJS, and a destructured `const { authenticator }` was
-// landing as `undefined` against the actual module object in production
-// builds (esModuleInterop quirks). Resolve via require + dot-access at
-// runtime so we touch the real export regardless of how the bundler
-// chose to interop it.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const otplibModule = require('otplib');
-const authenticator = (otplibModule.authenticator || otplibModule.default?.authenticator);
-if (!authenticator) {
-  throw new Error('otplib.authenticator could not be resolved at boot.');
-}
-// Set window once at module load instead of mutating per-request.
+// otplib v13 reshuffled the API and dropped the `authenticator` singleton —
+// pinned to v12 in package.json where `authenticator.verify({token, secret})`
+// is the canonical entrypoint. Set window once at module load instead of
+// mutating per-request.
+import { authenticator } from 'otplib';
 authenticator.options = { window: 1 };
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';

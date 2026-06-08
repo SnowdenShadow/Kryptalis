@@ -33,7 +33,7 @@
     "helmet": "^8.2.0",
     "joi": "^17.13.0",
     "js-yaml": "^4.2.0",
-    "otplib": "^13.4.1",
+    "otplib": "12",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "reflect-metadata": "^0.2.2",
