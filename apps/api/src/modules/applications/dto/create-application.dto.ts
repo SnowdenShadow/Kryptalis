@@ -108,4 +108,19 @@ export class CreateApplicationDto {
   @IsOptional()
   @IsString()
   domainId?: string;
+
+  /**
+   * Convenience: pass a brand-new domain string (e.g. "blog.acme.com")
+   * and the backend creates the Domain row + attaches it atomically.
+   * Saves the user a round-trip to the Domains page and avoids the
+   * partial-failure window where the app exists but the domain create
+   * 500s afterwards.
+   */
+  @ApiProperty({ required: false, description: 'New domain to create + attach in one go (e.g. "app.acme.com")' })
+  @IsOptional()
+  @IsString()
+  @Matches(/^(?=.{1,253}$)(?:(?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,63}$/, {
+    message: 'domain must be a valid RFC 1035 hostname (e.g. app.acme.com).',
+  })
+  domain?: string;
 }

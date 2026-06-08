@@ -46,6 +46,7 @@ import {
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { QuickDeployDialog } from './quick-deploy';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -240,7 +241,12 @@ export default function ApplicationsPage() {
     queryFn: () => api.get('/projects'),
   });
 
-  // --- Deploy dialog ---
+  // --- Deploy dialogs ---
+  // Quick path is the default. Advanced path (the original 4-step wizard)
+  // is reachable from the quick dialog's "Advanced…" button OR via the
+  // empty-state CTA when the user already has 0 apps but wants the full
+  // controls (Docker image, env editor, port mapping, compose override).
+  const [showQuickDeploy, setShowQuickDeploy] = useState(false);
   const [showDeploy, setShowDeploy] = useState(false);
   const [deployStep, setDeployStep] = useState(0);
   const [deployMode, setDeployMode] = useState<'docker' | 'git-provider' | 'git-url' | null>(null);
@@ -599,7 +605,7 @@ export default function ApplicationsPage() {
             </Badge>
           )}
         </div>
-        <Button onClick={() => setShowDeploy(true)}>
+        <Button onClick={() => setShowQuickDeploy(true)}>
           <Plus size={16} />
           {t('apps.deploy')}
         </Button>
@@ -690,7 +696,7 @@ export default function ApplicationsPage() {
             <p className="mt-1 text-sm text-muted-foreground">
               {t('apps.emptyDesc')}
             </p>
-            <Button className="mt-4" onClick={() => setShowDeploy(true)}>
+            <Button className="mt-4" onClick={() => setShowQuickDeploy(true)}>
               <Plus size={16} />
               {t('apps.deploy')}
             </Button>
@@ -959,6 +965,16 @@ export default function ApplicationsPage() {
       })()}
 
       {/* ---- Deploy Wizard ---- */}
+      {/* Quick deploy — the happy-path single-screen wizard. */}
+      <QuickDeployDialog
+        open={showQuickDeploy}
+        onClose={() => setShowQuickDeploy(false)}
+        onAdvanced={() => {
+          setShowQuickDeploy(false);
+          setShowDeploy(true);
+        }}
+      />
+
       <Dialog open={showDeploy} onClose={() => { setShowDeploy(false); setDeployStep(0); }} className="max-w-2xl max-h-[90vh] overflow-y-auto">
         {/* Step indicators — sticky so user always sees progress when content scrolls */}
         <div className="sticky top-0 z-10 -mx-6 -mt-6 px-6 pt-6 pb-3 mb-4 bg-card border-b border-border">

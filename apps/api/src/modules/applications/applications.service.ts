@@ -19,6 +19,7 @@ import {
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { AgentService } from '../agent/agent.service';
 import { isLocalHost, DeploymentTargetService } from '../deployment-target/deployment-target.service';
+import { detectStack, FRAMEWORK_DOCKERFILES, FRAMEWORK_INTERNAL_PORT } from './dockerfile-templates';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
@@ -320,10 +321,39 @@ export class ApplicationsService {
       composeOverride,
       dockerfileOverride,
       portMapping,
-      domainId,
+      domainId: dtoDomainId,
+      domain: dtoDomainString,
       envVars: dtoEnvVars,
       ...dbData
     } = dto;
+
+    // Convenience: caller passed `domain: "app.acme.com"` for a brand-new
+    // hostname. Create the Domain row up-front and treat the rest of the
+    // flow as if domainId had been provided. Avoids the 2-request UI dance
+    // where the wizard creates the app then PUSHes /domains and either
+    // succeeds or leaves a half-finished app behind.
+    let domainId = dtoDomainId;
+    if (!domainId && dtoDomainString) {
+      const existing = await this.prisma.domain.findUnique({
+        where: { domain: dtoDomainString },
+      });
+      if (existing) {
+        if (existing.projectId !== dto.projectId) {
+          throw new BadRequestException(
+            `Domain "${dtoDomainString}" already belongs to another project.`,
+          );
+        }
+        domainId = existing.id;
+      } else {
+        const created = await this.prisma.domain.create({
+          data: {
+            domain: dtoDomainString,
+            projectId: dto.projectId,
+          },
+        });
+        domainId = created.id;
+      }
+    }
 
     // canonical port = first host port in mapping (used by the dashboard URL)
     const firstMappedHost = portMapping
@@ -814,6 +844,41 @@ ${networksBlock}`;
         fs.writeFileSync(path.join(appDir, 'Dockerfile'), opts.dockerfileOverride);
       }
 
+      // Auto-detect the framework and generate a production Dockerfile
+      // when the user didn't bring their own. This is the heart of the
+      // "no Docker knowledge required" deploy: React/Vite/Next/Vue/Astro
+      // /static repos get a clean nginx-or-node image with a fixed
+      // internal port that Caddy reaches via container_name. The user
+      // never picks a port.
+      const composePathInitial = this.findComposePath(appDir);
+      const dockerfilePathInitial = path.join(appDir, 'Dockerfile');
+      const hasOwnDockerfile = fs.existsSync(dockerfilePathInitial);
+      const hasOwnCompose = !!composePathInitial;
+      if (!hasOwnDockerfile && !hasOwnCompose) {
+        const stack = detectStack(appDir);
+        if (stack) {
+          const tpl = FRAMEWORK_DOCKERFILES[stack];
+          fs.writeFileSync(dockerfilePathInitial, tpl);
+          log(`🪄 No Dockerfile in repo — generated one for detected stack: ${stack}`);
+          // Lock the app to the framework's canonical internal port so
+          // every later reload picks the same one.
+          const internalPort = FRAMEWORK_INTERNAL_PORT[stack];
+          await this.prisma.application.update({
+            where: { id: appId },
+            data: {
+              port: internalPort,
+              framework: (stack as any),
+              // Caddy reaches the app on the shared kryptalis-apps bridge
+              // by container_name:internalPort — no host port publish, no
+              // port collision possible.
+              containerName: containerName(slug),
+              containerPort: internalPort,
+            },
+          });
+          opts.port = internalPort;
+        }
+      }
+
       const composePath = this.findComposePath(appDir);
       const dockerfilePath = path.join(appDir, 'Dockerfile');
       const hasCompose = !!composePath;
@@ -845,28 +910,38 @@ ${networksBlock}`;
         const rb = await execFileAsync('docker', ['build', '-t', img, '.'], { cwd: appDir, timeout: 900_000 });
         log(rb.stdout + rb.stderr);
         try { await execFileAsync('docker', ['rm', '-f', cname]); } catch {}
-        // build run argv
+
+        // Resolve the container's internal port (EXPOSE in Dockerfile +
+        // opts.port override). This is what Caddy will reverse_proxy to,
+        // NOT a host port. The platform reaches the container through
+        // the shared `kryptalis-apps` bridge — host port publish is
+        // intentionally skipped so multiple apps can listen on port 80
+        // without colliding.
+        const exposed = parseDockerfileExposed(fs.readFileSync(dockerfilePath, 'utf-8'));
+        const internalPort =
+          opts.port ?? (exposed.length > 0 ? exposed[0] : undefined);
+
+        // Build run argv. Attach to:
+        //   1. kryptalis-apps  → Caddy proxies to <containerName>:<internalPort>
+        //   2. projectNet      → sibling apps in the same project reach by name
         const runArgs = ['run', '-d', '--name', cname, '--restart', 'unless-stopped'];
+        runArgs.push('--network', 'kryptalis-apps', '--network-alias', slug);
         if (projectNet) {
           runArgs.push('--network', projectNet, '--network-alias', slug);
         }
-        // env
         if (opts.envVars) {
           for (const [k, v] of Object.entries(opts.envVars)) {
             runArgs.push('-e', `${k}=${v}`);
           }
         }
-        // ports — prefer EXPOSE detection if no explicit
-        const exposed = parseDockerfileExposed(fs.readFileSync(dockerfilePath, 'utf-8'));
+        // No host -p publish. Caddy reaches us via container_name.
+        // If the user explicitly passed a portMapping (advanced flow),
+        // we still honour it so they can opt-in to direct host access.
         const portMap: Array<[number, number]> = [];
         if (opts.portMapping) {
           for (const [ct, ht] of Object.entries(opts.portMapping)) {
             portMap.push([Number(ht), Number(ct)]);
           }
-        } else if (opts.port) {
-          portMap.push([opts.port, opts.port]);
-        } else if (exposed.length) {
-          for (const e of exposed) portMap.push([e, e]);
         }
         for (const [h, c] of portMap) runArgs.push('-p', `${h}:${c}`);
         runArgs.push(img);
@@ -874,19 +949,33 @@ ${networksBlock}`;
         const rr = await execFileAsync('docker', runArgs, { timeout: 120_000 });
         log(rr.stdout + rr.stderr);
 
-        // generate compose mirror so start/stop/logs work uniformly
+        // Record container coordinates so Caddy's reverse_proxy uses
+        // the in-network path (containerName:internalPort) on every
+        // future regenerate.
+        if (internalPort) {
+          await this.prisma.application.update({
+            where: { id: appId },
+            data: { containerName: cname, containerPort: internalPort },
+          });
+        }
+
+        // Generate the compose mirror so start/stop/logs uses the same
+        // network attachment the run command did.
         const portsBlock = portMap.length
           ? `    ports:\n${portMap.map(([h, c]) => `      - "${h}:${c}"`).join('\n')}\n`
           : '';
         const envBlock = opts.envVars && Object.keys(opts.envVars).length
           ? `    environment:\n${Object.entries(opts.envVars).map(([k, v]) => `      ${k}: ${JSON.stringify(v)}`).join('\n')}\n`
           : '';
-        let composeContent = `services:\n  ${slug}:\n    image: ${img}\n    container_name: ${cname}\n    restart: unless-stopped\n${portsBlock}${envBlock}`;
-        if (projectNet) composeContent = attachProjectNetwork(composeContent, projectNet);
+        const networksBlock = `    networks:\n      - kryptalis-apps${projectNet ? `\n      - ${projectNet}` : ''}\n`;
+        const topLevelNetworks =
+          `networks:\n  kryptalis-apps:\n    external: true${projectNet ? `\n  ${projectNet}:\n    external: true` : ''}\n`;
+        const composeContent =
+          `services:\n  ${slug}:\n    image: ${img}\n    container_name: ${cname}\n    restart: unless-stopped\n${portsBlock}${envBlock}${networksBlock}\n${topLevelNetworks}`;
         fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), composeContent);
 
-        if (portMap.length === 0) {
-          log('⚠ no port exposed — container started but not reachable from host');
+        if (!internalPort) {
+          log('⚠ no EXPOSE directive in Dockerfile — Caddy will not be able to reach this app');
         }
       } else {
         // language autodetect — generate minimal compose.
