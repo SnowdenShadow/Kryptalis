@@ -193,9 +193,12 @@ export class AuthService {
           ' (this log is GATED to NODE_ENV !== production)',
         );
       }
-      // TODO: NotificationsService.sendEmailVerification(user.email, rawToken, user.name)
-      // — wire this once the notifications module lands. Same shape as
-      // forgotPassword's pending TODO; both will graduate together.
+      // Send via NotificationsService. The service swallows its own
+      // errors (logs a warn) so an SMTP outage doesn't 500 the register
+      // endpoint and lock out the signup flow.
+      try {
+        await this.notifications.sendEmailVerification(user.email, rawToken, user.name);
+      } catch {}
 
       return {
         message: 'Check your email to verify your account',
@@ -269,7 +272,9 @@ export class AuthService {
         ' (this log is GATED to NODE_ENV !== production)',
       );
     }
-    // TODO: NotificationsService.sendEmailVerification(user.email, rawToken, user.name)
+    try {
+      await this.notifications.sendEmailVerification(user.email, rawToken, user.name);
+    } catch {}
     return GENERIC;
   }
 

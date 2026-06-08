@@ -17,6 +17,7 @@ import type { ProjectRole } from '@prisma/client';
 import { AgentService } from '../agent/agent.service';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
@@ -41,6 +42,7 @@ export class ProjectsService {
     private agent: AgentService,
     private proxy: ReverseProxyService,
     private mailServer: MailServerService,
+    private notifications: NotificationsService,
   ) {}
 
   async create(userId: string, dto: CreateProjectDto) {
@@ -500,7 +502,7 @@ export class ProjectsService {
     }
     if (!targetUserId) throw new BadRequestException('email or userId required');
 
-    return this.prisma.projectMember.upsert({
+    const result = await this.prisma.projectMember.upsert({
       where: { projectId_userId: { projectId, userId: targetUserId } },
       create: {
         projectId,
@@ -513,6 +515,29 @@ export class ProjectsService {
         user: { select: { id: true, name: true, email: true } },
       },
     });
+
+    // Notify the user they've been added (fire-and-forget — a failed
+    // email shouldn't break the add). Only on first add, not on
+    // role updates, to avoid spamming.
+    try {
+      const wasUpdate = result.createdAt.getTime() < Date.now() - 5000;
+      if (!wasUpdate) {
+        const [project, actor] = await Promise.all([
+          this.prisma.project.findUnique({ where: { id: projectId }, select: { name: true } }),
+          this.prisma.user.findUnique({ where: { id: actorId }, select: { name: true } }),
+        ]);
+        if (project && actor && result.user.email) {
+          await this.notifications.sendUserInvited(
+            result.user.email,
+            project.name,
+            actor.name,
+            '',
+          );
+        }
+      }
+    } catch {}
+
+    return result;
   }
 
   async updateMember(

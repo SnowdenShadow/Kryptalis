@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { UpdateApplicationDto } from './dto/update-application.dto';
@@ -244,7 +245,31 @@ export class ApplicationsService {
     private agent: AgentService,
     private domainAttach: DomainAttachService,
     private encryption: EncryptionService,
+    private notifications: NotificationsService,
   ) {}
+
+  /**
+   * Notify the user who triggered a deployment of its terminal outcome.
+   * Reads triggeredById from the Deployment row so callers don't need to
+   * thread it down. Never throws — notification failures shouldn't break
+   * the deploy.
+   */
+  private async notifyDeploymentOutcome(
+    deploymentId: string,
+    appName: string,
+    status: 'success' | 'failed',
+    error?: string,
+  ) {
+    try {
+      const dep = await this.prisma.deployment.findUnique({
+        where: { id: deploymentId },
+        select: { triggeredById: true },
+      });
+      if (dep?.triggeredById) {
+        await this.notifications.sendDeploymentResult(dep.triggeredById, appName, status, error);
+      }
+    } catch {}
+  }
 
   /**
    * Resolve the server an app runs on. Loads { id, host } off project.serverId,
@@ -539,6 +564,7 @@ ${networksBlock}`;
           finishedAt: new Date(),
         },
       });
+      this.notifyDeploymentOutcome(deploymentId, name, 'success');
     } catch (err: any) {
       const msg = err?.message || 'docker image deploy failed';
       log(`✖ ${msg}`);
@@ -556,6 +582,7 @@ ${networksBlock}`;
           finishedAt: new Date(),
         },
       });
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
   }
 
@@ -686,6 +713,7 @@ ${networksBlock}`;
             finishedAt: new Date(),
           },
         });
+        this.notifyDeploymentOutcome(deploymentId, name, 'success');
       } catch (err: any) {
         const msg = err?.message || 'deploy failed';
         log(`✖ ${msg}`);
@@ -703,6 +731,7 @@ ${networksBlock}`;
             finishedAt: new Date(),
           },
         });
+        this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
       }
       return;
     }
@@ -917,6 +946,7 @@ ${networksBlock}`;
           finishedAt: new Date(),
         },
       });
+      this.notifyDeploymentOutcome(deploymentId, name, 'success');
     } catch (err: any) {
       const msg = (err?.stderr || err?.stdout || err?.message || 'deploy failed').toString();
       log(`✖ ${msg}`);
@@ -959,6 +989,7 @@ ${networksBlock}`;
           finishedAt: new Date(),
         },
       });
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
   }
 

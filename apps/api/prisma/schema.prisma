@@ -675,6 +675,10 @@ model AlertRule {
   serverId  String
   metric    String
   threshold Float
+  // Comparison operator. Default GTE because the original use case is
+  // high-water-mark alerts ('CPU >= 90%'); LT/LTE enable floor-watching
+  // ('free disk < 10%', 'requests/s dropped below 5').
+  operator   AlertOperator @default(GTE)
   channel   AlertChannel @default(EMAIL)
   webhookUrl String?
   enabled   Boolean      @default(true)
@@ -684,6 +688,14 @@ model AlertRule {
 
   @@index([serverId])
   @@map("alert_rules")
+}
+
+enum AlertOperator {
+  GT
+  GTE
+  LT
+  LTE
+  EQ
 }
 
 enum AlertChannel {

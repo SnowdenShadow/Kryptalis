@@ -256,18 +256,19 @@ EOF
 
   cat > /etc/systemd/system/kryptalis-update.timer <<EOF
 [Unit]
-Description=Run Kryptalis self-update every 30 seconds
+Description=Run Kryptalis self-update poll
 Requires=kryptalis-update.service
 
 [Timer]
-# First run 1 min after boot (let docker settle), then every 30 seconds.
-# update.sh polls the GitHub API with If-None-Match — when the upstream SHA
-# is unchanged, GitHub returns 304 Not Modified WITHOUT consuming the 60/h
-# anonymous quota. So even at 120 req/h cadence we sit at 0 quota cost in
-# steady state, and the latency between \`git push\` and rebuild start is
-# at most ~30 seconds. No webhook, no third-party service, no config.
+# Update.sh polls the GitHub API with If-None-Match — when the upstream
+# SHA is unchanged, GitHub returns 304 Not Modified WITHOUT consuming the
+# 60/h anonymous quota. So the request itself is free in steady state.
+# However at 30s cadence ANY rate-limit-skewed hour can cascade rebuilds
+# while you're still mid-edit; the 5-min default is conservative for prod
+# and still gives push→deploy latency under 10 min average.
+# Power users can override via /etc/kryptalis/.env: KRYPTALIS_UPDATE_INTERVAL=30s
 OnBootSec=1min
-OnUnitActiveSec=30s
+OnUnitActiveSec=\${KRYPTALIS_UPDATE_INTERVAL:-5min}
 Unit=kryptalis-update.service
 Persistent=true
 

@@ -83,7 +83,7 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
       for (const rule of serverRules) {
         const value = this.metricValue(rule.metric, latest);
         if (value == null) continue;
-        if (value >= rule.threshold) {
+        if (this.compareThreshold(value, (rule as any).operator || 'GTE', rule.threshold)) {
           // Fire-and-forget: notifications service swallows its own
           // errors so a misconfigured channel can't take down the loop.
           this.notifications.sendAlert(rule, value).catch((e) =>
@@ -91,6 +91,18 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
           );
         }
       }
+    }
+  }
+
+  /** Threshold comparison using the rule's operator. */
+  private compareThreshold(value: number, op: string, threshold: number): boolean {
+    switch (op) {
+      case 'GT': return value > threshold;
+      case 'GTE': return value >= threshold;
+      case 'LT': return value < threshold;
+      case 'LTE': return value <= threshold;
+      case 'EQ': return value === threshold;
+      default: return value >= threshold;
     }
   }
 
