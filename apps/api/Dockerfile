@@ -35,10 +35,12 @@ COPY --from=builder /app/apps/api/prisma ./apps/api/prisma
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 WORKDIR /app/apps/api
 EXPOSE 4000
-# Apply migrations on every start. Order:
-#   1. `migrate deploy` runs any pending versioned migrations (including the
-#      SQL data-preserving steps — db push would lose that).
-#   2. Fallback to `db push` only if migrate deploy fails (greenfield DBs
-#      that never had migrations applied yet — also keeps existing demos
-#      working without forcing them through a baseline).
-CMD ["sh", "-c", "(pnpm exec prisma migrate deploy || pnpm exec prisma db push --skip-generate --accept-data-loss) && node dist/main"]
+# Reconcile the DB schema on every start.
+#   1. `migrate deploy` applies any committed versioned migrations.
+#   2. THEN `db push` is ALWAYS run too — bridges the gap during the
+#      pre-1.0 era where we evolve the schema directly without minting a
+#      migration for every change. `--accept-data-loss` is required for
+#      additive column drops (we hand-pick the destructive operations and
+#      truncate ahead of time when needed). Once we cut a release we'll
+#      stop doing this and require migrations for every change.
+CMD ["sh", "-c", "pnpm exec prisma migrate deploy; pnpm exec prisma db push --skip-generate --accept-data-loss && node dist/main"]
