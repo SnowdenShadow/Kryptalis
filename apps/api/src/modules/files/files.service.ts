@@ -208,7 +208,7 @@ export class FilesService {
       role: p.role,
       applications: p.applications.map((a) => ({
         ...a,
-        hasFiles: fs.existsSync(this.appRootDir(a.id)),
+        hasFiles: fs.existsSync(this.appRootDir(a.id, this.slugify(a.name))),
       })),
       databases: p.databases.map((d) => ({
         ...d,
@@ -219,8 +219,48 @@ export class FilesService {
 
   // ── path resolution ───────────────────────────────────────────────
 
-  private appRootDir(appId: string) {
+  // The real on-disk layout — ApplicationsService writes deploys to
+  // `<APPS_DIR>/<slug>-<appId.slice(0,12)>` (or a legacy `<slug>` dir
+  // for pre-migration installs). We MUST mirror that here or the file
+  // browser ends up pointing at an empty `<APPS_DIR>/<appId>` dir that
+  // never gets populated. The browser would then show every app as
+  // "empty folder" forever — exactly the bug we're fixing.
+  //
+  // Same resolver as applications.service.ts (kept inline to avoid a
+  // cross-module helper export; the two MUST stay byte-for-byte
+  // equivalent — touching one without the other will desync the
+  // browser from the actual disk layout again).
+  private appRootDir(appId: string, slug?: string): string {
+    if (slug) {
+      const perInstance = path.join(APPS_DIR, `${slug}-${appId.slice(0, 12)}`);
+      if (fs.existsSync(perInstance)) return perInstance;
+      const legacy = path.join(APPS_DIR, slug);
+      if (fs.existsSync(legacy)) return legacy;
+      return perInstance;
+    }
+    // Slug not provided (legacy callers) — fall back to scanning APPS_DIR
+    // for any dir that ends with the appId prefix. Slower but correct.
+    const prefix = appId.slice(0, 12);
+    try {
+      for (const name of fs.readdirSync(APPS_DIR)) {
+        if (name.endsWith(`-${prefix}`)) return path.join(APPS_DIR, name);
+      }
+    } catch {}
     return path.join(APPS_DIR, appId);
+  }
+
+  // App lookups in listScopes() only have the id (not the slug). Convert
+  // the in-DB name to a slug here using the same rule the deploy path
+  // uses (lowercase, ascii, dashes, capped at 48). Kept inline for the
+  // same reason as appRootDir above.
+  private slugify(name: string): string {
+    return name
+      .toLowerCase()
+      .normalize('NFKD')
+      .replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 48) || 'app';
   }
 
   private dbRootDir(dbId: string) {
@@ -285,7 +325,7 @@ export class FilesService {
       if (!app) throw new NotFoundException('Application not found');
       await assertProjectAccess(this.prisma, userId, app.projectId, minRole);
       scopeName = app.name;
-      rootDir = this.appRootDir(app.id);
+      rootDir = this.appRootDir(app.id, this.slugify(app.name));
     } else {
       const db = await this.prisma.database.findUnique({ where: { id: scopeId } });
       if (!db) throw new NotFoundException('Database not found');
@@ -859,7 +899,7 @@ export class FilesService {
    * we don't accidentally double-count or escape via a symlink loop.
    */
   private computeProjectUsage(
-    appIds: string[],
+    apps: Array<{ id: string; name: string }>,
     dbIds: string[],
   ): bigint {
     let total = 0n;
@@ -892,7 +932,7 @@ export class FilesService {
         }
       }
     };
-    for (const id of appIds) walk(this.appRootDir(id), 0);
+    for (const a of apps) walk(this.appRootDir(a.id, this.slugify(a.name)), 0);
     for (const id of dbIds) walk(this.dbRootDir(id), 0);
     return total;
   }
@@ -904,13 +944,13 @@ export class FilesService {
     const project = await this.prisma.project.findUnique({
       where: { id: projectId },
       include: {
-        applications: { select: { id: true } },
+        applications: { select: { id: true, name: true } },
         databases: { select: { id: true } },
       },
     });
     if (!project) return 0n;
     const used = this.computeProjectUsage(
-      project.applications.map((a) => a.id),
+      project.applications,
       project.databases.map((d) => d.id),
     );
     this.quotaCache.set(projectId, {
