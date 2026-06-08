@@ -4,6 +4,9 @@ import {
   UnauthorizedException,
   RequestTimeoutException,
   BadRequestException,
+  OnModuleInit,
+  OnModuleDestroy,
+  Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
@@ -26,11 +29,55 @@ export type AgentTaskType = keyof typeof TaskType;
  *    belong to that server. This is checked in taskResult().
  */
 @Injectable()
-export class AgentService {
+export class AgentService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(AgentService.name);
+  private staleTaskInterval: NodeJS.Timeout | null = null;
+  private static readonly STALE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+  private static readonly STALE_TASK_THRESHOLD_MS = 30 * 60 * 1000;
+
   constructor(
     private prisma: PrismaService,
     private encryption: EncryptionService,
   ) {}
+
+  onModuleInit() {
+    // Periodically fail tasks stuck in QUEUED/RUNNING beyond the threshold —
+    // these indicate an agent crashed or disconnected mid-task.
+    this.staleTaskInterval = setInterval(() => {
+      this.failStaleTasks().catch((err) => {
+        this.logger.error('failStaleTasks sweep failed', err as any);
+      });
+    }, AgentService.STALE_SWEEP_INTERVAL_MS);
+  }
+
+  onModuleDestroy() {
+    if (this.staleTaskInterval) {
+      clearInterval(this.staleTaskInterval);
+      this.staleTaskInterval = null;
+    }
+  }
+
+  /**
+   * Mark any QUEUED or RUNNING task older than the threshold as FAILED.
+   * Runs on a timer; assumes the agent crashed or disconnected mid-task.
+   */
+  private async failStaleTasks() {
+    const cutoff = new Date(Date.now() - AgentService.STALE_TASK_THRESHOLD_MS);
+    const res = await this.prisma.agentTask.updateMany({
+      where: {
+        status: { in: ['QUEUED', 'RUNNING'] as any },
+        createdAt: { lt: cutoff },
+      },
+      data: {
+        status: 'FAILED' as any,
+        error: 'Task timed out — agent disconnected',
+        completedAt: new Date(),
+      },
+    });
+    if (res.count > 0) {
+      this.logger.warn(`Failed ${res.count} stale agent task(s) (>30m in QUEUED/RUNNING)`);
+    }
+  }
 
   async getTask(taskId: string) {
     const task = await this.prisma.agentTask.findUnique({ where: { id: taskId } });

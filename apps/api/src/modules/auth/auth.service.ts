@@ -105,6 +105,11 @@ export class AuthService {
         throw new ConflictException('Email already registered');
       }
 
+      const strength = this.isStrongEnough(dto.password);
+      if (!strength.ok) {
+        throw new BadRequestException(strength.reason);
+      }
+
       const hashedPassword = await bcrypt.hash(dto.password, 12);
       const user = await tx.user.create({
         data: {
@@ -357,8 +362,9 @@ export class AuthService {
     userId: string,
     dto: { currentPassword: string; newPassword: string; totpCode?: string; backupCode?: string },
   ) {
-    if (!dto.newPassword || dto.newPassword.length < 8) {
-      throw new BadRequestException('New password must be at least 8 characters');
+    const strength = this.isStrongEnough(dto.newPassword);
+    if (!strength.ok) {
+      throw new BadRequestException(strength.reason);
     }
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new UnauthorizedException('User not found');
@@ -474,8 +480,9 @@ export class AuthService {
     newPassword: string,
     twoFactor?: { totpCode?: string; backupCode?: string },
   ) {
-    if (!newPassword || newPassword.length < 8) {
-      throw new BadRequestException('New password must be at least 8 characters');
+    const strength = this.isStrongEnough(newPassword);
+    if (!strength.ok) {
+      throw new BadRequestException(strength.reason);
     }
     const tokenHash = this.encryption.hash(token);
     const row = await this.prisma.passwordResetToken.findUnique({
@@ -690,6 +697,38 @@ export class AuthService {
       this.config.get('JWT_REFRESH_EXPIRATION', '7d') as string,
     );
     return new Date(Date.now() + ttl);
+  }
+
+  /**
+   * Password strength gate for WRITES (register, changePassword,
+   * resetPassword). Login still accepts whatever the user has on file —
+   * grandfathered weak passwords keep working until the user changes
+   * them. Policy: ≥12 chars AND at least 3 of {lower, upper, digit, symbol}.
+   */
+  private isStrongEnough(pw: string): { ok: boolean; reason?: string } {
+    if (!pw || typeof pw !== 'string') {
+      return { ok: false, reason: 'Password is required.' };
+    }
+    if (pw.length < 12) {
+      return { ok: false, reason: 'Password must be at least 12 characters long.' };
+    }
+    if (pw.length > 128) {
+      return { ok: false, reason: 'Password must be at most 128 characters long.' };
+    }
+    const classes = [
+      /[a-z]/.test(pw),
+      /[A-Z]/.test(pw),
+      /[0-9]/.test(pw),
+      /[^A-Za-z0-9]/.test(pw),
+    ].filter(Boolean).length;
+    if (classes < 3) {
+      return {
+        ok: false,
+        reason:
+          'Password must contain at least 3 of: lowercase letter, uppercase letter, digit, symbol.',
+      };
+    }
+    return { ok: true };
   }
 
   private parseTtl(ttl: string): number {

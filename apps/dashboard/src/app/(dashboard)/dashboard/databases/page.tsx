@@ -19,6 +19,7 @@ import {
   Link as LinkIcon,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { toastError } from '@/lib/toast-error';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -157,7 +158,7 @@ export default function DatabasesPage() {
       closeCreateDialog();
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Failed to create database');
+      toastError(err);
     },
   });
 
@@ -169,7 +170,7 @@ export default function DatabasesPage() {
       setDeleteId(null);
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Failed to delete database');
+      toastError(err);
     },
   });
 
@@ -247,7 +248,7 @@ export default function DatabasesPage() {
       queryClient.invalidateQueries({ queryKey: ['databases'] });
       toast.success(`Database ${action === 'start' ? 'started' : 'stopped'}`);
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const deletingDb = databases.find((db) => db.id === deleteId);

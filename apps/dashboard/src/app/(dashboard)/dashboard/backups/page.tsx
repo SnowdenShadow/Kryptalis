@@ -13,6 +13,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { toastError } from '@/lib/toast-error';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -124,7 +125,7 @@ export default function BackupsPage() {
       closeCreateDialog();
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Failed to create backup');
+      toastError(err);
     },
   });
 
@@ -135,7 +136,7 @@ export default function BackupsPage() {
       toast.success('Backup restore initiated');
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Failed to restore backup');
+      toastError(err);
     },
   });
 
@@ -147,7 +148,7 @@ export default function BackupsPage() {
       setDeleteId(null);
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Failed to delete backup');
+      toastError(err);
     },
   });
 

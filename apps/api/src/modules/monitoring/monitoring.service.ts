@@ -45,10 +45,127 @@ export class MonitoringService {
     }
     const ms = PERIOD_MAP[period] || PERIOD_MAP['24h'];
     const since = new Date(Date.now() - ms);
-    return this.prisma.serverMetric.findMany({
+    const rows = await this.prisma.serverMetric.findMany({
       where: { serverId, timestamp: { gte: since } },
       orderBy: { timestamp: 'asc' },
     });
+
+    // For windows > 24h, downsample to <= 720 points by averaging into
+    // fixed time buckets (5m for 7d, 1h for 30d, 1d for 90d+). Smaller
+    // windows are returned as-is (raw 30s rows already fit on a chart).
+    if (ms <= PERIOD_MAP['24h'] || rows.length === 0) {
+      return rows;
+    }
+    return this.downsample(rows, ms);
+  }
+
+  /**
+   * Bucket raw ServerMetric rows by floor(timestamp / bucketSize) and
+   * average each numeric field within the bucket. BigInt fields are
+   * summed as BigInt and divided by the bucket count at the end so we
+   * never lose precision mid-aggregation. Returned shape matches the
+   * raw row shape (one representative `id`/`serverId` per bucket, the
+   * bucket-start `timestamp`, averaged numeric fields).
+   */
+  private downsample(
+    rows: Array<{
+      id: string;
+      serverId: string;
+      cpuPercent: number;
+      memoryUsed: bigint;
+      memoryTotal: bigint;
+      diskUsed: bigint;
+      diskTotal: bigint;
+      networkIn: bigint;
+      networkOut: bigint;
+      timestamp: Date;
+    }>,
+    windowMs: number,
+  ) {
+    // Pick bucket size so total buckets <= 720.
+    //   <=24h:  raw (handled by caller)
+    //   <=7d:   1h buckets → 168 points
+    //   <=30d:  1h buckets → 720 points
+    //   >30d:   1d buckets → e.g. 90d=90 points
+    // (Task spec: 5-min/day, hour/week, day/month — but day-window is
+    // returned raw upstream, so the effective ladder starts at "week".)
+    let bucketMs: number;
+    if (windowMs <= PERIOD_MAP['7d']) {
+      bucketMs = 60 * 60 * 1000; // 1 hour
+    } else if (windowMs <= PERIOD_MAP['30d']) {
+      bucketMs = 60 * 60 * 1000; // 1 hour → 30d=720 points
+    } else {
+      bucketMs = 24 * 60 * 60 * 1000; // 1 day
+    }
+    // Hard cap: never exceed 720 buckets — widen if needed.
+    const slots = Math.ceil(windowMs / bucketMs);
+    if (slots > 720) {
+      bucketMs = Math.ceil(windowMs / 720);
+    }
+
+    type Acc = {
+      bucketStart: number;
+      count: number;
+      cpuSum: number;
+      memoryUsedSum: bigint;
+      memoryTotalSum: bigint;
+      diskUsedSum: bigint;
+      diskTotalSum: bigint;
+      networkInSum: bigint;
+      networkOutSum: bigint;
+      firstId: string;
+      serverId: string;
+    };
+
+    const buckets = new Map<number, Acc>();
+    for (const r of rows) {
+      const ts = r.timestamp.getTime();
+      const key = Math.floor(ts / bucketMs);
+      let acc = buckets.get(key);
+      if (!acc) {
+        acc = {
+          bucketStart: key * bucketMs,
+          count: 0,
+          cpuSum: 0,
+          memoryUsedSum: 0n,
+          memoryTotalSum: 0n,
+          diskUsedSum: 0n,
+          diskTotalSum: 0n,
+          networkInSum: 0n,
+          networkOutSum: 0n,
+          firstId: r.id,
+          serverId: r.serverId,
+        };
+        buckets.set(key, acc);
+      }
+      acc.count += 1;
+      acc.cpuSum += r.cpuPercent;
+      acc.memoryUsedSum += r.memoryUsed;
+      acc.memoryTotalSum += r.memoryTotal;
+      acc.diskUsedSum += r.diskUsed;
+      acc.diskTotalSum += r.diskTotal;
+      acc.networkInSum += r.networkIn;
+      acc.networkOutSum += r.networkOut;
+    }
+
+    const out = Array.from(buckets.values())
+      .sort((a, b) => a.bucketStart - b.bucketStart)
+      .map((a) => {
+        const n = BigInt(a.count);
+        return {
+          id: a.firstId,
+          serverId: a.serverId,
+          cpuPercent: a.cpuSum / a.count,
+          memoryUsed: a.memoryUsedSum / n,
+          memoryTotal: a.memoryTotalSum / n,
+          diskUsed: a.diskUsedSum / n,
+          diskTotal: a.diskTotalSum / n,
+          networkIn: a.networkInSum / n,
+          networkOut: a.networkOutSum / n,
+          timestamp: new Date(a.bucketStart),
+        };
+      });
+    return out;
   }
 
   async createAlertRule(dto: CreateAlertRuleDto) {

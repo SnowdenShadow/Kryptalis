@@ -17,8 +17,10 @@ import {
   Plus,
   RefreshCw,
   Wrench,
+  Loader2,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { toastError } from '@/lib/toast-error';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -174,7 +176,7 @@ export default function ServersPage() {
       setShowReset(false);
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Failed to reset server');
+      toastError(err);
     },
   });
 
@@ -209,7 +211,7 @@ export default function ServersPage() {
       queryClient.invalidateQueries({ queryKey: ['servers'] });
       toast.success('Server slot created — run the command on your VPS');
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const regenInstallMutation = useMutation({
@@ -219,7 +221,7 @@ export default function ServersPage() {
       setShowAdd(true);
       toast.success('Install command generated');
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const rotateTokenMutation = useMutation({
@@ -230,7 +232,7 @@ export default function ServersPage() {
       queryClient.invalidateQueries({ queryKey: ['servers'] });
       toast.success('Token rotated — server back to PENDING_INSTALL');
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const resetServerMutation = useMutation({
@@ -242,7 +244,7 @@ export default function ServersPage() {
       queryClient.invalidateQueries({ queryKey: ['server-local'] });
       toast.success('Server reset — re-run the install command');
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const removeServerMutation = useMutation({
@@ -252,7 +254,7 @@ export default function ServersPage() {
       queryClient.invalidateQueries({ queryKey: ['servers'] });
       toast.success('Server removed');
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'ONLINE' | 'PENDING_INSTALL' | 'OFFLINE'>('ALL');
@@ -664,6 +666,7 @@ export default function ServersPage() {
                 disabled={!newServerName.trim() || createServerMutation.isPending}
                 onClick={() => createServerMutation.mutate({ name: newServerName.trim() })}
               >
+                {createServerMutation.isPending && <Loader2 size={14} className="animate-spin" />}
                 {createServerMutation.isPending ? 'Creating...' : 'Create slot'}
               </Button>
             </DialogFooter>
@@ -736,6 +739,7 @@ export default function ServersPage() {
             disabled={deleteMutation.isPending}
             onClick={() => server && deleteMutation.mutate(server.id)}
           >
+            {deleteMutation.isPending && <Loader2 size={14} className="animate-spin" />}
             {deleteMutation.isPending ? 'Resetting...' : 'Reset Server'}
           </Button>
         </DialogFooter>

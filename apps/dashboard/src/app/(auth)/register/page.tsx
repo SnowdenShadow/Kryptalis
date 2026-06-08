@@ -18,11 +18,34 @@ export default function RegisterPage() {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [regEnabled, setRegEnabled] = useState<boolean | null>(null);
   const [platformName, setPlatformName] = useState('Kryptalis');
   const { setAuth } = useAuthStore();
   const router = useRouter();
+
+  const strengthScore = (pw: string) => {
+    let s = 0;
+    if (pw.length >= 12) s++;
+    if (/[a-z]/.test(pw)) s++;
+    if (/[A-Z]/.test(pw)) s++;
+    if (/\d/.test(pw)) s++;
+    if (/[^A-Za-z0-9]/.test(pw)) s++;
+    return s;
+  };
+  const score = strengthScore(password);
+  const strengthLabelKey =
+    score <= 1 ? 'auth.passwordStrength.weak'
+    : score === 2 ? 'auth.passwordStrength.fair'
+    : score === 3 ? 'auth.passwordStrength.good'
+    : 'auth.passwordStrength.strong';
+  const strengthBarColor =
+    score <= 1 ? 'bg-destructive'
+    : score === 2 ? 'bg-yellow-500'
+    : score === 3 ? 'bg-blue-500'
+    : 'bg-green-500';
+  const passwordsMatch = confirmPassword === '' || password === confirmPassword;
 
   useEffect(() => {
     api.get<{ registration_enabled?: boolean; platform_name?: string }>('/settings/public')
@@ -35,6 +58,7 @@ export default function RegisterPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (password !== confirmPassword) return;
     setLoading(true);
     try {
       const res = await api.post<{
@@ -119,8 +143,36 @@ export default function RegisterPage() {
                 required
                 minLength={8}
               />
+              {password.length > 0 && (
+                <div className="space-y-1">
+                  <div className="flex gap-1">
+                    {[0, 1, 2, 3].map((i) => (
+                      <div
+                        key={i}
+                        className={`h-1 flex-1 rounded-full ${i < score ? strengthBarColor : 'bg-muted'}`}
+                      />
+                    ))}
+                  </div>
+                  <p className="text-xs text-muted-foreground">{t(strengthLabelKey)}</p>
+                </div>
+              )}
             </div>
-            <Button type="submit" className="w-full" disabled={loading}>
+            <div className="space-y-2">
+              <Label htmlFor="confirmPassword">{t('auth.confirmPassword')}</Label>
+              <Input
+                id="confirmPassword"
+                type="password"
+                placeholder="••••••••"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                required
+                minLength={8}
+              />
+              {!passwordsMatch && (
+                <p className="text-xs text-destructive">{t('auth.passwordsDontMatch')}</p>
+              )}
+            </div>
+            <Button type="submit" className="w-full" disabled={loading || password !== confirmPassword}>
               {loading ? t('auth.creatingAccount') : t('auth.register')}
             </Button>
           </form>

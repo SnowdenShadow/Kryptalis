@@ -17,6 +17,21 @@ import type { ProjectRole } from '@prisma/client';
 import { AgentService } from '../agent/agent.service';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import * as path from 'path';
+import * as fs from 'fs';
+
+const execFileAsync = promisify(execFile);
+const PROJ_DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const PROJ_APPS_DIR = path.join(PROJ_DATA_DIR, 'apps');
+const PROJ_DBS_DIR = path.join(PROJ_DATA_DIR, 'databases');
+const PROJ_LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+
+function isLocalProjServer(host: string | null | undefined): boolean {
+  if (!host) return true;
+  return PROJ_LOCAL_HOSTS.has(host);
+}
 
 @Injectable()
 export class ProjectsService {
@@ -123,6 +138,7 @@ export class ProjectsService {
     const project = await this.prisma.project.findUnique({
       where: { id },
       include: {
+        server: { select: { id: true, host: true } },
         applications: { select: { id: true, name: true } },
         databases: { select: { id: true, name: true } },
         domains: { select: { id: true, domain: true } },
@@ -130,32 +146,83 @@ export class ProjectsService {
     });
     if (!project) throw new NotFoundException('Project not found');
 
+    // Match applications.service slugify (NFKD + diacritic strip) so on-disk
+    // dir lookups hit the same path the install step wrote.
     const slugify = (n: string) =>
-      n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'app';
+      n
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/[̀-ͯ]/g, '')
+        .replace(/[^a-z0-9-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 48) || 'app';
 
-    // Best-effort REMOVE on every container the project owns. purgeVolumes:
-    // true because the user explicitly chose to delete the project.
+    const isLocal = isLocalProjServer(project.server?.host);
+
+    // ── Applications ────────────────────────────────────────────────
+    // LOCAL: drive docker compose + fs cleanup directly (the agent loop
+    // wouldn't run before the cascade nukes the rows). MULTI: enqueue REMOVE
+    // on the remote agent. purgeVolumes=true — user explicitly deleted the
+    // project, no recovery path expected.
     for (const app of project.applications) {
-      try {
-        await this.agent.enqueueTask(project.serverId, 'REMOVE', {
-          slug: slugify(app.name),
-          containerName: `kryptalis-${slugify(app.name)}`,
-          purgeVolumes: true,
-        });
-      } catch {}
-    }
-    for (const db of project.databases) {
-      try {
-        await this.agent.enqueueTask(project.serverId, 'REMOVE', {
-          slug: `db-${slugify(db.name)}`,
-          containerName: `kryptalis-db-${slugify(db.name)}`,
-          purgeVolumes: true,
-        });
-      } catch {}
+      const slug = slugify(app.name);
+      if (isLocal) {
+        // Marketplace multi-install apps live in <slug>-<id12>; legacy installs
+        // in <slug>. Try the per-instance dir first, then fall back.
+        const id12 = app.id.slice(0, 12);
+        const perInstanceDir = path.join(PROJ_APPS_DIR, `${slug}-${id12}`);
+        const legacyDir = path.join(PROJ_APPS_DIR, slug);
+        for (const dir of [perInstanceDir, legacyDir]) {
+          if (fs.existsSync(dir)) {
+            try { await execFileAsync('docker', ['compose', 'down', '-v', '--remove-orphans'], { cwd: dir, timeout: 60_000 }); } catch {}
+            try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+          }
+        }
+        // belt + suspenders: kill orphan containers under both naming schemes
+        try { await execFileAsync('docker', ['rm', '-f', `kryptalis-${slug}`], { timeout: 10_000 }); } catch {}
+        try { await execFileAsync('docker', ['rm', '-f', `kryptalis-${slug}-${id12}`], { timeout: 10_000 }); } catch {}
+      } else {
+        try {
+          await this.agent.enqueueTask(project.serverId, 'REMOVE', {
+            slug,
+            containerName: `kryptalis-${slug}`,
+            purgeVolumes: true,
+          });
+        } catch {}
+      }
     }
 
-    // Tear down per-domain mail servers (if any). The cascade would orphan
-    // the on-disk DKIM + compose dir otherwise.
+    // ── Databases ───────────────────────────────────────────────────
+    // databases.service stores compose dir as DBS_DIR/<db.name> (no slug) and
+    // names containers kryptalis-db-<db.name>. Match those exactly or LOCAL
+    // cleanup misses the bind-mount + leaks the postgres/redis container.
+    for (const db of project.databases) {
+      const containerName = `kryptalis-db-${db.name}`;
+      const slug = `db-${db.name}`;
+      if (isLocal) {
+        const dbDir = path.join(PROJ_DBS_DIR, db.name);
+        if (fs.existsSync(dbDir)) {
+          try { await execFileAsync('docker', ['compose', 'down', '-v', '--remove-orphans'], { cwd: dbDir, timeout: 30_000 }); } catch {}
+          try { fs.rmSync(dbDir, { recursive: true, force: true }); } catch {}
+        }
+        try { await execFileAsync('docker', ['rm', '-f', containerName], { timeout: 10_000 }); } catch {}
+      } else {
+        try {
+          await this.agent.enqueueTask(project.serverId, 'REMOVE', {
+            slug,
+            containerName,
+            purgeVolumes: true,
+          });
+        } catch {}
+      }
+    }
+
+    // ── Mail servers ────────────────────────────────────────────────
+    // Per-domain mail server stack. removeForDomain() already does compose
+    // down -v + fs.rmSync + force-rm by container name — works LOCAL or MULTI
+    // because mail compose dirs are managed locally regardless of project
+    // server (mail rides the host's Caddy). Cascade would otherwise orphan
+    // the DKIM keys + Postfix/Dovecot data dir + the MailServer row.
     for (const d of project.domains) {
       try { await this.mailServer.removeForDomain(d.id); } catch {}
     }

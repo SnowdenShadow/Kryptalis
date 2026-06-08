@@ -26,6 +26,7 @@ import {
   EyeOff,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { toastError } from '@/lib/toast-error';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -354,7 +355,7 @@ export default function ApplicationsPage() {
       });
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Failed to create application');
+      toastError(err);
     },
   });
 
@@ -366,7 +367,7 @@ export default function ApplicationsPage() {
       setDeleteTarget(null);
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Failed to delete application');
+      toastError(err);
     },
   });
 
@@ -378,7 +379,7 @@ export default function ApplicationsPage() {
       toast.success(`Application ${action} initiated`);
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Action failed');
+      toastError(err);
     },
   });
 
@@ -533,7 +534,7 @@ export default function ApplicationsPage() {
           setNewDomainName('');
           setDeployDomainId('');
         } catch (err: any) {
-          toast.error(`App created, but domain attach failed: ${err.message}`);
+          toastError(err, 'App created, but domain attach failed');
         }
       },
     });

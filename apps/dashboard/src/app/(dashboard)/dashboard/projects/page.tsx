@@ -12,8 +12,10 @@ import {
   AppWindow,
   Circle,
   Globe,
+  Loader2,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { toastError } from '@/lib/toast-error';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -196,7 +198,7 @@ export default function ProjectsPage() {
       setShowCreate(false);
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Failed to create project');
+      toastError(err);
     },
   });
 
@@ -208,7 +210,7 @@ export default function ProjectsPage() {
       setDeleteTarget(null);
     },
     onError: (err: Error) => {
-      toast.error(err.message || 'Failed to delete project');
+      toastError(err);
     },
   });
 
@@ -462,6 +464,7 @@ export default function ProjectsPage() {
                 (isMultiMode ? !createForm.serverId : !localServer)
               }
             >
+              {createMutation.isPending && <Loader2 size={14} className="animate-spin" />}
               {createMutation.isPending ? 'Creating...' : t('common.create')}
             </Button>
           </DialogFooter>
@@ -487,6 +490,7 @@ export default function ProjectsPage() {
             disabled={deleteMutation.isPending}
             onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
           >
+            {deleteMutation.isPending && <Loader2 size={14} className="animate-spin" />}
             {deleteMutation.isPending ? 'Deleting...' : t('common.delete')}
           </Button>
         </DialogFooter>

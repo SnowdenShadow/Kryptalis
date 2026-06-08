@@ -3,10 +3,16 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../../prisma/prisma.service';
 import { Role, UserStatus } from '@prisma/client';
+
+const AUDIT_LOG_RETENTION_DAYS = 365;
+const AUDIT_LOG_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
 
 const SETTING_KEYS = [
   'registration_enabled',
@@ -19,8 +25,45 @@ const SETTING_KEYS = [
 type SettingKey = (typeof SETTING_KEYS)[number];
 
 @Injectable()
-export class AdminService {
+export class AdminService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(AdminService.name);
+  private auditLogCleanupTimer: NodeJS.Timeout | null = null;
+
   constructor(private prisma: PrismaService) {}
+
+  onModuleInit() {
+    // Run once at startup, then hourly
+    void this.cleanupAuditLogs();
+    this.auditLogCleanupTimer = setInterval(
+      () => void this.cleanupAuditLogs(),
+      AUDIT_LOG_CLEANUP_INTERVAL_MS,
+    );
+  }
+
+  onModuleDestroy() {
+    if (this.auditLogCleanupTimer) {
+      clearInterval(this.auditLogCleanupTimer);
+      this.auditLogCleanupTimer = null;
+    }
+  }
+
+  private async cleanupAuditLogs() {
+    try {
+      const cutoff = new Date(
+        Date.now() - AUDIT_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+      );
+      const result = await this.prisma.auditLog.deleteMany({
+        where: { createdAt: { lt: cutoff } },
+      });
+      if (result.count > 0) {
+        this.logger.log(
+          `Pruned ${result.count} AuditLog rows older than ${AUDIT_LOG_RETENTION_DAYS} days`,
+        );
+      }
+    } catch (err) {
+      this.logger.error('AuditLog cleanup failed', err as Error);
+    }
+  }
 
   // ── settings ──────────────────────────────────────────────────────
 

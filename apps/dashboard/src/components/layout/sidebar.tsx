@@ -26,11 +26,19 @@ import { useSidebarStore, useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { api } from '@/lib/api';
 
-const navigation = [
+type NavBadge = 'applications' | 'servers';
+
+const navigation: Array<{
+  key: string;
+  href: string;
+  icon: typeof LayoutDashboard;
+  multiOnly?: boolean;
+  badge?: NavBadge;
+}> = [
   { key: 'nav.overview', href: '/dashboard', icon: LayoutDashboard },
-  { key: 'nav.server', href: '/dashboard/servers', icon: Server, multiOnly: true },
+  { key: 'nav.server', href: '/dashboard/servers', icon: Server, multiOnly: true, badge: 'servers' },
   { key: 'nav.projects', href: '/dashboard/projects', icon: FolderKanban },
-  { key: 'nav.applications', href: '/dashboard/applications', icon: Rocket },
+  { key: 'nav.applications', href: '/dashboard/applications', icon: Rocket, badge: 'applications' },
   { key: 'nav.domains', href: '/dashboard/domains', icon: Globe },
   { key: 'nav.docker', href: '/dashboard/docker', icon: Container },
   { key: 'nav.databases', href: '/dashboard/databases', icon: Database },
@@ -56,6 +64,40 @@ export function Sidebar() {
     staleTime: 60_000,
   });
   const isMulti = publicSettings?.deployment_mode === 'MULTI';
+
+  // Live count badges. /applications is already per-user sanitized.
+  // /servers is admin-only; non-admins use the sanitized /servers/mine.
+  const serversEndpoint = isAdmin ? '/servers' : '/servers/mine';
+  const { data: applications, isLoading: appsLoading } = useQuery<Array<{ status?: string }>>({
+    queryKey: ['applications'],
+    queryFn: () => api.get('/applications'),
+    staleTime: 15_000,
+  });
+  const { data: servers, isLoading: serversLoading } = useQuery<Array<{ status?: string }>>({
+    queryKey: ['servers', isAdmin ? 'all' : 'mine'],
+    queryFn: () => api.get(serversEndpoint),
+    staleTime: 15_000,
+  });
+
+  const runningAppsCount = Array.isArray(applications)
+    ? applications.filter((a) => a?.status === 'RUNNING').length
+    : 0;
+  const onlineServersCount = Array.isArray(servers)
+    ? servers.filter((s) => s?.status === 'ONLINE').length
+    : 0;
+
+  const badgeCount = (badge: NavBadge | undefined): number | null => {
+    if (!badge) return null;
+    if (badge === 'applications') {
+      if (appsLoading) return null;
+      return runningAppsCount > 0 ? runningAppsCount : null;
+    }
+    if (badge === 'servers') {
+      if (serversLoading) return null;
+      return onlineServersCount > 0 ? onlineServersCount : null;
+    }
+    return null;
+  };
 
   return (
     <aside
@@ -88,6 +130,7 @@ export function Sidebar() {
             item.href === '/dashboard'
               ? pathname === '/dashboard'
               : pathname.startsWith(item.href);
+          const count = badgeCount(item.badge);
 
           return (
             <Link
@@ -103,7 +146,16 @@ export function Sidebar() {
               title={collapsed ? t(item.key) : undefined}
             >
               <item.icon size={20} />
-              {!collapsed && <span>{t(item.key)}</span>}
+              {!collapsed && (
+                <>
+                  <span className="flex-1">{t(item.key)}</span>
+                  {count !== null && (
+                    <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      {count}
+                    </span>
+                  )}
+                </>
+              )}
             </Link>
           );
         })}

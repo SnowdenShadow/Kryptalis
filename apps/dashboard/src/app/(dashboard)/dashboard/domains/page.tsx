@@ -9,6 +9,7 @@ import {
   ChevronDown, ChevronRight, Mail,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { toastError } from '@/lib/toast-error';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -592,12 +593,12 @@ export default function DomainsPage() {
       refetchProxy();
       queryClient.invalidateQueries({ queryKey: ['domains'] });
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
   const proxyStartMutation = useMutation({
     mutationFn: () => api.post('/reverse-proxy/start'),
     onSuccess: () => { toast.success('Reverse proxy starting...'); refetchProxy(); },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const { data: projects = [] } = useQuery<{ id: string; name: string }[]>({
@@ -664,7 +665,7 @@ export default function DomainsPage() {
       }
       closeAdd();
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const renewMutation = useMutation({
@@ -673,7 +674,7 @@ export default function DomainsPage() {
       queryClient.invalidateQueries({ queryKey: ['domains'] });
       toast.success('SSL renewal requested');
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   const deleteMutation = useMutation({
@@ -683,7 +684,7 @@ export default function DomainsPage() {
       toast.success('Domain deleted');
       setDeleteTarget(null);
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => toastError(err),
   });
 
   function closeAdd() {
