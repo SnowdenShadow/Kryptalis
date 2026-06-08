@@ -322,13 +322,29 @@ export class FilesService {
     // (marketplace side-files are always shallow). Anything else
     // (a directory of source, a Dockerfile, a package.json…) flips
     // us to host-fs.
+    // Pull the actual side-file names declared by the matching template
+    // (e.g. PrestaShop's prestashop-proxy.conf + php-trust-proxy.ini +
+    // kryptalis-trust-proxy.php). Hard-coded suffix patterns would either
+    // miss future templates or accidentally whitelist user files; the
+    // explicit list is the precise oracle. Pulled lazily to avoid a
+    // circular import on the marketplace module.
+    let sideFileNames: Set<string> = new Set();
+    try {
+      const { SIDE_FILES } = require('../marketplace/templates') as {
+        SIDE_FILES: Record<string, Record<string, string>>;
+      };
+      const map = SIDE_FILES?.[slug];
+      if (map) sideFileNames = new Set(Object.keys(map));
+    } catch {}
+
     const isPlatformArtefact = (name: string): boolean => {
       if (this.isManaged(name)) return true;
       if (name === '.env') return true;
       if (/^docker-compose\.(yml|yaml)$/i.test(name)) return true;
-      // Marketplace side-files land here (PrestaShop's apache conf,
-      // future Postfix main.cf / sshd_config / php.ini drops).
-      if (/\.conf$/i.test(name)) return true;
+      // Marketplace side-files for this exact slug — exact-name match
+      // only. Avoids whitelisting any `.conf` / `.ini` / `.php` the
+      // user might have legitimately committed at repo root.
+      if (sideFileNames.has(name)) return true;
       return false;
     };
     let hasUserFiles = false;
