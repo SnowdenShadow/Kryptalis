@@ -635,9 +635,18 @@ networks:
     # — overriding it (we briefly did) broke the auto-installer.
     volumes:
       - prestashop_data___INSTANCE_ID__:/var/www/html
-      - ./prestashop-proxy.conf:/etc/apache2/conf-enabled/kryptalis-proxy.conf:ro
-      - ./php-trust-proxy.ini:/usr/local/etc/php/conf.d/zzz-kryptalis-trust-proxy.ini:ro
-      - ./kryptalis-trust-proxy.php:/usr/local/etc/php/kryptalis-trust-proxy.php:ro
+      # Bind mounts use the placeholder __HOST_APP_DIR__ instead of
+      # relative paths. When the API runs in a container, docker compose
+      # from inside it passes the compose-file directory to the host
+      # daemon as the mount source -- but that directory only exists
+      # inside the API container. The daemon resolves bind sources on
+      # the HOST filesystem and finds nothing, creating an empty dir at
+      # the mount point. The placeholder is replaced at install time
+      # with KRYPTALIS_HOST_DATA_DIR + the per-instance subpath, which
+      # IS a real host path the daemon can resolve.
+      - __HOST_APP_DIR__/prestashop-proxy.conf:/etc/apache2/conf-enabled/kryptalis-proxy.conf:ro
+      - __HOST_APP_DIR__/php-trust-proxy.ini:/usr/local/etc/php/conf.d/zzz-kryptalis-trust-proxy.ini:ro
+      - __HOST_APP_DIR__/kryptalis-trust-proxy.php:/usr/local/etc/php/kryptalis-trust-proxy.php:ro
     depends_on:
       prestashop-db-__INSTANCE_ID__:
         condition: service_healthy

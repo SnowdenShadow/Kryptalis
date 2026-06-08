@@ -329,9 +329,27 @@ export class MarketplaceService {
       data: { containerName },
     });
 
+    // Resolve the HOST path of this install's appDir. When the API runs
+    // in a container, the docker daemon sits on the host and resolves
+    // bind-mount sources against the HOST filesystem — `./` / relative
+    // paths in our generated compose would otherwise point at directories
+    // that exist inside the API container but NOT on the host, and the
+    // daemon would silently create empty dirs at the mount point.
+    //
+    // KRYPTALIS_HOST_DATA_DIR is set in the top-level compose to the
+    // operator's actual host path (`${PWD}/.kryptalis`). Default to the
+    // in-container path so single-process dev `pnpm dev` keeps working.
+    const hostDataDir = process.env.KRYPTALIS_HOST_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+    const hostAppDir = path.join(
+      hostDataDir,
+      'apps',
+      `${data.appSlug}-${instanceId}`,
+    );
+
     composeContent = composeContent
       .replace(/__INSTANCE_ID__/g, instanceId)
-      .replace(/__HOST_PORT__/g, String(realPort));
+      .replace(/__HOST_PORT__/g, String(realPort))
+      .replace(/__HOST_APP_DIR__/g, hostAppDir);
 
     // Generate strong random passwords for any __RANDOM_PASSWORD__ /
     // __RANDOM_PASSWORD_2__ / ... placeholders the template declares.
