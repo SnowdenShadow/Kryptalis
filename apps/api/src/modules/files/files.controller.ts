@@ -170,11 +170,9 @@ export class FilesController {
     @Query('path') p: string,
     @Res() res: Response,
   ) {
-    // Service hands back an O_NOFOLLOW-opened fd so a TOCTOU symlink swap
-    // between the access check and the read is impossible. We stream via
-    // createReadStream(null, { fd }) which consumes the fd and closes it
-    // on stream end.
-    const fs = await import('fs');
+    // Service returns a unified {stream, filename, size} regardless of
+    // whether the source is a host-fs O_NOFOLLOW-opened fd or a stream
+    // piped from `docker exec cat` inside a container.
     const meta = await this.svc.downloadFile(userId, parseScope(scope), scopeId, p);
     // RFC 5987 encoded filename + ASCII-safe fallback. Prevents
     // Content-Disposition header injection via CRLF or " in the basename.
@@ -186,8 +184,11 @@ export class FilesController {
     );
     res.setHeader('Content-Length', String(meta.size));
     res.setHeader('Content-Type', 'application/octet-stream');
-    const stream = fs.createReadStream(null as any, { fd: meta.fd, autoClose: true });
-    stream.on('error', (err) => {
+    // Cast to NodeJS.ReadableStream — the service union of {ReadStream
+    // | child process stdout} both implement the same Node stream API,
+    // but TS can't narrow the union for on/pipe overloads. Cast is safe.
+    const stream = meta.stream as NodeJS.ReadableStream;
+    stream.on('error', (err: Error) => {
       try { res.destroy(err); } catch {}
     });
     stream.pipe(res);

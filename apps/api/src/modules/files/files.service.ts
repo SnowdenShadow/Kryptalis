@@ -11,6 +11,8 @@ import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
+import * as dockerFs from './docker-fs';
+import { pickRootForImage, type DockerFsTarget } from './docker-fs';
 
 /**
  * Files module — multi-tenant browser/editor for app & database sandboxes.
@@ -170,7 +172,7 @@ export class FilesService {
             id: true,
             name: true,
             applications: {
-              select: { id: true, name: true, framework: true, status: true },
+              select: { id: true, name: true, framework: true, status: true, containerName: true },
             },
             databases: {
               select: { id: true, name: true, type: true, applicationId: true },
@@ -208,7 +210,13 @@ export class FilesService {
       role: p.role,
       applications: p.applications.map((a) => ({
         ...a,
-        hasFiles: fs.existsSync(this.appRootDir(a.id, this.slugify(a.name))),
+        // hasFiles=true if the host dir has user files (git deploys,
+        // compose-empty) OR the app has a container we can introspect
+        // (marketplace, image-only). Either way the file manager has
+        // SOMETHING to show.
+        hasFiles:
+          fs.existsSync(this.appRootDir(a.id, this.slugify(a.name))) ||
+          !!(a as any).containerName,
       })),
       databases: p.databases.map((d) => ({
         ...d,
@@ -265,6 +273,64 @@ export class FilesService {
 
   private dbRootDir(dbId: string) {
     return path.join(DBS_DIR, dbId);
+  }
+
+  // ── docker-fs detection ───────────────────────────────────────────
+  //
+  // Some app deploys live entirely INSIDE a container — marketplace
+  // installs (PrestaShop, WordPress, Ghost…) and `framework=DOCKER` /
+  // `dockerImage`-only apps. The host dir for those holds nothing but
+  // the compose file + .env; the actual app files (PrestaShop's
+  // /var/www/html, WordPress's same, etc.) are unreachable through the
+  // normal bind-mount file manager.
+  //
+  // When we detect that case, we return a DockerFsTarget {containerName,
+  // rootDir} and route every read/write through docker-fs.ts instead.
+  // From the user's POV the file manager just works — they see the
+  // app's actual files keyed on a sensible root for that image.
+  //
+  // We never combine both — once we decide a scope is "docker-only" we
+  // commit to it for that request, so the user doesn't have to think
+  // about which half of the disk they're editing.
+  private async resolveDockerTarget(appId: string): Promise<DockerFsTarget | null> {
+    const app = await this.prisma.application.findUnique({
+      where: { id: appId },
+      select: {
+        name: true,
+        framework: true,
+        dockerImage: true,
+        containerName: true,
+        gitUrl: true,
+      },
+    });
+    if (!app) return null;
+    // No container_name → can't address the container; fall through to host-fs.
+    if (!app.containerName) return null;
+
+    const slug = this.slugify(app.name);
+    const hostDir = this.appRootDir(appId, slug);
+    // If the host dir actually has source code (more than the managed
+    // compose / env file), prefer host-fs. Detected by counting non-
+    // managed entries.
+    let hasUserFiles = false;
+    try {
+      const entries = fs.readdirSync(hostDir);
+      for (const e of entries) {
+        if (this.isManaged(e)) continue;
+        // .env / docker-compose variants the deploy path drops in are
+        // expected — skip those even though they aren't in MANAGED_FILES
+        // (we explicitly want them browsable on git deploys).
+        if (e === '.env' || /^docker-compose\.(yml|yaml)$/i.test(e)) continue;
+        hasUserFiles = true;
+        break;
+      }
+    } catch {}
+    if (hasUserFiles) return null;
+
+    return {
+      containerName: app.containerName,
+      rootDir: pickRootForImage(app.dockerImage || app.containerName || ''),
+    };
   }
 
   private isManaged(name: string): boolean {
@@ -550,7 +616,30 @@ export class FilesService {
     relPath: string,
     opts: { showSensitive?: boolean } = {},
   ) {
+    // RBAC + scope existence (the path comparison itself is dummy here —
+    // we re-check inside the dispatcher).
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'VIEWER');
+
+    // Docker-fs path for apps with no host source dir (marketplace,
+    // image-only). RBAC has already cleared via resolvePath().
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        const entries = await dockerFs.listDir(target, resolved.relPath);
+        return {
+          scope: resolved.scope,
+          scopeName: resolved.scopeName,
+          path: resolved.relPath,
+          breadcrumbs: this.buildBreadcrumbs(resolved.relPath),
+          // Filter same sensitive defaults as host-fs so docker browsing
+          // doesn't suddenly reveal .git, .ssh, etc. to a VIEWER.
+          entries: entries
+            .filter((e) => opts.showSensitive || !this.isSensitiveDotfile(e.name))
+            .map((e) => ({ ...e, isHidden: e.name.startsWith('.') })),
+        };
+      }
+    }
+
     if (!fs.existsSync(resolved.absPath)) {
       throw new NotFoundException('Path not found');
     }
@@ -621,6 +710,33 @@ export class FilesService {
   async readFile(userId: string, scope: 'app' | 'db', scopeId: string, relPath: string) {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'VIEWER');
     this.assertNotManaged(resolved.relPath);
+
+    // Docker-fs path — read directly from inside the container.
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        const s = await dockerFs.stat(target, resolved.relPath);
+        if (!s.exists) throw new NotFoundException('File not found');
+        if (s.isDir) throw new BadRequestException('Path is a directory');
+        if (s.size > MAX_TEXT_FILE_BYTES) {
+          return {
+            path: resolved.relPath,
+            binary: true,
+            size: s.size,
+            message: 'File too large to edit in-browser (>2 MB)',
+          };
+        }
+        const content = await dockerFs.readFile(target, resolved.relPath);
+        return {
+          path: resolved.relPath,
+          binary: false,
+          size: content.length,
+          content,
+          sha256: crypto.createHash('sha256').update(content).digest('hex'),
+        };
+      }
+    }
+
     const basename = path.basename(resolved.absPath);
 
     // Dotenv files contain secrets — gate raw read behind project ADMIN.
@@ -687,6 +803,24 @@ export class FilesService {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
     this.assertNotManaged(resolved.relPath);
     if (typeof content !== 'string') throw new BadRequestException('content must be a string');
+
+    // Docker-fs path.
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        if (Buffer.byteLength(content, 'utf-8') > MAX_TEXT_FILE_BYTES) {
+          throw new BadRequestException('File too large (>2MB). Use upload instead.');
+        }
+        await dockerFs.writeFile(target, resolved.relPath, content);
+        await this.audit(userId, scope, scopeId, 'write', resolved.relPath);
+        return {
+          path: resolved.relPath,
+          size: Buffer.byteLength(content, 'utf-8'),
+          sha256: crypto.createHash('sha256').update(content).digest('hex'),
+        };
+      }
+    }
+
     const newSize = Buffer.byteLength(content, 'utf-8');
     if (newSize > MAX_TEXT_FILE_BYTES) {
       throw new BadRequestException('File too large (>2MB). Use upload instead.');
@@ -733,6 +867,17 @@ export class FilesService {
     const targetRel = relPath ? `${relPath}/${safeName}` : safeName;
     const resolved = await this.resolvePath(userId, scope, scopeId, targetRel, 'DEVELOPER');
     this.assertNotManaged(resolved.relPath);
+
+    // Docker-fs path.
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        await dockerFs.uploadFile(target, relPath || '', safeName, buffer);
+        await this.audit(userId, scope, scopeId, 'upload', resolved.relPath);
+        return { path: resolved.relPath, size: buffer.length };
+      }
+    }
+
     // Quota: charge buffer.length minus any prior size if we're
     // overwriting. New uploads to fresh paths charge the full size.
     let priorUploadSize = 0;
@@ -756,6 +901,18 @@ export class FilesService {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'VIEWER');
     this.assertNotManaged(resolved.relPath);
     await this.assertSensitiveOrAdmin(userId, resolved.relPath);
+
+    // Docker-fs path — return a stream the controller pipes to the
+    // response. No fd / O_NOFOLLOW dance because the container is the
+    // ownership boundary, not the host filesystem.
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        const { stream, filename, size } = await dockerFs.downloadFile(target, resolved.relPath);
+        return { stream, filename, size };
+      }
+    }
+
     if (!fs.existsSync(resolved.absPath)) throw new NotFoundException('File not found');
     const stat = fs.lstatSync(resolved.absPath);
     if (stat.isSymbolicLink()) {
@@ -775,8 +932,13 @@ export class FilesService {
       throw e;
     }
     const fstat = fs.fstatSync(fd);
+    // Wrap the fd in a ReadStream so the controller can pipe a unified
+    // {stream, filename, size} shape regardless of whether the source
+    // is a host file or a docker exec stream. autoClose closes the fd
+    // when the stream ends.
+    const stream = fs.createReadStream(null as any, { fd, autoClose: true });
     return {
-      fd,
+      stream,
       // strip CR/LF and double-quote from the filename used in the
       // Content-Disposition header — caller still applies its own RFC5987
       // encoding for unicode safety.
@@ -790,6 +952,19 @@ export class FilesService {
   async mkdir(userId: string, scope: 'app' | 'db', scopeId: string, relPath: string) {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
     this.assertNotManaged(resolved.relPath);
+
+    // Docker-fs path.
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        const s = await dockerFs.stat(target, resolved.relPath);
+        if (s.exists) throw new BadRequestException('Path already exists');
+        await dockerFs.mkdir(target, resolved.relPath);
+        await this.audit(userId, scope, scopeId, 'mkdir', resolved.relPath);
+        return { path: resolved.relPath };
+      }
+    }
+
     if (fs.existsSync(resolved.absPath)) {
       throw new BadRequestException('Path already exists');
     }
@@ -824,6 +999,21 @@ export class FilesService {
       : safeDstName;
     const dst = await this.resolvePath(userId, scope, scopeId, reconstructedToRel, 'DEVELOPER');
     this.assertNotManaged(dst.relPath);
+
+    // Docker-fs path.
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        const srcStat = await dockerFs.stat(target, src.relPath);
+        if (!srcStat.exists) throw new NotFoundException('Source not found');
+        const dstStat = await dockerFs.stat(target, dst.relPath);
+        if (dstStat.exists) throw new BadRequestException('Destination already exists');
+        await dockerFs.rename(target, src.relPath, dst.relPath);
+        await this.audit(userId, scope, scopeId, 'rename', `${src.relPath} → ${dst.relPath}`);
+        return { from: src.relPath, to: dst.relPath };
+      }
+    }
+
     if (!fs.existsSync(src.absPath)) throw new NotFoundException('Source not found');
     if (fs.existsSync(dst.absPath)) throw new BadRequestException('Destination already exists');
     this.assertNoSymlinkInPath(dst.rootDir, dst.absPath);
@@ -839,6 +1029,19 @@ export class FilesService {
     }
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'ADMIN');
     this.assertNotManaged(resolved.relPath);
+
+    // Docker-fs path.
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        const s = await dockerFs.stat(target, resolved.relPath);
+        if (!s.exists) throw new NotFoundException('Path not found');
+        await dockerFs.remove(target, resolved.relPath);
+        await this.audit(userId, scope, scopeId, 'remove', resolved.relPath);
+        return { path: resolved.relPath, deleted: true };
+      }
+    }
+
     if (!fs.existsSync(resolved.absPath)) throw new NotFoundException('Path not found');
     this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
     fs.rmSync(resolved.absPath, { recursive: true, force: true });
