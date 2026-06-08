@@ -34,6 +34,8 @@ import {
   CheckCircle2,
   GitCommit,
   Power,
+  Monitor,
+  LogOut,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -83,6 +85,45 @@ interface UpdateStatus {
     fired: boolean;
     lastFiredAt: string | null;
   };
+}
+
+// Tiny UA → "Browser on OS" parser. Intentionally heuristic: matches the
+// big four browsers and the big three OSes; falls back to raw UA when
+// nothing recognizable is found (the request to keep it "simple" rules
+// out pulling in `ua-parser-js`).
+function parseUA(ua: string | null | undefined): string {
+  if (!ua) return 'Unknown device';
+  const browser =
+    /Edg\//.test(ua) ? 'Edge' :
+    /OPR\//.test(ua) ? 'Opera' :
+    /Firefox\//.test(ua) ? 'Firefox' :
+    /Chrome\//.test(ua) ? 'Chrome' :
+    /Safari\//.test(ua) ? 'Safari' :
+    null;
+  const os =
+    /Windows NT/.test(ua) ? 'Windows' :
+    /Mac OS X|Macintosh/.test(ua) ? 'macOS' :
+    /Android/.test(ua) ? 'Android' :
+    /iPhone|iPad|iOS/.test(ua) ? 'iOS' :
+    /Linux/.test(ua) ? 'Linux' :
+    null;
+  if (browser && os) return `${browser} on ${os}`;
+  return ua;
+}
+
+function formatRelative(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (!then) return iso;
+  const diff = Date.now() - then;
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} minute${m === 1 ? '' : 's'} ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} hour${h === 1 ? '' : 's'} ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d} day${d === 1 ? '' : 's'} ago`;
+  return new Date(iso).toLocaleDateString();
 }
 
 const notificationEvents = [
@@ -373,6 +414,36 @@ export default function SettingsPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  // ── active sessions ──────────────────────────────────────────────
+  type SessionRow = {
+    id: string;
+    createdAt: string;
+    ipAddress: string | null;
+    userAgent: string | null;
+    isCurrent: boolean;
+  };
+  const { data: sessions = [], refetch: refetchSessions } = useQuery<SessionRow[]>({
+    queryKey: ['auth-sessions'],
+    queryFn: () => api.get('/auth/sessions'),
+    enabled: activeTab === 'security',
+  });
+  const revokeSession = useMutation({
+    mutationFn: (id: string) => api.delete(`/auth/sessions/${id}`),
+    onSuccess: () => {
+      toast.success('Session revoked');
+      refetchSessions();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const revokeOthers = useMutation({
+    mutationFn: () => api.delete('/auth/sessions') as Promise<{ revoked: number }>,
+    onSuccess: (d) => {
+      toast.success(`Logged out of ${d.revoked} other session${d.revoked === 1 ? '' : 's'}`);
+      refetchSessions();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   // Git Providers
   const [showAddGit, setShowAddGit] = useState(false);
   const [gitForm, setGitForm] = useState({ provider: 'GITHUB', name: '', token: '' });
@@ -640,6 +711,83 @@ export default function SettingsPage() {
                   {twoFactorEnabled ? 'Disable' : 'Enable'}
                 </Button>
               </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <CardTitle className="text-lg">Active sessions</CardTitle>
+                  <CardDescription>
+                    Every device currently signed into your account. Revoke any you don’t recognize.
+                  </CardDescription>
+                </div>
+                {sessions.filter((s) => !s.isCurrent).length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={revokeOthers.isPending}
+                    onClick={() => revokeOthers.mutate()}
+                  >
+                    {revokeOthers.isPending
+                      ? <Loader2 size={12} className="animate-spin" />
+                      : <LogOut size={12} />}
+                    Log out everywhere else
+                  </Button>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent>
+              {sessions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-8 text-muted-foreground text-sm">
+                  <Monitor size={28} className="mb-2" />
+                  <p>No active sessions found</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {sessions.map((s) => (
+                    <div
+                      key={s.id}
+                      className={cn(
+                        'flex items-center justify-between gap-3 rounded-lg border p-3',
+                        s.isCurrent ? 'border-primary/40 bg-primary/5' : 'border-border',
+                      )}
+                    >
+                      <div className="flex items-start gap-3 min-w-0 flex-1">
+                        <Monitor size={18} className="text-muted-foreground shrink-0 mt-0.5" />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="text-sm font-medium truncate">
+                              {parseUA(s.userAgent)}
+                            </p>
+                            {s.isCurrent && (
+                              <Badge variant="success" className="text-[10px]">This device</Badge>
+                            )}
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {s.ipAddress || 'unknown IP'} · signed in {formatRelative(s.createdAt)}
+                          </p>
+                        </div>
+                      </div>
+                      {!s.isCurrent && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-destructive shrink-0"
+                          disabled={revokeSession.isPending}
+                          onClick={() => revokeSession.mutate(s.id)}
+                        >
+                          {revokeSession.isPending
+                            ? <Loader2 size={14} className="animate-spin" />
+                            : <Trash2 size={14} />}
+                          Revoke
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>

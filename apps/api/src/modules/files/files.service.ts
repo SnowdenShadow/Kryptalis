@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  PayloadTooLargeException,
 } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -121,12 +122,41 @@ function isDotenvName(name: string): boolean {
 const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024; // 2MB
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50MB
 
+// Quota walk caps — guard against pathological trees (symlink loops the
+// O_NOFOLLOW guard didn't catch, runaway node_modules nesting, etc.).
+const QUOTA_MAX_DEPTH = 20;
+const QUOTA_MAX_FILES = 100_000;
+const QUOTA_CACHE_TTL_MS = 60_000;
+const DEFAULT_QUOTA_BYTES = 10n * 1024n * 1024n * 1024n; // 10 GiB
+
+interface QuotaCacheEntry {
+  used: bigint;
+  expiresAt: number;
+}
+
 @Injectable()
 export class FilesService {
+  // Cache of computed storage usage per projectId. Walking a tree is O(N
+  // files + dirs) of statSync calls — back-to-back uploads in a session
+  // would re-walk every time without this. TTL is 60s; entries also get
+  // bumped forward additively after each accepted write so we don't
+  // under-count between full re-walks.
+  private quotaCache = new Map<string, QuotaCacheEntry>();
+
   constructor(private prisma: PrismaService) {
     if (!fs.existsSync(ROOT_DIR)) fs.mkdirSync(ROOT_DIR, { recursive: true });
     if (!fs.existsSync(APPS_DIR)) fs.mkdirSync(APPS_DIR, { recursive: true });
     if (!fs.existsSync(DBS_DIR)) fs.mkdirSync(DBS_DIR, { recursive: true });
+
+    // Periodic refresh — every 5 minutes drop stale entries so we don't
+    // hold incorrect numbers indefinitely after a deletion outside the
+    // service or an out-of-band cleanup.
+    setInterval(() => {
+      const now = Date.now();
+      for (const [k, v] of this.quotaCache) {
+        if (v.expiresAt <= now) this.quotaCache.delete(k);
+      }
+    }, 5 * 60 * 1000).unref?.();
   }
 
   // ── scopes the user can access ────────────────────────────────────
@@ -617,9 +647,20 @@ export class FilesService {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
     this.assertNotManaged(resolved.relPath);
     if (typeof content !== 'string') throw new BadRequestException('content must be a string');
-    if (Buffer.byteLength(content, 'utf-8') > MAX_TEXT_FILE_BYTES) {
+    const newSize = Buffer.byteLength(content, 'utf-8');
+    if (newSize > MAX_TEXT_FILE_BYTES) {
       throw new BadRequestException('File too large (>2MB). Use upload instead.');
     }
+    // Quota: only count the DELTA — if the file already exists, the new
+    // content replaces the old size, so charge (new - existing). Falls
+    // back to the full size when stat fails / file is new.
+    let priorSize = 0;
+    try {
+      const st = fs.lstatSync(resolved.absPath);
+      if (st.isFile()) priorSize = st.size;
+    } catch {}
+    const projectId = await this.projectIdForScope(scope, scopeId);
+    await this.checkQuota(projectId, Math.max(0, newSize - priorSize));
     // Refuse if any intermediate path component is a symlink (defends against
     // a parent-dir swap between mkdir and write). The leaf is handled by
     // O_NOFOLLOW in writeFileNoFollow.
@@ -652,6 +693,15 @@ export class FilesService {
     const targetRel = relPath ? `${relPath}/${safeName}` : safeName;
     const resolved = await this.resolvePath(userId, scope, scopeId, targetRel, 'DEVELOPER');
     this.assertNotManaged(resolved.relPath);
+    // Quota: charge buffer.length minus any prior size if we're
+    // overwriting. New uploads to fresh paths charge the full size.
+    let priorUploadSize = 0;
+    try {
+      const st = fs.lstatSync(resolved.absPath);
+      if (st.isFile()) priorUploadSize = st.size;
+    } catch {}
+    const uploadProjectId = await this.projectIdForScope(scope, scopeId);
+    await this.checkQuota(uploadProjectId, Math.max(0, buffer.length - priorUploadSize));
     fs.mkdirSync(path.dirname(resolved.absPath), { recursive: true });
     this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
     this.writeFileNoFollow(resolved.absPath, buffer);
@@ -703,6 +753,12 @@ export class FilesService {
     if (fs.existsSync(resolved.absPath)) {
       throw new BadRequestException('Path already exists');
     }
+    // Quota: directories themselves cost ~zero bytes, but we still
+    // verify the project isn't already over budget — refusing to create
+    // a new folder when the user has filled their quota gives a clear
+    // failure signal earlier than letting them try the next upload.
+    const mkdirProjectId = await this.projectIdForScope(scope, scopeId);
+    await this.checkQuota(mkdirProjectId, 0);
     this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
     fs.mkdirSync(resolved.absPath, { recursive: true });
     await this.audit(userId, scope, scopeId, 'mkdir', resolved.relPath);
@@ -746,8 +802,175 @@ export class FilesService {
     if (!fs.existsSync(resolved.absPath)) throw new NotFoundException('Path not found');
     this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
     fs.rmSync(resolved.absPath, { recursive: true, force: true });
+    // Cache may now overstate usage by an arbitrary amount — drop it so
+    // the next quota check reflects the freed space.
+    const removeProjectId = await this.projectIdForScope(scope, scopeId);
+    this.invalidateQuota(removeProjectId);
     await this.audit(userId, scope, scopeId, 'remove', resolved.relPath);
     return { path: resolved.relPath, deleted: true };
+  }
+
+  // ── quota ─────────────────────────────────────────────────────────
+
+  /**
+   * Resolve the projectId that owns a given (scope, scopeId). Apps map
+   * directly via Application.projectId. Databases use db.projectId or
+   * fall back to the linked Application's projectId; admin-only unlinked
+   * databases return null (quota is skipped — those live outside any
+   * project budget).
+   */
+  private async projectIdForScope(
+    scope: 'app' | 'db',
+    scopeId: string,
+  ): Promise<string | null> {
+    if (scope === 'app') {
+      const app = await this.prisma.application.findUnique({
+        where: { id: scopeId },
+        select: { projectId: true },
+      });
+      return app?.projectId ?? null;
+    }
+    const db = await this.prisma.database.findUnique({
+      where: { id: scopeId },
+      select: { projectId: true, applicationId: true },
+    });
+    if (!db) return null;
+    if (db.projectId) return db.projectId;
+    if (db.applicationId) {
+      const app = await this.prisma.application.findUnique({
+        where: { id: db.applicationId },
+        select: { projectId: true },
+      });
+      return app?.projectId ?? null;
+    }
+    return null;
+  }
+
+  /**
+   * Walk every app + db dir owned by a project and sum file sizes. Caps
+   * recursion depth at QUOTA_MAX_DEPTH and total visited entries at
+   * QUOTA_MAX_FILES — going over either returns whatever we computed so
+   * far rather than throwing. Quota enforcement under that cap is still
+   * safe because we err on the SIDE of refusing writes (partial size
+   * count → smaller "used" → more writes allowed; cap reached for huge
+   * projects just degrades gracefully to "definitely over quota").
+   *
+   * Uses lstatSync so symlinks count their own size (typically tiny) and
+   * we don't accidentally double-count or escape via a symlink loop.
+   */
+  private computeProjectUsage(
+    appIds: string[],
+    dbIds: string[],
+  ): bigint {
+    let total = 0n;
+    let visited = 0;
+    const walk = (dir: string, depth: number): void => {
+      if (depth > QUOTA_MAX_DEPTH) return;
+      if (visited >= QUOTA_MAX_FILES) return;
+      if (!fs.existsSync(dir)) return;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const ent of entries) {
+        if (visited >= QUOTA_MAX_FILES) return;
+        visited++;
+        const full = path.join(dir, ent.name);
+        try {
+          // lstat so a symlink to /var/log doesn't sweep gigabytes into
+          // the project's quota number.
+          const st = fs.lstatSync(full);
+          if (st.isDirectory()) {
+            walk(full, depth + 1);
+          } else if (st.isFile() || st.isSymbolicLink()) {
+            total += BigInt(st.size);
+          }
+        } catch {
+          // ignore unreadable entries
+        }
+      }
+    };
+    for (const id of appIds) walk(this.appRootDir(id), 0);
+    for (const id of dbIds) walk(this.dbRootDir(id), 0);
+    return total;
+  }
+
+  private async getProjectUsageCached(projectId: string): Promise<bigint> {
+    const now = Date.now();
+    const cached = this.quotaCache.get(projectId);
+    if (cached && cached.expiresAt > now) return cached.used;
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      include: {
+        applications: { select: { id: true } },
+        databases: { select: { id: true } },
+      },
+    });
+    if (!project) return 0n;
+    const used = this.computeProjectUsage(
+      project.applications.map((a) => a.id),
+      project.databases.map((d) => d.id),
+    );
+    this.quotaCache.set(projectId, {
+      used,
+      expiresAt: now + QUOTA_CACHE_TTL_MS,
+    });
+    return used;
+  }
+
+  private async getProjectQuotaBytes(projectId: string): Promise<bigint> {
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { storageQuotaBytes: true },
+    });
+    const raw = (project as any)?.storageQuotaBytes;
+    if (raw == null) return DEFAULT_QUOTA_BYTES;
+    return typeof raw === 'bigint' ? raw : BigInt(raw);
+  }
+
+  /**
+   * Throw PayloadTooLargeException if (current_usage + additionalBytes)
+   * would exceed the project's quota. Caller passes the *delta* this op
+   * adds — uploads pass the buffer size, writes pass the new content
+   * length, mkdir passes 0 (just a directory, ~no bytes). On success
+   * additively bumps the cached usage so back-to-back writes within
+   * the TTL window account for the new bytes without re-walking.
+   */
+  private async checkQuota(
+    projectId: string | null,
+    additionalBytes: number,
+  ): Promise<void> {
+    if (!projectId) return; // unlinked admin scopes — no project budget
+    const add = BigInt(Math.max(0, Math.floor(additionalBytes)));
+    const quota = await this.getProjectQuotaBytes(projectId);
+    const used = await this.getProjectUsageCached(projectId);
+    if (used + add > quota) {
+      const fmt = (n: bigint) => `${(Number(n) / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+      throw new PayloadTooLargeException(
+        `Project storage quota exceeded: ${fmt(used)} used + ${fmt(add)} new > ${fmt(quota)} quota.`,
+      );
+    }
+    // additive bump — cheap, keeps the cache accurate for the rest of
+    // the TTL window without re-walking the tree.
+    const entry = this.quotaCache.get(projectId);
+    if (entry) {
+      entry.used = used + add;
+    }
+  }
+
+  /** Invalidate the cached usage for a project — call after deletes. */
+  private invalidateQuota(projectId: string | null) {
+    if (projectId) this.quotaCache.delete(projectId);
+  }
+
+  /** Public — drives the GET /files/project/:projectId/usage endpoint. */
+  async getProjectStorageUsage(userId: string, projectId: string) {
+    await assertProjectAccess(this.prisma, userId, projectId, 'VIEWER');
+    const used = await this.getProjectUsageCached(projectId);
+    const quota = await this.getProjectQuotaBytes(projectId);
+    return { used: used.toString(), quota: quota.toString() };
   }
 
   // ── helpers ───────────────────────────────────────────────────────

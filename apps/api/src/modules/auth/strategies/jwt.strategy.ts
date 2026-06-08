@@ -27,7 +27,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: { sub: string; email: string; role: string }) {
+  async validate(payload: { sub: string; email: string; role: string; sid?: string }) {
     const user = await this.prisma.user.findUnique({
       where: { id: payload.sub },
       select: { id: true, email: true, role: true, name: true, status: true },
@@ -46,6 +46,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       }
       throw new ForbiddenException('Account is not active.');
     }
-    return { id: user.id, email: user.email, role: user.role, name: user.name };
+    // sessionId (sid) is surfaced on req.user so the sessions list/revoke
+    // endpoints can compute isCurrent and protect the caller's own row.
+    return { id: user.id, email: user.email, role: user.role, name: user.name, sessionId: payload.sid };
   }
 }

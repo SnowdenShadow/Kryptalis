@@ -4,13 +4,13 @@ import {
   ConflictException,
   ForbiddenException,
   BadRequestException,
-  ServiceUnavailableException,
   Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { randomBytes, createHash } from 'crypto';
+import { NotificationsService } from '../notifications/notifications.service';
 // otplib v13 reshuffled the API and dropped the `authenticator` singleton —
 // pinned to v12 in package.json where `authenticator.verify({token, secret})`
 // is the canonical entrypoint. Set window once at module load instead of
@@ -57,6 +57,11 @@ export class AuthService {
     private jwt: JwtService,
     private config: ConfigService,
     private encryption: EncryptionService,
+    // Injected from the @Global NotificationsModule — no module-level
+    // import required here, which keeps Auth/Notifications mutually
+    // dep-free if NotificationsService ever needs to read from
+    // AuthService (e.g. to honour per-user mail preferences).
+    private notifications: NotificationsService,
   ) {}
 
   // ── register ──────────────────────────────────────────────────────
@@ -117,6 +122,11 @@ export class AuthService {
           email,
           password: hashedPassword,
           role: isBootstrapPath ? 'SUPERADMIN' : 'USER',
+          // Bootstrap path stays auto-ACTIVE — it's the install flow with no
+          // SMTP wired yet, so an email round-trip is structurally impossible.
+          // Every other registration starts PENDING_VERIFICATION until the
+          // user proves inbox control via /auth/verify-email.
+          status: isBootstrapPath ? 'ACTIVE' : 'PENDING_VERIFICATION',
         },
       });
 
@@ -152,12 +162,115 @@ export class AuthService {
         });
       }
 
-      const tokens = await this.issueTokenPair(user.id, user.email, user.role, ctx);
+      // Bootstrap path = install flow: no email round-trip possible, so we
+      // hand back tokens immediately just like the legacy behavior. Every
+      // other registrant gets PENDING_VERIFICATION + a verification token
+      // mailed/console-logged; they must round-trip /auth/verify-email
+      // before login() will work.
+      if (isBootstrapPath) {
+        const tokens = await this.issueTokenPair(user.id, user.email, user.role, ctx);
+        return {
+          user: { id: user.id, name: user.name, email: user.email, role: user.role },
+          ...tokens,
+        };
+      }
+
+      const rawToken = randomBytes(32).toString('base64url');
+      const tokenHash = this.encryption.hash(rawToken);
+      const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      await tx.emailVerificationToken.create({
+        data: { userId: user.id, tokenHash, expiresAt },
+      });
+
+      // Same dev-mode pattern as forgotPassword(): if SMTP isn't wired
+      // (notifications module is roadmap), log the raw token so devs can
+      // copy-paste. NEVER do this in production — log access would yield
+      // arbitrary account takeovers via the verification link.
+      if (process.env.NODE_ENV !== 'production') {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[dev] email verification token for ' + user.email + ': ' + rawToken +
+          ' (this log is GATED to NODE_ENV !== production)',
+        );
+      }
+      // TODO: NotificationsService.sendEmailVerification(user.email, rawToken, user.name)
+      // — wire this once the notifications module lands. Same shape as
+      // forgotPassword's pending TODO; both will graduate together.
+
       return {
-        user: { id: user.id, name: user.name, email: user.email, role: user.role },
-        ...tokens,
+        message: 'Check your email to verify your account',
+        user: { id: user.id, name: user.name, email: user.email },
       };
     }, { isolationLevel: 'Serializable' });
+  }
+
+  // ── email verification ────────────────────────────────────────────
+
+  async verifyEmail(rawToken: string, ctx: { ip?: string; userAgent?: string } = {}) {
+    if (!rawToken) throw new BadRequestException('Verification link is invalid or expired.');
+    const tokenHash = this.encryption.hash(rawToken);
+    const row = await this.prisma.emailVerificationToken.findUnique({
+      where: { tokenHash },
+      include: { user: true },
+    });
+    if (!row || row.usedAt || row.expiresAt < new Date()) {
+      throw new BadRequestException('Verification link is invalid or expired.');
+    }
+    // Atomically flip the user to ACTIVE and consume the token. If the
+    // user is already ACTIVE we still mark the token used so it can't be
+    // replayed — but we don't downgrade status (e.g. BANNED stays BANNED).
+    await this.prisma.$transaction([
+      this.prisma.emailVerificationToken.update({
+        where: { id: row.id },
+        data: { usedAt: new Date() },
+      }),
+      ...(row.user.status === 'PENDING_VERIFICATION'
+        ? [this.prisma.user.update({
+            where: { id: row.userId },
+            data: { status: 'ACTIVE' as any },
+          })]
+        : []),
+    ]);
+
+    if (row.user.status === 'BANNED' || row.user.status === 'SUSPENDED') {
+      throw new ForbiddenException('Account is not active');
+    }
+
+    const tokens = await this.issueTokenPair(row.user.id, row.user.email, row.user.role, ctx);
+    return {
+      user: { id: row.user.id, name: row.user.name, email: row.user.email, role: row.user.role },
+      ...tokens,
+    };
+  }
+
+  /**
+   * Resend a verification email. Always returns generic success so an
+   * unauthenticated caller can't enumerate which addresses are registered
+   * — the per-IP throttler (3/hour) is the real anti-abuse layer.
+   */
+  async resendVerification(emailRaw: string) {
+    const email = (emailRaw || '').trim().toLowerCase();
+    const GENERIC = { message: 'If that email needs verification, a new link has been sent.' };
+    if (!email) return GENERIC;
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user || user.status !== 'PENDING_VERIFICATION') return GENERIC;
+
+    const rawToken = randomBytes(32).toString('base64url');
+    const tokenHash = this.encryption.hash(rawToken);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await this.prisma.emailVerificationToken.create({
+      data: { userId: user.id, tokenHash, expiresAt },
+    });
+
+    if (process.env.NODE_ENV !== 'production') {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[dev] email verification token for ' + user.email + ': ' + rawToken +
+        ' (this log is GATED to NODE_ENV !== production)',
+      );
+    }
+    // TODO: NotificationsService.sendEmailVerification(user.email, rawToken, user.name)
+    return GENERIC;
   }
 
   // ── login ─────────────────────────────────────────────────────────
@@ -187,6 +300,9 @@ export class AuthService {
     }
     if (user.status === 'SUSPENDED') {
       throw new ForbiddenException('Your account is suspended');
+    }
+    if (user.status === 'PENDING_VERIFICATION') {
+      throw new ForbiddenException('Email not verified');
     }
 
     // Account-level lockout. After 5 failed password OR TOTP attempts the
@@ -282,14 +398,17 @@ export class AuthService {
     //    we revoke the whole family, because losing the race means
     //    SOMETHING else successfully rotated, which is exactly the
     //    "token used twice" signal RFC 6819 §5.2.2.3 expects.
-    const tokens = await this.signTokenPair(session.user.id, session.user.email, session.user.role);
-    const newHash = this.encryption.hash(tokens.refreshToken);
     const expiresAt = this.refreshTokenExpiry();
-
+    // Create the successor row FIRST (with a placeholder hash) so we can
+    // embed its id in the access-token payload. The placeholder hash is a
+    // sha256 of random bytes — guaranteed not to collide with any real
+    // refresh token, so it cannot be exchanged. We overwrite it with the
+    // real refresh-token hash once the CAS wins.
+    const placeholderHash = this.encryption.hash(randomBytes(32).toString('hex'));
     const successor = await this.prisma.session.create({
       data: {
         userId: session.user.id,
-        refreshTokenHash: newHash,
+        refreshTokenHash: placeholderHash,
         familyId: session.familyId,
         status: 'PENDING' as any, // not loggable-with yet
         expiresAt,
@@ -297,6 +416,14 @@ export class AuthService {
         userAgent: ctx.userAgent,
       },
     });
+
+    const tokens = await this.signTokenPair(
+      session.user.id,
+      session.user.email,
+      session.user.role,
+      successor.id,
+    );
+    const newHash = this.encryption.hash(tokens.refreshToken);
 
     const cas = await this.prisma.session.updateMany({
       where: { id: session.id, status: 'ACTIVE' },
@@ -311,14 +438,80 @@ export class AuthService {
       throw new UnauthorizedException('Session revoked. Please log in again.');
     }
 
-    // Flip the successor to ACTIVE only after the CAS won — keeps the
-    // window where two ACTIVE rows share a family arbitrarily small.
+    // Flip the successor to ACTIVE and write the real refresh-token hash
+    // only after the CAS won — keeps the window where two ACTIVE rows
+    // share a family arbitrarily small.
     await this.prisma.session.update({
       where: { id: successor.id },
-      data: { status: 'ACTIVE' },
+      data: { status: 'ACTIVE', refreshTokenHash: newHash },
     });
 
     return tokens;
+  }
+
+  // ── sessions (list / revoke) ──────────────────────────────────────
+
+  async listSessions(userId: string, currentSessionId?: string | null) {
+    const rows = await this.prisma.session.findMany({
+      where: {
+        userId,
+        status: { in: ['ACTIVE' as any, 'PENDING' as any] },
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        createdAt: true,
+        ipAddress: true,
+        userAgent: true,
+      },
+    });
+    return rows.map((s) => ({
+      id: s.id,
+      createdAt: s.createdAt,
+      ipAddress: s.ipAddress,
+      userAgent: s.userAgent,
+      isCurrent: currentSessionId ? s.id === currentSessionId : false,
+    }));
+  }
+
+  async revokeSession(userId: string, sessionId: string, currentSessionId?: string | null) {
+    const session = await this.prisma.session.findUnique({ where: { id: sessionId } });
+    if (!session || session.userId !== userId) {
+      throw new UnauthorizedException('Session not found');
+    }
+    const isCurrent = currentSessionId && session.id === currentSessionId;
+    if (isCurrent) {
+      // Revoking the current session is treated as "log out everywhere
+      // else" — we keep the current session alive so the caller's
+      // dashboard tab doesn't get bumped to /login mid-action.
+      await this.prisma.session.updateMany({
+        where: {
+          userId,
+          id: { not: currentSessionId! },
+          status: { not: 'REVOKED' as any },
+        },
+        data: { status: 'REVOKED' as any },
+      });
+      return { revoked: true, keptCurrent: true };
+    }
+    await this.prisma.session.update({
+      where: { id: sessionId },
+      data: { status: 'REVOKED' as any },
+    });
+    return { revoked: true, keptCurrent: false };
+  }
+
+  async revokeOtherSessions(userId: string, currentSessionId?: string | null) {
+    const result = await this.prisma.session.updateMany({
+      where: {
+        userId,
+        ...(currentSessionId ? { id: { not: currentSessionId } } : {}),
+        status: { not: 'REVOKED' as any },
+      },
+      data: { status: 'REVOKED' as any },
+    });
+    return { revoked: result.count };
   }
 
   // ── logout ────────────────────────────────────────────────────────
@@ -430,6 +623,32 @@ export class AuthService {
     return user;
   }
 
+  // ── onboarding ────────────────────────────────────────────────────
+
+  /** Per-user onboarding completion flag, stored in SystemSetting under
+   *  `onboarding_completed_<userId>`. We namespace per-user so multiple
+   *  SUPERADMINs each see the wizard once, and so wiping the flag for a
+   *  single user (rerun the tour) doesn't disturb others. */
+  private onboardingKey(userId: string) {
+    return `onboarding_completed_${userId}`;
+  }
+
+  async getOnboarding(userId: string): Promise<{ completed: boolean }> {
+    const row = await this.prisma.systemSetting.findUnique({
+      where: { key: this.onboardingKey(userId) },
+    });
+    return { completed: !!(row?.value as any) };
+  }
+
+  async completeOnboarding(userId: string): Promise<{ completed: true }> {
+    await this.prisma.systemSetting.upsert({
+      where: { key: this.onboardingKey(userId) },
+      create: { key: this.onboardingKey(userId), value: true as any, updatedBy: userId },
+      update: { value: true as any, updatedBy: userId },
+    });
+    return { completed: true };
+  }
+
   // ── password reset ────────────────────────────────────────────────
 
   async forgotPassword(emailRaw: string) {
@@ -448,29 +667,13 @@ export class AuthService {
       data: { userId: user.id, tokenHash, expiresAt },
     });
 
-    // The raw reset token must NEVER reach a production log — anyone with
-    // log access could hijack the account by triggering forgot-password
-    // and reading the line. We only log it in development (where there's
-    // no email transport yet) for the developer to copy-paste.
-    if (process.env.NODE_ENV !== 'production') {
-      // eslint-disable-next-line no-console
-      console.warn(
-        '[dev] password reset token for ' + user.email + ': ' + token +
-        ' (this log is GATED to NODE_ENV !== production)',
-      );
-    }
-    // TODO: NotificationsService.dispatch('password.reset', { userId, token })
-    // — wiring the notifications module is the next item on the roadmap.
-    // Until SMTP is configured, fail loudly in production rather than
-    // pretending to send. Otherwise users sit refreshing their inbox
-    // waiting for a mail that will never arrive, and the whole reset
-    // flow is silently dead. In dev/test we keep returning success so
-    // the console.warn token can be used.
-    if (process.env.NODE_ENV === 'production' && !process.env.SMTP_HOST) {
-      throw new ServiceUnavailableException(
-        'Password reset by email is not configured on this instance. Ask an administrator.',
-      );
-    }
+    // Hand off to NotificationsService. It owns:
+    //   - SMTP transport + no-op fallback when unconfigured
+    //   - dev-mode token logging (gated on NODE_ENV !== production)
+    // so we keep the auth flow clean. Errors are swallowed inside the
+    // service — we don't want a misconfigured mail relay to leak the
+    // existence of a registered email back to the client.
+    await this.notifications.sendPasswordReset(user.email, token, user.name);
 
     return { message: 'If that email is registered, a reset link has been sent.' };
   }
@@ -653,8 +856,14 @@ export class AuthService {
 
   // ── token issuance + helpers ──────────────────────────────────────
 
-  private async signTokenPair(userId: string, email: string, role: string) {
-    const payload = { sub: userId, email, role };
+  private async signTokenPair(userId: string, email: string, role: string, sessionId?: string) {
+    // Embed sessionId in the access-token payload so authenticated requests
+    // can be tied back to the row in `sessions` (needed by the session
+    // list/revoke endpoints to flag isCurrent). The refresh token gets it
+    // too, but only as a debugging convenience — refresh-flow lookups are
+    // still by sha256(refreshToken).
+    const payload: Record<string, unknown> = { sub: userId, email, role };
+    if (sessionId) payload.sid = sessionId;
     const [accessToken, refreshToken] = await Promise.all([
       this.jwt.signAsync(payload),
       this.jwt.signAsync(payload, {
@@ -671,22 +880,32 @@ export class AuthService {
     role: string,
     ctx: { ip?: string; userAgent?: string } = {},
   ) {
-    const tokens = await this.signTokenPair(userId, email, role);
-    const refreshTokenHash = this.encryption.hash(tokens.refreshToken);
+    // Create the session row FIRST with a placeholder hash so we can mint
+    // an access token whose `sid` claim points at it. The placeholder is a
+    // sha256 of random bytes — can't collide with any real refresh token,
+    // so it can't be exchanged. Once we know the row's id we sign the
+    // pair, then patch the row with the real refresh-token hash.
     const expiresAt = this.refreshTokenExpiry();
     const familyId = createHash('sha256')
       .update(randomBytes(16))
       .digest('hex');
-    await this.prisma.session.create({
+    const placeholderHash = this.encryption.hash(randomBytes(32).toString('hex'));
+    const session = await this.prisma.session.create({
       data: {
         userId,
-        refreshTokenHash,
+        refreshTokenHash: placeholderHash,
         familyId,
         status: 'ACTIVE',
         expiresAt,
         ipAddress: ctx.ip,
         userAgent: ctx.userAgent,
       },
+    });
+    const tokens = await this.signTokenPair(userId, email, role, session.id);
+    const refreshTokenHash = this.encryption.hash(tokens.refreshToken);
+    await this.prisma.session.update({
+      where: { id: session.id },
+      data: { refreshTokenHash },
     });
     return tokens;
   }

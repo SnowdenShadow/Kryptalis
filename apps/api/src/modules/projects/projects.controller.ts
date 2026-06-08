@@ -14,6 +14,8 @@ import { ProjectsService } from './projects.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { RolesGuard } from '../../common/guards/roles.guard';
 import type { ProjectRole } from '@prisma/client';
 
 @ApiTags('Projects')
@@ -49,6 +51,17 @@ export class ProjectsController {
     @Body() dto: UpdateProjectDto,
   ) {
     return this.projectsService.update(id, userId, dto);
+  }
+
+  @Patch(':id/quota')
+  @UseGuards(RolesGuard)
+  @Roles('ADMIN', 'SUPERADMIN')
+  @ApiOperation({ summary: 'Set per-project storage quota (platform ADMIN only)' })
+  setQuota(
+    @Param('id') id: string,
+    @Body('quotaBytes') quotaBytes: number | string,
+  ) {
+    return this.projectsService.setQuota(id, quotaBytes);
   }
 
   @Delete(':id')

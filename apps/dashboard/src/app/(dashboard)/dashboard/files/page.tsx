@@ -91,8 +91,24 @@ function fmtDate(iso: string) {
   return new Date(iso).toLocaleString();
 }
 
+interface UsageResp {
+  used: string;
+  quota: string;
+}
+
+function fmtGiB(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 GiB';
+  const gib = bytes / (1024 * 1024 * 1024);
+  if (gib >= 10) return `${gib.toFixed(0)} GiB`;
+  if (gib >= 1) return `${gib.toFixed(1)} GiB`;
+  const mib = bytes / (1024 * 1024);
+  if (mib >= 1) return `${mib.toFixed(0)} MiB`;
+  const kib = bytes / 1024;
+  return `${kib.toFixed(0)} KiB`;
+}
+
 export default function FilesPage() {
-  const [selected, setSelected] = useState<{ scope: 'app' | 'db'; id: string; role: Role; name: string } | null>(null);
+  const [selected, setSelected] = useState<{ scope: 'app' | 'db'; id: string; role: Role; name: string; projectId: string } | null>(null);
   const [currentPath, setCurrentPath] = useState('');
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<{ path: string; original: string; draft: string } | null>(null);
@@ -124,6 +140,21 @@ export default function FilesPage() {
     enabled: !!selected,
   });
 
+  // ── per-project storage usage / quota progress bar ────────────────
+  // Server returns bigint-strings; JS numbers are safe up to ~9 PiB so
+  // Number() is fine for display purposes. We refetch whenever the user
+  // mutates (write/upload/mkdir/remove) — same trigger as listing.
+  const { data: usage, refetch: refetchUsage } = useQuery<UsageResp>({
+    queryKey: ['file-usage', selected?.projectId],
+    queryFn: () => api.get(`/files/project/${selected!.projectId}/usage`),
+    enabled: !!selected?.projectId,
+  });
+  const usedBytes = usage ? Number(usage.used) : 0;
+  const quotaBytes = usage ? Number(usage.quota) : 0;
+  const pct = quotaBytes > 0 ? Math.min(100, (usedBytes / quotaBytes) * 100) : 0;
+  const barColor = pct > 95 ? 'bg-red-500' : pct > 80 ? 'bg-orange-500' : 'bg-primary';
+  const labelColor = pct > 95 ? 'text-red-500' : pct > 80 ? 'text-orange-500' : 'text-muted-foreground';
+
   const filteredEntries = (listing?.entries || []).filter(e =>
     !search.trim() || e.name.toLowerCase().includes(search.toLowerCase())
   );
@@ -138,6 +169,7 @@ export default function FilesPage() {
       setNewFolderOpen(false);
       setNewFolderName('');
       refetchListing();
+      refetchUsage();
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -150,6 +182,7 @@ export default function FilesPage() {
       setRenameTarget(null);
       setRenameValue('');
       refetchListing();
+      refetchUsage();
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -161,6 +194,7 @@ export default function FilesPage() {
       toast.success('Deleted');
       setDeleteTarget(null);
       refetchListing();
+      refetchUsage();
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -172,6 +206,7 @@ export default function FilesPage() {
       toast.success('Saved');
       setEditing((e) => (e ? { ...e, original: vars.content } : e));
       refetchListing();
+      refetchUsage();
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -223,6 +258,7 @@ export default function FilesPage() {
     }
     if (uploadInputRef.current) uploadInputRef.current.value = '';
     refetchListing();
+    refetchUsage();
   }
 
   function handleDownload(p: string, name: string) {
@@ -252,8 +288,8 @@ export default function FilesPage() {
     });
   }
 
-  function selectScope(scope: 'app' | 'db', id: string, role: Role, name: string) {
-    setSelected({ scope, id, role, name });
+  function selectScope(scope: 'app' | 'db', id: string, role: Role, name: string, projectId: string) {
+    setSelected({ scope, id, role, name, projectId });
     setCurrentPath('');
     setEditing(null);
     setReadingPath(null);
@@ -271,6 +307,31 @@ export default function FilesPage() {
           Browse and edit files of your applications and databases. Permissions cascade from project roles.
         </p>
       </div>
+
+      {/* ── Project storage quota bar ──────────────────────────────── */}
+      {selected && usage && (
+        <Card>
+          <CardContent className="p-3">
+            <div className="flex items-center justify-between text-xs mb-1.5">
+              <span className="font-medium">Project storage</span>
+              <span className={cn('font-mono', labelColor)}>
+                {fmtGiB(usedBytes)} / {fmtGiB(quotaBytes)} used ({pct.toFixed(0)}%)
+              </span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className={cn('h-full transition-all', barColor)}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            {pct > 95 && (
+              <p className="mt-1.5 text-xs text-red-500 flex items-center gap-1">
+                <AlertTriangle size={11} /> Quota nearly full — uploads will be refused once full.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-[320px_1fr]">
         {/* ── Left panel: scopes ───────────────────────────────────── */}
@@ -305,7 +366,7 @@ export default function FilesPage() {
                         {p.applications.map(a => (
                           <button
                             key={a.id}
-                            onClick={() => selectScope('app', a.id, p.role, a.name)}
+                            onClick={() => selectScope('app', a.id, p.role, a.name, p.id)}
                             className={cn(
                               'w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-accent text-left',
                               selected?.scope === 'app' && selected.id === a.id && 'bg-primary/10 text-primary',
@@ -321,7 +382,7 @@ export default function FilesPage() {
                         {p.databases.map(d => (
                           <button
                             key={d.id}
-                            onClick={() => selectScope('db', d.id, p.role, d.name)}
+                            onClick={() => selectScope('db', d.id, p.role, d.name, p.id)}
                             className={cn(
                               'w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-xs hover:bg-accent text-left',
                               selected?.scope === 'db' && selected.id === d.id && 'bg-primary/10 text-primary',

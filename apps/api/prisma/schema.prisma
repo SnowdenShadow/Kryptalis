@@ -37,6 +37,7 @@ model User {
   memberships         ProjectMember[]       @relation("ProjectMembership")
   passwordResetTokens PasswordResetToken[]
   backupCodes         TwoFactorBackupCode[]
+  verificationTokens  EmailVerificationToken[]
 
   @@map("users")
 }
@@ -68,6 +69,7 @@ enum UserStatus {
   ACTIVE
   SUSPENDED
   BANNED
+  PENDING_VERIFICATION
 }
 
 model SystemSetting {
@@ -125,6 +127,23 @@ model PasswordResetToken {
 
   @@index([userId])
   @@map("password_reset_tokens")
+}
+
+// Email verification tokens. Stored as sha256 hash; single-use; 24h expiry.
+// Issued at register() when status=PENDING_VERIFICATION, consumed by
+// /auth/verify-email which flips status to ACTIVE and issues a token pair.
+model EmailVerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("email_verification_tokens")
 }
 
 // TOTP backup codes (10 codes per user, bcrypt-hashed). Used once.
@@ -201,6 +220,12 @@ model Project {
   description String?
   serverId    String
   userId      String
+  // Per-project file storage quota in bytes. Default 10 GiB. The Files
+  // module enforces this on every write (upload/create/mkdir-with-file)
+  // by computing actual on-disk usage with a 60s-TTL cache. We do NOT
+  // persist storageUsedBytes — it's derived on demand to avoid drift
+  // between DB rows and the real filesystem state.
+  storageQuotaBytes BigInt? @default(10737418240)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -586,6 +611,17 @@ model Backup {
   target              BackupTarget @default(LOCAL)
   status              BackupStatus @default(PENDING)
   size                BigInt?
+  // sha256 of the FINAL on-disk dump (post-encryption if encryptedAt=true).
+  // Computed at write time, re-verified on restore — mismatch → refuse to
+  // restore (corruption / tampering detection).
+  sha256              String?
+  // True when the dump on disk is AES-256-GCM encrypted with BACKUP_ENCRYPTION_KEY.
+  // Recorded explicitly so a restore knows whether to decrypt first, and so
+  // operators can see at a glance which rows are siloed from main DB access.
+  encryptedAt         Boolean      @default(false)
+  // Final on-disk size in bytes (matches whatever sha256 was computed over).
+  // Surfaced in the UI alongside the existing legacy `size` field.
+  sizeBytes           BigInt?
   includeApplications Boolean      @default(true)
   includeDatabases    Boolean      @default(true)
   includeVolumes      Boolean      @default(true)

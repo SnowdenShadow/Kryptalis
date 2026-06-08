@@ -129,6 +129,32 @@ export class ProjectsService {
     });
   }
 
+  /**
+   * Set the per-project file-storage quota. Restricted to platform
+   * ADMIN/SUPERADMIN at the controller — project members (even OWNER)
+   * cannot grant themselves more disk. quotaBytes must be a non-negative
+   * integer; null is rejected here (use a positive value, or leave the
+   * default by not calling this endpoint).
+   */
+  async setQuota(id: string, quotaBytes: number | string | bigint) {
+    let q: bigint;
+    try {
+      q = typeof quotaBytes === 'bigint' ? quotaBytes : BigInt(quotaBytes as any);
+    } catch {
+      throw new BadRequestException('quotaBytes must be an integer (bytes)');
+    }
+    if (q < 0n) {
+      throw new BadRequestException('quotaBytes must be >= 0');
+    }
+    const project = await this.prisma.project.findUnique({ where: { id } });
+    if (!project) throw new NotFoundException('Project not found');
+    return this.prisma.project.update({
+      where: { id },
+      data: { storageQuotaBytes: q } as any,
+      select: { id: true, name: true, storageQuotaBytes: true } as any,
+    });
+  }
+
   async remove(id: string, userId: string) {
     await assertProjectAccess(this.prisma, userId, id, 'OWNER');
 

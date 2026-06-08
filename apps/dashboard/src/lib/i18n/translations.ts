@@ -136,6 +136,18 @@ export const translations: Record<string, Record<string, string>> = {
     'admin.settings.defaultRoleLabel': 'Default role for new users', 'admin.settings.defaultRoleDesc': 'Role assigned at signup time.',
     'admin.settings.maintenanceActive': 'Maintenance mode active', 'admin.settings.maintenanceWarn': 'Visitors will see a banner. Make sure to disable this once maintenance is done.',
     'admin.audit.title': 'Audit Log', 'admin.audit.desc': 'Last 100 events', 'admin.audit.user': 'User', 'admin.audit.action': 'Action', 'admin.audit.resource': 'Resource', 'admin.audit.ip': 'IP', 'admin.audit.when': 'When', 'admin.audit.none': 'No events recorded yet.', 'admin.audit.system': 'system',
+
+    // ── onboarding ─────────────────────────────────────────────────
+    'onboarding.welcome': 'Welcome to Kryptalis',
+    'onboarding.welcomeBody': "You're signed in as SUPERADMIN — full control over users, servers and platform settings. Let's get the basics in place so the dashboard isn't empty.",
+    'onboarding.chooseMode': 'Choose a deployment mode',
+    'onboarding.createProject': 'Create your first project',
+    'onboarding.projectName': 'Project name',
+    'onboarding.allSet': "You're all set",
+    'onboarding.allSetBody': 'Two great next steps: install your first app from the Marketplace, or wire up your first custom domain.',
+    'onboarding.finish': 'Finish',
+    'onboarding.next': 'Next',
+    'onboarding.back': 'Back',
   },
   fr: {
     // ── nav ─────────────────────────────────────────────────────────
@@ -272,5 +284,17 @@ export const translations: Record<string, Record<string, string>> = {
     'admin.settings.defaultRoleLabel': 'Rôle par défaut des nouveaux utilisateurs', 'admin.settings.defaultRoleDesc': "Rôle attribué à l'inscription.",
     'admin.settings.maintenanceActive': 'Mode maintenance actif', 'admin.settings.maintenanceWarn': 'Les visiteurs verront une bannière. Pensez à désactiver une fois la maintenance terminée.',
     'admin.audit.title': "Journal d'audit", 'admin.audit.desc': '100 derniers événements', 'admin.audit.user': 'Utilisateur', 'admin.audit.action': 'Action', 'admin.audit.resource': 'Ressource', 'admin.audit.ip': 'IP', 'admin.audit.when': 'Quand', 'admin.audit.none': "Aucun événement enregistré.", 'admin.audit.system': 'système',
+
+    // ── onboarding ─────────────────────────────────────────────────
+    'onboarding.welcome': 'Bienvenue sur Kryptalis',
+    'onboarding.welcomeBody': "Vous êtes connecté en tant que SUPERADMIN — contrôle total sur les utilisateurs, serveurs et paramètres de la plateforme. Configurons les bases pour ne pas démarrer sur un dashboard vide.",
+    'onboarding.chooseMode': 'Choisissez un mode de déploiement',
+    'onboarding.createProject': 'Créez votre premier projet',
+    'onboarding.projectName': 'Nom du projet',
+    'onboarding.allSet': 'Tout est prêt',
+    'onboarding.allSetBody': "Deux pistes pour commencer : installez une première app depuis la Marketplace, ou ajoutez votre premier domaine personnalisé.",
+    'onboarding.finish': 'Terminer',
+    'onboarding.next': 'Suivant',
+    'onboarding.back': 'Retour',
   },
 };

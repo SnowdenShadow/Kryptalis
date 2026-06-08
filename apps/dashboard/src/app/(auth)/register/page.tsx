@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Lock } from 'lucide-react';
+import { Lock, Mail } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -22,6 +22,12 @@ export default function RegisterPage() {
   const [loading, setLoading] = useState(false);
   const [regEnabled, setRegEnabled] = useState<boolean | null>(null);
   const [platformName, setPlatformName] = useState('Kryptalis');
+  // After a successful non-bootstrap register the server doesn't issue
+  // tokens — it asks the user to verify by email. We flip into this state
+  // to show the "check your inbox" view + a "Resend" button instead of
+  // redirecting to /dashboard with no session.
+  const [pendingVerification, setPendingVerification] = useState(false);
+  const [resending, setResending] = useState(false);
   const { setAuth } = useAuthStore();
   const router = useRouter();
 
@@ -61,20 +67,79 @@ export default function RegisterPage() {
     if (password !== confirmPassword) return;
     setLoading(true);
     try {
+      // Two possible shapes: bootstrap path returns tokens (first install
+      // → SUPERADMIN, no email round-trip possible), everyone else gets
+      // { message, user } and must verify by email before logging in.
       const res = await api.post<{
-        user: { id: string; name: string; email: string; role: string };
-        accessToken: string;
-        refreshToken: string;
+        user: { id: string; name: string; email: string; role?: string };
+        accessToken?: string;
+        refreshToken?: string;
+        message?: string;
       }>('/auth/register', { name, email, password });
-      setAuth(res.user, res.accessToken, res.refreshToken);
-      router.push('/dashboard');
-      toast.success('Account created!');
+      if (res.accessToken && res.refreshToken && res.user.role) {
+        setAuth(
+          { id: res.user.id, name: res.user.name, email: res.user.email, role: res.user.role },
+          res.accessToken,
+          res.refreshToken,
+        );
+        router.push('/dashboard');
+        toast.success('Account created!');
+      } else {
+        setPendingVerification(true);
+        toast.success(res.message || 'Check your email to verify your account');
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Registration failed');
     } finally {
       setLoading(false);
     }
   };
+
+  const handleResend = async () => {
+    setResending(true);
+    try {
+      const res = await api.post<{ message: string }>('/auth/resend-verification', { email });
+      toast.success(res.message || 'Verification email resent');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to resend');
+    } finally {
+      setResending(false);
+    }
+  };
+
+  if (pendingVerification) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background p-4">
+        <Card className="w-full max-w-md">
+          <CardHeader className="text-center">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <Mail className="h-6 w-6" />
+            </div>
+            <CardTitle>Check your email</CardTitle>
+            <CardDescription>
+              We sent a verification link to <strong>{email}</strong>. Click it to activate your account.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Button
+              type="button"
+              className="w-full"
+              variant="outline"
+              onClick={handleResend}
+              disabled={resending}
+            >
+              {resending ? 'Sending...' : 'Resend verification email'}
+            </Button>
+            <Link href="/login" className="block">
+              <Button type="button" variant="ghost" className="w-full">
+                Back to sign in
+              </Button>
+            </Link>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   if (regEnabled === false) {
     return (

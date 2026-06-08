@@ -88,6 +88,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      # Optional — enables AES-256-GCM at-rest encryption of backup dumps.
+      # Kept separate from ENCRYPTION_KEY so backup access is siloed from app
+      # secrets. Unset → backups remain plaintext on disk (sha256 still
+      # recorded + verified on restore).
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:-}
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
       # Optional — Let's Encrypt contact email. If unset, Kryptalis derives one
       # from PUBLIC_API_URL (e.g. admin@mydomain.com). Bare IPs fall back to
@@ -103,6 +108,19 @@ services:
       # against the host filesystem, not the API container's filesystem.
       # Override via .env if your repo lives somewhere other than $PWD.
       KRYPTALIS_HOST_DATA_DIR: ${PWD}/.kryptalis
+      # Optional SMTP transport for transactional mail (password reset,
+      # invites, deployment + alert notifications). If SMTP_HOST is unset
+      # the NotificationsService becomes a logged no-op — the API still
+      # boots normally. The `${VAR:-}` pattern keeps compose happy when
+      # the variable isn't defined in .env.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      # Public origin of the dashboard, used to build CTA links inside
+      # email bodies. Defaults to localhost:3000 when unset.
+      PUBLIC_DASHBOARD_URL: ${PUBLIC_DASHBOARD_URL:-http://localhost:3000}
     ports:
       - "4000:4000"
     healthcheck:

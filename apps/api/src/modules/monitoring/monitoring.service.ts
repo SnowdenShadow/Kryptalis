@@ -2,8 +2,12 @@ import {
   Injectable,
   NotFoundException,
   ForbiddenException,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreateAlertRuleDto } from './dto/create-alert-rule.dto';
 
 const PERIOD_MAP: Record<string, number> = {
@@ -13,9 +17,107 @@ const PERIOD_MAP: Record<string, number> = {
   '90d': 90 * 24 * 60 * 60 * 1000,
 };
 
+/** Alert-evaluation cadence. Matches the agent's 30 s metric push cadence
+ *  so we evaluate roughly once per fresh sample. NotificationsService
+ *  already dedupes by ruleId for 15 min so a sustained breach won't spam.
+ */
+const ALERT_EVAL_INTERVAL_MS = 30_000;
+
 @Injectable()
-export class MonitoringService {
-  constructor(private prisma: PrismaService) {}
+export class MonitoringService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(MonitoringService.name);
+  private evalTimer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private prisma: PrismaService,
+    private notifications: NotificationsService,
+  ) {}
+
+  onModuleInit() {
+    // Skip the eval loop in test runs so unit tests don't carry a live
+    // interval. `NODE_ENV=test` is the convention; anything else opts in.
+    if (process.env.NODE_ENV === 'test') return;
+    this.evalTimer = setInterval(
+      () => this.evaluateAlerts().catch((e) =>
+        this.logger.error(`Alert eval loop crashed: ${e.message}`),
+      ),
+      ALERT_EVAL_INTERVAL_MS,
+    );
+    this.evalTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.evalTimer) clearInterval(this.evalTimer);
+  }
+
+  /**
+   * Walk every enabled alert rule once, compare the most recent metric
+   * sample against the rule's threshold, and hand off to
+   * NotificationsService.sendAlert when crossed. Dedupe-by-ruleId lives
+   * in the notifications service so the same fire isn't repeated every
+   * 30 s — see NotificationsService.recentlyFiredAlerts.
+   *
+   * Metrics are computed as percentages so thresholds like "memory > 90"
+   * mean 90 percent regardless of the server's RAM size.
+   */
+  private async evaluateAlerts(): Promise<void> {
+    const rules = await this.prisma.alertRule.findMany({ where: { enabled: true } });
+    if (rules.length === 0) return;
+
+    // Group by server so we fetch each server's latest sample once even
+    // when several rules target the same machine.
+    const byServer = new Map<string, typeof rules>();
+    for (const r of rules) {
+      const arr = byServer.get(r.serverId) ?? [];
+      arr.push(r);
+      byServer.set(r.serverId, arr);
+    }
+
+    for (const [serverId, serverRules] of byServer) {
+      const latest = await this.prisma.serverMetric.findFirst({
+        where: { serverId },
+        orderBy: { timestamp: 'desc' },
+      });
+      if (!latest) continue;
+
+      for (const rule of serverRules) {
+        const value = this.metricValue(rule.metric, latest);
+        if (value == null) continue;
+        if (value >= rule.threshold) {
+          // Fire-and-forget: notifications service swallows its own
+          // errors so a misconfigured channel can't take down the loop.
+          this.notifications.sendAlert(rule, value).catch((e) =>
+            this.logger.error(`sendAlert(${rule.id}) failed: ${e.message}`),
+          );
+        }
+      }
+    }
+  }
+
+  /** Convert raw metric row → comparable percentage for the named metric. */
+  private metricValue(
+    metric: string,
+    row: {
+      cpuPercent: number;
+      memoryUsed: bigint;
+      memoryTotal: bigint;
+      diskUsed: bigint;
+      diskTotal: bigint;
+    },
+  ): number | null {
+    switch (metric) {
+      case 'cpu':
+        return row.cpuPercent;
+      case 'memory':
+        if (row.memoryTotal === 0n) return null;
+        return Number((row.memoryUsed * 10000n) / row.memoryTotal) / 100;
+      case 'disk':
+        if (row.diskTotal === 0n) return null;
+        return Number((row.diskUsed * 10000n) / row.diskTotal) / 100;
+      default:
+        return null;
+    }
+  }
 
   /**
    * Resolve the set of serverIds the caller can see via project membership

@@ -63,6 +63,16 @@ export class ReverseProxyService implements OnApplicationBootstrap, OnModuleDest
   private readonly logger = new Logger(ReverseProxyService.name);
   private sslSyncInterval: ReturnType<typeof setInterval> | null = null;
 
+  /**
+   * Debounce timer for coalesced reload requests. Bulk operations
+   * (e.g. import 10 domains) used to fire 10 back-to-back regenerate()
+   * calls — each writing the Caddyfile and exec'ing `caddy reload`. We now
+   * funnel high-frequency mutators through scheduleReload() which collapses
+   * a burst into a single regenerate.
+   */
+  private pendingReload: NodeJS.Timeout | null = null;
+  private readonly RELOAD_DEBOUNCE_MS = 1500;
+
   constructor(private prisma: PrismaService) {
     if (!fs.existsSync(PROXY_DIR)) fs.mkdirSync(PROXY_DIR, { recursive: true });
   }
@@ -92,6 +102,47 @@ export class ReverseProxyService implements OnApplicationBootstrap, OnModuleDest
       clearInterval(this.sslSyncInterval);
       this.sslSyncInterval = null;
     }
+    if (this.pendingReload) {
+      clearTimeout(this.pendingReload);
+      this.pendingReload = null;
+    }
+  }
+
+  /**
+   * Schedule a Caddyfile rebuild + reload `RELOAD_DEBOUNCE_MS` (1.5 s) in the
+   * future. If called again before the timer fires, the previous timer is
+   * cancelled and reset. Net effect: a burst of N calls within the window
+   * collapses into ONE regenerate() — bulk domain import, multi-app deploy,
+   * project move, etc.
+   *
+   * Use this for high-frequency mutators (domain create/delete/update, app
+   * create, app name change). Synchronous callers that need the new
+   * Caddyfile to be live before the next step (cert-renew watcher,
+   * bootstrap) should still `await regenerate()` directly.
+   */
+  scheduleReload(): void {
+    if (this.pendingReload) clearTimeout(this.pendingReload);
+    this.pendingReload = setTimeout(() => {
+      this.pendingReload = null;
+      this.regenerate().catch((e) => {
+        this.logger.warn(`Debounced regenerate failed: ${e?.message || e}`);
+      });
+    }, this.RELOAD_DEBOUNCE_MS);
+  }
+
+  /**
+   * Test-friendly: if a debounced reload is pending, fire it NOW (cancels
+   * the timer and runs regenerate synchronously). Returns the regenerate
+   * promise so tests can await the resulting Caddyfile. No-op when nothing
+   * is pending.
+   */
+  flushPending(): Promise<unknown> {
+    if (!this.pendingReload) return Promise.resolve();
+    clearTimeout(this.pendingReload);
+    this.pendingReload = null;
+    return this.regenerate().catch((e) => {
+      this.logger.warn(`flushPending regenerate failed: ${e?.message || e}`);
+    });
   }
 
   private ensureCaddyfile() {

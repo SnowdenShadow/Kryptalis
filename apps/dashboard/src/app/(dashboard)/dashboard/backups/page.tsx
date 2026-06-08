@@ -11,6 +11,9 @@ import {
   Trash2,
   RotateCcw,
   Loader2,
+  Lock,
+  Unlock,
+  ShieldCheck,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -39,6 +42,9 @@ interface Backup {
   target: string;
   status: string;
   size: number | null;
+  sizeBytes: number | string | null;
+  sha256: string | null;
+  encryptedAt: boolean;
   schedule: string | null;
   lastRunAt: string | null;
   createdAt: string;
@@ -65,12 +71,15 @@ const targetVariant: Record<string, 'default' | 'secondary' | 'outline'> = {
   B2: 'outline',
 };
 
-function formatBytes(bytes: number | null): string {
+function formatBytes(bytes: number | string | null): string {
   if (bytes === null || bytes === undefined) return '—';
-  if (bytes === 0) return '0 B';
+  // Prisma BigInt serializes as string in JSON; normalize both shapes.
+  const n = typeof bytes === 'string' ? Number(bytes) : bytes;
+  if (!Number.isFinite(n)) return '—';
+  if (n === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+  const i = Math.floor(Math.log(n) / Math.log(1024));
+  return `${(n / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
 }
 
 function formatDate(date: string | null): string {
@@ -227,6 +236,8 @@ export default function BackupsPage() {
                     <th className="px-6 py-3 font-medium">{t('backups.target')}</th>
                     <th className="px-6 py-3 font-medium">Status</th>
                     <th className="px-6 py-3 font-medium">{t('backups.size')}</th>
+                    <th className="px-6 py-3 font-medium" title="sha256 of the on-disk dump">Integrity</th>
+                    <th className="px-6 py-3 font-medium" title="At-rest encryption status">Enc</th>
                     <th className="px-6 py-3 font-medium">{t('backups.schedule')}</th>
                     <th className="px-6 py-3 font-medium">{t('backups.lastRun')}</th>
                     <th className="px-6 py-3 font-medium">Actions</th>
@@ -263,8 +274,38 @@ export default function BackupsPage() {
                       <td className="px-6 py-4 text-sm text-muted-foreground">
                         <span className="flex items-center gap-1">
                           <HardDrive size={14} />
-                          {formatBytes(backup.size)}
+                          {formatBytes(backup.sizeBytes ?? backup.size)}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">
+                        {backup.sha256 ? (
+                          <span
+                            className="flex items-center gap-1 font-mono"
+                            title={`sha256: ${backup.sha256}`}
+                          >
+                            <ShieldCheck size={14} className="text-green-600" />
+                            {backup.sha256.slice(0, 8)}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground/60">—</span>
+                        )}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-muted-foreground">
+                        {backup.encryptedAt ? (
+                          <span
+                            className="flex items-center gap-1 text-green-600"
+                            title="Encrypted at rest (AES-256-GCM)"
+                          >
+                            <Lock size={14} />
+                          </span>
+                        ) : (
+                          <span
+                            className="flex items-center gap-1 text-muted-foreground/60"
+                            title="Stored in plaintext on disk"
+                          >
+                            <Unlock size={14} />
+                          </span>
+                        )}
                       </td>
                       <td className="px-6 py-4 text-sm text-muted-foreground">
                         {backup.schedule || '—'}

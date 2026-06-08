@@ -18,6 +18,7 @@ import { MonitoringModule } from './modules/monitoring/monitoring.module';
 import { BackupsModule } from './modules/backups/backups.module';
 import { MarketplaceModule } from './modules/marketplace/marketplace.module';
 import { AgentModule } from './modules/agent/agent.module';
+import { DeploymentTargetModule } from './modules/deployment-target/deployment-target.module';
 import { SslModule } from './modules/ssl/ssl.module';
 import { GitModule } from './modules/git/git.module';
 import { GitProvidersModule } from './modules/git-providers/git-providers.module';
@@ -27,6 +28,7 @@ import { EmailModule } from './modules/email/email.module';
 import { ReverseProxyModule } from './modules/reverse-proxy/reverse-proxy.module';
 import { SystemModule } from './modules/system/system.module';
 import { HealthModule } from './modules/health/health.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 @Module({
   imports: [
@@ -40,8 +42,24 @@ import { HealthModule } from './modules/health/health.module';
         JWT_EXPIRATION: Joi.string().default('15m'),
         JWT_REFRESH_EXPIRATION: Joi.string().default('7d'),
         ENCRYPTION_KEY: Joi.string().min(32).required(),
+        // Optional — when set, backup dumps are AES-256-GCM encrypted at rest.
+        // Deliberately separate from ENCRYPTION_KEY so backup access can be
+        // siloed (e.g. only an ops-team member holds it, app secrets unaffected
+        // if it leaks, and vice versa).
+        BACKUP_ENCRYPTION_KEY: Joi.string().min(32).optional(),
         CORS_ORIGINS: Joi.string().optional(),
         SWAGGER_PUBLIC: Joi.string().optional(),
+        // Notifications — all optional. If SMTP_HOST is unset the
+        // NotificationsService silently degrades to a logged no-op so
+        // dev/test environments work without an SMTP relay.
+        SMTP_HOST: Joi.string().optional(),
+        SMTP_PORT: Joi.number().optional(),
+        SMTP_USER: Joi.string().optional(),
+        SMTP_PASS: Joi.string().optional(),
+        SMTP_FROM: Joi.string().optional(),
+        // Used to render CTA links inside transactional email. Defaults
+        // to localhost:3000 when unset so dev links still resolve.
+        PUBLIC_DASHBOARD_URL: Joi.string().uri().optional(),
       }),
     }),
     // Global throttler — defaults are conservative; tight per-route limits
@@ -63,6 +81,7 @@ import { HealthModule } from './modules/health/health.module';
     BackupsModule,
     MarketplaceModule,
     AgentModule,
+    DeploymentTargetModule,
     SslModule,
     GitModule,
     GitProvidersModule,
@@ -72,6 +91,7 @@ import { HealthModule } from './modules/health/health.module';
     ReverseProxyModule,
     SystemModule,
     HealthModule,
+    NotificationsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

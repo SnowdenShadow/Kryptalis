@@ -2,10 +2,13 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useQuery } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
+import { OnboardingWizard } from '@/components/onboarding-wizard';
 import { useSidebarStore, useAuthStore } from '@/lib/store';
+import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 /**
@@ -30,7 +33,11 @@ export default function DashboardLayout({
   const { collapsed } = useSidebarStore();
   const router = useRouter();
   const accessToken = useAuthStore((s) => s.accessToken);
+  const user = useAuthStore((s) => s.user);
   const [hydrated, setHydrated] = useState(false);
+  // Local override so closing the wizard takes effect this render even
+  // before the /auth/me/onboarding refetch lands.
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     // After zustand's persist has had a chance to rehydrate from localStorage
@@ -43,6 +50,33 @@ export default function DashboardLayout({
       router.replace('/login');
     }
   }, [hydrated, accessToken, router]);
+
+  // Onboarding eligibility — only SUPERADMIN with zero projects and the
+  // server-side completion flag still false sees the wizard. We gate the
+  // queries on (hydrated && accessToken && user) so they don't fire before
+  // auth is ready or for logged-out viewers.
+  const isSuperadmin = user?.role === 'SUPERADMIN';
+  const enabled = hydrated && !!accessToken && isSuperadmin && !dismissed;
+
+  const { data: onboarding } = useQuery<{ completed: boolean }>({
+    queryKey: ['onboarding'],
+    queryFn: () => api.get('/auth/me/onboarding'),
+    enabled,
+    staleTime: 60_000,
+  });
+
+  const { data: projects } = useQuery<unknown[]>({
+    queryKey: ['projects'],
+    queryFn: () => api.get('/projects'),
+    enabled,
+    staleTime: 60_000,
+  });
+
+  const showWizard =
+    enabled &&
+    onboarding?.completed === false &&
+    Array.isArray(projects) &&
+    projects.length === 0;
 
   if (!hydrated || !accessToken) {
     return (
@@ -64,6 +98,12 @@ export default function DashboardLayout({
       >
         {children}
       </main>
+      {showWizard && (
+        <OnboardingWizard
+          open={showWizard}
+          onComplete={() => setDismissed(true)}
+        />
+      )}
     </div>
   );
 }

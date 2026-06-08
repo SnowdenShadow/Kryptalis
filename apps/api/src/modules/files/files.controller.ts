@@ -37,6 +37,15 @@ export class FilesController {
     return this.svc.listScopes(userId);
   }
 
+  @Get('project/:projectId/usage')
+  @ApiOperation({ summary: 'Storage usage + quota for a project (bytes)' })
+  usage(
+    @CurrentUser('id') userId: string,
+    @Param('projectId') projectId: string,
+  ) {
+    return this.svc.getProjectStorageUsage(userId, projectId);
+  }
+
   @Get(':scope/:scopeId')
   @ApiOperation({ summary: 'List directory contents' })
   list(

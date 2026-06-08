@@ -3,6 +3,8 @@ import {
   Post,
   Patch,
   Get,
+  Delete,
+  Param,
   Body,
   HttpCode,
   HttpStatus,
@@ -17,6 +19,7 @@ import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
+import { VerifyEmailDto } from './dto/verify-email.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Auth')
@@ -64,6 +67,27 @@ export class AuthController {
   @ApiOperation({ summary: 'Logout (revokes the refresh-token family)' })
   logout(@Body() dto: RefreshTokenDto) {
     return this.authService.logout(dto.refreshToken);
+  }
+
+  @Post('verify-email')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60_000, limit: 10 } })
+  @ApiOperation({ summary: 'Verify email with a one-time token and receive a token pair' })
+  verifyEmail(@Body() dto: VerifyEmailDto, @Req() req: Request) {
+    return this.authService.verifyEmail(dto.token, {
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+  }
+
+  // 3/hour per IP — the throttler is the real anti-enumeration / anti-spam
+  // gate (the service returns a generic success either way).
+  @Post('resend-verification')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { ttl: 60 * 60_000, limit: 3 } })
+  @ApiOperation({ summary: 'Re-send verification email (always returns generic success)' })
+  resendVerification(@Body() body: { email: string }) {
+    return this.authService.resendVerification(body.email);
   }
 
   @Post('forgot-password')
@@ -116,6 +140,56 @@ export class AuthController {
     @Body() body: { currentPassword: string; newPassword: string; totpCode?: string; backupCode?: string },
   ) {
     return this.authService.changePassword(user.id, body);
+  }
+
+  // ── sessions ───────────────────────────────────────────────────────
+
+  @Get('sessions')
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard('jwt'))
+  @ApiOperation({ summary: 'List the caller’s active/pending sessions' })
+  listSessions(@CurrentUser() user: { id: string; sessionId?: string }) {
+    return this.authService.listSessions(user.id, user.sessionId);
+  }
+
+  @Delete('sessions/:id')
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard('jwt'))
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Revoke a single session (revokes all OTHERS if it is the current one)' })
+  revokeSession(
+    @CurrentUser() user: { id: string; sessionId?: string },
+    @Param('id') id: string,
+  ) {
+    return this.authService.revokeSession(user.id, id, user.sessionId);
+  }
+
+  @Delete('sessions')
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard('jwt'))
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Log out everywhere else (revoke all sessions except current)' })
+  revokeOtherSessions(@CurrentUser() user: { id: string; sessionId?: string }) {
+    return this.authService.revokeOtherSessions(user.id, user.sessionId);
+  }
+
+  // ── onboarding ─────────────────────────────────────────────────────
+
+  @Get('me/onboarding')
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard('jwt'))
+  @ApiOperation({ summary: 'Whether the current user has completed first-run onboarding' })
+  getOnboarding(@CurrentUser() user: { id: string }) {
+    return this.authService.getOnboarding(user.id);
+  }
+
+  @Post('me/onboarding/complete')
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard('jwt'))
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Mark first-run onboarding as completed for the current user' })
+  completeOnboarding(@CurrentUser() user: { id: string }) {
+    return this.authService.completeOnboarding(user.id);
   }
 
   // ── 2FA ────────────────────────────────────────────────────────────
