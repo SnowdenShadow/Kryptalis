@@ -550,13 +550,19 @@ export class ApplicationsService {
     // attach run together. Any failure rolls back everything; the user
     // never sees an orphan app row in ERROR state or a stale Domain row
     // bound to a non-existent app.
-    const { app, domainId } = await this.prisma.$transaction(async (tx) => {
+    // Phase 1 — create Domain row + Application row in a transaction.
+    // We DO NOT call domainAttach.attach() inside the transaction because
+    // that service uses this.prisma (not the tx), so the brand-new
+    // Application row isn't visible to it yet and the FK update throws.
+    const { app, domainId, createdDomainId } = await this.prisma.$transaction(async (tx) => {
       let domainId: string | null = dtoDomainId ?? existingDomainId;
+      let createdDomainId: string | null = null;
       if (!domainId && dtoDomainString) {
         const created = await tx.domain.create({
           data: { domain: dtoDomainString, projectId: dto.projectId },
         });
         domainId = created.id;
+        createdDomainId = created.id;
       }
 
       const newApp = await tx.application.create({
@@ -573,24 +579,31 @@ export class ApplicationsService {
         } as any,
       });
 
-      if (domainId) {
-        // DomainAttachService internally uses prisma (not the tx) — but
-        // the only effects are Domain.applicationId update + DomainPortBinding
-        // upsert, both of which will surface a Conflict before any
-        // app-level side effect. If it throws, the outer transaction
-        // catches and rolls back the just-created Application + Domain.
+      return { app: newApp, domainId, createdDomainId };
+    });
+
+    // Phase 2 — attach the (now committed) Application to the Domain.
+    // Done OUTSIDE the transaction so DomainAttachService sees the row.
+    // If it throws (cross-project conflict, etc.), we manually roll back
+    // both the App row and the newly-created Domain (if any) so the
+    // user doesn't end up with orphan rows. Caddy regen still deferred.
+    if (domainId) {
+      try {
         await this.domainAttach.attach({
-          applicationId: newApp.id,
+          applicationId: app.id,
           domainId,
           projectId: dto.projectId,
           customPort: userPickedPort,
-          port: newApp.port ?? 80,
+          port: app.port ?? 80,
         });
-        // Caddy regen still deferred to deploy success.
+      } catch (err) {
+        await this.prisma.application.delete({ where: { id: app.id } }).catch(() => undefined);
+        if (createdDomainId) {
+          await this.prisma.domain.delete({ where: { id: createdDomainId } }).catch(() => undefined);
+        }
+        throw err;
       }
-
-      return { app: newApp, domainId };
-    });
+    }
 
     // resolve auth url WITHOUT persisting token in url
     let cloneUrl: string | undefined = dto.gitUrl || undefined;
