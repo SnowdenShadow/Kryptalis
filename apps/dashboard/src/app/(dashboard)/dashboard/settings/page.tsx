@@ -54,14 +54,17 @@ import { cn } from '@/lib/utils';
 
 type Tab = 'profile' | 'security' | 'git' | 'notifications' | 'appearance' | 'infrastructure' | 'updates';
 
-const tabDefs: { key: Tab; labelKey: string; icon: React.ElementType }[] = [
+// `adminOnly` tabs touch platform-wide infrastructure / control plane and
+// must not be reachable by regular USERs. The sidebar guard hides them and
+// any direct navigation falls back to the profile tab.
+const tabDefs: { key: Tab; labelKey: string; icon: React.ElementType; adminOnly?: boolean }[] = [
   { key: 'profile', labelKey: 'settings.profile', icon: User },
   { key: 'security', labelKey: 'settings.security', icon: Shield },
   { key: 'git', labelKey: 'settings.git', icon: GitBranch },
   { key: 'notifications', labelKey: 'settings.notifications', icon: Bell },
   { key: 'appearance', labelKey: 'settings.appearance', icon: Palette },
-  { key: 'infrastructure', labelKey: 'settings.infrastructure', icon: Share2 },
-  { key: 'updates', labelKey: 'settings.updates', icon: Download },
+  { key: 'infrastructure', labelKey: 'settings.infrastructure', icon: Share2, adminOnly: true },
+  { key: 'updates', labelKey: 'settings.updates', icon: Download, adminOnly: true },
 ];
 
 interface UpdateStatus {
@@ -299,6 +302,8 @@ function InfrastructureTab({
 }
 
 export default function SettingsPage() {
+  const authMe = useAuthStore((s) => s.user);
+  const isAdmin = authMe?.role === 'ADMIN' || authMe?.role === 'SUPERADMIN';
   const [activeTab, setActiveTab] = useState<Tab>('profile');
   const [profileName, setProfileName] = useState('');
   const [profileEmail, setProfileEmail] = useState('');
@@ -310,6 +315,14 @@ export default function SettingsPage() {
   const [serverMode, setServerModeState] = useState<'local' | 'multi'>('local');
   const [notifications, setNotifications] = useState<Record<string, Record<string, boolean>>>({});
   const queryClient = useQueryClient();
+
+  // Guard: if a non-admin lands on an adminOnly tab (via URL hash, browser
+  // back button, etc.), kick them to profile so they don't see a card that
+  // 403s on every API call.
+  useEffect(() => {
+    const def = tabDefs.find((tt) => tt.key === activeTab);
+    if (def?.adminOnly && !isAdmin) setActiveTab('profile');
+  }, [activeTab, isAdmin]);
 
   // Load the current user so profile fields aren't empty on mount.
   const { data: me } = useQuery<{ id: string; name: string; email: string; twoFactorEnabled?: boolean }>({
@@ -483,7 +496,7 @@ export default function SettingsPage() {
       </div>
 
       <div className="flex gap-1 rounded-lg border border-border bg-muted/50 p-1 overflow-x-auto">
-        {tabDefs.map((tab) => (
+        {tabDefs.filter((tab) => !tab.adminOnly || isAdmin).map((tab) => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}

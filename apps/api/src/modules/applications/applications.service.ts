@@ -1098,10 +1098,10 @@ ${networksBlock}`;
     } else if (server) {
       await this.agent.enqueueTask(server.id, 'START', { slug });
     }
-    return this.prisma.application.update({
-      where: { id },
-      data: { status: AppStatus.RUNNING },
-    });
+    // Don't blindly flip the DB to RUNNING — the docker compose call returned
+    // 0, but the container might still be crashlooping. syncStatus reads the
+    // real docker ps state.
+    return this.refreshAndReturn(id);
   }
 
   async stop(userId: string, id: string) {
@@ -1116,10 +1116,7 @@ ${networksBlock}`;
     } else if (server) {
       await this.agent.enqueueTask(server.id, 'STOP', { slug });
     }
-    return this.prisma.application.update({
-      where: { id },
-      data: { status: AppStatus.STOPPED },
-    });
+    return this.refreshAndReturn(id);
   }
 
   async restart(userId: string, id: string) {
@@ -1134,14 +1131,42 @@ ${networksBlock}`;
     } else if (server) {
       await this.agent.enqueueTask(server.id, 'RESTART', { slug });
     }
-    return this.prisma.application.update({
-      where: { id },
-      data: { status: AppStatus.RUNNING },
-    });
+    return this.refreshAndReturn(id);
+  }
+
+  /**
+   * Reload the app from DB and run the real docker-ps check, so the
+   * returned status reflects the container's actual state (not what we
+   * asked it to do). Used by start/stop/restart so a click doesn't flip
+   * the UI to RUNNING when the container is in fact crashlooping.
+   */
+  private async refreshAndReturn(id: string) {
+    const fresh = await this.prisma.application.findUnique({ where: { id } });
+    if (!fresh) throw new NotFoundException('Application not found');
+    return this.syncStatus(fresh);
   }
 
   async redeploy(userId: string, id: string) {
     const app = await this.assertOwnership(userId, id, 'DEVELOPER');
+
+    // Concurrency guard. Two redeploys in flight at the same time race for
+    // the app dir, clobber compose files mid-build, and produce conflicting
+    // Deployment rows. Refuse a second one while a fresh deployment is
+    // still PENDING/BUILDING/DEPLOYING. A stuck DEPLOYING older than 30
+    // minutes is treated as crashed and overridden.
+    const inflight = await this.prisma.deployment.findFirst({
+      where: {
+        applicationId: id,
+        status: { in: ['PENDING', 'BUILDING', 'DEPLOYING'] as any },
+        startedAt: { gt: new Date(Date.now() - 30 * 60 * 1000) },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (inflight) {
+      throw new ConflictException(
+        `A deployment is already running (status: ${inflight.status}). Wait for it to finish or cancel it first.`,
+      );
+    }
 
     // Docker-image-only app: re-pull + recreate. No git clone needed.
     if (!app.gitUrl && app.dockerImage) {

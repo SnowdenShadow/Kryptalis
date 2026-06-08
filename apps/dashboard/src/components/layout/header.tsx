@@ -1,11 +1,13 @@
 'use client';
 
 import { Bell, Search, User, LogOut } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useAuthStore, useSidebarStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { useRouter } from 'next/navigation';
+import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 export function Header() {
@@ -13,9 +15,30 @@ export function Header() {
   const { user, logout } = useAuthStore();
   const { collapsed } = useSidebarStore();
   const router = useRouter();
+  const qc = useQueryClient();
 
-  const handleLogout = () => {
+  /**
+   * Logout flow:
+   *   1. POST /auth/logout with the current refreshToken so the server
+   *      revokes the whole family — a stolen token elsewhere is now dead.
+   *   2. Clear local storage + zustand auth state.
+   *   3. Wipe the react-query cache so the next user on this browser
+   *      doesn't see the previous user's data flash.
+   *   4. Bounce to /login.
+   *
+   * The server call is fire-and-forget (catch the throw) — we don't block
+   * the UI on a slow network when the user is leaving.
+   */
+  const handleLogout = async () => {
+    const refreshToken =
+      typeof window !== 'undefined' ? localStorage.getItem('refreshToken') : null;
+    if (refreshToken) {
+      try {
+        await api.post('/auth/logout', { refreshToken });
+      } catch {}
+    }
     logout();
+    qc.clear();
     router.push('/login');
   };
 
@@ -47,7 +70,7 @@ export function Header() {
           <span className="text-sm">{user?.name || 'User'}</span>
         </div>
 
-        <Button variant="ghost" size="icon" onClick={handleLogout}>
+        <Button variant="ghost" size="icon" onClick={handleLogout} title={t('common.logout') || 'Log out'}>
           <LogOut size={18} />
         </Button>
       </div>

@@ -26,6 +26,7 @@ import { FilesModule } from './modules/files/files.module';
 import { EmailModule } from './modules/email/email.module';
 import { ReverseProxyModule } from './modules/reverse-proxy/reverse-proxy.module';
 import { SystemModule } from './modules/system/system.module';
+import { HealthModule } from './modules/health/health.module';
 
 @Module({
   imports: [
@@ -70,6 +71,7 @@ import { SystemModule } from './modules/system/system.module';
     EmailModule,
     ReverseProxyModule,
     SystemModule,
+    HealthModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

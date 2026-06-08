@@ -45,6 +45,20 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Public, sanitized snapshot of the local server. Safe for any
+   * authenticated user — needed by the dashboard's "create project"
+   * flow in LOCAL mode (the form has to know there's a local target
+   * before letting the user submit). No tokens, no remote IPs.
+   */
+  async findLocalPublic() {
+    const local = await this.prisma.server.findFirst({
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, name: true, status: true, os: true, arch: true },
+    });
+    return local;
+  }
+
+  /**
    * Sanitized list of servers the caller can reach via project membership.
    * Used by the dashboard sidebar / project picker. Never includes
    * agentTokens, IPs of remote servers, or other infra secrets.

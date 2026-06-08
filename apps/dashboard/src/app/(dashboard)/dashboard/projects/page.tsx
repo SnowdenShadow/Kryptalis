@@ -143,9 +143,12 @@ export default function ProjectsPage() {
   });
 
   // --- Local server (auto-select for new project in LOCAL mode) ---
+  // Use the sanitized -public endpoint so non-admin USERs can still create
+  // projects. The admin endpoint /servers/local returns agent tokens and is
+  // gated to ADMIN/SUPERADMIN; we don't need any of that here.
   const { data: localServer } = useQuery<LocalServer>({
-    queryKey: ['servers', 'local'],
-    queryFn: () => api.get('/servers/local'),
+    queryKey: ['servers', 'local-public'],
+    queryFn: () => api.get('/servers/local-public'),
   });
 
   // --- Deployment mode (LOCAL or MULTI) + servers list (only fetched in MULTI mode)

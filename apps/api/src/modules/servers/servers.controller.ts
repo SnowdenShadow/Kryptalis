@@ -43,12 +43,18 @@ export class ServersController {
     private admin: AdminService,
   ) {}
 
-  // ── Per-user view ────────────────────────────────────────────────
+  // ── Per-user (sanitized) views ─────────────────────────────────
 
   @Get('mine')
   @ApiOperation({ summary: 'List servers the caller can reach via project membership (sanitized)' })
   findMine(@CurrentUser('id') userId: string) {
     return this.serversService.findAccessible(userId);
+  }
+
+  @Get('local-public')
+  @ApiOperation({ summary: 'Sanitized local server info (any authenticated user). No tokens, no IPs of remote servers.' })
+  findLocalPublic() {
+    return this.serversService.findLocalPublic();
   }
 
   // ── Admin platform CRUD ─────────────────────────────────────────

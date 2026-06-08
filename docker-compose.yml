@@ -17,6 +17,7 @@ services:
     image: postgres:16-alpine
     container_name: kryptalis-postgres
     restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
     environment:
       POSTGRES_USER: kryptalis
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (run install.sh or set it in .env)}
@@ -36,6 +37,7 @@ services:
     image: redis:7-alpine
     container_name: kryptalis-redis
     restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
     volumes:
       - redis_data:/data
     ports:
@@ -50,6 +52,7 @@ services:
     image: caddy:2-alpine
     container_name: kryptalis-caddy
     restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "20m", max-file: "5" } }
     ports:
       - "80:80"
       - "443:443"
@@ -61,11 +64,15 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
-      # default network (postgres/redis/api/dashboard) AND kryptalis-apps so
-      # Caddy can reach any container the API deploys via container_name —
-      # the basis for HTTPS-on-custom-port (no host port collision).
       - default
       - kryptalis-apps
+    # Caddy's admin API answers on :2019; we use it as a liveness probe.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   api:
     build:
@@ -73,6 +80,7 @@ services:
       dockerfile: apps/api/Dockerfile
     container_name: kryptalis-api
     restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "20m", max-file: "5" } }
     environment:
       DATABASE_URL: postgresql://kryptalis:${POSTGRES_PASSWORD}@postgres:5432/kryptalis
       REDIS_URL: redis://redis:6379
@@ -97,6 +105,12 @@ services:
       KRYPTALIS_HOST_DATA_DIR: ${PWD}/.kryptalis
     ports:
       - "4000:4000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:4000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     volumes:
       # API persists generated docker-compose stacks, mail server configs,
       # Caddyfile, app sources etc. in .kryptalis on the host.
@@ -128,17 +142,27 @@ services:
       context: .
       dockerfile: apps/dashboard/Dockerfile
       args:
-        # Next inlines NEXT_PUBLIC_* at build time — we MUST pass it as a build arg,
-        # not as a runtime env var, otherwise the browser bundle keeps the default.
         NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
     container_name: kryptalis-dashboard
     restart: unless-stopped
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
     environment:
       NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
+    # The dashboard publishes :3000 on every interface by default — that's
+    # how a fresh install lets you reach the UI before any domain is wired.
+    # Once you have a public domain + Caddy in front, set DASHBOARD_BIND=127.0.0.1
+    # in .env so direct :3000 traffic no longer bypasses TLS.
     ports:
-      - "3000:3000"
+      - "${DASHBOARD_BIND:-0.0.0.0}:3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:3000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 networks:
   # default — postgres/redis/api/dashboard talk to each other here.

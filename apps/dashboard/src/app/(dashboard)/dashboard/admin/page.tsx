@@ -14,6 +14,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import { useRouter } from 'next/navigation';
+import { useAuthStore } from '@/lib/store';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -67,6 +69,22 @@ export default function AdminPage() {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const router = useRouter();
+  const me = useAuthStore((s) => s.user);
+
+  // Client-side role guard. The sidebar already hides this entry for
+  // non-admins, but a hand-typed /dashboard/admin URL would render the
+  // page and then 403 on every API call — confusing. Redirect to the
+  // dashboard with a toast instead of rendering a half-broken shell.
+  // The backend still enforces RBAC on every endpoint — this is purely
+  // UX defense in depth.
+  if (me && me.role !== 'ADMIN' && me.role !== 'SUPERADMIN') {
+    if (typeof window !== 'undefined') {
+      router.replace('/dashboard');
+      toast.error('Admin panel is restricted to platform administrators.');
+    }
+    return null;
+  }
 
   // ── Overview ─────────────────────────────────────────────────────
   const { data: overview } = useQuery<Overview>({
