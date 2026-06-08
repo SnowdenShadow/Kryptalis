@@ -331,7 +331,7 @@ export default function ApplicationsPage() {
       api.post<Application>('/applications', body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['applications'] });
-      toast.success('Application created');
+      toast.success(t('toast.appCreated'));
       setShowDeploy(false);
       setDeployStep(0);
       setDeployMode(null);
@@ -363,7 +363,7 @@ export default function ApplicationsPage() {
     mutationFn: (id: string) => api.delete(`/applications/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['applications'] });
-      toast.success('Application deleted');
+      toast.success(t('toast.appDeleted'));
       setDeleteTarget(null);
     },
     onError: (err: Error) => {
@@ -376,7 +376,7 @@ export default function ApplicationsPage() {
       api.post(`/applications/${id}/${action}`),
     onSuccess: (_, { action }) => {
       queryClient.invalidateQueries({ queryKey: ['applications'] });
-      toast.success(`Application ${action} initiated`);
+      toast.success(t('toast.appActionInitiated', { action }));
     },
     onError: (err: Error) => {
       toastError(err);
@@ -529,7 +529,7 @@ export default function ApplicationsPage() {
               applicationId: created.id,
               autoSsl: true,
             });
-            toast.success(`Domain ${newDomainName} reserved — point its A record at the server IP.`);
+            toast.success(t('toast.domainReserved', { name: newDomainName }));
           }
           setNewDomainName('');
           setDeployDomainId('');

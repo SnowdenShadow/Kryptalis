@@ -194,7 +194,7 @@ export default function ProjectsPage() {
       api.post<Project>('/projects', body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
-      toast.success('Project created');
+      toast.success(t('toast.projectCreated'));
       setShowCreate(false);
     },
     onError: (err: Error) => {
@@ -206,7 +206,7 @@ export default function ProjectsPage() {
     mutationFn: (id: string) => api.delete(`/projects/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
-      toast.success('Project deleted');
+      toast.success(t('toast.projectDeleted'));
       setDeleteTarget(null);
     },
     onError: (err: Error) => {
@@ -219,7 +219,7 @@ export default function ProjectsPage() {
     e.preventDefault();
     const serverId = isMultiMode ? createForm.serverId : localServer?.id;
     if (!serverId) {
-      toast.error(isMultiMode ? 'Pick a server first' : 'No local server found');
+      toast.error(t(isMultiMode ? 'toast.pickServerFirst' : 'toast.noLocalServer'));
       return;
     }
     createMutation.mutate({

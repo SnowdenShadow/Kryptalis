@@ -130,7 +130,7 @@ export default function BackupsPage() {
     }) => api.post('/backups', data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['backups'] });
-      toast.success('Backup created successfully');
+      toast.success(t('toast.backupCreated'));
       closeCreateDialog();
     },
     onError: (err: Error) => {
@@ -142,7 +142,7 @@ export default function BackupsPage() {
     mutationFn: (id: string) => api.post(`/backups/${id}/restore`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['backups'] });
-      toast.success('Backup restore initiated');
+      toast.success(t('toast.backupRestoreInitiated'));
     },
     onError: (err: Error) => {
       toastError(err);
@@ -153,7 +153,7 @@ export default function BackupsPage() {
     mutationFn: (id: string) => api.delete(`/backups/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['backups'] });
-      toast.success('Backup deleted successfully');
+      toast.success(t('toast.backupDeleted'));
       setDeleteId(null);
     },
     onError: (err: Error) => {

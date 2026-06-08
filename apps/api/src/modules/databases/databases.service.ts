@@ -18,16 +18,11 @@ import {
 } from '../../common/rbac/project-access';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { AgentService } from '../agent/agent.service';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
 
 const execAsync = promisify(exec);
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const DBS_DIR = path.join(DATA_DIR, 'databases');
-const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
-
-function isLocalServer(host: string | null | undefined): boolean {
-  if (!host) return true;
-  return LOCAL_HOSTS.has(host);
-}
 
 const DB_CONFIGS: Record<string, { image: string; defaultPort: number; hostPort: (name: string) => number; compose: (name: string, user: string, pass: string, port: number) => string }> = {
   POSTGRESQL: {
@@ -168,7 +163,7 @@ export class DatabasesService {
 
   private isDbLocal(server: { host: string } | null): boolean {
     if (!server) return true;
-    return isLocalServer(server.host);
+    return isLocalHost(server.host);
   }
 
   // ── access ─────────────────────────────────────────────────────────

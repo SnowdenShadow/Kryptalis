@@ -11,6 +11,13 @@ import * as path from 'path';
 
 const execAsync = promisify(exec);
 
+export interface MarketplaceEnvVar {
+  key: string;
+  defaultValue: string;
+  required: boolean;
+  description: string;
+}
+
 export interface MarketplaceApp {
   id: string;
   name: string;
@@ -18,47 +25,63 @@ export interface MarketplaceApp {
   description: string;
   category: string;
   icon: string;
+  /** Public icon URL (dashboard-icons CDN) for the marketplace UI. */
+  iconUrl?: string;
   version: string;
+  /** Docker image used by the install template (informational; the real
+   *  image is in templates.ts). Surfaced in the marketplace UI. */
+  dockerImage?: string;
   /** Default host ports the template publishes. Index 0 is the canonical one. */
   ports: number[];
   /** Internal port the container actually listens on. Caddy proxies here. */
   containerPort: number;
+  /** Canonical default host port (mirrors ports[0]) — convenience for UI. */
+  defaultPort?: number;
+  /** Declared env vars the install wizard surfaces in the UI. */
+  envVars?: MarketplaceEnvVar[];
 }
 
-// Apps removed from the visible marketplace until proper packaging exists:
+// Catalog is loaded from catalog.json at boot. This lets ops edit the
+// marketplace (add apps, tweak versions, change defaults) without a code
+// change + rebuild. The JSON sits alongside this file so it ships in the
+// build artifact (NestJS copies *.json by default via nest-cli assets).
+//
+// Apps deliberately omitted from the visible marketplace until proper
+// packaging exists:
 //   - Supabase: standalone studio template is non-functional (needs the
 //     full 8-service stack — postgres/kong/gotrue/postgrest/realtime/
 //     storage-api/postgres-meta/etc).
 //   - Appwrite: same story — single-container `appwrite/appwrite` boots
 //     into a crashloop without mariadb/redis/influxdb wired up.
-//   - Postal: refuses to start without a /config/postal.yml that the
-//     template never generates; depends_on doesn't wait for MariaDB,
-//     hardcoded port collisions.
-//   - Mailu: container_name mismatch with Caddy routing + missing redis +
-//     placeholder SECRET_KEY / DOMAIN that we don't substitute. Kryptalis's
-//     own mail server feature (Postfix+Dovecot+rspamd) is the supported
+//   - Postal / Mailu / Rainloop: see commit history for the full
+//     rationale; Kryptalis's own mail server feature is the supported
 //     mail path.
-//   - Rainloop: upstream is dead since 2022 with unpatched XSS CVEs.
-//     SnappyMail is its actively-maintained successor and is the
-//     recommended webmail client. Until we ship a maintained fork pin,
-//     don't recommend it.
-const APPS: MarketplaceApp[] = [
-  { id: '1', name: 'Portainer', slug: 'portainer', description: 'Container management UI', category: 'DevOps', icon: 'container', version: '2.21', ports: [9443], containerPort: 9443 },
-  { id: '2', name: 'Grafana', slug: 'grafana', description: 'Observability dashboards', category: 'DevOps', icon: 'chart', version: '11.0', ports: [3001], containerPort: 3000 },
-  { id: '3', name: 'Uptime Kuma', slug: 'uptime-kuma', description: 'Self-hosted monitoring tool', category: 'DevOps', icon: 'heartbeat', version: '1.23', ports: [3002], containerPort: 3001 },
-  { id: '4', name: 'n8n', slug: 'n8n', description: 'Workflow automation', category: 'Automation', icon: 'workflow', version: '1.64', ports: [5678], containerPort: 5678 },
-  { id: '6', name: 'WordPress', slug: 'wordpress', description: 'Popular CMS', category: 'CMS', icon: 'edit', version: '6.6', ports: [8080], containerPort: 80 },
-  { id: '7', name: 'Ghost', slug: 'ghost', description: 'Publishing platform', category: 'CMS', icon: 'ghost', version: '5.94', ports: [2368], containerPort: 2368 },
-  { id: '8', name: 'MinIO', slug: 'minio', description: 'S3-compatible object storage', category: 'Storage', icon: 'bucket', version: '2024', ports: [9001], containerPort: 9001 },
-  { id: '9', name: 'Nextcloud', slug: 'nextcloud', description: 'File hosting platform', category: 'Storage', icon: 'cloud', version: '29', ports: [8081], containerPort: 80 },
-  { id: '10', name: 'PostgreSQL', slug: 'postgresql', description: 'Relational database', category: 'Databases', icon: 'database', version: '16', ports: [5433], containerPort: 5432 },
-  { id: '11', name: 'Redis', slug: 'redis', description: 'In-memory data store', category: 'Databases', icon: 'zap', version: '7.4', ports: [6380], containerPort: 6379 },
+function loadCatalog(): MarketplaceApp[] {
+  // Resolve relative to this compiled file. Works in both `ts-node` (src/)
+  // and the built `dist/` output. The dist build maps `__dirname` →
+  // `apps/api/dist/modules/marketplace/`; the JSON lives in src/, so we
+  // also probe the sibling src/ path. Last-resort: cwd-relative for unit
+  // tests run from odd working dirs.
+  const distSibling = path.resolve(__dirname, '../../../src/modules/marketplace/catalog.json');
+  const candidates = [
+    path.join(__dirname, 'catalog.json'),
+    distSibling,
+    path.join(process.cwd(), 'apps/api/src/modules/marketplace/catalog.json'),
+    path.join(process.cwd(), 'src/modules/marketplace/catalog.json'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      const raw = fs.readFileSync(p, 'utf8');
+      const parsed = JSON.parse(raw) as { apps: MarketplaceApp[] };
+      return parsed.apps;
+    }
+  }
+  throw new Error(
+    `Marketplace catalog.json not found. Looked in:\n  - ${candidates.join('\n  - ')}`,
+  );
+}
 
-  // ── Email & webmail ─────────────────────────────────────────────
-  { id: '13', name: 'Roundcube', slug: 'roundcube', description: 'Polished IMAP webmail client', category: 'Email', icon: 'mail', version: '1.6', ports: [8083], containerPort: 80 },
-  { id: '14', name: 'SnappyMail', slug: 'snappymail', description: 'Modern lightweight webmail (Rainloop successor)', category: 'Email', icon: 'mail-check', version: '2.36', ports: [8084], containerPort: 8888 },
-  { id: '16', name: 'Mailpit', slug: 'mailpit', description: 'SMTP testing tool with web UI — catches outgoing mail in dev', category: 'Email', icon: 'send', version: '1.20', ports: [8086, 1025], containerPort: 8025 },
-];
+const APPS: MarketplaceApp[] = loadCatalog();
 
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const APPS_DIR = path.join(DATA_DIR, 'apps');

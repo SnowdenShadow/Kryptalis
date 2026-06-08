@@ -18,6 +18,7 @@ import { AgentService } from '../agent/agent.service';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
@@ -27,12 +28,6 @@ const execFileAsync = promisify(execFile);
 const PROJ_DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const PROJ_APPS_DIR = path.join(PROJ_DATA_DIR, 'apps');
 const PROJ_DBS_DIR = path.join(PROJ_DATA_DIR, 'databases');
-const PROJ_LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
-
-function isLocalProjServer(host: string | null | undefined): boolean {
-  if (!host) return true;
-  return PROJ_LOCAL_HOSTS.has(host);
-}
 
 @Injectable()
 export class ProjectsService {
@@ -185,7 +180,7 @@ export class ProjectsService {
         .replace(/^-+|-+$/g, '')
         .slice(0, 48) || 'app';
 
-    const isLocal = isLocalProjServer(project.server?.host);
+    const isLocal = isLocalHost(project.server?.host);
 
     // ── Applications ────────────────────────────────────────────────
     // LOCAL: drive docker compose + fs cleanup directly (the agent loop

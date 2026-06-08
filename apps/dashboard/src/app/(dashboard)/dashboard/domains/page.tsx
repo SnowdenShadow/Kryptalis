@@ -589,7 +589,7 @@ export default function DomainsPage() {
   const proxySyncMutation = useMutation({
     mutationFn: () => api.post('/reverse-proxy/sync'),
     onSuccess: () => {
-      toast.success('Reverse proxy reloaded');
+      toast.success(t('toast.proxyReloaded'));
       refetchProxy();
       queryClient.invalidateQueries({ queryKey: ['domains'] });
     },
@@ -597,7 +597,7 @@ export default function DomainsPage() {
   });
   const proxyStartMutation = useMutation({
     mutationFn: () => api.post('/reverse-proxy/start'),
-    onSuccess: () => { toast.success('Reverse proxy starting...'); refetchProxy(); },
+    onSuccess: () => { toast.success(t('toast.proxyStarting')); refetchProxy(); },
     onError: (err: Error) => toastError(err),
   });
 
@@ -656,12 +656,12 @@ export default function DomainsPage() {
       api.post('/domains', data),
     onSuccess: (res: any) => {
       queryClient.invalidateQueries({ queryKey: ['domains'] });
-      toast.success('Domain added');
+      toast.success(t('toast.domainAdded'));
       if (autoSsl && res?.id) {
         api.post('/ssl/issue', { domainId: res.id }).then(() => {
-          toast.success('SSL certificate requested');
+          toast.success(t('toast.sslRequested'));
           queryClient.invalidateQueries({ queryKey: ['domains'] });
-        }).catch(() => toast.error('SSL request failed'));
+        }).catch(() => toast.error(t('toast.sslRequestFailed')));
       }
       closeAdd();
     },
@@ -672,7 +672,7 @@ export default function DomainsPage() {
     mutationFn: (domainId: string) => api.post('/ssl/issue', { domainId }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['domains'] });
-      toast.success('SSL renewal requested');
+      toast.success(t('toast.sslRenewalRequested'));
     },
     onError: (err: Error) => toastError(err),
   });
@@ -681,7 +681,7 @@ export default function DomainsPage() {
     mutationFn: (id: string) => api.delete(`/domains/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['domains'] });
-      toast.success('Domain deleted');
+      toast.success(t('toast.domainDeleted'));
       setDeleteTarget(null);
     },
     onError: (err: Error) => toastError(err),

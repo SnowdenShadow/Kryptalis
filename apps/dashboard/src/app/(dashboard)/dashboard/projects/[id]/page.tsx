@@ -158,7 +158,7 @@ export default function ProjectDetailPage() {
   function copyMesh(text: string, key: string) {
     navigator.clipboard.writeText(text).then(() => {
       setCopiedMesh(key);
-      toast.success('Copied');
+      toast.success(t('toast.copied'));
       setTimeout(() => setCopiedMesh(''), 1200);
     });
   }
@@ -167,7 +167,7 @@ export default function ProjectDetailPage() {
     mutationFn: () => api.delete(`/projects/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
-      toast.success('Project deleted');
+      toast.success(t('toast.projectDeleted'));
       router.push('/dashboard/projects');
     },
     onError: (err: Error) => toast.error(err.message),
@@ -179,7 +179,7 @@ export default function ProjectDetailPage() {
     onSuccess: (data) => {
       toast.success(data.message);
       if (data.warnings.length > 0) {
-        toast.warning(`${data.warnings.length} warning${data.warnings.length > 1 ? 's' : ''} during migration. Check logs.`);
+        toast.warning(t('toast.migrationWarnings', { n: data.warnings.length }));
       }
       queryClient.invalidateQueries({ queryKey: ['project', id] });
       queryClient.invalidateQueries({ queryKey: ['projects'] });
@@ -196,7 +196,7 @@ export default function ProjectDetailPage() {
   const addMemberMutation = useMutation({
     mutationFn: () => api.post(`/projects/${id}/members`, { email: addEmail, role: addRole }),
     onSuccess: () => {
-      toast.success('Member added');
+      toast.success(t('toast.memberAdded'));
       setShowAdd(false);
       setAddEmail('');
       setAddRole('DEVELOPER');
@@ -209,7 +209,7 @@ export default function ProjectDetailPage() {
     mutationFn: ({ memberId, role }: { memberId: string; role: Role }) =>
       api.patch(`/projects/${id}/members/${memberId}`, { role }),
     onSuccess: () => {
-      toast.success('Role updated');
+      toast.success(t('toast.roleUpdated'));
       queryClient.invalidateQueries({ queryKey: ['project-members', id] });
     },
     onError: (err: Error) => toast.error(err.message),
@@ -218,7 +218,7 @@ export default function ProjectDetailPage() {
   const removeMemberMutation = useMutation({
     mutationFn: (memberId: string) => api.delete(`/projects/${id}/members/${memberId}`),
     onSuccess: () => {
-      toast.success('Member removed');
+      toast.success(t('toast.memberRemoved'));
       queryClient.invalidateQueries({ queryKey: ['project-members', id] });
     },
     onError: (err: Error) => toast.error(err.message),
@@ -227,7 +227,7 @@ export default function ProjectDetailPage() {
   const transferOwnershipMutation = useMutation({
     mutationFn: (targetUserId: string) => api.post(`/projects/${id}/transfer-ownership`, { targetUserId }),
     onSuccess: () => {
-      toast.success('Ownership transferred');
+      toast.success(t('toast.ownershipTransferred'));
       queryClient.invalidateQueries({ queryKey: ['project-members', id] });
       queryClient.invalidateQueries({ queryKey: ['project', id] });
     },

@@ -166,6 +166,28 @@ export class DeploymentTargetService {
     return this.taskToExec(task);
   }
 
+  /**
+   * `docker compose stop` — stops services without removing containers or
+   * volumes. Distinct from composeDown (which tears down containers and,
+   * with purgeVolumes, deletes named volumes). Used by the "Stop" lifecycle
+   * button so the user can hit "Start" later without redeploying.
+   */
+  async composeStop(server: TargetServer | null, dir: string): Promise<ExecResult> {
+    if (this.isLocal(server)) {
+      return this.execute(server, 'docker', ['compose', 'stop'], {
+        cwd: dir,
+        timeoutMs: 120_000,
+      });
+    }
+    const task = await this.agent.enqueueAndWait(
+      server!.id,
+      'STOP',
+      { dir },
+      120_000,
+    );
+    return this.taskToExec(task);
+  }
+
   async composeRestart(server: TargetServer | null, dir: string): Promise<ExecResult> {
     if (this.isLocal(server)) {
       return this.execute(server, 'docker', ['compose', 'restart'], {

@@ -154,7 +154,7 @@ export default function DatabasesPage() {
     }) => api.post('/databases', data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['databases'] });
-      toast.success('Database created successfully');
+      toast.success(t('toast.dbCreated'));
       closeCreateDialog();
     },
     onError: (err: Error) => {
@@ -166,7 +166,7 @@ export default function DatabasesPage() {
     mutationFn: (id: string) => api.delete(`/databases/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['databases'] });
-      toast.success('Database deleted successfully');
+      toast.success(t('toast.dbDeleted'));
       setDeleteId(null);
     },
     onError: (err: Error) => {
@@ -220,10 +220,10 @@ export default function DatabasesPage() {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedId(dbId);
-      toast.success('Copied to clipboard');
+      toast.success(t('toast.copiedToClipboard'));
       setTimeout(() => setCopiedId(null), 2000);
     } catch {
-      toast.error('Failed to copy');
+      toast.error(t('toast.failedToCopy'));
     }
   }
 
@@ -246,7 +246,7 @@ export default function DatabasesPage() {
       api.post(`/databases/${id}/${action}`),
     onSuccess: (_, { action }) => {
       queryClient.invalidateQueries({ queryKey: ['databases'] });
-      toast.success(`Database ${action === 'start' ? 'started' : 'stopped'}`);
+      toast.success(t(action === 'start' ? 'toast.dbStarted' : 'toast.dbStopped'));
     },
     onError: (err: Error) => toastError(err),
   });

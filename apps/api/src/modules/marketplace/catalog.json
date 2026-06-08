@@ -1,0 +1,334 @@
+{
+  "apps": [
+    {
+      "id": "1",
+      "name": "Portainer",
+      "slug": "portainer",
+      "description": "Container management UI",
+      "category": "DevOps",
+      "icon": "container",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/portainer.png",
+      "version": "2.21",
+      "dockerImage": "portainer/portainer-ce:latest",
+      "ports": [9443],
+      "containerPort": 9443,
+      "defaultPort": 9443,
+      "envVars": []
+    },
+    {
+      "id": "2",
+      "name": "Grafana",
+      "slug": "grafana",
+      "description": "Observability dashboards",
+      "category": "DevOps",
+      "icon": "chart",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/grafana.png",
+      "version": "11.0",
+      "dockerImage": "grafana/grafana:latest",
+      "ports": [3001],
+      "containerPort": 3000,
+      "defaultPort": 3001,
+      "envVars": [
+        { "key": "GF_SECURITY_ADMIN_USER", "defaultValue": "admin", "required": false, "description": "Initial admin username" },
+        { "key": "GF_SECURITY_ADMIN_PASSWORD", "defaultValue": "admin", "required": true, "description": "Initial admin password (CHANGE ME)" }
+      ]
+    },
+    {
+      "id": "3",
+      "name": "Uptime Kuma",
+      "slug": "uptime-kuma",
+      "description": "Self-hosted monitoring tool",
+      "category": "DevOps",
+      "icon": "heartbeat",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/uptime-kuma.png",
+      "version": "1.23",
+      "dockerImage": "louislam/uptime-kuma:1",
+      "ports": [3002],
+      "containerPort": 3001,
+      "defaultPort": 3002,
+      "envVars": []
+    },
+    {
+      "id": "4",
+      "name": "n8n",
+      "slug": "n8n",
+      "description": "Workflow automation",
+      "category": "Automation",
+      "icon": "workflow",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/n8n.png",
+      "version": "1.64",
+      "dockerImage": "n8nio/n8n:latest",
+      "ports": [5678],
+      "containerPort": 5678,
+      "defaultPort": 5678,
+      "envVars": [
+        { "key": "N8N_BASIC_AUTH_ACTIVE", "defaultValue": "true", "required": false, "description": "Enable basic auth on the web UI" },
+        { "key": "N8N_BASIC_AUTH_USER", "defaultValue": "admin", "required": false, "description": "Basic auth username" },
+        { "key": "N8N_BASIC_AUTH_PASSWORD", "defaultValue": "", "required": true, "description": "Basic auth password" }
+      ]
+    },
+    {
+      "id": "6",
+      "name": "WordPress",
+      "slug": "wordpress",
+      "description": "Popular CMS",
+      "category": "CMS",
+      "icon": "edit",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/wordpress.png",
+      "version": "6.6",
+      "dockerImage": "wordpress:latest",
+      "ports": [8080],
+      "containerPort": 80,
+      "defaultPort": 8080,
+      "envVars": [
+        { "key": "WORDPRESS_DB_HOST", "defaultValue": "db", "required": true, "description": "MySQL host" },
+        { "key": "WORDPRESS_DB_USER", "defaultValue": "wordpress", "required": true, "description": "MySQL user" },
+        { "key": "WORDPRESS_DB_PASSWORD", "defaultValue": "", "required": true, "description": "MySQL password" },
+        { "key": "WORDPRESS_DB_NAME", "defaultValue": "wordpress", "required": true, "description": "MySQL database name" }
+      ]
+    },
+    {
+      "id": "7",
+      "name": "Ghost",
+      "slug": "ghost",
+      "description": "Publishing platform",
+      "category": "CMS",
+      "icon": "ghost",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/ghost.png",
+      "version": "5.94",
+      "dockerImage": "ghost:latest",
+      "ports": [2368],
+      "containerPort": 2368,
+      "defaultPort": 2368,
+      "envVars": [
+        { "key": "url", "defaultValue": "http://localhost:2368", "required": true, "description": "Public site URL" },
+        { "key": "NODE_ENV", "defaultValue": "production", "required": false, "description": "Node environment" }
+      ]
+    },
+    {
+      "id": "8",
+      "name": "MinIO",
+      "slug": "minio",
+      "description": "S3-compatible object storage",
+      "category": "Storage",
+      "icon": "bucket",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/minio.png",
+      "version": "2024",
+      "dockerImage": "minio/minio:latest",
+      "ports": [9001],
+      "containerPort": 9001,
+      "defaultPort": 9001,
+      "envVars": [
+        { "key": "MINIO_ROOT_USER", "defaultValue": "minioadmin", "required": true, "description": "Root username" },
+        { "key": "MINIO_ROOT_PASSWORD", "defaultValue": "minioadmin", "required": true, "description": "Root password (min 8 chars)" }
+      ]
+    },
+    {
+      "id": "9",
+      "name": "Nextcloud",
+      "slug": "nextcloud",
+      "description": "File hosting platform",
+      "category": "Storage",
+      "icon": "cloud",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/nextcloud.png",
+      "version": "29",
+      "dockerImage": "nextcloud:latest",
+      "ports": [8081],
+      "containerPort": 80,
+      "defaultPort": 8081,
+      "envVars": [
+        { "key": "NEXTCLOUD_ADMIN_USER", "defaultValue": "admin", "required": false, "description": "Admin username" },
+        { "key": "NEXTCLOUD_ADMIN_PASSWORD", "defaultValue": "", "required": true, "description": "Admin password" }
+      ]
+    },
+    {
+      "id": "10",
+      "name": "PostgreSQL",
+      "slug": "postgresql",
+      "description": "Relational database",
+      "category": "Databases",
+      "icon": "database",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/postgres.png",
+      "version": "16",
+      "dockerImage": "postgres:16-alpine",
+      "ports": [5433],
+      "containerPort": 5432,
+      "defaultPort": 5433,
+      "envVars": [
+        { "key": "POSTGRES_USER", "defaultValue": "postgres", "required": true, "description": "Superuser name" },
+        { "key": "POSTGRES_PASSWORD", "defaultValue": "", "required": true, "description": "Superuser password" },
+        { "key": "POSTGRES_DB", "defaultValue": "postgres", "required": false, "description": "Initial database name" }
+      ]
+    },
+    {
+      "id": "11",
+      "name": "Redis",
+      "slug": "redis",
+      "description": "In-memory data store",
+      "category": "Databases",
+      "icon": "zap",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/redis.png",
+      "version": "7.4",
+      "dockerImage": "redis:7-alpine",
+      "ports": [6380],
+      "containerPort": 6379,
+      "defaultPort": 6380,
+      "envVars": []
+    },
+    {
+      "id": "13",
+      "name": "Roundcube",
+      "slug": "roundcube",
+      "description": "Polished IMAP webmail client",
+      "category": "Email",
+      "icon": "mail",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/roundcube.png",
+      "version": "1.6",
+      "dockerImage": "roundcube/roundcubemail:latest",
+      "ports": [8083],
+      "containerPort": 80,
+      "defaultPort": 8083,
+      "envVars": []
+    },
+    {
+      "id": "14",
+      "name": "SnappyMail",
+      "slug": "snappymail",
+      "description": "Modern lightweight webmail (Rainloop successor)",
+      "category": "Email",
+      "icon": "mail-check",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/snappymail.png",
+      "version": "2.36",
+      "dockerImage": "djmaze/snappymail:latest",
+      "ports": [8084],
+      "containerPort": 8888,
+      "defaultPort": 8084,
+      "envVars": []
+    },
+    {
+      "id": "16",
+      "name": "Mailpit",
+      "slug": "mailpit",
+      "description": "SMTP testing tool with web UI — catches outgoing mail in dev",
+      "category": "Email",
+      "icon": "send",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mailpit.png",
+      "version": "1.20",
+      "dockerImage": "axllent/mailpit:latest",
+      "ports": [8086, 1025],
+      "containerPort": 8025,
+      "defaultPort": 8086,
+      "envVars": []
+    },
+    {
+      "id": "20",
+      "name": "MySQL",
+      "slug": "mysql",
+      "description": "World's most popular open-source relational database",
+      "category": "Databases",
+      "icon": "database",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mysql.png",
+      "version": "8",
+      "dockerImage": "mysql:8",
+      "ports": [3306],
+      "containerPort": 3306,
+      "defaultPort": 3306,
+      "envVars": [
+        { "key": "MYSQL_ROOT_PASSWORD", "defaultValue": "", "required": true, "description": "Root password" },
+        { "key": "MYSQL_DATABASE", "defaultValue": "app", "required": false, "description": "Initial database name" },
+        { "key": "MYSQL_USER", "defaultValue": "app", "required": false, "description": "Initial username" },
+        { "key": "MYSQL_PASSWORD", "defaultValue": "", "required": false, "description": "Initial user password" }
+      ]
+    },
+    {
+      "id": "21",
+      "name": "MongoDB",
+      "slug": "mongodb",
+      "description": "Document-oriented NoSQL database",
+      "category": "Databases",
+      "icon": "database",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mongodb.png",
+      "version": "7",
+      "dockerImage": "mongo:7",
+      "ports": [27017],
+      "containerPort": 27017,
+      "defaultPort": 27017,
+      "envVars": [
+        { "key": "MONGO_INITDB_ROOT_USERNAME", "defaultValue": "root", "required": true, "description": "Root username" },
+        { "key": "MONGO_INITDB_ROOT_PASSWORD", "defaultValue": "", "required": true, "description": "Root password" }
+      ]
+    },
+    {
+      "id": "22",
+      "name": "Gitea",
+      "slug": "gitea",
+      "description": "Lightweight self-hosted Git service",
+      "category": "DevOps",
+      "icon": "git-branch",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/gitea.png",
+      "version": "1.22",
+      "dockerImage": "gitea/gitea:latest",
+      "ports": [3030],
+      "containerPort": 3000,
+      "defaultPort": 3030,
+      "envVars": [
+        { "key": "USER_UID", "defaultValue": "1000", "required": false, "description": "UID for the git user" },
+        { "key": "USER_GID", "defaultValue": "1000", "required": false, "description": "GID for the git user" }
+      ]
+    },
+    {
+      "id": "23",
+      "name": "Vaultwarden",
+      "slug": "vaultwarden",
+      "description": "Unofficial Bitwarden server (Rust) — passwords & secrets",
+      "category": "Security",
+      "icon": "lock",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/vaultwarden.png",
+      "version": "1.32",
+      "dockerImage": "vaultwarden/server:latest",
+      "ports": [8087],
+      "containerPort": 80,
+      "defaultPort": 8087,
+      "envVars": [
+        { "key": "ADMIN_TOKEN", "defaultValue": "", "required": false, "description": "Admin panel token (leave empty to disable /admin)" },
+        { "key": "SIGNUPS_ALLOWED", "defaultValue": "true", "required": false, "description": "Allow new user signups" }
+      ]
+    },
+    {
+      "id": "24",
+      "name": "Plausible Analytics",
+      "slug": "plausible",
+      "description": "Privacy-friendly web analytics (lightweight, no cookies)",
+      "category": "Analytics",
+      "icon": "bar-chart",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/plausible.png",
+      "version": "2.1",
+      "dockerImage": "plausible/analytics:latest",
+      "ports": [8088],
+      "containerPort": 8000,
+      "defaultPort": 8088,
+      "envVars": [
+        { "key": "BASE_URL", "defaultValue": "http://localhost:8088", "required": true, "description": "Public base URL of the install" },
+        { "key": "SECRET_KEY_BASE", "defaultValue": "", "required": true, "description": "64-char random secret (generate with openssl rand -base64 64)" }
+      ]
+    },
+    {
+      "id": "25",
+      "name": "Code-Server",
+      "slug": "code-server",
+      "description": "VS Code in the browser — full IDE accessible from anywhere",
+      "category": "Dev",
+      "icon": "code",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/code-server.png",
+      "version": "4.92",
+      "dockerImage": "codercom/code-server:latest",
+      "ports": [8443],
+      "containerPort": 8080,
+      "defaultPort": 8443,
+      "envVars": [
+        { "key": "PASSWORD", "defaultValue": "", "required": true, "description": "Login password for the IDE" },
+        { "key": "SUDO_PASSWORD", "defaultValue": "", "required": false, "description": "Optional sudo password inside the container" }
+      ]
+    }
+  ]
+}

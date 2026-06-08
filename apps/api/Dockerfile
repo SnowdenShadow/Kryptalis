@@ -33,6 +33,10 @@ COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=builder /app/apps/api/prisma ./apps/api/prisma
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
+# Marketplace catalog is JSON (data, not code) so nest's tsc doesn't
+# emit it into dist/. Copy it next to the compiled service so the
+# resolver finds it via path.join(__dirname, 'catalog.json').
+COPY --from=builder /app/apps/api/src/modules/marketplace/catalog.json ./apps/api/dist/modules/marketplace/catalog.json
 WORKDIR /app/apps/api
 EXPOSE 4000
 # Reconcile the DB schema on every start.

@@ -240,7 +240,7 @@ export default function MonitoringPage() {
       webhookUrl?: string;
     }) => api.post('/monitoring/alert-rules', data),
     onSuccess: () => {
-      toast.success('Alert rule created');
+      toast.success(t('toast.alertCreated'));
       queryClient.invalidateQueries({
         queryKey: ['monitoring', 'alert-rules', serverId],
       });
@@ -253,7 +253,7 @@ export default function MonitoringPage() {
   const deleteAlert = useMutation({
     mutationFn: (id: string) => api.delete(`/monitoring/alert-rules/${id}`),
     onSuccess: () => {
-      toast.success('Alert rule deleted');
+      toast.success(t('toast.alertDeleted'));
       queryClient.invalidateQueries({
         queryKey: ['monitoring', 'alert-rules', serverId],
       });

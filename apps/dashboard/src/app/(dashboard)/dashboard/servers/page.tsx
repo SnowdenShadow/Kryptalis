@@ -172,7 +172,7 @@ export default function ServersPage() {
     mutationFn: (id: string) => api.delete(`/servers/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['servers'] });
-      toast.success('Server reset successfully');
+      toast.success(t('toast.serverReset'));
       setShowReset(false);
     },
     onError: (err: Error) => {
@@ -209,7 +209,7 @@ export default function ServersPage() {
       setCreatedServer({ id: data.id, installCommand: data.installCommand });
       setNewServerName('');
       queryClient.invalidateQueries({ queryKey: ['servers'] });
-      toast.success('Server slot created — run the command on your VPS');
+      toast.success(t('toast.serverSlotCreated'));
     },
     onError: (err: Error) => toastError(err),
   });
@@ -219,7 +219,7 @@ export default function ServersPage() {
     onSuccess: (data, id) => {
       setCreatedServer({ id, installCommand: data.installCommand });
       setShowAdd(true);
-      toast.success('Install command generated');
+      toast.success(t('toast.installCmdGenerated'));
     },
     onError: (err: Error) => toastError(err),
   });
@@ -230,7 +230,7 @@ export default function ServersPage() {
       setCreatedServer({ id, installCommand: data.installCommand });
       setShowAdd(true);
       queryClient.invalidateQueries({ queryKey: ['servers'] });
-      toast.success('Token rotated — server back to PENDING_INSTALL');
+      toast.success(t('toast.tokenRotated'));
     },
     onError: (err: Error) => toastError(err),
   });
@@ -242,7 +242,7 @@ export default function ServersPage() {
       setShowAdd(true);
       queryClient.invalidateQueries({ queryKey: ['servers'] });
       queryClient.invalidateQueries({ queryKey: ['server-local'] });
-      toast.success('Server reset — re-run the install command');
+      toast.success(t('toast.serverResetInstall'));
     },
     onError: (err: Error) => toastError(err),
   });
@@ -252,7 +252,7 @@ export default function ServersPage() {
       api.delete(`/servers/${opts.id}`, { force: !!opts.force }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['servers'] });
-      toast.success('Server removed');
+      toast.success(t('toast.serverRemoved'));
     },
     onError: (err: Error) => toastError(err),
   });

@@ -451,7 +451,7 @@ export default function ApplicationDetailPage() {
     onSuccess: (_, action) => {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['applications'] });
-      toast.success(`Application ${action} initiated`);
+      toast.success(t('toast.appActionInitiated', { action }));
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -468,7 +468,7 @@ export default function ApplicationDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['domains'] });
-      toast.success('Domain linked');
+      toast.success(t('toast.domainLinked'));
       setShowLinkDomain(false);
       setSelectedDomainId('');
     },
@@ -480,7 +480,7 @@ export default function ApplicationDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['domains'] });
-      toast.success('Domain unlinked');
+      toast.success(t('toast.domainUnlinked'));
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -490,7 +490,7 @@ export default function ApplicationDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['applications'] });
-      toast.success('Port updated');
+      toast.success(t('toast.portUpdated'));
       setEditingPort(false);
     },
     onError: (err: Error) => toast.error(err.message),
@@ -501,7 +501,7 @@ export default function ApplicationDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['applications'] });
-      toast.success('Name updated');
+      toast.success(t('toast.nameUpdated'));
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -512,7 +512,7 @@ export default function ApplicationDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['applications'] });
-      toast.success('URL mode updated — Caddy reloading');
+      toast.success(t('toast.urlModeUpdated'));
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -525,7 +525,7 @@ export default function ApplicationDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['applications'] });
-      toast.success('Port binding added — Caddy reloading');
+      toast.success(t('toast.bindingAdded'));
       setNewBindingDomainId('');
       setNewBindingPort('');
     },
@@ -537,7 +537,7 @@ export default function ApplicationDetailPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['applications'] });
-      toast.success('Binding removed');
+      toast.success(t('toast.bindingRemoved'));
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -546,7 +546,7 @@ export default function ApplicationDetailPage() {
     mutationFn: () => api.delete(`/applications/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['applications'] });
-      toast.success('Application deleted');
+      toast.success(t('toast.appDeleted'));
       router.push('/dashboard/applications');
     },
     onError: (err: Error) => toast.error(err.message),
@@ -570,12 +570,12 @@ export default function ApplicationDetailPage() {
 
   const saveComposeMutation = useMutation({
     mutationFn: (content: string) => api.patch(`/applications/${id}/files/compose`, { content }),
-    onSuccess: () => { toast.success('Compose saved'); refetchCompose(); queryClient.invalidateQueries({ queryKey: ['app-ports', id] }); },
+    onSuccess: () => { toast.success(t('toast.composeSaved')); refetchCompose(); queryClient.invalidateQueries({ queryKey: ['app-ports', id] }); },
     onError: (err: Error) => toast.error(err.message),
   });
   const saveDockerfileMutation = useMutation({
     mutationFn: (content: string) => api.patch(`/applications/${id}/files/dockerfile`, { content }),
-    onSuccess: () => { toast.success('Dockerfile saved'); refetchDockerfile(); queryClient.invalidateQueries({ queryKey: ['app-ports', id] }); },
+    onSuccess: () => { toast.success(t('toast.dockerfileSaved')); refetchDockerfile(); queryClient.invalidateQueries({ queryKey: ['app-ports', id] }); },
     onError: (err: Error) => toast.error(err.message),
   });
 
@@ -599,7 +599,7 @@ export default function ApplicationDetailPage() {
   const remapPortsMutation = useMutation({
     mutationFn: (mapping: Record<string, number>) => api.patch(`/applications/${id}/ports`, { mapping }),
     onSuccess: () => {
-      toast.success('Ports remapped — redeploy to apply');
+      toast.success(t('toast.portsRemapped'));
       refetchPorts();
       queryClient.invalidateQueries({ queryKey: ['app-compose', id] });
       queryClient.invalidateQueries({ queryKey: ['application', id] });
@@ -624,7 +624,7 @@ export default function ApplicationDetailPage() {
 
   const saveEnvMutation = useMutation({
     mutationFn: (envVars: Record<string, string>) => api.patch(`/applications/${id}/env`, { envVars }),
-    onSuccess: () => { toast.success('Env vars saved — redeploy to apply'); refetchEnv(); },
+    onSuccess: () => { toast.success(t('toast.envSaved')); refetchEnv(); },
     onError: (err: Error) => toast.error(err.message),
   });
 
@@ -636,7 +636,7 @@ export default function ApplicationDetailPage() {
   });
   const rotateWebhookMutation = useMutation({
     mutationFn: () => api.post(`/applications/${id}/webhook/rotate`),
-    onSuccess: () => { toast.success('Secret rotated'); refetchWebhook(); },
+    onSuccess: () => { toast.success(t('toast.secretRotated')); refetchWebhook(); },
     onError: (err: Error) => toast.error(err.message),
   });
   const autoDeployMutation = useMutation({
@@ -650,7 +650,7 @@ export default function ApplicationDetailPage() {
   const redeployMutation = useMutation({
     mutationFn: () => api.post(`/applications/${id}/redeploy`),
     onSuccess: () => {
-      toast.success('Redeploy triggered');
+      toast.success(t('toast.redeployTriggered'));
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['deployments', id] });
     },
@@ -1633,7 +1633,7 @@ export default function ApplicationDetailPage() {
                     onClick={() => {
                       const p = Number(newBindingPort);
                       if (!newBindingDomainId || !Number.isInteger(p) || p < 1) {
-                        toast.error('Pick a domain and a valid port');
+                        toast.error(t('toast.pickDomainAndPort'));
                         return;
                       }
                       addBindingMutation.mutate({ domainId: newBindingDomainId, port: p });
@@ -1686,7 +1686,7 @@ export default function ApplicationDetailPage() {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => { if (webhook?.url) { navigator.clipboard.writeText(webhook.url); toast.success('Copied'); } }}
+                      onClick={() => { if (webhook?.url) { navigator.clipboard.writeText(webhook.url); toast.success(t('toast.copied')); } }}
                     >Copy</Button>
                   </div>
                 </div>
@@ -1706,7 +1706,7 @@ export default function ApplicationDetailPage() {
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => { if (webhook?.secret) { navigator.clipboard.writeText(webhook.secret); toast.success('Copied'); } }}
+                      onClick={() => { if (webhook?.secret) { navigator.clipboard.writeText(webhook.secret); toast.success(t('toast.copied')); } }}
                     >Copy</Button>
                     <Button
                       size="sm"

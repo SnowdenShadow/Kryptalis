@@ -18,6 +18,7 @@ import {
 } from '../../common/rbac/project-access';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { AgentService } from '../agent/agent.service';
+import { isLocalHost, DeploymentTargetService } from '../deployment-target/deployment-target.service';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
@@ -28,12 +29,6 @@ import * as yaml from 'js-yaml';
 const execFileAsync = promisify(execFile);
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const APPS_DIR = path.join(DATA_DIR, 'apps');
-const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
-
-function isLocalServer(host: string | null | undefined): boolean {
-  if (!host) return true;
-  return LOCAL_HOSTS.has(host);
-}
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -246,6 +241,7 @@ export class ApplicationsService {
     private domainAttach: DomainAttachService,
     private encryption: EncryptionService,
     private notifications: NotificationsService,
+    private deploymentTarget: DeploymentTargetService,
   ) {}
 
   /**
@@ -287,7 +283,7 @@ export class ApplicationsService {
 
   private isAppLocal(server: { host: string } | null): boolean {
     if (!server) return true;
-    return isLocalServer(server.host);
+    return isLocalHost(server.host);
   }
 
   // ── access control (RBAC via ProjectMember) ───────────────────────
@@ -666,7 +662,7 @@ ${networksBlock}`;
         project: { select: { server: { select: { id: true, host: true } } } },
       },
     });
-    const remoteServer = appRow?.project?.server && !isLocalServer(appRow.project.server.host)
+    const remoteServer = appRow?.project?.server && !isLocalHost(appRow.project.server.host)
       ? appRow.project.server
       : null;
 
@@ -1125,13 +1121,11 @@ ${networksBlock}`;
     const app = await this.assertOwnership(userId, id, 'DEVELOPER');
     const slug = slugify(app.name);
     const server = await this.resolveAppServer(id);
-    if (this.isAppLocal(server)) {
-      const appDir = resolveAppDir(slug, id);
-      if (fs.existsSync(appDir)) {
-        await dockerCompose(appDir, ['up', '-d'], undefined, 60_000);
-      }
-    } else if (server) {
-      await this.agent.enqueueTask(server.id, 'START', { slug });
+    const appDir = resolveAppDir(slug, id);
+    // Local: skip if the app dir was never materialized (no compose to run).
+    // Remote: always dispatch — the agent owns dir state on its host.
+    if (!this.deploymentTarget.isLocal(server) || fs.existsSync(appDir)) {
+      await this.deploymentTarget.composeUp(server, appDir);
     }
     // Don't blindly flip the DB to RUNNING — the docker compose call returned
     // 0, but the container might still be crashlooping. syncStatus reads the
@@ -1143,13 +1137,9 @@ ${networksBlock}`;
     const app = await this.assertOwnership(userId, id, 'DEVELOPER');
     const slug = slugify(app.name);
     const server = await this.resolveAppServer(id);
-    if (this.isAppLocal(server)) {
-      const appDir = resolveAppDir(slug, id);
-      if (fs.existsSync(appDir)) {
-        await dockerCompose(appDir, ['stop'], undefined, 60_000);
-      }
-    } else if (server) {
-      await this.agent.enqueueTask(server.id, 'STOP', { slug });
+    const appDir = resolveAppDir(slug, id);
+    if (!this.deploymentTarget.isLocal(server) || fs.existsSync(appDir)) {
+      await this.deploymentTarget.composeStop(server, appDir);
     }
     return this.refreshAndReturn(id);
   }
@@ -1158,13 +1148,9 @@ ${networksBlock}`;
     const app = await this.assertOwnership(userId, id, 'DEVELOPER');
     const slug = slugify(app.name);
     const server = await this.resolveAppServer(id);
-    if (this.isAppLocal(server)) {
-      const appDir = resolveAppDir(slug, id);
-      if (fs.existsSync(appDir)) {
-        await dockerCompose(appDir, ['restart'], undefined, 60_000);
-      }
-    } else if (server) {
-      await this.agent.enqueueTask(server.id, 'RESTART', { slug });
+    const appDir = resolveAppDir(slug, id);
+    if (!this.deploymentTarget.isLocal(server) || fs.existsSync(appDir)) {
+      await this.deploymentTarget.composeRestart(server, appDir);
     }
     return this.refreshAndReturn(id);
   }
