@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
-import { COMPOSE_TEMPLATES, PORT_MAP, renderCustomComposeTemplate } from './templates';
+import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate } from './templates';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
 import { DatabasesService } from '../databases/databases.service';
@@ -682,6 +682,17 @@ export class MarketplaceService {
         .map(([k, v]) => `${k}=${String(v).replace(/\n/g, '\\n')}`)
         .join('\n') + '\n';
       fs.writeFileSync(path.join(appDir, '.env'), envContent);
+    }
+
+    // Companion files some templates bind-mount into the container
+    // (e.g. PrestaShop's Apache proxy-trust conf). The compose body
+    // already references each one by relative path; we just have to
+    // drop them next to the compose so the mount target exists.
+    const sideFiles = SIDE_FILES[slug];
+    if (sideFiles) {
+      for (const [name, content] of Object.entries(sideFiles)) {
+        fs.writeFileSync(path.join(appDir, name), content);
+      }
     }
 
     try {
