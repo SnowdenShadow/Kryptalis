@@ -17,6 +17,11 @@ export class MarketplaceController {
   @ApiOperation({ summary: 'List marketplace apps' })
   list() { return this.svc.listApps(); }
 
+  // Alias used by the unified deploy dialog. Same payload as @Get().
+  @Get('apps')
+  @ApiOperation({ summary: 'List marketplace apps (alias)' })
+  listApps() { return this.svc.listApps(); }
+
   @Get(':slug')
   @ApiOperation({ summary: 'Get app details' })
   get(@Param('slug') slug: string) { return this.svc.getApp(slug); }

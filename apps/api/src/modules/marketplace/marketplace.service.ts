@@ -118,9 +118,15 @@ export class MarketplaceService {
   async install(
     data: {
       appSlug: string;
-      serverId: string;
+      serverId?: string;
       projectId: string;
+      // Custom name (slug). Falls back to the catalog name + suffix.
+      name?: string;
       domainId?: string;
+      // Convenience: new domain to create + attach atomically.
+      newDomain?: string;
+      // Host port for direct IP access (no domain case).
+      hostPort?: number;
       port?: number;
       envVars?: Record<string, string>;
     },
@@ -163,20 +169,40 @@ export class MarketplaceService {
     // Track whether we suffixed (= multi-install): if so, the default host
     // port is almost certainly taken by the previous instance, so we'll
     // auto-allocate a fresh one instead of refusing the install.
-    let appName = app.name;
+    // Custom name from the unified deploy dialog wins. We still check for
+    // name collisions inside the project — if the picked name is taken,
+    // suffix as usual instead of failing.
+    let appName = (data.name && data.name.trim()) || app.name;
     let isMultiInstall = false;
     if (!isWebmail) {
       let suffix = 2;
-      // hard cap to avoid an infinite loop if something goes very wrong
       while (suffix < 100) {
         const existing = await this.prisma.application.findFirst({
           where: { name: appName, projectId: data.projectId },
           select: { id: true },
         });
         if (!existing) break;
-        appName = `${app.name} ${suffix}`;
+        appName = `${(data.name && data.name.trim()) || app.name} ${suffix}`;
         isMultiInstall = true;
         suffix++;
+      }
+    }
+
+    // Convenience: caller passed `newDomain: "app.acme.com"`. Create the
+    // Domain row + use its id from here on. The downstream attach() call
+    // performs cross-server / cross-project validation.
+    if (!data.domainId && data.newDomain) {
+      const existing = await this.prisma.domain.findUnique({ where: { domain: data.newDomain } });
+      if (existing) {
+        if (existing.projectId !== data.projectId) {
+          throw new BadRequestException(`Domain "${data.newDomain}" belongs to another project.`);
+        }
+        data.domainId = existing.id;
+      } else {
+        const created = await this.prisma.domain.create({
+          data: { domain: data.newDomain, projectId: data.projectId },
+        });
+        data.domainId = created.id;
       }
     }
 
