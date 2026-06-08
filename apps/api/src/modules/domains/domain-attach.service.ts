@@ -86,6 +86,16 @@ export class DomainAttachService {
       );
     }
 
+    // Cross-PROJECT guard. The caller's opts.projectId is the project
+    // the new attach is supposed to land in. If the Domain row already
+    // belongs to a different project, refuse — silently overwriting
+    // domain.applicationId would break project ownership.
+    if (domain.projectId && domain.projectId !== opts.projectId) {
+      throw new BadRequestException(
+        `Domain '${domain.domain}' already belongs to another project — move it there first or pick another domain.`,
+      );
+    }
+
     if (opts.customPort) {
       // ── port-pinned path ────────────────────────────────────────
       // Refuse if the port is the clean-URL app's port too — Caddy can't

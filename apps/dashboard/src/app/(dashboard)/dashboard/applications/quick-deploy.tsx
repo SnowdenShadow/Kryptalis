@@ -242,12 +242,26 @@ export function QuickDeployDialog({
     (source === 'docker' && dockerImage.trim().length > 0) ||
     source === 'blank';
 
+  // RFC 1035 hostname regex aligned with the backend DTO: no leading/
+  // trailing dashes per label, TLD must be alphabetic, total ≤253 chars.
+  // Misalignment caused the Deploy button to enable for "-foo.com" and
+  // hit a 400 on submit.
+  const domainRegex = /^(?=.{1,253}$)(?:(?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,63}$/;
   const domainValid =
     domainChoice === 'skip' ||
-    (domainChoice === 'new' && /^([a-z0-9-]+\.)+[a-z]{2,}$/i.test(newDomain.trim())) ||
+    (domainChoice === 'new' && domainRegex.test(newDomain.trim())) ||
     (domainChoice !== 'skip' && domainChoice !== 'new');
 
-  const canDeploy = sourceValid && !!projectId && !!name && domainValid;
+  // Host port: when typed, it must be 1024-65535 AND not match the
+  // reserved set the backend rejects. We surface invalidity inline so
+  // the user sees the problem before clicking Deploy.
+  const RESERVED = new Set([22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995, 2019, 3000, 4000, 5432, 6379]);
+  const hostPortNumber = hostPort.trim() ? parseInt(hostPort.trim(), 10) : null;
+  const hostPortValid =
+    hostPort.trim() === '' ||
+    (Number.isFinite(hostPortNumber!) && hostPortNumber! >= 1024 && hostPortNumber! <= 65535 && !RESERVED.has(hostPortNumber!));
+
+  const canDeploy = sourceValid && !!projectId && !!name && domainValid && hostPortValid;
 
   const sourceTabs: { id: Source; label: string; icon: typeof Github; available: boolean }[] = [
     {
@@ -519,6 +533,12 @@ export function QuickDeployDialog({
                 value={hostPort}
                 onChange={(e) => setHostPort(e.target.value)}
               />
+              {!hostPortValid && hostPort.trim() !== '' && (
+                <p className="text-[11px] text-destructive">
+                  {t('quickDeploy.hostPortInvalid') ||
+                    'Port must be 1024–65535 and not one of the reserved Kryptalis ports.'}
+                </p>
+              )}
               <p className="text-[11px] text-muted-foreground">
                 {t('quickDeploy.hostPortHint') ||
                   'App reachable at http://<server-ip>:<port>. Reserved ports (3000 dashboard, 4000 API, 5432 postgres, 80/443 Caddy) are refused.'}

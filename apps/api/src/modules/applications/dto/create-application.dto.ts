@@ -50,6 +50,14 @@ export class CreateApplicationDto {
   @ApiProperty({ required: false, example: 'node:20-alpine' })
   @IsOptional()
   @IsString()
+  @MaxLength(255)
+  // Docker image reference grammar (simplified): optional registry host
+  // + path segments + optional :tag or @sha256:digest. Rejects newlines,
+  // spaces, YAML metacharacters — defense against compose injection when
+  // we write the image into a generated docker-compose.yml.
+  @Matches(/^[A-Za-z0-9][A-Za-z0-9._\-:/@]{0,254}$/, {
+    message: 'dockerImage must look like "[registry/]image[:tag|@sha256:...]"',
+  })
   dockerImage?: string;
 
   @ApiProperty({ required: false, example: 'npm run build' })

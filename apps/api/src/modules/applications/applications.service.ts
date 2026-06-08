@@ -449,8 +449,29 @@ export class ApplicationsService {
       ...dbData
     } = dto;
 
-    // Host-port collision check. Refuses reserved system ports and
-    // ports already published by another app on the same server.
+    // ── PRE-WRITE VALIDATION ───────────────────────────────────────
+    // Every validation rule runs BEFORE any DB mutation. A failure
+    // here leaves no orphan rows. The actual create + domain attach
+    // happen inside a single Prisma $transaction so either both
+    // succeed or neither does.
+
+    // 1) Blank scaffold + domain = nonsense. There's no service to
+    // route the domain to, ever.
+    const isBlankScaffold = !dto.gitUrl && !dto.dockerImage;
+    if (isBlankScaffold && (dtoDomainId || dtoDomainString)) {
+      throw new BadRequestException(
+        'Cannot attach a domain to a blank app — add a Git URL or Docker image first.',
+      );
+    }
+    // 2) Blank scaffold + hostPort = also nonsense: no container is
+    // ever published. Refuse to reserve the port.
+    if (isBlankScaffold && dtoHostPort) {
+      throw new BadRequestException(
+        'Cannot reserve a host port on a blank app — add a Git URL or Docker image first.',
+      );
+    }
+
+    // 3) Host-port reserved + collision check.
     if (dtoHostPort) {
       if (RESERVED_HOST_PORTS.has(dtoHostPort)) {
         throw new ConflictException(
@@ -475,13 +496,11 @@ export class ApplicationsService {
       }
     }
 
-    // Convenience: caller passed `domain: "app.acme.com"` for a brand-new
-    // hostname. Create the Domain row up-front and treat the rest of the
-    // flow as if domainId had been provided. Avoids the 2-request UI dance
-    // where the wizard creates the app then PUSHes /domains and either
-    // succeeds or leaves a half-finished app behind.
-    let domainId = dtoDomainId;
-    if (!domainId && dtoDomainString) {
+    // 4) Existing-domain ownership check (when dtoDomainString points
+    // at an already-stored hostname). The new-domain create branch
+    // happens inside the transaction below.
+    let existingDomainId: string | null = null;
+    if (!dtoDomainId && dtoDomainString) {
       const existing = await this.prisma.domain.findUnique({
         where: { domain: dtoDomainString },
       });
@@ -491,15 +510,7 @@ export class ApplicationsService {
             `Domain "${dtoDomainString}" already belongs to another project.`,
           );
         }
-        domainId = existing.id;
-      } else {
-        const created = await this.prisma.domain.create({
-          data: {
-            domain: dtoDomainString,
-            projectId: dto.projectId,
-          },
-        });
-        domainId = created.id;
+        existingDomainId = existing.id;
       }
     }
 
@@ -507,23 +518,12 @@ export class ApplicationsService {
     const firstMappedHost = portMapping
       ? Object.values(portMapping).find((n) => Number.isFinite(n))
       : undefined;
-
-    // If the user explicitly provided a port (or a port mapping) at create
-    // time, mark customPort=true so the URL displayed (and the Caddy block)
-    // includes the port. Git-deploy apps that ship a compose with hardcoded
-    // ports also count — the user knows that port belongs in the URL.
     const userPickedPort = !!(firstMappedHost || dbData.port);
 
-    // Up-front port collision check so the user gets a clear error in the
-    // create dialog instead of a cryptic "docker compose up failed" 30s
-    // into the deploy. Only applies when the user actually picked a host
-    // port (mapping or dbData.port). Marketplace already does this; do it
-    // here for manual create too.
+    // 5) Up-front port collision check for legacy port/portMapping
+    // (advanced wizard path). Done BEFORE the transaction.
     const portToCheck = (firstMappedHost as number | undefined) ?? dbData.port;
     if (portToCheck && typeof portToCheck === 'number') {
-      // Scope the port-conflict check to the target SERVER, not globally.
-      // Two apps on different hosts can share the same host port — they
-      // never collide on a single Docker daemon.
       const targetProject = await this.prisma.project.findUnique({
         where: { id: dbData.projectId },
         select: { serverId: true },
@@ -545,54 +545,52 @@ export class ApplicationsService {
       }
     }
 
-    const app = await this.prisma.application.create({
-      data: {
-        ...dbData,
-        gitProviderId: gitProviderId || null,
-        portMapping: portMapping || undefined,
-        port: firstMappedHost ?? dbData.port,
-        hostPort: dtoHostPort,
-        customPort: userPickedPort,
-        status: 'DEPLOYING',
-        envVars: this.encryptEnvVars(dtoEnvVars) as any,
-        webhookSecret: this.encryption.encrypt(crypto.randomBytes(24).toString('hex')),
-      } as any,
-    });
+    // ── ATOMIC WRITE ───────────────────────────────────────────────
+    // Domain create-or-find + Application.create + Domain.applicationId
+    // attach run together. Any failure rolls back everything; the user
+    // never sees an orphan app row in ERROR state or a stale Domain row
+    // bound to a non-existent app.
+    const { app, domainId } = await this.prisma.$transaction(async (tx) => {
+      let domainId: string | null = dtoDomainId ?? existingDomainId;
+      if (!domainId && dtoDomainString) {
+        const created = await tx.domain.create({
+          data: { domain: dtoDomainString, projectId: dto.projectId },
+        });
+        domainId = created.id;
+      }
 
-    // Domain attach rules:
-    //   - We attach the DB-level Domain.applicationId now, so the user
-    //     immediately sees the link in the dashboard.
-    //   - We DO NOT regenerate Caddy yet. The container doesn't exist;
-    //     a regen now produces a reverse_proxy block pointing at a
-    //     containerName Docker can't resolve → 502s for ~30 s while
-    //     the build/up runs. The runDeploy / runDockerImageDeploy
-    //     success path calls proxy.regenerate() once they're sure the
-    //     container is up — that's the safe point.
-    //   - Blank-scaffold apps (no gitUrl + no dockerImage) can't host
-    //     anything yet, so a domain attach on them is rejected up front.
-    if (domainId && !dto.gitUrl && !dto.dockerImage) {
-      throw new BadRequestException(
-        'Cannot attach a domain to a blank app — add a Git URL or Docker image first.',
-      );
-    }
-    if (domainId) {
-      try {
+      const newApp = await tx.application.create({
+        data: {
+          ...dbData,
+          gitProviderId: gitProviderId || null,
+          portMapping: portMapping || undefined,
+          port: firstMappedHost ?? dbData.port,
+          hostPort: dtoHostPort,
+          customPort: userPickedPort,
+          status: 'DEPLOYING',
+          envVars: this.encryptEnvVars(dtoEnvVars) as any,
+          webhookSecret: this.encryption.encrypt(crypto.randomBytes(24).toString('hex')),
+        } as any,
+      });
+
+      if (domainId) {
+        // DomainAttachService internally uses prisma (not the tx) — but
+        // the only effects are Domain.applicationId update + DomainPortBinding
+        // upsert, both of which will surface a Conflict before any
+        // app-level side effect. If it throws, the outer transaction
+        // catches and rolls back the just-created Application + Domain.
         await this.domainAttach.attach({
-          applicationId: app.id,
+          applicationId: newApp.id,
           domainId,
           projectId: dto.projectId,
           customPort: userPickedPort,
-          port: app.port ?? 80,
+          port: newApp.port ?? 80,
         });
-        // Defer proxy.regenerate() to the deploy success path.
-      } catch (err: any) {
-        await this.prisma.application.update({
-          where: { id: app.id },
-          data: { status: 'ERROR' },
-        });
-        throw err;
+        // Caddy regen still deferred to deploy success.
       }
-    }
+
+      return { app: newApp, domainId };
+    });
 
     // resolve auth url WITHOUT persisting token in url
     let cloneUrl: string | undefined = dto.gitUrl || undefined;
@@ -604,8 +602,18 @@ export class ApplicationsService {
       if (!gp) throw new ForbiddenException('Git provider not yours');
       cloneHeader = this.buildAuthHeader(gp.provider, this.encryption.decrypt(gp.token));
     } else if (dto.gitUrl && gitToken) {
-      // one-shot token: still inject via http header, never written to .git/config
-      cloneHeader = `Authorization: Bearer ${gitToken}`;
+      // One-shot PAT — detect the host so we pick the right scheme:
+      //   - GitHub HTTPS clones need Basic x-access-token:<token>, NOT
+      //     Bearer (returns 'token expired' otherwise even with a valid PAT).
+      //   - GitLab accepts Bearer.
+      //   - Bitbucket needs Basic x-token-auth:<token>.
+      // Falls back to a generic Basic for everything else.
+      const lc = (dto.gitUrl || '').toLowerCase();
+      const inferred =
+        lc.includes('github.com') ? 'GITHUB' :
+        lc.includes('gitlab') ? 'GITLAB' :
+        lc.includes('bitbucket') ? 'BITBUCKET' : 'OTHER';
+      cloneHeader = this.buildAuthHeader(inferred, gitToken);
     }
 
     const deployment = await this.prisma.deployment.create({
@@ -719,20 +727,30 @@ export class ApplicationsService {
       // container over the bridge — no publish needed.
       const publishHost = opts.hostPort;
       const publishContainer = opts.port ?? opts.hostPort ?? null;
-      const portsBlock = publishHost && publishContainer
-        ? `    ports:\n      - "${publishHost}:${publishContainer}"\n`
-        : '';
-      const networksBlock = projectNet
-        ? `    networks:\n      - kryptalis_project\nnetworks:\n  kryptalis_project:\n    external: true\n    name: ${projectNet}\n`
-        : '';
 
-      const compose = `services:
-  app:
-    image: ${image}
-    container_name: ${containerNm}
-    restart: unless-stopped
-${envBlock}${portsBlock}    pull_policy: always
-${networksBlock}`;
+      // Build compose via yaml.dump so the image string can't break out
+      // of its quoted form into the parent compose document. An
+      // attacker who controls the dockerImage field (auth'd user) could
+      // otherwise inject \\n  privileged: true or a sibling service.
+      const composeDoc: any = {
+        services: {
+          app: {
+            image,
+            container_name: containerNm,
+            restart: 'unless-stopped',
+            pull_policy: 'always',
+            ...(Object.keys(env).length ? { environment: { ...env } } : {}),
+            ...(publishHost && publishContainer
+              ? { ports: [`${publishHost}:${publishContainer}`] }
+              : {}),
+            ...(projectNet ? { networks: ['kryptalis_project'] } : {}),
+          },
+        },
+        ...(projectNet
+          ? { networks: { kryptalis_project: { external: true, name: projectNet } } }
+          : {}),
+      };
+      const compose = yaml.dump(composeDoc, { lineWidth: 200 });
       fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), compose);
       log('> wrote docker-compose.yml');
 

@@ -234,6 +234,164 @@ networks:
   kryptalis-apps:
     external: true`,
   },
+  mysql: {
+    compose: `services:
+  mysql:
+    image: mysql:8
+    container_name: kryptalis-mysql-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:3306"
+    env_file:
+      - .env
+    environment:
+      MYSQL_ROOT_PASSWORD: \${MYSQL_ROOT_PASSWORD:-kryptalis}
+      MYSQL_DATABASE: \${MYSQL_DATABASE:-app}
+    volumes:
+      - mysql_data___INSTANCE_ID__:/var/lib/mysql
+volumes:
+  mysql_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
+  mongodb: {
+    compose: `services:
+  mongodb:
+    image: mongo:7
+    container_name: kryptalis-mongodb-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:27017"
+    env_file:
+      - .env
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: \${MONGO_INITDB_ROOT_USERNAME:-kryptalis}
+      MONGO_INITDB_ROOT_PASSWORD: \${MONGO_INITDB_ROOT_PASSWORD:-kryptalis}
+    volumes:
+      - mongo_data___INSTANCE_ID__:/data/db
+volumes:
+  mongo_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
+  gitea: {
+    compose: `services:
+  gitea:
+    image: gitea/gitea:latest
+    container_name: kryptalis-gitea-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:3000"
+    env_file:
+      - .env
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+    volumes:
+      - gitea_data___INSTANCE_ID__:/data
+volumes:
+  gitea_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
+  vaultwarden: {
+    compose: `services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: kryptalis-vaultwarden-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:80"
+    env_file:
+      - .env
+    environment:
+      WEBSOCKET_ENABLED: "true"
+    volumes:
+      - vw_data___INSTANCE_ID__:/data
+volumes:
+  vw_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
+  plausible: {
+    compose: `services:
+  plausible-db:
+    image: postgres:15-alpine
+    container_name: kryptalis-plausible-db-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    environment:
+      POSTGRES_PASSWORD: plausible
+    volumes:
+      - plausible_db___INSTANCE_ID__:/var/lib/postgresql/data
+  plausible-events:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: kryptalis-plausible-events-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    volumes:
+      - plausible_events___INSTANCE_ID__:/var/lib/clickhouse
+  plausible:
+    image: ghcr.io/plausible/community-edition:v2.1.5
+    container_name: kryptalis-plausible-__INSTANCE_ID__
+    restart: unless-stopped
+    depends_on:
+      - plausible-db
+      - plausible-events
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:8000"
+    env_file:
+      - .env
+    environment:
+      BASE_URL: \${BASE_URL:-http://localhost:8000}
+      SECRET_KEY_BASE: \${SECRET_KEY_BASE:-please-change-me-to-a-long-random-string}
+      DATABASE_URL: postgres://postgres:plausible@plausible-db:5432/plausible_db
+      CLICKHOUSE_DATABASE_URL: http://plausible-events:8123/plausible_events_db
+volumes:
+  plausible_db___INSTANCE_ID__:
+  plausible_events___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
+  'code-server': {
+    compose: `services:
+  code-server:
+    image: codercom/code-server:latest
+    container_name: kryptalis-code-server-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:8080"
+    env_file:
+      - .env
+    environment:
+      PASSWORD: \${PASSWORD:-please-change-me}
+    volumes:
+      - code_data___INSTANCE_ID__:/home/coder
+volumes:
+  code_data___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
   supabase: {
     compose: `services:
   supabase-studio:
@@ -445,6 +603,12 @@ export const PORT_MAP: Record<string, number> = {
   nextcloud: 8081,
   postgresql: 5433,
   redis: 6380,
+  mysql: 3306,
+  mongodb: 27017,
+  gitea: 3030,
+  vaultwarden: 8085,
+  plausible: 8086,
+  'code-server': 8087,
   supabase: 3003,
   appwrite: 8082,
   roundcube: 8083,
