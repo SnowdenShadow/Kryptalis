@@ -300,6 +300,7 @@ export class ApplicationsService {
       dockerfileOverride,
       portMapping,
       domainId,
+      envVars: dtoEnvVars,
       ...dbData
     } = dto;
 
@@ -353,6 +354,7 @@ export class ApplicationsService {
         port: firstMappedHost ?? dbData.port,
         customPort: userPickedPort,
         status: 'DEPLOYING',
+        envVars: this.encryptEnvVars(dtoEnvVars) as any,
         webhookSecret: this.encryption.encrypt(crypto.randomBytes(24).toString('hex')),
       },
     });
@@ -758,10 +760,10 @@ ${networksBlock}`;
         envFile = path.join(appDir, '.kryptalis.env');
         fs.writeFileSync(envFile, this.serializeEnv(opts.envVars));
         log(`> merged env (${Object.keys(repoEnv).length} from repo, ${Object.keys(opts.envVars).length} total)`);
-        // persist so redeploy keeps the merge
+        // persist (encrypted) so redeploy keeps the merge
         await this.prisma.application.update({
           where: { id: appId },
-          data: { envVars: opts.envVars },
+          data: { envVars: this.encryptEnvVars(opts.envVars) as any },
         });
       }
 
@@ -1148,7 +1150,7 @@ ${networksBlock}`;
       });
       await this.runDockerImageDeploy(deployment.id, app.id, app.name, app.dockerImage, {
         port: app.port ?? undefined,
-        envVars: (app.envVars as Record<string, string>) || undefined,
+        envVars: this.decryptEnvVars(app.envVars),
       });
       return { message: 'Image re-pulled and stack recreated', deploymentId: deployment.id };
     }
@@ -1177,7 +1179,7 @@ ${networksBlock}`;
     });
     this.runDeploy(deployment.id, id, app.name, app.gitUrl, app.gitBranch || 'main', {
       port: app.port,
-      envVars: (app.envVars as Record<string, string>) || undefined,
+      envVars: this.decryptEnvVars(app.envVars),
       buildCommand: app.buildCommand,
       startCommand: app.startCommand,
       cloneHeader,
@@ -1459,7 +1461,7 @@ ${networksBlock}`;
 
   async getEnv(userId: string, id: string) {
     const app = await this.assertOwnership(userId, id);
-    return { envVars: (app.envVars as Record<string, string>) || {} };
+    return { envVars: this.decryptEnvVars(app.envVars) };
   }
 
   async setEnv(userId: string, id: string, envVars: Record<string, string>) {
@@ -1469,8 +1471,33 @@ ${networksBlock}`;
     }
     return this.prisma.application.update({
       where: { id },
-      data: { envVars },
+      data: { envVars: this.encryptEnvVars(envVars) as any },
     });
+  }
+
+  // ── envVars at-rest encryption ────────────────────────────────────
+  //
+  // App env vars routinely carry production secrets (DATABASE_URL, JWT
+  // SECRETs, third-party API keys, etc.). We persist the JSON blob as
+  // `{ __k: 1, v: '<encrypted-utf8>' }` so the read path can detect the
+  // wrapper and decrypt, while legacy plaintext rows are still readable
+  // (they don't have __k).
+  private encryptEnvVars(envVars: Record<string, string> | null | undefined): any {
+    if (!envVars || Object.keys(envVars).length === 0) return envVars;
+    return { __k: 1, v: this.encryption.encrypt(JSON.stringify(envVars)) };
+  }
+
+  private decryptEnvVars(raw: any): Record<string, string> {
+    if (!raw) return {};
+    if (typeof raw === 'object' && (raw as any).__k === 1 && typeof (raw as any).v === 'string') {
+      try {
+        return JSON.parse(this.encryption.decrypt((raw as any).v));
+      } catch {
+        return {};
+      }
+    }
+    // Legacy plaintext shape: { KEY: VALUE, ... }
+    return raw as Record<string, string>;
   }
 
   // ── webhooks ──────────────────────────────────────────────────────

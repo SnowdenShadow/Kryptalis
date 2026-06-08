@@ -29,8 +29,11 @@ export class AuthController {
   @Post('register')
   @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @ApiOperation({ summary: 'Register a new account' })
-  register(@Body() dto: RegisterDto) {
-    return this.authService.register(dto);
+  register(@Body() dto: RegisterDto, @Req() req: Request) {
+    return this.authService.register(dto, {
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
   }
 
   @Post('login')

@@ -79,27 +79,33 @@ export class AgentService {
     payload: { host: string; hostname: string; os: string; arch: string; cpuCores: number; totalMemory: number },
   ) {
     if (!installToken) throw new UnauthorizedException('Missing install token');
-    // Install tokens are stored as sha256 hashes too — register lookup is
-    // by hash. The fresh token returned to the agent is the only plaintext
-    // copy that ever exists in memory.
+    // Install tokens are stored as sha256 hashes; lookup is by hash. The
+    // freshly-minted long-lived token is the only plaintext copy.
+    //
+    // Single-use enforcement via conditional UPDATE: two concurrent
+    // register() calls cannot both succeed because only one updateMany
+    // matches the row where token === installHash (after the first one
+    // updates it to the new hash, the second's predicate misses).
     const installHash = this.encryption.hash(installToken);
-    const token = await this.prisma.agentToken.findFirst({
+    const candidate = await this.prisma.agentToken.findFirst({
       where: { token: installHash },
       include: { server: true },
     });
-    if (!token) throw new UnauthorizedException('Invalid install token');
-    if (token.expiresAt && token.expiresAt < new Date()) {
+    if (!candidate) throw new UnauthorizedException('Invalid install token');
+    if (candidate.expiresAt && candidate.expiresAt < new Date()) {
       throw new UnauthorizedException('Install token expired');
     }
-    // Issue a long-lived agent token (raw, returned once) and persist its
-    // hash. Any later poll/heartbeat/result call provides the raw token
-    // which we hash for lookup.
     const newToken = randomBytes(32).toString('hex');
     const newHash = this.encryption.hash(newToken);
-    await this.prisma.agentToken.update({
-      where: { id: token.id },
+    const claim = await this.prisma.agentToken.updateMany({
+      where: { id: candidate.id, token: installHash },
       data: { token: newHash, expiresAt: null },
     });
+    if (claim.count === 0) {
+      // Lost the race — another register() already consumed the install token.
+      throw new UnauthorizedException('Install token already consumed.');
+    }
+    const token = candidate;
     await this.prisma.server.update({
       where: { id: token.serverId },
       data: {

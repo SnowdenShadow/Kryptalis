@@ -33,11 +33,18 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       select: { id: true, email: true, role: true, name: true, status: true },
     });
     if (!user) throw new UnauthorizedException('User not found');
-    if (user.status === 'BANNED') {
-      throw new ForbiddenException('Your account has been banned.');
-    }
-    if (user.status === 'SUSPENDED') {
-      throw new ForbiddenException('Your account is suspended.');
+    // Default-DENY status check. Any non-ACTIVE state (BANNED, SUSPENDED,
+    // or future values like DELETED / PENDING_VERIFICATION / LOCKED)
+    // refuses the request. Specific messages are kept for BANNED/SUSPENDED
+    // since those are user-facing legitimate states.
+    if (user.status !== 'ACTIVE') {
+      if (user.status === 'BANNED') {
+        throw new ForbiddenException('Your account has been banned.');
+      }
+      if (user.status === 'SUSPENDED') {
+        throw new ForbiddenException('Your account is suspended.');
+      }
+      throw new ForbiddenException('Account is not active.');
     }
     return { id: user.id, email: user.email, role: user.role, name: user.name };
   }

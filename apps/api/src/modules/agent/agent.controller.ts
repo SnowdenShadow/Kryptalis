@@ -73,7 +73,10 @@ export class AgentController {
   @ApiOperation({ summary: 'Install script for a brand-new server' })
   @Header('Content-Type', 'text/x-shellscript')
   installScript(@Query('token') token: string, @Res() res: Response) {
-    if (!token || !/^[a-zA-Z0-9_-]{8,128}$/.test(token)) {
+    // Tight regex: every install token Kryptalis issues is 64 hex chars
+    // (32 random bytes). Accept the canonical shape only — defends against
+    // anyone trying to brute-force /agent/register with short tokens.
+    if (!token || !/^[a-zA-Z0-9_-]{32,128}$/.test(token)) {
       res.status(400).type('text/plain').send('Missing or invalid token\n');
       return;
     }

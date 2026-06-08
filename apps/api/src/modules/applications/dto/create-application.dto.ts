@@ -6,6 +6,8 @@ import {
   IsObject,
   Min,
   Max,
+  Matches,
+  MaxLength,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AppFramework, GitProviderType } from '@prisma/client';
@@ -13,6 +15,13 @@ import { AppFramework, GitProviderType } from '@prisma/client';
 export class CreateApplicationDto {
   @ApiProperty({ example: 'my-app' })
   @IsString()
+  @MaxLength(64)
+  // Defense-in-depth against Caddyfile + shell injection via the app name.
+  // The reverse-proxy renderer also sanitizes at write time, but rejecting
+  // bad input at the DTO boundary keeps DB rows trustworthy.
+  @Matches(/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/, {
+    message: 'name must start with a letter/digit and contain only A-Z, a-z, 0-9, space, dot, underscore, dash.',
+  })
   name: string;
 
   @ApiProperty({ example: 'clxyz...' })

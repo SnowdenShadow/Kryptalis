@@ -11,7 +11,10 @@ import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { randomBytes, createHash } from 'crypto';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { authenticator } = require('otplib');
+const otplib = require('otplib');
+// Set window once at module load instead of mutating per-request.
+otplib.authenticator.options = { window: 1 };
+const authenticator = otplib.authenticator;
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { RegisterDto } from './dto/register.dto';
@@ -56,10 +59,18 @@ export class AuthService {
 
   // ── register ──────────────────────────────────────────────────────
 
-  async register(dto: RegisterDto) {
-    // Atomic first-user race fix. We count + insert in a single
-    // serializable transaction so two concurrent registrations cannot both
-    // observe `count === 0` and become SUPERADMIN.
+  async register(dto: RegisterDto, ctx: { ip?: string; userAgent?: string } = {}) {
+    // Normalize email at the boundary so case-variants can't register as
+    // separate accounts. Postgres's @unique is case-sensitive by default.
+    const email = (dto.email || '').trim().toLowerCase();
+    if (!email) throw new BadRequestException('Email is required');
+
+    // Atomic first-user race fix. Default Prisma/Postgres isolation is
+    // READ COMMITTED — count() takes no lock, so two concurrent register()
+    // could both observe userCount===0 and both insert with role=SUPERADMIN.
+    // Serializable causes one of the two to abort with a serialization
+    // error; the loser is rolled back and a second attempt sees the right
+    // count.
     return this.prisma.$transaction(async (tx) => {
       const userCount = await tx.user.count();
       if (userCount > 0) {
@@ -72,12 +83,7 @@ export class AuthService {
         }
       }
 
-      // To resist email-enumeration on register, we accept the request and
-      // return a generic success when the email is taken, but only the
-      // first-time-no-users branch needs to fail loudly. For subsequent
-      // signups we still throw Conflict — register page is itself behind
-      // throttler + captcha is the right defense, not opaque returns.
-      const existing = await tx.user.findUnique({ where: { email: dto.email } });
+      const existing = await tx.user.findUnique({ where: { email } });
       if (existing) {
         throw new ConflictException('Email already registered');
       }
@@ -86,7 +92,7 @@ export class AuthService {
       const user = await tx.user.create({
         data: {
           name: dto.name,
-          email: dto.email,
+          email,
           password: hashedPassword,
           role: userCount === 0 ? 'SUPERADMIN' : 'USER',
         },
@@ -110,19 +116,20 @@ export class AuthService {
         });
       }
 
-      const tokens = await this.issueTokenPair(user.id, user.email, user.role);
+      const tokens = await this.issueTokenPair(user.id, user.email, user.role, ctx);
       return {
         user: { id: user.id, name: user.name, email: user.email, role: user.role },
         ...tokens,
       };
-    });
+    }, { isolationLevel: 'Serializable' });
   }
 
   // ── login ─────────────────────────────────────────────────────────
 
   async login(dto: LoginDto, ctx: { ip?: string; userAgent?: string } = {}) {
+    const email = (dto.email || '').trim().toLowerCase();
     const user = await this.prisma.user.findUnique({
-      where: { email: dto.email },
+      where: { email },
     });
 
     // Run bcrypt EITHER WAY so timing doesn't distinguish missing-email
@@ -215,26 +222,47 @@ export class AuthService {
       throw new ForbiddenException('Account is not active');
     }
 
-    // 3. Rotate. Mark current ROTATED, create successor in same family.
+    // 3. Atomic rotation via compare-and-set. We MUST claim the parent
+    //    session (set ACTIVE→ROTATED) before issuing the successor. If
+    //    two concurrent refreshes arrive with the same token, only one
+    //    sees the CAS succeed (count===1) — the other loses the race and
+    //    we revoke the whole family, because losing the race means
+    //    SOMETHING else successfully rotated, which is exactly the
+    //    "token used twice" signal RFC 6819 §5.2.2.3 expects.
     const tokens = await this.signTokenPair(session.user.id, session.user.email, session.user.role);
     const newHash = this.encryption.hash(tokens.refreshToken);
     const expiresAt = this.refreshTokenExpiry();
 
-    const newSession = await this.prisma.session.create({
+    const successor = await this.prisma.session.create({
       data: {
         userId: session.user.id,
         refreshTokenHash: newHash,
         familyId: session.familyId,
-        status: 'ACTIVE',
+        status: 'PENDING' as any, // not loggable-with yet
         expiresAt,
         ipAddress: ctx.ip,
         userAgent: ctx.userAgent,
       },
     });
 
+    const cas = await this.prisma.session.updateMany({
+      where: { id: session.id, status: 'ACTIVE' },
+      data: { status: 'ROTATED', replacedById: successor.id },
+    });
+
+    if (cas.count === 0) {
+      // Lost the race → someone else already rotated this token. That's a
+      // replay. Burn the family and the half-built successor.
+      await this.prisma.session.delete({ where: { id: successor.id } }).catch(() => {});
+      await this.revokeFamily(session.familyId);
+      throw new UnauthorizedException('Session revoked. Please log in again.');
+    }
+
+    // Flip the successor to ACTIVE only after the CAS won — keeps the
+    // window where two ACTIVE rows share a family arbitrarily small.
     await this.prisma.session.update({
-      where: { id: session.id },
-      data: { status: 'ROTATED', replacedById: newSession.id },
+      where: { id: successor.id },
+      data: { status: 'ACTIVE' },
     });
 
     return tokens;
@@ -309,29 +337,35 @@ export class AuthService {
 
   // ── password reset ────────────────────────────────────────────────
 
-  async forgotPassword(email: string) {
-    // Always return success to avoid email enumeration.
+  async forgotPassword(emailRaw: string) {
+    const email = (emailRaw || '').trim().toLowerCase();
     const user = await this.prisma.user.findUnique({ where: { email } });
     if (!user) {
-      // Still consume ~the same time as the legit path to flatten timing.
-      await bcrypt.hash('dummy', 4).catch(() => {});
+      // Same return — the rate limiter is the real defense against enumeration.
       return { message: 'If that email is registered, a reset link has been sent.' };
     }
 
     const token = randomBytes(32).toString('base64url');
     const tokenHash = this.encryption.hash(token);
-    const expiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
 
     await this.prisma.passwordResetToken.create({
       data: { userId: user.id, tokenHash, expiresAt },
     });
 
-    // TODO: wire NotificationsService.dispatch('password.reset', { ... })
-    // when the notifications module ships. For now, log it for ops to read
-    // out of the API logs — never return the token to the API caller.
-    this.logger.warn(
-      `[password-reset] user=${user.id} token=${token} (DO NOT log in production)`,
-    );
+    // The raw reset token must NEVER reach a production log — anyone with
+    // log access could hijack the account by triggering forgot-password
+    // and reading the line. We only log it in development (where there's
+    // no email transport yet) for the developer to copy-paste.
+    if (process.env.NODE_ENV !== 'production') {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[dev] password reset token for ' + user.email + ': ' + token +
+        ' (this log is GATED to NODE_ENV !== production)',
+      );
+    }
+    // TODO: NotificationsService.dispatch('password.reset', { userId, token })
+    // — wiring the notifications module is the next item on the roadmap.
 
     return { message: 'If that email is registered, a reset link has been sent.' };
   }
@@ -431,11 +465,11 @@ export class AuthService {
     encryptedSecret: string | null,
     code: string,
   ): Promise<boolean> {
-    // Try TOTP first (window of ±1 tick = 30s).
+    // Try TOTP first. Window (±1 tick = 30 s) is configured at module load
+    // so concurrent requests cannot race a global mutation.
     if (encryptedSecret) {
       try {
         const secret = this.encryption.decrypt(encryptedSecret);
-        authenticator.options = { window: 1 };
         if (authenticator.verify({ token: code, secret })) return true;
       } catch {}
     }

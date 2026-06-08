@@ -21,6 +21,33 @@ const INSTALL_ROOT_HOST = process.env.KRYPTALIS_HOST_INSTALL_DIR
   || '/opt/kryptalis';
 
 /**
+ * Defense-in-depth Caddyfile injection guards. DTOs reject malformed
+ * domains and app names at create time, but legacy rows can still slip
+ * past — we re-validate at render time and skip anything dangerous.
+ *
+ * SAFE_DOMAIN_RE mirrors the CreateDomainDto regex exactly so the two
+ * paths cannot drift. Single-label, all-digit TLDs and >253-char hosts
+ * are rejected here as well.
+ */
+const SAFE_DOMAIN_RE =
+  /^(?=.{1,253}$)(?:(?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,63}$/;
+
+/**
+ * Strip everything that could break out of a Caddyfile string literal
+ * or comment line: CR, LF, `{`, `}`, `\\`, `"`, `#`, control chars.
+ * Used for application names that surface in both `respond "..."` and
+ * `# comment` contexts.
+ */
+function sanitizeCaddyName(name: string | null | undefined): string {
+  if (!name) return '';
+  return name
+    .replace(/[\r\n{}\\"#]/g, ' ')
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .trim()
+    .slice(0, 64);
+}
+
+/**
  * Generates a Caddyfile from the current domains↔applications mapping,
  * runs Caddy in a docker container on host ports 80/443, and reloads on changes.
  *
@@ -230,12 +257,6 @@ ${email ? `  email ${email}\n` : ''}}
         : `  reverse_proxy ${target}`;
     };
 
-    // Defense-in-depth Caddyfile injection check. DTO validation should
-    // already have rejected malformed domains at create time, but if a
-    // legacy row slipped in we skip it rather than render syntax that
-    // could let an attacker break out of the site block.
-    const SAFE_DOMAIN_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
-
     for (const d of allDomains) {
       const host = d.domain;
       if (!SAFE_DOMAIN_RE.test(host)) {
@@ -243,8 +264,8 @@ ${email ? `  email ${email}\n` : ''}}
         continue;
       }
       // App and binding names also reach the Caddyfile via the 'respond'
-      // string literal. Sanitize any non-printable / quote chars.
-      const safeMainAppName = (d.application?.name || '').replace(/["\r\n\\]/g, ' ');
+      // string literal AND comment lines. Sanitize for both paths.
+      const safeMainAppName = sanitizeCaddyName(d.application?.name);
       const isLocal = this.isLocalHostname(host);
 
       // Main app on :443 (clean-URL slot). Tracked via Domain.applicationId.
@@ -258,19 +279,19 @@ ${email ? `  email ${email}\n` : ''}}
 
       // ── :443 block ────────────────────────────────────────────────
       if (isLocal) {
-        blocks.push(`# ${host} :80 → ${mainLinked ? `app ${mainApp!.name} (host port ${mainPort})` : 'reserved'}`);
+        blocks.push(`# ${host} :80 → ${mainLinked ? `app ${safeMainAppName} (host port ${mainPort})` : 'reserved'}`);
         blocks.push(`http://${host} {`);
         if (mainLinked) {
           blocks.push(proxyFor(mainApp!, mainPort!));
         } else if (portBindings.length > 0) {
           const first = portBindings[0];
-          blocks.push(`  respond "Open https://${host}:${first.port} for ${(first.application.name || '').replace(/["\r\n\\]/g, ' ')}." 200`);
+          blocks.push(`  respond "Open https://${host}:${first.port} for ${sanitizeCaddyName(first.application.name)}." 200`);
         } else {
           blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
         }
         blocks.push(`}`);
       } else {
-        blocks.push(`# ${host} :443 → ${mainLinked ? `app ${mainApp!.name} (host port ${mainPort})` : (portBindings.length > 0 ? 'redirect to port-bound apps' : 'reserved')}`);
+        blocks.push(`# ${host} :443 → ${mainLinked ? `app ${safeMainAppName} (host port ${mainPort})` : (portBindings.length > 0 ? 'redirect to port-bound apps' : 'reserved')}`);
         blocks.push(`${host} {`);
         if (mainLinked) {
           blocks.push(proxyFor(mainApp!, mainPort!));
@@ -289,7 +310,7 @@ ${email ? `  email ${email}\n` : ''}}
       // We document the binding in the Caddyfile so an operator reading
       // the file knows where each port goes.
       for (const b of portBindings) {
-        blocks.push(`# http://${host}:${b.port} → app ${b.application.name} (direct container publish, not proxied by Caddy)`);
+        blocks.push(`# http://${host}:${b.port} → app ${sanitizeCaddyName(b.application.name)} (direct container publish, not proxied by Caddy)`);
         blocks.push('');
       }
 
@@ -305,9 +326,15 @@ ${email ? `  email ${email}\n` : ''}}
 
     // mail.<apex> routes — only purpose is to obtain Let's Encrypt certs for the mail server.
     // The mail server itself reads the cert files from the shared Caddy volume.
+    // Same SAFE_DOMAIN_RE gate as the main loop — legacy rows that predate
+    // strict validation cannot reach the renderer.
     for (const ms of mailServers) {
       const apex = ms.domain.domain;
       if (this.isLocalHostname(apex)) continue;
+      if (!SAFE_DOMAIN_RE.test(apex)) {
+        this.logger.warn(`Refusing to render mail Caddyfile block for unsafe domain '${apex}'`);
+        continue;
+      }
       const mailHost = `mail.${apex}`;
       blocks.push(`# ${mailHost} → cert provisioning for mail server`);
       blocks.push(`${mailHost} {`);

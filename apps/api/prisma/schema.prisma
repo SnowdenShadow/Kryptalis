@@ -96,6 +96,8 @@ model Session {
 }
 
 enum SessionStatus {
+  /** Briefly held during rotation CAS — never accepts a refresh. */
+  PENDING
   ACTIVE
   ROTATED
   REVOKED

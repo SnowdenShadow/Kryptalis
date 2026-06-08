@@ -44,25 +44,50 @@ async function bootstrap() {
   app.setGlobalPrefix('api');
 
   // ── CORS allowlist ──────────────────────────────────────────────────
-  // Refuses arbitrary origins so a malicious page cannot send authenticated
-  // XHR from the user's browser. Operators can extend via CORS_ORIGINS as
-  // a comma-separated list (e.g. `https://dash.athexis.xyz,https://localhost:3000`).
+  // Operators set an explicit allowlist via CORS_ORIGINS (comma-separated
+  // origins). When unset we accept the local dev origins AND any
+  // origin whose hostname matches the PUBLIC_API_URL host — that's where
+  // the dashboard is served from in the default install.
+  //
+  // CRITICAL: when an origin doesn't match, we MUST NOT throw — Express's
+  // CORS middleware bubbles the throw into a 500 on the preflight
+  // (browser sees ERR_FAILED). We return `false` instead so the browser
+  // gets a normal CORS rejection that surfaces as "blocked by CORS
+  // policy" with no Access-Control-Allow-Origin header. The server stays
+  // healthy and unauthenticated callers (curl, scripts) work because we
+  // allow null/empty origin too.
   const configService = app.get(ConfigService);
   const corsEnv = configService.get<string>('CORS_ORIGINS', '');
   const allowlist = corsEnv
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
-  // Dev defaults: localhost:3000 (Next dev), 127.0.0.1:3000.
+  // Dev defaults: localhost + 127.0.0.1 (Next dev) on :3000.
   if (allowlist.length === 0) {
     allowlist.push('http://localhost:3000', 'http://127.0.0.1:3000');
   }
+  // Derive the host from PUBLIC_API_URL (e.g. http://1.2.3.4:4000) and
+  // also accept :3000 / :443 / :80 on that same host for the dashboard.
+  const publicApi = configService.get<string>('PUBLIC_API_URL', '');
+  try {
+    const u = new URL(publicApi);
+    const host = u.hostname;
+    if (host) {
+      for (const p of ['http://' + host + ':3000', 'https://' + host, 'http://' + host]) {
+        if (!allowlist.includes(p)) allowlist.push(p);
+      }
+    }
+  } catch {}
+  // eslint-disable-next-line no-console
+  console.log('[cors] allowlist:', allowlist);
   app.enableCors({
     origin: (origin: string | undefined, cb: (err: Error | null, ok?: boolean) => void) => {
-      // No origin → same-origin / curl / native — allow.
+      // No origin → same-origin / curl / native — always allow.
       if (!origin) return cb(null, true);
       if (allowlist.includes(origin) || allowlist.includes('*')) return cb(null, true);
-      return cb(new Error(`Origin ${origin} not in CORS allowlist`), false);
+      // Refuse SILENTLY (no thrown error) — browser surfaces it as a CORS
+      // block instead of a 500 preflight.
+      return cb(null, false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'PUT', 'OPTIONS'],
