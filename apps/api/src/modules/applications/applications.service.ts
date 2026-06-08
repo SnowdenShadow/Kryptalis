@@ -218,6 +218,84 @@ function projectNetworkName(projectId: string) {
   return `kryptalis_proj_${projectId.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
 }
 
+/**
+ * Attach every service of a compose file to the shared `kryptalis-apps`
+ * bridge. Caddy lives on that bridge and reaches each container by
+ * `container_name:internal_port`. This is what makes zero-host-port
+ * deploys possible — multiple apps can listen on port 80 internally
+ * without colliding.
+ */
+function attachSharedAppsNetwork(content: string): string {
+  const doc: any = yaml.load(content);
+  if (!doc?.services) return content;
+  for (const val of Object.values<any>(doc.services)) {
+    const existing = val.networks;
+    if (Array.isArray(existing)) {
+      if (!existing.includes('kryptalis_apps')) existing.push('kryptalis_apps');
+    } else if (existing && typeof existing === 'object') {
+      existing.kryptalis_apps = {};
+    } else {
+      val.networks = ['kryptalis_apps'];
+    }
+  }
+  doc.networks = {
+    ...(doc.networks || {}),
+    kryptalis_apps: { external: true, name: 'kryptalis-apps' },
+  };
+  return yaml.dump(doc, { lineWidth: 200 });
+}
+
+/**
+ * Strip every `ports:` block from a compose file. Used when the app is
+ * reached via Caddy on a domain — no host port publish is needed and
+ * keeping one risks colliding with Kryptalis own services (the dashboard
+ * on :3000, the API on :4000, postgres on :5432, etc).
+ */
+function stripComposePorts(content: string): string {
+  const doc: any = yaml.load(content);
+  if (!doc?.services) return content;
+  for (const val of Object.values<any>(doc.services)) {
+    if (val && typeof val === 'object' && 'ports' in val) {
+      delete val.ports;
+    }
+  }
+  return yaml.dump(doc, { lineWidth: 200 });
+}
+
+/**
+ * Pull the first declared container_name + first internal target port
+ * from a compose file. Used to wire up Caddy's reverse_proxy target
+ * without forcing a host port publish.
+ */
+function readComposeContainerInfo(
+  content: string,
+  fallbackContainerName: string,
+): { containerName: string; containerPort: number | null } {
+  try {
+    const doc: any = yaml.load(content);
+    if (!doc?.services) return { containerName: fallbackContainerName, containerPort: null };
+    for (const [svc, val] of Object.entries<any>(doc.services)) {
+      const cname = val?.container_name || `${fallbackContainerName}-${svc}`;
+      let target: number | null = null;
+      if (Array.isArray(val?.ports) && val.ports.length > 0) {
+        const p = val.ports[0];
+        if (typeof p === 'string') {
+          const parts = p.split('/')[0].split(':');
+          // forms: "8080" | "8080:80" | "127.0.0.1:8080:80"
+          target = Number(parts[parts.length - 1]);
+        } else if (typeof p === 'object' && p?.target != null) {
+          target = Number(p.target);
+        }
+      }
+      return {
+        containerName: cname,
+        containerPort: Number.isFinite(target as number) ? (target as number) : null,
+      };
+    }
+  } catch {}
+  return { containerName: fallbackContainerName, containerPort: null };
+}
+
 // command argv builder, no shell interpolation
 async function dockerCompose(
   appDir: string,
@@ -894,6 +972,40 @@ ${networksBlock}`;
         let content = fs.readFileSync(composePath!, 'utf-8');
         if (opts.portMapping) content = remapComposePorts(content, opts.portMapping);
         if (opts.envVars) content = injectComposeEnv(content, opts.envVars);
+
+        // Look up whether the app already has a domain attached. When it
+        // does, Caddy will reach the container via the shared bridge —
+        // so we strip the user's `ports:` blocks (which would otherwise
+        // collide with platform services like the dashboard on :3000)
+        // and replace them with kryptalis-apps network membership. The
+        // user's intent is "this is internet-facing via a domain"; the
+        // raw host port publish is a vestige of their local dev setup.
+        const appRowForDomain = await this.prisma.application.findUnique({
+          where: { id: appId },
+          include: { domains: { select: { id: true } } },
+        });
+        const hasAttachedDomain = (appRowForDomain?.domains?.length ?? 0) > 0;
+
+        if (hasAttachedDomain) {
+          // Capture the original first container_name + target port BEFORE
+          // stripping, so Caddy can route to it on the bridge.
+          const info = readComposeContainerInfo(content, containerName(slug));
+          if (info.containerPort) {
+            await this.prisma.application.update({
+              where: { id: appId },
+              data: {
+                containerName: info.containerName,
+                containerPort: info.containerPort,
+              },
+            });
+            log(
+              `🛰  Domain attached — Caddy will route to ${info.containerName}:${info.containerPort}.`,
+            );
+          }
+          content = stripComposePorts(content);
+          content = attachSharedAppsNetwork(content);
+        }
+
         if (projectNet) content = attachProjectNetwork(content, projectNet);
         fs.writeFileSync(composePath!, content);
 
