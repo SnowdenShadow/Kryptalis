@@ -627,6 +627,40 @@ networks:
     depends_on:
       prestashop-db-__INSTANCE_ID__:
         condition: service_healthy
+    # Trust the Caddy reverse proxy. PrestaShop checks $_SERVER['HTTPS']
+    # to decide whether to allow the admin login; behind Caddy the
+    # container sees plain HTTP (Caddy terminates TLS). Without this
+    # fix the user lands on "Pour des raisons de sécurité, vous ne
+    # pouvez pas vous connecter tant que vous n'avez pas activé SSL".
+    #
+    # We patch Apache at boot to honour X-Forwarded-Proto via mod_remoteip:
+    # any request that came in over HTTPS upstream is treated as HTTPS
+    # by PHP. Caddy already sends X-Forwarded-Proto + X-Forwarded-For
+    # on every reverse_proxy block, so this Just Works once the conf
+    # exists. Drop the conf, enable the modules, then chain into the
+    # image's default entrypoint so the auto-installer + Apache start
+    # normally.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        cat > /etc/apache2/conf-available/kryptalis-proxy.conf <<'PROXY'
+        # Treat upstream HTTPS as HTTPS for PHP + PrestaShop.
+        SetEnvIf X-Forwarded-Proto https HTTPS=on
+        # mod_remoteip rewrites REMOTE_ADDR from X-Forwarded-For so
+        # access logs + rate limits see the real client IP. Trusted
+        # docker network only — kryptalis-apps is the bridge Caddy
+        # joins, so accepting headers from peers on it is safe.
+        RemoteIPHeader X-Forwarded-For
+        RemoteIPInternalProxy 172.16.0.0/12
+        RemoteIPInternalProxy 10.0.0.0/8
+        RemoteIPInternalProxy 192.168.0.0/16
+        PROXY
+        a2enmod remoteip headers >/dev/null 2>&1 || true
+        a2enconf kryptalis-proxy >/dev/null 2>&1 || true
+        # Chain into the image's stock entrypoint (the official PrestaShop
+        # image runs the installer + apache via docker-php-entrypoint).
+        exec docker-php-entrypoint apache2-foreground
   prestashop-db-__INSTANCE_ID__:
     image: mariadb:11
     container_name: kryptalis-prestashop-db-__INSTANCE_ID__
