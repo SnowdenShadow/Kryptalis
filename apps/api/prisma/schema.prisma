@@ -19,6 +19,13 @@ model User {
   twoFactorEnabled Boolean    @default(false)
   twoFactorSecret  String?
   lastLoginAt      DateTime?
+  // Account-level brute-force lockout. failedLoginAttempts increments on
+  // every bad password OR bad TOTP code (after the password passed). At
+  // threshold (5) the account is locked for 15 min via lockedUntil so
+  // credential stuffing across rotated IPs can't grind the password or
+  // TOTP space.
+  failedLoginAttempts Int @default(0)
+  lockedUntil         DateTime?
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
 

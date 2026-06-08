@@ -4,6 +4,7 @@ import {
   ConflictException,
   ForbiddenException,
   BadRequestException,
+  ServiceUnavailableException,
   Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -73,8 +74,23 @@ export class AuthService {
     // error; the loser is rolled back and a second attempt sees the right
     // count.
     return this.prisma.$transaction(async (tx) => {
+      // First-user bootstrap is a SINGLE-SHOT event. Once we've ever
+      // promoted a SUPERADMIN, that fact is recorded in SystemSetting
+      // and the userCount===0 fallback can NEVER be reentered — even if
+      // every user gets deleted, restoring from a partial DB dump can't
+      // re-trigger an unauthenticated SUPERADMIN escalation.
+      const bootstrappedSetting = await tx.systemSetting.findUnique({
+        where: { key: 'bootstrapped' },
+      });
+      const isBootstrapped = !!(bootstrappedSetting?.value as any);
+
+      // If bootstrapped, registration_enabled rules. If NOT yet bootstrapped
+      // and userCount===0 (first install), we let the registrant through
+      // to become SUPERADMIN regardless of the setting.
       const userCount = await tx.user.count();
-      if (userCount > 0) {
+      const isBootstrapPath = !isBootstrapped && userCount === 0;
+
+      if (!isBootstrapPath) {
         const setting = await tx.systemSetting.findUnique({
           where: { key: 'registration_enabled' },
         });
@@ -95,12 +111,26 @@ export class AuthService {
           name: dto.name,
           email,
           password: hashedPassword,
-          role: userCount === 0 ? 'SUPERADMIN' : 'USER',
+          role: isBootstrapPath ? 'SUPERADMIN' : 'USER',
         },
       });
 
-      const existingServer = await tx.server.findFirst();
-      if (!existingServer) {
+      if (isBootstrapPath) {
+        // Lock the bootstrap door behind us. Any future userCount===0 path
+        // will see bootstrapped=true and require registration_enabled.
+        await tx.systemSetting.upsert({
+          where: { key: 'bootstrapped' },
+          create: { key: 'bootstrapped', value: true as any, updatedBy: user.id },
+          update: { value: true as any, updatedBy: user.id },
+        });
+      }
+
+      // Bootstrap the in-process local server row + its hashed agent token
+      // — but ONLY on first ever install (the same trigger as the SUPERADMIN
+      // bootstrap). Subsequent registrations don't touch tenant
+      // provisioning. The raw agent token is unused (LOCAL mode shells out
+      // directly); admins regenerate it on demand via the Servers UI.
+      if (isBootstrapPath) {
         const server = await tx.server.create({
           data: {
             name: 'Local Server',
@@ -141,6 +171,9 @@ export class AuthService {
     );
 
     if (!user || !passwordOk) {
+      // Increment the failed counter (no-op if user doesn't exist) so
+      // credential-stuffing rotating IPs still hits the per-account lock.
+      if (user) await this.bumpFailedAttempt(user.id);
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -151,21 +184,35 @@ export class AuthService {
       throw new ForbiddenException('Your account is suspended');
     }
 
+    // Account-level lockout. After 5 failed password OR TOTP attempts the
+    // account is frozen for 15 min — independent of per-IP throttler so
+    // credential stuffing across rotated IPs is mitigated.
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      const minutes = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60000);
+      throw new UnauthorizedException(
+        `Account temporarily locked due to repeated failed attempts. Try again in ${minutes} minute(s).`,
+      );
+    }
+
     // Enforce 2FA when enabled — the totpCode (or backup code) is required.
     if (user.twoFactorEnabled) {
       const code = (dto as any).totpCode || (dto as any).backupCode;
       if (!code) {
         throw new UnauthorizedException('Two-factor code required');
       }
-      const ok = await this.verifyTwoFactor(user.id, user.twoFactorSecret, code);
+      const ok = await this.verifyTwoFactor(user.id, user.twoFactorSecret, code, {
+        forBackup: !!(dto as any).backupCode,
+      });
       if (!ok) {
+        await this.bumpFailedAttempt(user.id);
         throw new UnauthorizedException('Invalid two-factor code');
       }
     }
 
+    // Reset counter on successful login.
     await this.prisma.user.update({
       where: { id: user.id },
-      data: { lastLoginAt: new Date() },
+      data: { lastLoginAt: new Date(), failedLoginAttempts: 0, lockedUntil: null },
     });
 
     const tokens = await this.issueTokenPair(user.id, user.email, user.role, ctx);
@@ -306,7 +353,10 @@ export class AuthService {
     });
   }
 
-  async changePassword(userId: string, dto: { currentPassword: string; newPassword: string }) {
+  async changePassword(
+    userId: string,
+    dto: { currentPassword: string; newPassword: string; totpCode?: string; backupCode?: string },
+  ) {
     if (!dto.newPassword || dto.newPassword.length < 8) {
       throw new BadRequestException('New password must be at least 8 characters');
     }
@@ -314,6 +364,23 @@ export class AuthService {
     if (!user) throw new UnauthorizedException('User not found');
     const ok = await bcrypt.compare(dto.currentPassword, user.password);
     if (!ok) throw new UnauthorizedException('Current password is incorrect');
+
+    // Symmetric with disableTwoFactor(): a sensitive credential change must
+    // re-verify the second factor when one is set. A phished current
+    // password alone shouldn't unlock the keys to the kingdom.
+    if (user.twoFactorEnabled) {
+      const code = dto.totpCode || dto.backupCode;
+      if (!code) {
+        throw new UnauthorizedException('Two-factor code required to change password');
+      }
+      const validTotp = await this.verifyTwoFactor(userId, user.twoFactorSecret, code, {
+        forBackup: !!dto.backupCode,
+      });
+      if (!validTotp) {
+        throw new UnauthorizedException('Invalid two-factor code');
+      }
+    }
+
     const hashed = await bcrypt.hash(dto.newPassword, 12);
     await this.prisma.user.update({ where: { id: userId }, data: { password: hashed } });
     // Wipe every session — every refresh token in the wild is now stale.
@@ -322,6 +389,27 @@ export class AuthService {
       data: { status: 'REVOKED' },
     });
     return { message: 'Password changed. Please log in again.' };
+  }
+
+  /**
+   * Increment failed-login counter; lock the account at threshold. Used by
+   * BOTH the password and TOTP branches of login so brute-force is
+   * mitigated regardless of which factor the attacker is grinding.
+   */
+  private async bumpFailedAttempt(userId: string) {
+    const THRESHOLD = 5;
+    const LOCK_MINUTES = 15;
+    const u = await this.prisma.user.update({
+      where: { id: userId },
+      data: { failedLoginAttempts: { increment: 1 } },
+      select: { failedLoginAttempts: true },
+    });
+    if (u.failedLoginAttempts >= THRESHOLD) {
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: { lockedUntil: new Date(Date.now() + LOCK_MINUTES * 60_000) },
+      });
+    }
   }
 
   async getMe(userId: string) {
@@ -367,11 +455,25 @@ export class AuthService {
     }
     // TODO: NotificationsService.dispatch('password.reset', { userId, token })
     // — wiring the notifications module is the next item on the roadmap.
+    // Until SMTP is configured, fail loudly in production rather than
+    // pretending to send. Otherwise users sit refreshing their inbox
+    // waiting for a mail that will never arrive, and the whole reset
+    // flow is silently dead. In dev/test we keep returning success so
+    // the console.warn token can be used.
+    if (process.env.NODE_ENV === 'production' && !process.env.SMTP_HOST) {
+      throw new ServiceUnavailableException(
+        'Password reset by email is not configured on this instance. Ask an administrator.',
+      );
+    }
 
     return { message: 'If that email is registered, a reset link has been sent.' };
   }
 
-  async resetPassword(token: string, newPassword: string) {
+  async resetPassword(
+    token: string,
+    newPassword: string,
+    twoFactor?: { totpCode?: string; backupCode?: string },
+  ) {
     if (!newPassword || newPassword.length < 8) {
       throw new BadRequestException('New password must be at least 8 characters');
     }
@@ -383,6 +485,24 @@ export class AuthService {
     if (!row || row.usedAt || row.expiresAt < new Date()) {
       throw new BadRequestException('Reset link is invalid or expired.');
     }
+
+    // If the account has 2FA enabled, do NOT let an email-based reset
+    // bypass it. The attacker who controls the inbox still has to prove
+    // possession of the authenticator or a backup code. This closes the
+    // 'inbox-takeover → full account' path.
+    if (row.user.twoFactorEnabled) {
+      const code = twoFactor?.totpCode || twoFactor?.backupCode;
+      if (!code) {
+        throw new BadRequestException('Two-factor code required to reset password.');
+      }
+      const ok = await this.verifyTwoFactor(row.user.id, row.user.twoFactorSecret, code, {
+        forBackup: !!twoFactor?.backupCode,
+      });
+      if (!ok) {
+        throw new UnauthorizedException('Invalid two-factor code.');
+      }
+    }
+
     const hashed = await bcrypt.hash(newPassword, 12);
     await this.prisma.$transaction([
       this.prisma.user.update({ where: { id: row.userId }, data: { password: hashed } }),
@@ -423,12 +543,22 @@ export class AuthService {
     if (!authenticator.verify({ token: code, secret })) {
       throw new BadRequestException('Invalid code.');
     }
-    const backupCodes: string[] = [];
+    // 80 bits of entropy per code (matches GitHub / Google Authenticator
+    // baseline). The previous 40-bit hex code was within reach of online
+    // grinding once the account-lockout was bypassed.
+    // 80 bits per code. The user sees the dashed form for legibility, but
+    // verifyBackupCode() strips dashes/spaces before comparing, so we
+    // bcrypt-hash the canonical un-dashed string to keep both inputs
+    // equivalent regardless of how the user types them.
+    const display: string[] = [];
+    const canonical: string[] = [];
     for (let i = 0; i < 10; i++) {
-      const c = randomBytes(5).toString('hex'); // 10 hex chars
-      backupCodes.push(c);
+      const raw = randomBytes(10).toString('hex'); // 20 hex chars → 80 bits
+      canonical.push(raw);
+      display.push(raw.match(/.{1,5}/g)!.join('-'));
     }
-    const hashes = await Promise.all(backupCodes.map((c) => bcrypt.hash(c, 10)));
+    const hashes = await Promise.all(canonical.map((c) => bcrypt.hash(c, 10)));
+    const backupCodes = display;
     await this.prisma.$transaction([
       this.prisma.user.update({
         where: { id: userId },
@@ -448,7 +578,13 @@ export class AuthService {
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) throw new UnauthorizedException('Wrong password.');
     if (user.twoFactorEnabled) {
-      const valid = await this.verifyTwoFactor(userId, user.twoFactorSecret, code);
+      // Accept TOTP OR a backup code — distinguished by length/charset.
+      // Backup codes are 80-bit hex grouped with dashes ("ab12c-de34f-...").
+      const stripped = code.replace(/-/g, '');
+      const looksLikeBackup = /^[0-9a-f]{10,}$/i.test(stripped);
+      const valid = await this.verifyTwoFactor(userId, user.twoFactorSecret, code, {
+        forBackup: looksLikeBackup,
+      });
       if (!valid) throw new UnauthorizedException('Invalid two-factor code.');
     }
     await this.prisma.$transaction([
@@ -465,30 +601,47 @@ export class AuthService {
     userId: string,
     encryptedSecret: string | null,
     code: string,
+    opts: { forBackup?: boolean } = {},
   ): Promise<boolean> {
-    // Try TOTP first. Window (±1 tick = 30 s) is configured at module load
-    // so concurrent requests cannot race a global mutation.
+    // Caller has told us whether they expect a TOTP or a backup code, so
+    // we don't burn 10 × bcrypt.compare on a 6-digit numeric attempt that
+    // was always meant for the TOTP path (a trivial CPU-DoS amplifier
+    // otherwise).
+    if (opts.forBackup) {
+      return this.verifyBackupCode(userId, code);
+    }
     if (encryptedSecret) {
       try {
         const secret = this.encryption.decrypt(encryptedSecret);
         if (authenticator.verify({ token: code, secret })) return true;
       } catch {}
     }
-    // Fall back to backup codes (single-use).
+    return false;
+  }
+
+  /**
+   * Backup-code path. bcrypt.compares are run in parallel so wall-time
+   * doesn't depend on which slot matched (timing leak) and the user
+   * doesn't pay the full N × cost-10 sequentially. We mark exactly one
+   * matched code as used (the first hit).
+   */
+  private async verifyBackupCode(userId: string, code: string): Promise<boolean> {
+    // Normalize so users can type with or without dashes/spaces.
+    const norm = (code || '').replace(/[-\s]/g, '').toLowerCase();
+    if (!norm) return false;
     const candidates = await this.prisma.twoFactorBackupCode.findMany({
       where: { userId, usedAt: null },
     });
-    for (const c of candidates) {
-      const ok = await bcrypt.compare(code, c.codeHash);
-      if (ok) {
-        await this.prisma.twoFactorBackupCode.update({
-          where: { id: c.id },
-          data: { usedAt: new Date() },
-        });
-        return true;
-      }
-    }
-    return false;
+    const results = await Promise.all(
+      candidates.map((c) => bcrypt.compare(norm, c.codeHash).then((ok) => ({ id: c.id, ok }))),
+    );
+    const matched = results.find((r) => r.ok);
+    if (!matched) return false;
+    await this.prisma.twoFactorBackupCode.update({
+      where: { id: matched.id },
+      data: { usedAt: new Date() },
+    });
+    return true;
   }
 
   // ── token issuance + helpers ──────────────────────────────────────

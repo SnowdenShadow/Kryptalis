@@ -13,6 +13,7 @@ const execAsync = promisify(exec);
 @Injectable()
 export class ServersService implements OnModuleInit, OnModuleDestroy {
   private collectInterval: ReturnType<typeof setInterval> | null = null;
+  private retentionInterval: ReturnType<typeof setInterval> | null = null;
   private prevNet: { rx: number; tx: number; ts: number } | null = null;
 
   constructor(
@@ -29,12 +30,37 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit() {
     this.collectInterval = setInterval(() => this.collectMetrics(), 30000);
     setTimeout(() => this.collectMetrics(), 2000);
+    // Prune old ServerMetric rows hourly. Without this the table grows
+    // forever (2 rows/min × every server) and eventually dominates the
+    // postgres footprint. We keep 30 days of metrics — enough for the
+    // monitoring dashboard's 30-day window, and a sensible default for a
+    // single-tenant install.
+    this.retentionInterval = setInterval(() => this.pruneOldMetrics(), 60 * 60 * 1000);
+    setTimeout(() => this.pruneOldMetrics(), 30_000);
   }
 
   async onModuleDestroy() {
     if (this.collectInterval) {
       clearInterval(this.collectInterval);
       this.collectInterval = null;
+    }
+    if (this.retentionInterval) {
+      clearInterval(this.retentionInterval);
+      this.retentionInterval = null;
+    }
+  }
+
+  /** Drop ServerMetric rows older than the configured window. */
+  private async pruneOldMetrics() {
+    try {
+      const days = parseInt(process.env.METRIC_RETENTION_DAYS || '30', 10);
+      const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      await this.prisma.serverMetric.deleteMany({
+        where: { timestamp: { lt: cutoff } },
+      });
+    } catch {
+      // Never throw from the retention job — a transient DB hiccup
+      // shouldn't crash the API.
     }
   }
 

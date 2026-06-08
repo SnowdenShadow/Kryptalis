@@ -1,6 +1,7 @@
 import { Controller, Get, Post, Patch, Delete, Param, Body, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { DomainsService } from './domains.service';
 import { CreateDomainDto } from './dto/create-domain.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -12,7 +13,14 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 export class DomainsController {
   constructor(private svc: DomainsService) {}
 
+  // Each domain attach kicks off a Let's Encrypt cert issue via Caddy.
+  // LE enforces a hard 50 certs/week per registered domain — if we don't
+  // throttle the API a malicious or buggy client can blow that ceiling
+  // in seconds and break ALL future cert issuance for the tenant. 10
+  // attach/min per IP is conservative; production users adding domains
+  // by hand never hit it.
   @Post()
+  @Throttle({ default: { ttl: 60_000, limit: 10 } })
   @ApiOperation({ summary: 'Add domain' })
   create(@CurrentUser('id') userId: string, @Body() dto: CreateDomainDto) {
     return this.svc.create(userId, dto);

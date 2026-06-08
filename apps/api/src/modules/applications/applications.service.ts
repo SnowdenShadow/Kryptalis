@@ -594,7 +594,11 @@ ${networksBlock}`;
     },
   ) {
     const slug = slugify(name);
-    const appDir = path.join(APPS_DIR, slug);
+    // Use the per-instance app dir (slug + applicationId prefix), same
+    // helper every other touchpoint uses. Without this two apps whose
+    // names slugify identically (e.g. "blog" and "Blog") would share an
+    // appDir and clobber each other's compose stack and clone sources.
+    const appDir = resolveAppDir(slug, appId);
     const started = Date.now();
     const buildLogs: string[] = [];
     // Same scrub as runDockerImageDeploy — strips git bearer tokens and
@@ -1154,11 +1158,15 @@ ${networksBlock}`;
     // Deployment rows. Refuse a second one while a fresh deployment is
     // still PENDING/BUILDING/DEPLOYING. A stuck DEPLOYING older than 30
     // minutes is treated as crashed and overridden.
+    // Filter on createdAt — startedAt is null until the worker actually
+    // picks up the job, and that's exactly the small window we MUST
+    // protect against (the gap between row insert and the build step
+    // wiping the app dir is when a second redeploy click would conflict).
     const inflight = await this.prisma.deployment.findFirst({
       where: {
         applicationId: id,
         status: { in: ['PENDING', 'BUILDING', 'DEPLOYING'] as any },
-        startedAt: { gt: new Date(Date.now() - 30 * 60 * 1000) },
+        createdAt: { gt: new Date(Date.now() - 30 * 60 * 1000) },
       },
       orderBy: { createdAt: 'desc' },
     });

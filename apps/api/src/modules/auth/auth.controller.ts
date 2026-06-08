@@ -78,8 +78,13 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @ApiOperation({ summary: 'Reset password using a one-time token' })
-  resetPassword(@Body() body: { token: string; newPassword: string }) {
-    return this.authService.resetPassword(body.token, body.newPassword);
+  resetPassword(
+    @Body() body: { token: string; newPassword: string; totpCode?: string; backupCode?: string },
+  ) {
+    return this.authService.resetPassword(body.token, body.newPassword, {
+      totpCode: body.totpCode,
+      backupCode: body.backupCode,
+    });
   }
 
   @Get('me')
@@ -108,7 +113,7 @@ export class AuthController {
   @ApiOperation({ summary: 'Change own password (current → new)' })
   changePassword(
     @CurrentUser() user: { id: string },
-    @Body() body: { currentPassword: string; newPassword: string },
+    @Body() body: { currentPassword: string; newPassword: string; totpCode?: string; backupCode?: string },
   ) {
     return this.authService.changePassword(user.id, body);
   }

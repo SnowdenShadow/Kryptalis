@@ -537,10 +537,15 @@ func (p *Poller) reportResult(taskID string, result map[string]interface{}, task
 		status = "FAILED"
 	}
 
+	// Backend requires serverId + token in the body to bind the result
+	// to this agent's identity (same shape as /api/agent/tasks). Without
+	// them every POST was rejected and deployments stayed forever PENDING.
 	body, _ := json.Marshal(map[string]interface{}{
-		"status": status,
-		"result": result,
-		"error":  taskErr,
+		"serverId": p.cfg.ServerID,
+		"token":    p.cfg.AgentToken,
+		"status":   status,
+		"result":   result,
+		"error":    taskErr,
 	})
 
 	resp, err := p.client.Post(
