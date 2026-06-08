@@ -84,15 +84,40 @@ const DOMAIN_RE = /^(?=.{1,253}$)(?:(?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,
 export function QuickDeployDialog({
   open,
   onClose,
+  initialMode,
+  initialMarketplaceSlug,
 }: {
   open: boolean;
   onClose: () => void;
+  /**
+   * Pre-select a mode when the dialog opens — skips the mode picker
+   * screen and jumps straight to that mode's config. Used by the
+   * Marketplace page (always opens in marketplace mode) and the
+   * "Deploy custom image" button (opens in docker mode).
+   */
+  initialMode?: Mode;
+  /**
+   * Pre-select a marketplace catalog entry by its slug. Used when the
+   * user clicks a card on /dashboard/marketplace — we open the
+   * dialog already focused on that exact app so they only have to pick
+   * project + name and hit Deploy.
+   */
+  initialMarketplaceSlug?: string;
 }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
 
   // ── Mode selection (step 0) ─────────────────────────────────────
-  const [mode, setMode] = useState<Mode | null>(null);
+  const [mode, setMode] = useState<Mode | null>(initialMode ?? null);
+
+  // Sync mode with caller — if the dialog is re-opened with a different
+  // initialMode we must reflect it. Resets the chosen mode whenever the
+  // dialog transitions from closed → open so each open is a fresh flow.
+  useEffect(() => {
+    if (open) {
+      setMode(initialMode ?? null);
+    }
+  }, [open, initialMode]);
 
   // ── Git mode state ──────────────────────────────────────────────
   const [gitSource, setGitSource] = useState<GitSource>('provider');
@@ -220,6 +245,22 @@ export function QuickDeployDialog({
       setHostPort(String(nextFreePort.port));
     }
   }, [exposeMode, nextFreePort, hostPort]);
+
+  // Pre-pick a marketplace app when the caller supplies a slug AND the
+  // catalog has finished loading. Lets /dashboard/marketplace skip
+  // straight to "configure name + project" for the clicked card.
+  useEffect(() => {
+    if (
+      open &&
+      mode === 'marketplace' &&
+      initialMarketplaceSlug &&
+      !marketplaceApp &&
+      catalog.length > 0
+    ) {
+      const found = catalog.find((c) => c.slug === initialMarketplaceSlug);
+      if (found) setMarketplaceApp(found);
+    }
+  }, [open, mode, initialMarketplaceSlug, catalog, marketplaceApp]);
 
   // Preload marketplace env vars into the editor when an app is picked.
   useEffect(() => {
@@ -461,7 +502,13 @@ export function QuickDeployDialog({
         <DialogTitle className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setMode(null)}
+            onClick={() => {
+              // Caller-forced mode → no mode picker to fall back to; act
+              // as a close instead so the back chevron always does
+              // something useful.
+              if (initialMode) handleClose();
+              else setMode(null);
+            }}
             className="text-muted-foreground hover:text-foreground"
             title={t('common.back') || 'Back'}
           >

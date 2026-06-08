@@ -86,7 +86,7 @@ export const translations: Record<string, Record<string, string>> = {
     'databases.title': 'Databases', 'databases.subtitle': 'Manage your database instances', 'databases.create': 'Create Database', 'databases.empty': 'No databases yet', 'databases.emptyDesc': 'Create your first database', 'databases.type': 'Type', 'databases.selectServer': 'Select a server', 'databases.username': 'Username',
     'monitoring.title': 'Monitoring', 'monitoring.subtitle': 'Monitor server resources in real-time', 'monitoring.selectServer': 'Select a server to view metrics', 'monitoring.noMetrics': 'No metrics yet', 'monitoring.alertRules': 'Alert Rules', 'monitoring.addAlert': 'Add Alert', 'monitoring.metric': 'Metric', 'monitoring.threshold': 'Threshold', 'monitoring.channel': 'Channel', 'monitoring.network': 'Network',
     'backups.title': 'Backups', 'backups.subtitle': 'Create and manage backups of your infrastructure', 'backups.create': 'Create Backup', 'backups.empty': 'No backups configured', 'backups.emptyDesc': 'Create your first backup', 'backups.restore': 'Restore', 'backups.target': 'Target', 'backups.schedule': 'Schedule', 'backups.lastRun': 'Last Run', 'backups.size': 'Size', 'backups.includeApps': 'Include Applications', 'backups.includeDbs': 'Include Databases', 'backups.includeVolumes': 'Include Volumes',
-    'marketplace.title': 'Marketplace', 'marketplace.subtitle': 'Install pre-configured applications with one click', 'marketplace.searchPlaceholder': 'Search applications...', 'marketplace.noResults': 'No applications found', 'marketplace.noResultsDesc': 'Try adjusting your search or filter criteria', 'marketplace.installTitle': 'Install', 'marketplace.configureWhere': 'Configure where to deploy', 'marketplace.selectServer': 'Server', 'marketplace.selectProject': 'Project', 'marketplace.noServers': 'No servers available. Add a server first.', 'marketplace.noProjects': 'No projects available. Create a project first.', 'marketplace.domain': 'Domain (optional)', 'marketplace.installing': 'Installing...',
+    'marketplace.title': 'Marketplace', 'marketplace.subtitle': 'Install pre-configured applications with one click', 'marketplace.searchPlaceholder': 'Search applications...', 'marketplace.noResults': 'No applications found', 'marketplace.noResultsDesc': 'Try adjusting your search or filter criteria', 'marketplace.installTitle': 'Install', 'marketplace.configureWhere': 'Configure where to deploy', 'marketplace.selectServer': 'Server', 'marketplace.selectProject': 'Project', 'marketplace.noServers': 'No servers available. Add a server first.', 'marketplace.noProjects': 'No projects available. Create a project first.', 'marketplace.domain': 'Domain (optional)', 'marketplace.installing': 'Installing...', 'marketplace.deployCustom': 'Deploy custom image',
     'emails.title': 'Email Hosting', 'emails.subtitle': 'Manage mail servers, mailboxes, aliases and DNS records.',
     'emails.empty': 'No mail-eligible domains yet', 'emails.emptyDesc': 'Add a domain in Domains and link it to a project to enable email hosting.',
     'emails.addDomain': 'Add a domain',
@@ -265,6 +265,20 @@ export const translations: Record<string, Record<string, string>> = {
     'quickDeploy.advanced': 'Advanced…',
     'quickDeploy.deploy': 'Deploy',
     'quickDeploy.deploying': 'Deploying…',
+    // Compose-only mode (paste a docker-compose.yml)
+    'quickDeploy.modeCompose': 'Compose (empty)',
+    'quickDeploy.modeComposeDesc': 'Paste a docker-compose.yml. Multi-service stacks, no Git needed.',
+    'quickDeploy.titleCompose': 'Deploy a Compose stack',
+    'quickDeploy.composeYaml': 'docker-compose.yml',
+    'quickDeploy.composeSample': 'Load example',
+    'quickDeploy.composeHint': 'Standard Compose v3 syntax. Kryptalis adds the project + shared networks automatically so other apps in the same project can reach yours by container_name.',
+    // Dockerfile-only mode
+    'quickDeploy.modeDockerfile': 'Dockerfile (empty)',
+    'quickDeploy.modeDockerfileDesc': 'Paste a Dockerfile. Build & run a custom image, no Git.',
+    'quickDeploy.titleDockerfile': 'Deploy a Dockerfile',
+    'quickDeploy.dockerfile': 'Dockerfile',
+    'quickDeploy.dockerfileSample': 'Load example',
+    'quickDeploy.dockerfileHintEmpty': 'No git, no build context — only the Dockerfile. Pull base images and bake the app in via RUN. For multi-file projects, deploy from Git instead.',
   },
   fr: {
     // ── nav ─────────────────────────────────────────────────────────
@@ -351,7 +365,7 @@ export const translations: Record<string, Record<string, string>> = {
     'databases.title': 'Bases de données', 'databases.subtitle': 'Gérez vos instances de base de données', 'databases.create': 'Créer une base', 'databases.empty': 'Aucune base de données', 'databases.emptyDesc': 'Créez votre première base de données', 'databases.type': 'Type', 'databases.selectServer': 'Sélectionner un serveur', 'databases.username': "Nom d'utilisateur",
     'monitoring.title': 'Monitoring', 'monitoring.subtitle': 'Surveillez les ressources en temps réel', 'monitoring.selectServer': 'Sélectionnez un serveur pour voir les métriques', 'monitoring.noMetrics': 'Pas encore de métriques', 'monitoring.alertRules': "Règles d'alerte", 'monitoring.addAlert': 'Ajouter une alerte', 'monitoring.metric': 'Métrique', 'monitoring.threshold': 'Seuil', 'monitoring.channel': 'Canal', 'monitoring.network': 'Réseau',
     'backups.title': 'Sauvegardes', 'backups.subtitle': 'Créez et gérez les sauvegardes de votre infrastructure', 'backups.create': 'Créer une sauvegarde', 'backups.empty': 'Aucune sauvegarde configurée', 'backups.emptyDesc': 'Créez votre première sauvegarde', 'backups.restore': 'Restaurer', 'backups.target': 'Cible', 'backups.schedule': 'Planification', 'backups.lastRun': 'Dernière exécution', 'backups.size': 'Taille', 'backups.includeApps': 'Inclure les applications', 'backups.includeDbs': 'Inclure les bases de données', 'backups.includeVolumes': 'Inclure les volumes',
-    'marketplace.title': 'Marketplace', 'marketplace.subtitle': "Installez des applications préconfigurées en un clic", 'marketplace.searchPlaceholder': 'Rechercher des applications...', 'marketplace.noResults': 'Aucune application trouvée', 'marketplace.noResultsDesc': 'Essayez de modifier vos critères de recherche', 'marketplace.installTitle': 'Installer', 'marketplace.configureWhere': 'Configurez où déployer', 'marketplace.selectServer': 'Serveur', 'marketplace.selectProject': 'Projet', 'marketplace.noServers': "Aucun serveur disponible. Ajoutez d'abord un serveur.", 'marketplace.noProjects': "Aucun projet disponible. Créez d'abord un projet.", 'marketplace.domain': 'Domaine (optionnel)', 'marketplace.installing': 'Installation...',
+    'marketplace.title': 'Marketplace', 'marketplace.subtitle': "Installez des applications préconfigurées en un clic", 'marketplace.searchPlaceholder': 'Rechercher des applications...', 'marketplace.noResults': 'Aucune application trouvée', 'marketplace.noResultsDesc': 'Essayez de modifier vos critères de recherche', 'marketplace.installTitle': 'Installer', 'marketplace.configureWhere': 'Configurez où déployer', 'marketplace.selectServer': 'Serveur', 'marketplace.selectProject': 'Projet', 'marketplace.noServers': "Aucun serveur disponible. Ajoutez d'abord un serveur.", 'marketplace.noProjects': "Aucun projet disponible. Créez d'abord un projet.", 'marketplace.domain': 'Domaine (optionnel)', 'marketplace.installing': 'Installation...', 'marketplace.deployCustom': 'Déployer une image custom',
     'emails.title': 'Hébergement Email', 'emails.subtitle': 'Gérez vos serveurs mail, boîtes, alias et enregistrements DNS.',
     'emails.empty': 'Aucun domaine éligible au mail', 'emails.emptyDesc': "Ajoutez un domaine dans Domaines et liez-le à un projet pour activer l'hébergement email.",
     'emails.addDomain': 'Ajouter un domaine',
@@ -530,5 +544,19 @@ export const translations: Record<string, Record<string, string>> = {
     'quickDeploy.advanced': 'Avancé…',
     'quickDeploy.deploy': 'Déployer',
     'quickDeploy.deploying': 'Déploiement…',
+    // Mode Compose seul (coller un docker-compose.yml)
+    'quickDeploy.modeCompose': 'Compose (vide)',
+    'quickDeploy.modeComposeDesc': 'Colle un docker-compose.yml. Stacks multi-services, sans Git.',
+    'quickDeploy.titleCompose': 'Déployer une stack Compose',
+    'quickDeploy.composeYaml': 'docker-compose.yml',
+    'quickDeploy.composeSample': "Charger l'exemple",
+    'quickDeploy.composeHint': 'Syntaxe Compose v3 standard. Kryptalis attache automatiquement les réseaux projet + partagés, les autres apps du même projet peuvent joindre tes services par container_name.',
+    // Mode Dockerfile seul
+    'quickDeploy.modeDockerfile': 'Dockerfile (vide)',
+    'quickDeploy.modeDockerfileDesc': 'Colle un Dockerfile. Build et exécution d\'une image custom, sans Git.',
+    'quickDeploy.titleDockerfile': 'Déployer un Dockerfile',
+    'quickDeploy.dockerfile': 'Dockerfile',
+    'quickDeploy.dockerfileSample': "Charger l'exemple",
+    'quickDeploy.dockerfileHintEmpty': "Pas de git, pas de contexte de build — uniquement le Dockerfile. Pull les images de base et embarque l'app via RUN. Pour des projets multi-fichiers, déploie depuis Git.",
   },
 };
