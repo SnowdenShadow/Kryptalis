@@ -40,11 +40,16 @@ COPY --from=builder /app/apps/api/src/modules/marketplace/catalog.json ./apps/ap
 WORKDIR /app/apps/api
 EXPOSE 4000
 # Reconcile the DB schema on every start.
-#   1. `migrate deploy` applies any committed versioned migrations.
-#   2. THEN `db push` is ALWAYS run too — bridges the gap during the
-#      pre-1.0 era where we evolve the schema directly without minting a
-#      migration for every change. `--accept-data-loss` is required for
-#      additive column drops (we hand-pick the destructive operations and
-#      truncate ahead of time when needed). Once we cut a release we'll
-#      stop doing this and require migrations for every change.
-CMD ["sh", "-c", "pnpm exec prisma migrate deploy; pnpm exec prisma db push --skip-generate --accept-data-loss && node dist/main"]
+#
+# `prisma db push` syncs schema.prisma directly to the database — fast,
+# idempotent, doesn't care whether the DB is empty or already has data.
+# Pre-1.0 we treat schema.prisma as the single source of truth and skip
+# the migration file workflow entirely; there's no value in keeping a
+# linear migration history while the schema is still moving daily and
+# every existing install gets refreshed via the auto-update timer.
+# `--accept-data-loss` is required for column drops; pick destructive
+# ops manually and pre-truncate when needed.
+#
+# Once we cut 1.0 we'll start minting versioned migrations for every
+# schema change and switch this back to `migrate deploy`.
+CMD ["sh", "-c", "pnpm exec prisma db push --skip-generate --accept-data-loss && node dist/main"]

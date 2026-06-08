@@ -1,2 +1,0 @@
--- AlterEnum
-ALTER TYPE "ServerStatus" ADD VALUE 'PENDING_INSTALL';

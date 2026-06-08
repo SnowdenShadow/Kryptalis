@@ -24,10 +24,12 @@ out/
 .DS_Store
 Thumbs.db
 
-# Prisma — migrations ARE checked in (so `prisma migrate deploy` works on
-# a fresh clone). Per-developer drafts produced by `prisma migrate dev`
-# would normally also land here; gate those behind a manual review instead
-# of hiding the whole folder.
+# Prisma — pre-1.0 we skip the migration workflow entirely. schema.prisma
+# is the single source of truth; the API boots with `prisma db push` which
+# syncs the schema to the DB whether it's empty or already populated.
+# Migration files generated locally by `prisma migrate dev` are noise that
+# would drift from the runtime behaviour, so we drop them here.
+apps/api/prisma/migrations/
 
 # Go
 apps/agent/bin/
