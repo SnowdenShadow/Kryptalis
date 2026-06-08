@@ -789,7 +789,11 @@ export class ApplicationsService {
       // Fresh dir + minimal compose. If the user supplied a port, publish it
       // on host; otherwise Caddy proxies over the project network.
       if (fs.existsSync(appDir)) {
-        try { await dockerCompose(appDir, ['down', '-v', '--remove-orphans'], undefined, 60_000); } catch {}
+        // REDEPLOY path — `down` WITHOUT `-v` so user data (DB volumes,
+        // upload dirs declared in the compose) survives. Using `-v` here
+        // was wiping PrestaShop/WordPress databases on every redeploy.
+        // Remove path handles -v + --rmi separately below.
+        try { await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000); } catch {}
         fs.rmSync(appDir, { recursive: true, force: true });
       }
       fs.mkdirSync(appDir, { recursive: true });
@@ -941,7 +945,11 @@ export class ApplicationsService {
       }
 
       if (fs.existsSync(appDir)) {
-        try { await dockerCompose(appDir, ['down', '-v', '--remove-orphans'], undefined, 60_000); } catch {}
+        // REDEPLOY path — `down` WITHOUT `-v` so user data (DB volumes,
+        // upload dirs declared in the compose) survives. Using `-v` here
+        // was wiping PrestaShop/WordPress databases on every redeploy.
+        // Remove path handles -v + --rmi separately below.
+        try { await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000); } catch {}
         fs.rmSync(appDir, { recursive: true, force: true });
       }
       fs.mkdirSync(appDir, { recursive: true });
@@ -1078,7 +1086,11 @@ export class ApplicationsService {
       }
 
       if (fs.existsSync(appDir)) {
-        try { await dockerCompose(appDir, ['down', '-v', '--remove-orphans'], undefined, 60_000); } catch {}
+        // REDEPLOY path — `down` WITHOUT `-v` so user data (DB volumes,
+        // upload dirs declared in the compose) survives. Using `-v` here
+        // was wiping PrestaShop/WordPress databases on every redeploy.
+        // Remove path handles -v + --rmi separately below.
+        try { await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000); } catch {}
         fs.rmSync(appDir, { recursive: true, force: true });
       }
       fs.mkdirSync(appDir, { recursive: true });
@@ -1347,10 +1359,12 @@ export class ApplicationsService {
     }
 
     try {
-      // 1. clean previous stack BEFORE wiping
+      // 1. clean previous stack BEFORE wiping. `down` without -v keeps
+      // user volumes (DB, uploads) intact across redeploys. The remove
+      // path elsewhere uses -v + --rmi to actually purge.
       if (fs.existsSync(appDir)) {
         try {
-          await dockerCompose(appDir, ['down', '-v', '--remove-orphans'], undefined, 60_000);
+          await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000);
         } catch {}
         fs.rmSync(appDir, { recursive: true, force: true });
       }
@@ -1844,7 +1858,12 @@ export class ApplicationsService {
       const appDir = resolveAppDir(slug, id);
       if (fs.existsSync(appDir)) {
         try {
-          await dockerCompose(appDir, ['down', '-v', '--remove-orphans'], undefined, 60_000);
+          // Full purge: `down -v --rmi local` removes named volumes AND
+          // the locally-built image. Without --rmi we'd leave dozens of
+          // dangling `<slug>-<id>-web:latest` images per app rebuilt;
+          // with it the docker volume list stays clean too. Skips
+          // pulled images (postgres:16-alpine etc) — those are shared.
+          await dockerCompose(appDir, ['down', '-v', '--rmi', 'local', '--remove-orphans'], undefined, 90_000);
         } catch {}
         try { fs.rmSync(appDir, { recursive: true, force: true }); } catch {}
       }
@@ -1852,6 +1871,17 @@ export class ApplicationsService {
       // (compose `down` may have missed them on a crashed install).
       try { await execFileAsync('docker', ['rm', '-f', containerName(slug)]); } catch {}
       try { await execFileAsync('docker', ['rm', '-f', `${containerName(slug)}-${id.slice(0, 12)}`]); } catch {}
+      // Drop the per-project network if this app was the last in its
+      // project — leaves shared networks alone.
+      try {
+        const otherApps = await this.prisma.application.count({
+          where: { projectId: app.projectId, NOT: { id } },
+        });
+        if (otherApps === 0) {
+          const projectNet = projectNetworkName(app.projectId);
+          try { await execFileAsync('docker', ['network', 'rm', projectNet], { timeout: 10_000 }); } catch {}
+        }
+      } catch {}
     } else if (server) {
       // User-initiated delete → purge volumes (databases + uploads). The agent
       // defaults to keeping volumes (safe for migration); flip it on here.

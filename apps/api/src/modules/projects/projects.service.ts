@@ -197,7 +197,10 @@ export class ProjectsService {
         const legacyDir = path.join(PROJ_APPS_DIR, slug);
         for (const dir of [perInstanceDir, legacyDir]) {
           if (fs.existsSync(dir)) {
-            try { await execFileAsync('docker', ['compose', 'down', '-v', '--remove-orphans'], { cwd: dir, timeout: 60_000 }); } catch {}
+            // --rmi local purges locally-BUILT images (the per-app
+            // `<slug>-<id>-web:latest` ones) so they don't accumulate.
+            // Pulled images like postgres:16 are shared → not touched.
+            try { await execFileAsync('docker', ['compose', 'down', '-v', '--rmi', 'local', '--remove-orphans'], { cwd: dir, timeout: 90_000 }); } catch {}
             try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
           }
         }
@@ -248,6 +251,15 @@ export class ProjectsService {
     // the DKIM keys + Postfix/Dovecot data dir + the MailServer row.
     for (const d of project.domains) {
       try { await this.mailServer.removeForDomain(d.id); } catch {}
+    }
+
+    // Drop the project's dedicated docker network now that every app/db
+    // in it is gone. Otherwise `docker network ls` keeps showing
+    // kryptalis_proj_<id> forever and we leak networks on every
+    // project delete.
+    if (isLocal) {
+      const networkName = `kryptalis_proj_${id.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
+      try { await execFileAsync('docker', ['network', 'rm', networkName], { timeout: 10_000 }); } catch {}
     }
 
     await this.prisma.project.delete({ where: { id } });

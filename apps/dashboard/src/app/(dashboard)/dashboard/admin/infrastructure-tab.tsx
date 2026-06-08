@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { toast } from 'sonner';
 import {
   Share2, HardDrive, Server, Check, AlertCircle, Loader2,
+  Trash2, Container, Package, HardDriveDownload, Network,
 } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -246,6 +247,176 @@ export function InfrastructureTab() {
           </Button>
         </DialogFooter>
       </Dialog>
+
+      <DockerReaperCard />
+    </div>
+  );
+}
+
+/**
+ * Docker Reaper card.
+ *
+ * Lists orphan docker artefacts the platform owned but whose DB row is
+ * gone (deleted apps that left images / volumes / networks behind, crashes
+ * mid-delete, etc.). Two-step UX: Scan = dry-run, Reap = apply. Reap
+ * is irreversible — explicit confirm + per-section counts shown first.
+ */
+function DockerReaperCard() {
+  const qc = useQueryClient();
+  const [scan, setScan] = useState<any | null>(null);
+  const [reaping, setReaping] = useState(false);
+  const [confirmReap, setConfirmReap] = useState(false);
+
+  const scanMutation = useMutation({
+    mutationFn: () => api.get<any>('/admin/reaper/scan'),
+    onSuccess: (r) => setScan(r),
+    onError: (e: any) => toast.error(e?.message || 'Scan failed'),
+  });
+
+  const reapMutation = useMutation({
+    mutationFn: () => api.post<any>('/admin/reaper/reap'),
+    onSuccess: (r) => {
+      setScan(r);
+      setReaping(false);
+      setConfirmReap(false);
+      const total = r.containers.length + r.images.length + r.volumes.length + r.networks.length;
+      toast.success(`Reaped ${total} artefact${total === 1 ? '' : 's'}`);
+      qc.invalidateQueries({ queryKey: ['servers'] });
+    },
+    onError: (e: any) => {
+      setReaping(false);
+      toast.error(e?.message || 'Reap failed');
+    },
+  });
+
+  const total = scan
+    ? scan.containers.length + scan.images.length + scan.volumes.length + scan.networks.length
+    : 0;
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Trash2 size={18} /> Docker Reaper
+            </CardTitle>
+            <CardDescription>
+              Garbage-collect docker artefacts left behind by deleted apps / databases / projects.
+              Identifies orphans by matching the platform's naming conventions against live DB rows.
+            </CardDescription>
+          </div>
+          <div className="flex gap-2 shrink-0">
+            <Button
+              variant="outline"
+              onClick={() => scanMutation.mutate()}
+              disabled={scanMutation.isPending}
+            >
+              {scanMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+              Scan
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!scan || total === 0 || reapMutation.isPending}
+              onClick={() => setConfirmReap(true)}
+            >
+              Reap{total > 0 ? ` (${total})` : ''}
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {!scan && (
+          <p className="text-sm text-muted-foreground">
+            Click <span className="font-medium">Scan</span> to inventory orphan artefacts. No changes are made until you click Reap.
+          </p>
+        )}
+        {scan && total === 0 && (
+          <div className="flex items-center gap-2 text-sm text-emerald-500">
+            <Check size={16} /> Nothing to clean — every docker artefact maps back to a live DB row.
+          </div>
+        )}
+        {scan && total > 0 && (
+          <div className="space-y-3">
+            <ReaperSection
+              icon={Container}
+              title="Containers"
+              items={scan.containers}
+              render={(c: any) => `${c.name} (${c.status})`}
+            />
+            <ReaperSection
+              icon={Package}
+              title="Images"
+              items={scan.images}
+              render={(i: any) => `${i.repo}:${i.tag}${i.size ? ` — ${i.size}` : ''}`}
+            />
+            <ReaperSection
+              icon={HardDriveDownload}
+              title="Volumes"
+              items={scan.volumes}
+              render={(v: any) => v.name}
+            />
+            <ReaperSection
+              icon={Network}
+              title="Networks"
+              items={scan.networks}
+              render={(n: any) => n.name}
+            />
+          </div>
+        )}
+      </CardContent>
+
+      <Dialog open={confirmReap} onClose={() => setConfirmReap(false)}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-destructive">
+            <AlertCircle size={18} /> Confirm Reap
+          </DialogTitle>
+          <DialogDescription>
+            About to permanently delete {total} orphan artefact{total === 1 ? '' : 's'}.
+            Volume data is unrecoverable. Container/network/image removals are also irreversible
+            but don't carry user data.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setConfirmReap(false)}>Cancel</Button>
+          <Button
+            variant="destructive"
+            disabled={reapMutation.isPending}
+            onClick={() => { setReaping(true); reapMutation.mutate(); }}
+          >
+            {reapMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+            Reap {total} artefacts
+          </Button>
+        </DialogFooter>
+      </Dialog>
+    </Card>
+  );
+}
+
+function ReaperSection({
+  icon: Icon, title, items, render,
+}: {
+  icon: typeof Container;
+  title: string;
+  items: any[];
+  render: (item: any) => string;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2 text-sm font-medium">
+        <Icon size={14} className="text-muted-foreground" />
+        {title}
+        <Badge variant="outline" className="text-[10px]">{items.length}</Badge>
+      </div>
+      <div className="rounded-md border border-border bg-muted/30 divide-y divide-border max-h-48 overflow-y-auto">
+        {items.map((item, i) => (
+          <div key={i} className="flex items-center justify-between px-3 py-1.5 text-xs">
+            <span className="font-mono truncate">{render(item)}</span>
+            <span className="text-muted-foreground shrink-0 ml-3">{item.reason}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

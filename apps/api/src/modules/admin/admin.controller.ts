@@ -13,6 +13,7 @@ import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { Role, UserStatus } from '@prisma/client';
 import { AdminService } from './admin.service';
+import { ReaperService } from './reaper.service';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -23,7 +24,21 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 @Roles('ADMIN', 'SUPERADMIN')
 @Controller('admin')
 export class AdminController {
-  constructor(private svc: AdminService) {}
+  constructor(private svc: AdminService, private reaper: ReaperService) {}
+
+  // ── docker reaper ─────────────────────────────────────────────────
+
+  @Get('reaper/scan')
+  @ApiOperation({ summary: 'Dry-run: list orphan docker artefacts (containers / images / volumes / networks)' })
+  reaperScan() {
+    return this.reaper.scan();
+  }
+
+  @Post('reaper/reap')
+  @ApiOperation({ summary: 'Delete every orphan flagged by /reaper/scan' })
+  reaperReap() {
+    return this.reaper.reap();
+  }
 
   @Get('overview')
   @ApiOperation({ summary: 'Platform overview (stats + recent signups)' })

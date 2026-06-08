@@ -403,7 +403,9 @@ export class MarketplaceService {
     const appDir = path.join(APPS_DIR, appSlug);
     if (fs.existsSync(appDir)) {
       try {
-        await execAsync('docker compose down -v', { cwd: appDir });
+        // --rmi local removes any custom-built image; pulled images
+        // (postgres, redis…) are shared and left alone.
+        await execAsync('docker compose down -v --rmi local --remove-orphans', { cwd: appDir });
       } catch {}
     }
   }
