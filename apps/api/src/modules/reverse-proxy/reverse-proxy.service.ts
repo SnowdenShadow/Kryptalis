@@ -303,9 +303,19 @@ ${email ? `  email ${email}\n` : ''}}
       const targetPortForHttpsHint = app.containerPort || hostPort;
       const upstreamHttps =
         HTTPS_UPSTREAM_APP_NAMES.has(app.name) || HTTPS_UPSTREAM_PORTS.has(targetPortForHttpsHint);
-      return upstreamHttps
-        ? `  reverse_proxy https://${target} {\n    transport http {\n      tls\n      tls_insecure_skip_verify\n    }\n  }`
-        : `  reverse_proxy ${target}`;
+      // Caddy resolves the upstream hostname ONCE at config load when no
+      // explicit DNS TTL is set, then caches the IP forever. Docker
+      // assigns new IPs on every container recreate (redeploy / restart),
+      // so the cached IP goes stale and Caddy hits ECONNREFUSED → 502.
+      //
+      // `dial_timeout` + `resolvers 127.0.0.11` (Docker's embedded DNS,
+      // available on every user-defined network) + a short response
+      // header timeout makes Caddy re-resolve fresh on every connect.
+      // Costs us ~1ms per request inside the same docker network —
+      // worth it to never serve a 502 after a redeploy again.
+      const transport = `    transport http {\n      dial_timeout 5s\n      response_header_timeout 30s\n      resolvers 127.0.0.11\n${upstreamHttps ? '      tls\n      tls_insecure_skip_verify\n' : ''}    }`;
+      const scheme = upstreamHttps ? 'https://' : '';
+      return `  reverse_proxy ${scheme}${target} {\n${transport}\n  }`;
     };
 
     for (const d of allDomains) {
