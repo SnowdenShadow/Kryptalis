@@ -590,6 +590,68 @@ networks:
   kryptalis-apps:
     external: true`,
   },
+  // PrestaShop ships its own auto-installer when PS_INSTALL_AUTO=1 and a
+  // DB is reachable. We bundle a dedicated MariaDB instance so the user
+  // just clicks Deploy and lands on a working back-office. Both services
+  // get unique container names + volumes via __INSTANCE_ID__ so two
+  // shops can coexist on the same host.
+  prestashop: {
+    compose: `services:
+  prestashop:
+    image: prestashop/prestashop:latest
+    container_name: kryptalis-prestashop-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    ports:
+      - "__HOST_PORT__:80"
+    env_file:
+      - .env
+    environment:
+      DB_SERVER: prestashop-db-__INSTANCE_ID__
+      DB_USER: prestashop
+      DB_PASSWD: prestashop
+      DB_NAME: prestashop
+      DB_PREFIX: ps_
+      PS_INSTALL_AUTO: \${PS_INSTALL_AUTO:-1}
+      PS_LANGUAGE: \${PS_LANGUAGE:-en}
+      PS_COUNTRY: \${PS_COUNTRY:-FR}
+      ADMIN_MAIL: \${ADMIN_MAIL:-admin@example.com}
+      ADMIN_PASSWD: \${ADMIN_PASSWD:-changeme-now-please}
+      PS_DOMAIN: \${PS_DOMAIN:-}
+      PS_ENABLE_SSL: 1
+      PS_FOLDER_ADMIN: admin
+      PS_FOLDER_INSTALL: install
+    volumes:
+      - prestashop_data___INSTANCE_ID__:/var/www/html
+    depends_on:
+      prestashop-db-__INSTANCE_ID__:
+        condition: service_healthy
+  prestashop-db-__INSTANCE_ID__:
+    image: mariadb:11
+    container_name: kryptalis-prestashop-db-__INSTANCE_ID__
+    restart: unless-stopped
+    networks:
+      - kryptalis-apps
+    environment:
+      MARIADB_DATABASE: prestashop
+      MARIADB_USER: prestashop
+      MARIADB_PASSWORD: prestashop
+      MARIADB_ROOT_PASSWORD: rootpassword-change-me
+    volumes:
+      - prestashop_db___INSTANCE_ID__:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+volumes:
+  prestashop_data___INSTANCE_ID__:
+  prestashop_db___INSTANCE_ID__:
+networks:
+  kryptalis-apps:
+    external: true`,
+  },
 };
 
 export const PORT_MAP: Record<string, number> = {
@@ -609,6 +671,7 @@ export const PORT_MAP: Record<string, number> = {
   vaultwarden: 8085,
   plausible: 8086,
   'code-server': 8087,
+  prestashop: 8090,
   supabase: 3003,
   appwrite: 8082,
   roundcube: 8083,

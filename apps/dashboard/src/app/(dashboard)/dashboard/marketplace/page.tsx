@@ -88,6 +88,7 @@ const ICON_MAP: Record<string, string> = {
   portainer: '🐳', grafana: '📊', 'uptime-kuma': '💓', n8n: '🤖',
   supabase: '⚡', wordpress: '✏️', ghost: '👻', minio: '🪣',
   nextcloud: '☁️', postgresql: '🐘', redis: '⚡', appwrite: '🔧',
+  prestashop: '🛒',
   // Email
   roundcube: '📮', snappymail: '✉️', rainloop: '☔', mailpit: '🧪',
   postal: '📬', mailu: '🛡️',

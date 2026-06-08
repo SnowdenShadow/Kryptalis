@@ -329,6 +329,28 @@
         { "key": "PASSWORD", "defaultValue": "", "required": true, "description": "Login password for the IDE" },
         { "key": "SUDO_PASSWORD", "defaultValue": "", "required": false, "description": "Optional sudo password inside the container" }
       ]
+    },
+    {
+      "id": "26",
+      "name": "PrestaShop",
+      "slug": "prestashop",
+      "description": "Open-source e-commerce platform — full store with bundled MariaDB, ready to install on first visit",
+      "category": "CMS",
+      "icon": "shopping-cart",
+      "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/prestashop.png",
+      "version": "8.1",
+      "dockerImage": "prestashop/prestashop:latest",
+      "ports": [8090],
+      "containerPort": 80,
+      "defaultPort": 8090,
+      "envVars": [
+        { "key": "PS_DOMAIN", "defaultValue": "", "required": false, "description": "Public hostname the shop will use (leave empty to auto-detect on first hit)" },
+        { "key": "PS_LANGUAGE", "defaultValue": "en", "required": false, "description": "Default store language (en, fr, es, de…)" },
+        { "key": "PS_COUNTRY", "defaultValue": "FR", "required": false, "description": "Default country ISO code" },
+        { "key": "ADMIN_MAIL", "defaultValue": "admin@example.com", "required": true, "description": "Back-office admin email (login)" },
+        { "key": "ADMIN_PASSWD", "defaultValue": "", "required": true, "description": "Back-office admin password (≥ 8 chars)" },
+        { "key": "PS_INSTALL_AUTO", "defaultValue": "1", "required": false, "description": "Run the installer automatically on first boot (set 0 to install via the web UI)" }
+      ]
     }
   ]
 }
