@@ -497,7 +497,7 @@ export function QuickDeployDialog({
 
   // ── Layout: Unified configuration screen ───────────────────────
   return (
-    <Dialog open={open} onClose={handleClose} className="max-w-2xl max-h-[90vh] overflow-y-auto">
+    <Dialog open={open} onClose={handleClose} className="max-w-3xl max-h-[90vh] overflow-y-auto">
       <DialogHeader>
         <DialogTitle className="flex items-center gap-2">
           <button
@@ -1054,16 +1054,20 @@ function EnvEditor({
         const required = requiredKeys.includes(row.key);
         const missing = required && !row.value.trim();
         return (
-          <div key={i} className="flex items-center gap-2">
+          // 5fr / 7fr grid keeps KEY narrow enough to read AT_A_GLANCE
+          // while giving VALUE the breathing room secrets actually need.
+          // The trailing icon column is a fixed 32px so the badge / remove
+          // button always sits flush at the same x — no jagged right edge.
+          <div key={i} className="grid grid-cols-[5fr_7fr_32px] items-center gap-2">
             <Input
-              className="font-mono text-xs"
+              className="font-mono text-sm"
               placeholder="KEY"
               value={row.key}
               onChange={(e) => update(i, { key: e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_') })}
             />
-            <div className="flex-1 relative">
+            <div className="relative">
               <Input
-                className={cn('font-mono text-xs', missing && 'border-destructive')}
+                className={cn('font-mono text-sm pr-9', missing && 'border-destructive')}
                 type={row.hidden ? 'password' : 'text'}
                 placeholder={required ? 'required' : 'value'}
                 value={row.value}
@@ -1073,19 +1077,21 @@ function EnvEditor({
                 type="button"
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                 onClick={() => update(i, { hidden: !row.hidden })}
+                title={row.hidden ? 'Show value' : 'Hide value'}
               >
-                {row.hidden ? <Eye size={12} /> : <EyeOff size={12} />}
+                {row.hidden ? <Eye size={14} /> : <EyeOff size={14} />}
               </button>
             </div>
             {required ? (
-              <Badge variant="outline" className="text-[9px]">req</Badge>
+              <Badge variant="outline" className="text-[10px] justify-self-center">req</Badge>
             ) : (
               <button
                 type="button"
                 onClick={() => remove(i)}
-                className="text-muted-foreground hover:text-destructive"
+                className="justify-self-center text-muted-foreground hover:text-destructive"
+                title="Remove"
               >
-                <X size={14} />
+                <X size={16} />
               </button>
             )}
           </div>
