@@ -20,6 +20,8 @@ import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { SystemConfigTab } from './system-config-tab';
+import { InfrastructureTab } from './infrastructure-tab';
+import { UpdatesTab } from './updates-tab';
 
 type Role = 'SUPERADMIN' | 'ADMIN' | 'USER' | 'VIEWER';
 type Status = 'ACTIVE' | 'SUSPENDED' | 'BANNED';
@@ -494,23 +496,11 @@ export default function AdminPage() {
       {/* ─────────────── System config ─────────────── */}
       {activeTab === 'system' && <SystemConfigTab />}
 
-      {/* ─────────────── Infrastructure / Updates placeholders ─────────────── */}
-      {(activeTab === 'infrastructure' || activeTab === 'updates') && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">
-              {activeTab === 'infrastructure' ? 'Infrastructure mode' : 'System updates'}
-            </CardTitle>
-            <CardDescription>
-              These controls are being migrated from /settings to /admin in the
-              ongoing config-consolidation work. Use the existing CLI in the
-              meantime: <span className="font-mono">/opt/kryptalis/update.sh</span>{' '}
-              for manual updates, and edit <span className="font-mono">.env</span>
-              {' '}for the LOCAL/MULTI deployment mode toggle.
-            </CardDescription>
-          </CardHeader>
-        </Card>
-      )}
+      {/* ─────────────── Infrastructure (LOCAL/MULTI) ─────────────── */}
+      {activeTab === 'infrastructure' && <InfrastructureTab />}
+
+      {/* ─────────────── System Updates ─────────────── */}
+      {activeTab === 'updates' && <UpdatesTab />}
 
       {/* ─────────────── Audit ─────────────── */}
       {activeTab === 'audit' && (
