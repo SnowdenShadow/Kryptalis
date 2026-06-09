@@ -29,9 +29,12 @@ ChallengeResponseAuthentication no
 KbdInteractiveAuthentication no
 UsePAM yes
 # Brute-force defense: allow 3 auth failures per connection before
-# tarpitting; max 10 simultaneous unauthenticated connections.
+# tarpitting. MaxStartups raised because Filezilla aggressively
+# parallelizes operations (it opens up to 10 connections at once,
+# which the default 10:30:60 cap would refuse with ECONNREFUSED).
+# 100 simultaneous unauthenticated still cuts off real botnets.
 MaxAuthTries 3
-MaxStartups 10:30:60
+MaxStartups 100:30:200
 # Drop idle sessions after 5 minutes so FileZilla forgetting to
 # disconnect doesn't keep slots tied up.
 ClientAliveInterval 60
@@ -41,7 +44,11 @@ ClientAliveCountMax 5
 Subsystem sftp internal-sftp -l VERBOSE
 
 # Chroot + sftp lock for every real account. The API matches against
-# the kryptalis group it creates every user under.
+# the sftpusers group it adds every user to. Per-user ChrootDirectory
+# overrides are dropped into /etc/ssh/sshd_config.d/<user>.conf by the
+# Kryptalis API so each user lands directly in their app sandbox
+# without any runtime mount --bind on Docker-managed volumes (which
+# can race the Docker daemon and corrupt the volume).
 Match Group sftpusers
   ChrootDirectory %h
   ForceCommand internal-sftp -l VERBOSE
@@ -50,3 +57,8 @@ Match Group sftpusers
   AllowAgentForwarding no
   PermitTunnel no
   PermitTTY no
+
+# Per-user includes — the API drops one .conf file per account here so
+# each can have its own ChrootDirectory pointing straight at the right
+# host path. Loaded AFTER the Match block above; later directives win.
+Include /etc/ssh/sshd_config.d/*.conf

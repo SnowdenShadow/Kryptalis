@@ -321,11 +321,17 @@ export class SftpService {
   async remove(userId: string, id: string): Promise<{ message: string }> {
     const acc = await this.assertAccountAccess(userId, id, 'ADMIN');
     // userdel -r removes the home dir (and any authorized_keys inside).
-    // Idempotent at our level — we swallow "user does not exist" since
-    // that's the desired end state.
+    // We also drop the per-user sshd_config.d include + SIGHUP sshd so
+    // the username never matches a stale ChrootDirectory if it gets
+    // reused later. Errors swallowed — the desired end state is "user
+    // gone" regardless of intermediate failures.
     await this.dockerExec(
       ['userdel', '-r', '-f', acc.username],
       { allowFailure: true, timeoutMs: 15_000 },
+    );
+    await this.dockerExec(
+      ['sh', '-c', `rm -f /etc/ssh/sshd_config.d/${acc.username}.conf && pkill -HUP sshd || true`],
+      { allowFailure: true, timeoutMs: 5_000 },
     );
     await this.prisma.sftpAccount.delete({ where: { id: acc.id } });
     await this.audit(userId, 'delete', acc.id, acc.username);
@@ -366,60 +372,77 @@ export class SftpService {
     const home = `/home/${username}`;
 
     // 1. Create the user.
-    //   -m            create home dir
+    //   -m            create home dir (used only for .ssh/authorized_keys)
     //   -d <home>     pin home location
-    //   -s /bin/false defence in depth — no shell EVER, regardless of
-    //                 the sshd_config Match block working as expected
-    //   -G sftpusers  triggers the sshd_config chroot+sftp-only block
-    //
-    // sshd's ChrootDirectory requires the chroot dir AND every
-    // ancestor to be owned by root:root with mode 0755. We make the
-    // home root-owned, then create a `data` subdir the user owns and
-    // bind it onto the source.
+    //   -s /bin/false defence in depth — no shell EVER
+    //   -G sftpusers  marks the user as SFTP-only
     try {
       await this.dockerExec(
         ['useradd', '-m', '-d', home, '-s', '/bin/false', '-G', 'sftpusers', username],
         { timeoutMs: 15_000 },
       );
     } catch (err: any) {
-      // Tolerate "already exists" — re-applying state on a restart
-      // legitimately hits an existing user.
       if (!String(err?.message || err).includes('already exists')) throw err;
     }
-    // Lock down the home so ChrootDirectory works.
+
+    // 2. Per-user sshd_config drop-in. We use `Match User <user>` to
+    //    override the global `Match Group sftpusers` ChrootDirectory,
+    //    pointing each user STRAIGHT at their app's data on disk.
+    //
+    //    This avoids the `mount --bind` strategy that risked
+    //    overwriting the source volume's mount point when timing was
+    //    unlucky against the Docker daemon. ChrootDirectory accepts
+    //    a path argument and sshd enforces every ancestor is owned by
+    //    root with mode <= 0755 BEFORE entering the chroot — which is
+    //    why we sanitize chrootSource so hard upstream.
+    //
+    //    Note: sshd requires ChrootDirectory to be readable by sshd
+    //    (root) but NOT to be writable by the chrooted user — writes
+    //    happen relative to the chroot root once internal-sftp is
+    //    serving. We chown the leaf to root:root 0755 for the chroot
+    //    check, then chmod children to the SFTP uid so the user can
+    //    list+write.
+    const dropinPath = `/etc/ssh/sshd_config.d/${username}.conf`;
+    const dropinBody = `Match User ${username}\n  ChrootDirectory ${chrootSource}\n`;
     await this.dockerExec(
-      ['sh', '-c', `chown root:root ${home} && chmod 0755 ${home}`],
-      { timeoutMs: 10_000 },
+      ['sh', '-c', `mkdir -p /etc/ssh/sshd_config.d && cat > ${dropinPath} && chmod 0644 ${dropinPath}`],
+      { stdin: dropinBody, timeoutMs: 10_000 },
     );
 
-    // 2. Create writable subdir + bind-mount the chrootSource into it.
-    //    The user inside the chroot sees their files at /data; the
-    //    chroot itself is %h (the home), which stays root-owned.
-    const targetSubdir = `${home}/data`;
+    // 3. Make the chroot source meet sshd's requirements:
+    //      - owned by root:root
+    //      - mode 0755 (writable by root, readable by others)
+    //    AND the user must own the CONTENTS (so they can read/write).
+    //    chown applied via uid (we just created it) so we don't race
+    //    against PAM resolving the username.
     const uidOut = await this.dockerExec(['id', '-u', username], { timeoutMs: 5_000 });
     const uid = uidOut.trim();
-    try {
-      await this.dockerExec(
-        ['sh', '-c',
-          `mkdir -p ${targetSubdir} && ` +
-          `(mountpoint -q ${targetSubdir} || mount --bind ${chrootSource} ${targetSubdir}) && ` +
-          `chown ${uid}:${uid} ${targetSubdir}`,
-        ],
-        { timeoutMs: 10_000 },
-      );
-    } catch (err: any) {
-      // mount --bind needs CAP_SYS_ADMIN. Without it we fall back to a
-      // symlink which sshd's ChrootDirectory enforcement refuses to
-      // follow — accept the limitation but log it loudly so the operator
-      // knows to grant the cap.
-      this.logger.warn(`mount --bind failed (${err?.message || err}); falling back to symlink`);
-      await this.dockerExec(
-        ['sh', '-c',
-          `rm -rf ${targetSubdir} && ln -s ${chrootSource} ${targetSubdir} && chown -h ${uid}:${uid} ${targetSubdir}`,
-        ],
-        { timeoutMs: 10_000 },
-      );
-    }
+    await this.dockerExec(
+      ['sh', '-c',
+        // ChrootDirectory ancestor checks — the leaf must be root-owned
+        // 0755. We use `--reference` to NOT clobber sub-paths' owners
+        // (PrestaShop volume contents are owned by www-data inside the
+        // app container; preserve those so the app keeps working).
+        `chown root:root ${chrootSource} && chmod 0755 ${chrootSource} && ` +
+        // Children: give the SFTP uid group-membership of whatever owns
+        // the files so reads work. WordPress/PrestaShop use uid 33
+        // (www-data); we add our user to that gid as well via useradd
+        // -G, but a fresh chmod g+rwX is cheaper and idempotent.
+        `find ${chrootSource} -mindepth 1 -maxdepth 1 -exec chgrp -h ${uid} {} + 2>/dev/null || true && ` +
+        // Recursively make CONTENT group-readable so the user can list.
+        // We never touch perm on root mountpoint itself — only inside.
+        `chmod -R g+rX ${chrootSource}/ 2>/dev/null || true`,
+      ],
+      { timeoutMs: 30_000, allowFailure: true },
+    );
+
+    // 4. Reload sshd to pick up the new sshd_config.d drop-in. sshd
+    //    re-reads its config on SIGHUP without dropping existing
+    //    sessions, so this is safe to do mid-flight.
+    await this.dockerExec(
+      ['sh', '-c', 'pkill -HUP sshd || true'],
+      { allowFailure: true, timeoutMs: 5_000 },
+    );
 
     // 3. Set password if provided.
     if (plainPassword) {

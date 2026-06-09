@@ -177,16 +177,22 @@ services:
     #   - no-new-privileges blocks SUID escalation inside the container
     #     even if a user manages to write a binary to a writable mount.
     #   - The PID limit caps fork bombs from a compromised account.
+    # Minimal capability set. No SYS_ADMIN — we used to need it for
+    # mount --bind to graft Docker volumes into per-user chroots, but
+    # that approach raced the Docker daemon and could wipe app
+    # volumes. The new architecture uses per-user ChrootDirectory
+    # drop-ins in /etc/ssh/sshd_config.d/, which need none of those
+    # privileges; sshd handles the chroot itself with just SYS_CHROOT.
     cap_drop:
       - ALL
     cap_add:
-      - CHOWN
-      - DAC_OVERRIDE
-      - FOWNER
-      - FSETID
-      - SETUID
-      - SETGID
-      - SYS_ADMIN
+      - CHOWN          # chown chroot leaf to root (sshd requirement)
+      - DAC_OVERRIDE   # PAM writes /etc/shadow as non-root user
+      - FOWNER         # chmod on files we don't own
+      - FSETID         # preserve setuid bits on writes
+      - SETUID         # sshd drops privs to user via setuid
+      - SETGID         # sshd drops privs to group via setgid
+      - SYS_CHROOT     # ChrootDirectory + sshd privsep chroot
     security_opt:
       - no-new-privileges:true
       - apparmor:unconfined

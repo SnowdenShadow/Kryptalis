@@ -28,6 +28,13 @@ chmod 0644 /etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
 # `groupadd -f` is idempotent: no error if the group already exists.
 groupadd -f -g 65530 sftpusers
 
+# ── 2b. per-user sshd_config drop-in directory ─────────────────────
+# Kryptalis API drops one .conf file per account here at runtime.
+# sshd's `Include /etc/ssh/sshd_config.d/*.conf` only succeeds if the
+# directory exists at sshd startup, so make sure it does.
+mkdir -p /etc/ssh/sshd_config.d
+chmod 0755 /etc/ssh/sshd_config.d
+
 # ── 3. /run/sshd ───────────────────────────────────────────────────
 # Alpine's sshd needs a privsep dir to exist.
 mkdir -p /run/sshd
