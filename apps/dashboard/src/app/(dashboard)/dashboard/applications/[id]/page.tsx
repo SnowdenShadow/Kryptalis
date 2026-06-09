@@ -274,7 +274,16 @@ function EnvRow({
   titleHide: string;
   titleShow: string;
 }) {
-  const looksSecret = /token|secret|key|password|pwd|api/i.test(row.key);
+  // Match only patterns that genuinely look like secrets. NEXT_PUBLIC_*
+  // is exposed client-side by definition → never a secret. URL / NAME /
+  // GTM_ID / HOST etc. aren't either. We DO mask: TOKEN, SECRET,
+  // PASSWORD, PWD, _KEY (so OPENAI_API_KEY still masks but USER_NAME
+  // doesn't). The leading underscore on _KEY avoids matching MONKEY or
+  // similar substrings.
+  const upper = row.key.toUpperCase();
+  const looksSecret =
+    !upper.startsWith('NEXT_PUBLIC_') &&
+    /(^|_)(SECRET|TOKEN|PASSWORD|PWD|PRIVATE_KEY)(_|$)|_KEY$/.test(upper);
   const [show, setShow] = useState(!looksSecret);
   useEffect(() => { if (looksSecret && row.value) setShow(false); }, [looksSecret, row.key]);
   return (
