@@ -285,15 +285,16 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
 
     if (patch.permission !== undefined || patch.disabled !== undefined) {
       // Permission and disabled state both live in the dropin; rewrite
-      // it once. Chroot source doesn't change so we re-resolve only
-      // when the app's deploy mode changes (separate code path).
-      const chrootSource = await this.resolveChrootSourceForAccount(acc);
-      await this.writeUserDropin(acc.username, chrootSource, next.permission, next.disabled);
-      // ACL flips between rwx and rx when the permission tier changes.
+      // it once. ChrootDirectory is always /home/<user> — never
+      // changes — so the dropin only needs username + permission +
+      // disabled.
+      const chrootLeaf = `/home/${acc.username}`;
+      await this.writeUserDropin(acc.username, chrootLeaf, next.permission, next.disabled);
+      // ACL flips between rwx and rx when permission changes.
       // Skipping this on a READ→WRITE upgrade would leave the user
       // unable to write despite the dropin no longer carrying `-R`.
       if (patch.permission !== undefined) {
-        await this.prepareChrootLeaf(acc.username, chrootSource, next.permission);
+        await this.applyAclToBindTarget(acc.username, next.permission);
       }
       await this.reloadSshd();
     }
@@ -472,16 +473,25 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   /**
    * Project the DB row into the SFTP container. Steps:
    *
-   *   1. Create the unix user (idempotent — re-running on an existing
-   *      user is tolerated).
-   *   2. Write the per-user sshd_config drop-in (chroot, sftp-lock,
-   *      RO flag for READ permission, blanket disable when locked).
-   *   3. Tighten ownership/modes on the chroot leaf to satisfy sshd
-   *      (ChrootDirectory MUST be root-owned mode 0755 or sshd refuses
-   *      with "bad ownership or modes for chroot directory").
-   *   4. Set the password (chpasswd over stdin).
-   *   5. Write authorized_keys.
-   *   6. SIGHUP sshd so the new drop-in is loaded mid-flight.
+   *   1. Create the unix user — home is /home/<user>, owned root:root
+   *      mode 0755 (sshd's `safely_chroot` requires the chroot leaf
+   *      and every ancestor to be root-owned with no group/other
+   *      write bit).
+   *   2. Bind-mount the app's actual data dir under /home/<user>/app
+   *      — this is where the user can read/write. sshd doesn't inspect
+   *      the bind target (it only walks ancestors of ChrootDirectory),
+   *      so we're free to layer POSIX ACLs on /home/<user>/app without
+   *      tripping sshd. We can't put the ACL on the chroot leaf
+   *      directly because the kernel surfaces the ACL mask in
+   *      stat()'s group bits, and sshd reads that as a write bit and
+   *      refuses.
+   *   3. Write the per-user sshd_config drop-in (chroot=/home/<user>,
+   *      sftp-lock, RO flag for READ permission, blanket disable when
+   *      locked).
+   *   4. ACL on the bind target so the user can actually write.
+   *   5. Set the password (chpasswd over stdin).
+   *   6. Write authorized_keys.
+   *   7. SIGHUP sshd so the new dropin is loaded mid-flight.
    */
   private async applyAccountToContainer(opts: {
     username: string;
@@ -493,22 +503,14 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   }): Promise<void> {
     const { username, plainPassword, publicKeys, chrootSource, permission, disabled } = opts;
 
-    // Final guard before shelling out. Every caller already validates,
-    // but we never want the wrong string to end up in a Match block:
-    // the chroot leaf would be wrong, sshd would refuse, and the
-    // user's session would tarpit through every failure attempt.
     this.assertUsernameValid(username);
     this.assertChrootPathSafe(chrootSource);
 
     const home = `/home/${username}`;
+    const chrootLeaf = home;
 
-    // 1. Create the user.
-    //    -m            create home dir (used only for .ssh/authorized_keys)
-    //    -d <home>     pin home location
-    //    -s /bin/false defence in depth — no shell EVER
-    //    -G sftpusers  marks the user as SFTP-only (informational —
-    //                  sshd_config no longer matches on the group; the
-    //                  per-user dropin owns the policy)
+    // 1. Create the user. Home stays /home/<user>; we'll re-chown/chmod
+    //    it root:root 0755 below so sshd accepts it as a chroot leaf.
     try {
       await this.dockerExec(
         ['useradd', '-m', '-d', home, '-s', '/bin/false', '-G', 'sftpusers', username],
@@ -518,36 +520,48 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       if (!String(err?.message || err).includes('already exists')) throw err;
     }
 
-    // 2. Per-user sshd_config drop-in.
-    await this.writeUserDropin(username, chrootSource, permission, disabled);
+    // 2. Sterile chroot leaf + bind-mount the writable app data under
+    //    /home/<user>/app. Done in one shell call so a failure rolls
+    //    everything back cleanly via the `set -e`. The bind mount
+    //    points FROM chrootSource INTO our container's /home — Docker
+    //    daemon doesn't manage /home in this container, so there's no
+    //    daemon race like the old design had against Docker-managed
+    //    volume paths.
+    await this.prepareChrootLeafAndBind(username, chrootSource);
 
-    // 3. Tighten chroot leaf ownership + grant per-user ACL.
-    await this.prepareChrootLeaf(username, chrootSource, permission);
+    // 3. Per-user sshd_config drop-in.
+    await this.writeUserDropin(username, chrootLeaf, permission, disabled);
 
-    // 4. Password.
+    // 4. ACL on the bind target (/home/<user>/app), not the chroot
+    //    leaf — see prepareChrootLeafAndBind for the why.
+    await this.applyAclToBindTarget(username, permission);
+
+    // 5. Password.
     if (plainPassword) await this.execChpasswd(username, plainPassword);
 
-    // 5. authorized_keys.
+    // 6. authorized_keys.
     await this.writeAuthorizedKeys(username, publicKeys);
 
-    // 6. Reload sshd so the new dropin is picked up. SIGHUP re-reads
-    //    config without dropping existing sessions.
+    // 7. Reload sshd so the new dropin is picked up.
     await this.reloadSshd();
   }
 
   private async removeAccountFromContainer(username: string): Promise<void> {
     this.assertUsernameValid(username);
-    // userdel -r removes the home dir; we also drop the per-user
-    // dropin and SIGHUP sshd so any reused username never matches a
-    // stale ChrootDirectory. Errors swallowed — desired end-state is
-    // "user gone" regardless of intermediate failures.
+    // Order matters: umount BEFORE userdel -r. Otherwise `rm -rf` on
+    // the home dir would recurse INTO the bind mount and try to
+    // delete the actual app data on the volume. `|| true` because
+    // the mount might already be gone (manual cleanup, container
+    // recreate without resync, etc.) and we still want userdel to
+    // run.
+    await this.dockerExec(
+      ['sh', '-c', `umount /home/${username}/app 2>/dev/null || true`],
+      { allowFailure: true, timeoutMs: 5_000 },
+    );
     await this.dockerExec(
       ['userdel', '-r', '-f', username],
       { allowFailure: true, timeoutMs: 15_000 },
     );
-    // rm by absolute path (no glob, no shell expansion needed) so we
-    // don't drag in `sh -c`. The path is fixed and the username is
-    // already regex-validated.
     await this.dockerExec(
       ['rm', '-f', `/etc/ssh/sshd_config.d/${username}.conf`],
       { allowFailure: true, timeoutMs: 5_000 },
@@ -609,70 +623,88 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Prepare the chroot leaf so:
+   * Two-layer chroot setup:
    *
-   *   1. sshd accepts it. sshd's `safely_chroot()` walks every ancestor
-   *      of ChrootDirectory and requires each to be owned by root with
-   *      no group/world write bit. If anything else fails this check
-   *      the session dies with "bad ownership or modes for chroot
-   *      directory".
+   *   /home/<user>          root:root 0755   — the sshd chroot LEAF
+   *   /home/<user>/app      bind mount       — the writable app data
    *
-   *   2. The SFTP user can still write inside the chroot root. sshd's
-   *      ancestor check is purely uid+mode based — it does NOT inspect
-   *      POSIX ACLs. So we layer a per-user ACL on top of the
-   *      root:root 0755 base: sshd sees the safe mode, the kernel
-   *      honours the ACL on actual write()/unlink()/mkdir() syscalls.
+   * Why split:
+   *   sshd's `safely_chroot()` walks every ancestor of
+   *   ChrootDirectory and requires each to be owned by root with no
+   *   group/other write bit. That check inspects st_mode, and the
+   *   Linux kernel surfaces the POSIX ACL mask in the group bits of
+   *   st_mode — so you cannot grant the user write access to the
+   *   chroot leaf itself via ACL without sshd rejecting it. The bind
+   *   mount sidesteps that: sshd only inspects the leaf and its
+   *   ancestors, never descends. /home/<user>/app can have any
+   *   ownership/ACL we want.
    *
-   *      `setfacl -m u:<user>:rwx <leaf>`     — direct grant on the
-   *                                              chroot root so the
-   *                                              user can mkdir/touch
-   *                                              there.
-   *      `setfacl -d -m u:<user>:rwx <leaf>`  — default ACL so files
-   *                                              the user creates
-   *                                              inherit the perms
-   *                                              recursively.
-   *      `setfacl -R -m u:<user>:rwX <leaf>/` — apply to every existing
-   *                                              child too (covers
-   *                                              files owned by
-   *                                              www-data inside
-   *                                              marketplace apps).
-   *      `X` (capital) = execute only on dirs, never on plain files
-   *      — sshd's chrooted user shouldn't gain exec on text content.
+   * Why mount per-user (instead of one shared mount):
+   *   The bind target lives INSIDE the chroot — each user needs their
+   *   own. Mount is idempotent — `mountpoint -q` skip if already
+   *   mounted (covers resync after container restart).
    *
-   *   3. READ-only accounts collapse `rwx` → `rx` / `rwX` → `rX`. The
-   *      sshd-side `internal-sftp -R` still enforces RO at the
-   *      protocol layer (server refuses write ops outright); the ACL
-   *      tightening is just defence in depth.
+   * Why this isn't the old SYS_ADMIN footgun:
+   *   The earlier design tried to bind-mount onto paths managed by
+   *   the host Docker daemon (Docker volume `_data` dirs), which
+   *   raced the daemon and could wipe volumes. Here we mount FROM the
+   *   Docker-managed path INTO our own /home tree — Docker doesn't
+   *   touch /home in this container, so no race.
    */
-  private async prepareChrootLeaf(
+  private async prepareChrootLeafAndBind(
     username: string,
     chrootSource: string,
-    permission: SftpPermission,
   ): Promise<void> {
     this.assertUsernameValid(username);
     this.assertChrootPathSafe(chrootSource);
+    const home = `/home/${username}`;
+    const bindTarget = `${home}/app`;
+    await this.dockerExec(
+      ['sh', '-c',
+        // Sterile chroot leaf.
+        `chown root:root ${home} && chmod 0755 ${home} && ` +
+        `mkdir -p ${bindTarget} && ` +
+        // Idempotent bind mount. If something is mounted at bindTarget
+        // already (e.g. resync after container restart and a previous
+        // session left it mounted), skip — `mountpoint -q` short-
+        // circuits cleanly.
+        `if ! mountpoint -q ${bindTarget}; then mount --bind ${chrootSource} ${bindTarget}; fi`,
+      ],
+      { timeoutMs: 15_000 },
+    );
+  }
+
+  /**
+   * Apply the per-user ACL to /home/<user>/app (the bind target). The
+   * ACL grants rwx (or rx for READ) directly on the dir + default
+   * ACL so newly-created files/dirs inherit. Capital `X` = execute
+   * only on dirs, never on plain files — chrooted SFTP users
+   * shouldn't gain exec on uploaded content. READ accounts get
+   * `-R rX` as defence in depth on top of `internal-sftp -R`.
+   *
+   * Recursive ACL on a large codebase (~80k files for PrestaShop)
+   * can take seconds; 60s timeout + allowFailure keeps account
+   * creation alive if a partial application happens — next update
+   * call will repair the stragglers.
+   */
+  private async applyAclToBindTarget(
+    username: string,
+    permission: SftpPermission,
+  ): Promise<void> {
+    this.assertUsernameValid(username);
     const uidOut = await this.dockerExec(['id', '-u', username], { timeoutMs: 5_000 });
     const uid = uidOut.trim();
     if (!/^\d+$/.test(uid)) {
       throw new BadRequestException(`Could not resolve uid for ${username}`);
     }
+    const bindTarget = `/home/${username}/app`;
     const aclLeaf = permission === 'READ' ? `u:${uid}:rx` : `u:${uid}:rwx`;
     const aclTree = permission === 'READ' ? `u:${uid}:rX` : `u:${uid}:rwX`;
     await this.dockerExec(
       ['sh', '-c',
-        // sshd ancestor check.
-        `chown root:root ${chrootSource} && chmod 0755 ${chrootSource} && ` +
-        // Per-user ACL on the chroot root + default ACL so new children
-        // inherit. `setfacl -d` writes the default to the dir itself.
-        `setfacl -m ${aclLeaf} ${chrootSource} && ` +
-        `setfacl -d -m ${aclLeaf} ${chrootSource} && ` +
-        // Apply to existing tree. Recursive ACL on a huge codebase can
-        // take seconds (PrestaShop is ~80k files); we allow up to 60s
-        // here and tolerate failure so a partial application doesn't
-        // brick account creation. Worst case the user can read the
-        // leaf and most children but a few stragglers stay restricted
-        // — the next ACL run on update/rotate will repair them.
-        `setfacl -R -m ${aclTree} ${chrootSource}/ 2>/dev/null || true`,
+        `setfacl -m ${aclLeaf} ${bindTarget} && ` +
+        `setfacl -d -m ${aclLeaf} ${bindTarget} && ` +
+        `setfacl -R -m ${aclTree} ${bindTarget}/ 2>/dev/null || true`,
       ],
       { timeoutMs: 60_000, allowFailure: true },
     );

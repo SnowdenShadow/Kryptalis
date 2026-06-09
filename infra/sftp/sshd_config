@@ -31,7 +31,13 @@ PubkeyAuthentication yes
 PermitEmptyPasswords no
 ChallengeResponseAuthentication no
 KbdInteractiveAuthentication no
-UsePAM yes
+# UsePAM intentionally omitted. Alpine's stock `openssh` binary is
+# built without PAM support, so the directive prints
+# "Unsupported option UsePAM" on every config reload. We don't need
+# PAM either way — sshd reads /etc/shadow directly via crypt(3), and
+# our chpasswd flow writes SHA-512 crypt entries there. PAM would
+# only matter for session-level integrations we don't have
+# (pam_limits, pam_mkhomedir, etc.).
 # Brute-force defense: allow 3 auth failures per connection before
 # tarpitting. MaxStartups raised because Filezilla aggressively
 # parallelizes operations (it opens up to 10 connections at once,

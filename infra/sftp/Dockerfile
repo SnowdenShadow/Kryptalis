@@ -18,19 +18,22 @@
 FROM alpine:3.20
 
 # - openssh: the daemon itself, plus sftp-server + ssh-keygen.
-# - openssh-server-pam: PAM session module (required so chpasswd-driven
-#   /etc/shadow updates authenticate sessions correctly).
+#   We don't install openssh-server-pam: the Alpine `openssh` binary
+#   isn't built with PAM support, and we don't need it — sshd reads
+#   /etc/shadow directly via crypt(3), and chpasswd writes SHA-512
+#   crypt entries there.
 # - shadow: GNU `useradd`/`userdel`/`chpasswd` (Alpine's busybox
 #   `adduser` lacks features we depend on).
-# - acl: POSIX ACLs. We need them because sshd refuses to start a
-#   chrooted session unless ChrootDirectory is root-owned with mode
-#   <= 0755 — but at the same time, the SFTP user has to be able to
-#   write inside the chroot root. ACLs give per-user rwx on top of
-#   the root:root 0755 base, which sshd ignores (it only checks
-#   owner/mode) but the kernel honors. Default ACLs make new files
-#   inherit the permission so users can keep creating things.
+# - acl: POSIX ACLs (setfacl/getfacl). The chroot leaf at /home/<user>
+#   must stay root:root 0755 (sshd hard requirement — it walks
+#   ancestors and refuses anything else), so we bind-mount the
+#   writable app data at /home/<user>/app and layer the per-user ACL
+#   on the bind target. sshd never inspects the bind target so the
+#   ACL doesn't trip its safety check.
+# - util-linux: provides `mountpoint`, used to make the per-user
+#   bind mount idempotent across container restarts.
 # - bash: nicer interactive debug shell for ops.
-RUN apk add --no-cache openssh openssh-server-pam shadow acl bash \
+RUN apk add --no-cache openssh shadow acl util-linux bash \
  && rm -rf /var/cache/apk/*
 
 # sshd_config — chroot every non-root account into /home/<user>, force

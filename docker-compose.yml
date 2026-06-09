@@ -193,6 +193,27 @@ services:
       - SETUID         # sshd drops privs to user via setuid
       - SETGID         # sshd drops privs to group via setgid
       - SYS_CHROOT     # ChrootDirectory + sshd privsep chroot
+      - SYS_ADMIN      # mount --bind: graft each user's app data dir
+                       # under /home/<user>/app inside their chroot.
+                       # Required because:
+                       #   - ChrootDirectory has a hard sshd requirement
+                       #     of root:root mode 0755 (no group/other write)
+                       #     on the leaf.
+                       #   - POSIX ACLs on the leaf don't work: the
+                       #     kernel reports the ACL mask in stat()'s
+                       #     group bits, which sshd reads as
+                       #     "group-writable" and refuses.
+                       #   - So the chroot leaf is a sterile /home/<user>
+                       #     (sshd-compliant) and the writable app data
+                       #     lives at /home/<user>/app, bind-mounted from
+                       #     the actual source (Docker volume or host
+                       #     appDir). ACLs go on the bind target — sshd
+                       #     never inspects it, only the kernel does.
+                       # Mount sources are server-computed from validated
+                       # DB rows (regex-checked, no user input reaches
+                       # the mount syscall). Combined with
+                       # no-new-privileges, this caps the cap to mount
+                       # operations on this container's own filesystem.
     security_opt:
       - no-new-privileges:true
       - apparmor:unconfined
