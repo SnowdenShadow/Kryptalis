@@ -402,8 +402,22 @@ export class SftpService {
     //    serving. We chown the leaf to root:root 0755 for the chroot
     //    check, then chmod children to the SFTP uid so the user can
     //    list+write.
+    // The dropin contains EVERY per-user sshd setting: chroot path,
+    // sftp-lock, and forwarding bans. We removed the global Match
+    // Group block in sshd_config because it shadowed these per-user
+    // includes when sshd hit the group match first ("bad ownership
+    // or modes for chroot directory" because it tried to chroot at
+    // /home/<user>, which we never prepared).
     const dropinPath = `/etc/ssh/sshd_config.d/${username}.conf`;
-    const dropinBody = `Match User ${username}\n  ChrootDirectory ${chrootSource}\n`;
+    const dropinBody =
+      `Match User ${username}\n` +
+      `  ChrootDirectory ${chrootSource}\n` +
+      `  ForceCommand internal-sftp -l VERBOSE\n` +
+      `  AllowTcpForwarding no\n` +
+      `  X11Forwarding no\n` +
+      `  AllowAgentForwarding no\n` +
+      `  PermitTunnel no\n` +
+      `  PermitTTY no\n`;
     await this.dockerExec(
       ['sh', '-c', `mkdir -p /etc/ssh/sshd_config.d && cat > ${dropinPath} && chmod 0644 ${dropinPath}`],
       { stdin: dropinBody, timeoutMs: 10_000 },

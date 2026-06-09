@@ -43,22 +43,15 @@ ClientAliveCountMax 5
 # Force SFTP-only for everyone except root (which is locked anyway).
 Subsystem sftp internal-sftp -l VERBOSE
 
-# Chroot + sftp lock for every real account. The API matches against
-# the sftpusers group it adds every user to. Per-user ChrootDirectory
-# overrides are dropped into /etc/ssh/sshd_config.d/<user>.conf by the
-# Kryptalis API so each user lands directly in their app sandbox
-# without any runtime mount --bind on Docker-managed volumes (which
-# can race the Docker daemon and corrupt the volume).
-Match Group sftpusers
-  ChrootDirectory %h
-  ForceCommand internal-sftp -l VERBOSE
-  AllowTcpForwarding no
-  X11Forwarding no
-  AllowAgentForwarding no
-  PermitTunnel no
-  PermitTTY no
-
-# Per-user includes — the API drops one .conf file per account here so
-# each can have its own ChrootDirectory pointing straight at the right
-# host path. Loaded AFTER the Match block above; later directives win.
+# Per-user sshd_config includes. The Kryptalis API drops one .conf
+# file per account here with BOTH the chroot path AND the sftp/lock
+# directives. We DO NOT add a Match Group block here — sshd evaluates
+# Match in order and stops at the first match, so a global Match
+# Group would silently shadow every per-user Include below it (the
+# user would get the group's ChrootDirectory %h pointing at an
+# unprepared /home/<user> dir, triggering "bad ownership or modes
+# for chroot directory" auth failures).
+#
+# Load order matters: Include must come BEFORE any catch-all Match
+# block or sshd ignores the per-user files.
 Include /etc/ssh/sshd_config.d/*.conf
