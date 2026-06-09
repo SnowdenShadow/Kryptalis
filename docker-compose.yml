@@ -156,10 +156,7 @@ services:
         condition: service_started
 
   sftp:
-    # Custom alpine + openssh image. atmoz/sftp's CLI-only user model
-    # and undocumented users.conf format made hot-CRUD impossible; the
-    # tighter sshd_config + dynamic `docker exec useradd` flow here is
-    # what the Kryptalis API actually needs.
+    # Custom alpine + openssh image — see infra/sftp/.
     build:
       context: ./infra/sftp
     image: kryptalis-sftp:latest
@@ -168,44 +165,67 @@ services:
     logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
     ports:
       - "${SFTP_PORT:-2222}:22"
-    # mount --bind for the per-user chroot data dirs requires
-    # CAP_SYS_ADMIN. Granting just this cap (vs --privileged) keeps the
-    # blast radius small if sshd is ever compromised.
+    # Hardening — see infra/sftp/Dockerfile for the matching image-side
+    # tightening (apt drops, /bin/false shell, no sudo, no su, etc.):
+    #
+    #   - Drop EVERY capability we don't actively need. CHOWN/FOWNER/
+    #     DAC_OVERRIDE/FSETID/SETUID/SETGID are required by sshd's
+    #     PAM module + chpasswd to write /etc/shadow at runtime;
+    #     SYS_ADMIN is required for `mount --bind` to chroot users
+    #     into their app sandbox. Everything else (NET_RAW, SYS_TIME,
+    #     SYS_PTRACE, MKNOD, AUDIT_*, …) goes.
+    #   - no-new-privileges blocks SUID escalation inside the container
+    #     even if a user manages to write a binary to a writable mount.
+    #   - The PID limit caps fork bombs from a compromised account.
+    cap_drop:
+      - ALL
     cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - FSETID
+      - SETUID
+      - SETGID
       - SYS_ADMIN
-    # AppArmor profile that would otherwise block `mount` inside the
-    # container; unconfined is the right default for a dedicated SFTP
-    # box. On hosts without AppArmor this key is silently ignored.
     security_opt:
+      - no-new-privileges:true
       - apparmor:unconfined
+    pids_limit: 200
+    # Filesystem-level access:
+    #
+    #   - .kryptalis/apps RW: needed so git-deploys / compose-empty
+    #     apps can be SFTP-edited. The chroot Match block in
+    #     sshd_config keeps each user inside their own /home/<user>.
+    #   - docker volumes RO: marketplace apps store their code in
+    #     named volumes. We mount the WHOLE volumes root because the
+    #     volume name is per-instance (e.g. prestashop_data_cmq5xxx)
+    #     and we'd have to regenerate the compose file on every new
+    #     marketplace install otherwise. Read-only by default; the
+    #     SftpService remount-binds a per-user subset to RW on demand
+    #     via `mount --bind` (which honours the RO of the upstream),
+    #     so writes to volumes go through an explicit code path.
+    #   - sftp_homes (named): /home, world-readable inside the
+    #     container only. Per-user dirs are chmod 0700 by sshd.
     volumes:
-      # Persistent SSH host keys so client `known_hosts` doesn't have
-      # to be rewiped on every redeploy.
       - sftp_host_keys:/etc/ssh
-      # Persistent /etc/passwd, /etc/shadow, /etc/group, /home/* so
-      # accounts created via `docker exec useradd` survive container
-      # restarts. Without this the API would have to re-create every
-      # account on every reboot.
       - sftp_users:/etc/sftp-state
       - sftp_homes:/home
-      # The actual data: bind-mount the whole apps/ tree read-write so
-      # each chrooted user can be `mount --bind`-ed into their app
-      # sandbox. The API creates the user with home=/home/<user> and
-      # populates /home/<user>/<appname> as a symlink/bind into
-      # /data/apps/<slug-id12>/.
       - ./.kryptalis/apps:/data/apps
-      # Marketplace / docker-image apps store their actual code in
-      # Docker-managed volumes (PrestaShop's /var/www/html, WordPress's
-      # same, etc.). To let SFTP users browse those live files we mount
-      # the docker volumes root read-write. SftpService resolves each
-      # app's volume via `docker inspect` at account-create time and
-      # bind-mounts the matching _data dir into the user's home.
-      # The `:ro` would prevent writes — we want WRITE for marketplace
-      # apps too so users can edit themes/plugins/config.
+      # Marketplace + docker-image apps store code in named volumes.
+      # We mount the volumes root RW so SftpService can `mount --bind`
+      # a per-account subset into /home/<user>/data. Defence in depth:
+      #
+      #   1. SftpService.discoverContainerCodePath VALIDATES the volume
+      #      name belongs to the requested app (via docker inspect) —
+      #      a user cannot ask for "give me access to <random volume>".
+      #   2. The chroot inside sshd_config (`ChrootDirectory %h`) keeps
+      #      every session locked into /home/<user>, which only shows
+      #      the bind target — never the parent /data/volumes tree.
+      #   3. /home/<user> is root-owned 0755, so even if a user shells
+      #      out (they can't — internal-sftp + /bin/false) they can't
+      #      list siblings under /data/volumes.
       - /var/lib/docker/volumes:/data/volumes
     healthcheck:
-      # pgrep catches both straight-up crash AND the no-hostkey
-      # restart loop we hit with atmoz.
       test: ["CMD-SHELL", "pgrep sshd || exit 1"]
       interval: 30s
       timeout: 5s

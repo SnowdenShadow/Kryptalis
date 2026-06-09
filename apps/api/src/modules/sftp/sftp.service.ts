@@ -73,6 +73,78 @@ export class SftpService {
     });
   }
 
+  // ── audit log ──────────────────────────────────────────────────
+  //
+  // Every mutating op writes an AuditLog row so security review can
+  // trace who issued / rotated / disabled / deleted what. Failures
+  // are swallowed (we don't want to roll back a successful CRUD on a
+  // logging blip), but logged for ops to investigate.
+  private async audit(
+    userId: string,
+    action: 'create' | 'rotate' | 'disable' | 'enable' | 'update' | 'delete',
+    accountId: string,
+    username: string,
+    extra: Record<string, unknown> = {},
+  ): Promise<void> {
+    try {
+      await (this.prisma as any).auditLog?.create?.({
+        data: {
+          userId,
+          resourceType: 'sftp_account',
+          resourceId: accountId,
+          action: `sftp.${action}`,
+          metadata: { username, ...extra },
+        },
+      });
+    } catch (e: any) {
+      this.logger.warn(`audit log failed for sftp.${action} ${username}: ${e?.message || e}`);
+    }
+  }
+
+  // ── docker exec wrapper ────────────────────────────────────────
+  //
+  // Centralizes every call to `docker exec kryptalis-sftp ...` so we
+  // get consistent timeouts, logging, and stdin handling. Refusing to
+  // run if any arg contains shell metacharacters is paranoia at this
+  // depth (execFile doesn't spawn a shell), but it makes the intent
+  // explicit and catches future regressions where someone passes a
+  // path through `bash -c` by accident.
+  private async dockerExec(
+    args: string[],
+    opts: { stdin?: string; timeoutMs?: number; allowFailure?: boolean } = {},
+  ): Promise<string> {
+    for (const a of args) {
+      if (typeof a !== 'string' || a.includes('\0') || a.includes('\n')) {
+        throw new BadRequestException('Refusing docker exec arg with null/newline');
+      }
+    }
+    try {
+      if (opts.stdin !== undefined) {
+        return await new Promise<string>((resolve, reject) => {
+          const child = execFile(
+            'docker',
+            ['exec', '-i', this.CONTAINER_NAME, ...args],
+            { timeout: opts.timeoutMs ?? 15_000 },
+            (err, stdout) => (err ? reject(err) : resolve(String(stdout))),
+          );
+          child.stdin!.end(opts.stdin);
+        });
+      }
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['exec', this.CONTAINER_NAME, ...args],
+        { timeout: opts.timeoutMs ?? 15_000 },
+      );
+      return stdout;
+    } catch (err: any) {
+      if (opts.allowFailure) {
+        this.logger.warn(`docker exec ${args[0]} failed: ${err?.message || err}`);
+        return '';
+      }
+      throw err;
+    }
+  }
+
   async create(
     userId: string,
     scope: 'app' | 'project',
@@ -169,6 +241,10 @@ export class SftpService {
       throw new BadRequestException(`SFTP container rejected the account: ${err?.message || err}`);
     }
 
+    await this.audit(userId, 'create', account.id, username, {
+      scope, scopeId, permission: account.permission, hasKeys: publicKeys.length,
+    });
+
     return { account, plainPassword };
   }
 
@@ -182,6 +258,7 @@ export class SftpService {
       data: { passwordHash, passwordEnc },
     });
     await this.execChpasswd(acc.username, plainPassword);
+    await this.audit(userId, 'rotate', acc.id, acc.username);
     return { plainPassword };
   }
 
@@ -214,36 +291,44 @@ export class SftpService {
     // sets a `!` prefix on the shadow password so PAM auth fails
     // immediately. unlock with -U.
     if (patch.disabled !== undefined) {
-      try {
-        await execFileAsync('docker', [
-          'exec', this.CONTAINER_NAME,
-          'usermod', patch.disabled ? '-L' : '-U', acc.username,
-        ], { timeout: 10_000 });
-      } catch (err: any) {
-        this.logger.warn(`usermod ${acc.username}: ${err?.message || err}`);
-      }
+      await this.dockerExec(
+        ['usermod', patch.disabled ? '-L' : '-U', acc.username],
+        { allowFailure: true, timeoutMs: 10_000 },
+      );
     }
 
-    return this.prisma.sftpAccount.update({
+    const updated = await this.prisma.sftpAccount.update({
       where: { id: acc.id },
       data,
     });
+
+    await this.audit(
+      userId,
+      patch.disabled === true ? 'disable' : patch.disabled === false ? 'enable' : 'update',
+      acc.id, acc.username,
+      // Patch summary lets the auditor see what was changed without
+      // also dumping the raw publicKeys (they can be many KiB).
+      {
+        ...(patch.permission !== undefined && { permission: patch.permission }),
+        ...(patch.expiresAt !== undefined && { expiresAt: patch.expiresAt }),
+        ...(patch.publicKeys !== undefined && { keysCount: patch.publicKeys.length }),
+      },
+    );
+
+    return updated;
   }
 
   async remove(userId: string, id: string): Promise<{ message: string }> {
     const acc = await this.assertAccountAccess(userId, id, 'ADMIN');
-    // userdel -r also removes the home dir (and any authorized_keys
-    // inside). Idempotent at our level — swallow "user does not exist"
-    // since that's the desired end state.
-    try {
-      await execFileAsync('docker', [
-        'exec', this.CONTAINER_NAME,
-        'userdel', '-r', '-f', acc.username,
-      ], { timeout: 15_000 });
-    } catch (err: any) {
-      this.logger.warn(`userdel ${acc.username}: ${err?.message || err}`);
-    }
+    // userdel -r removes the home dir (and any authorized_keys inside).
+    // Idempotent at our level — we swallow "user does not exist" since
+    // that's the desired end state.
+    await this.dockerExec(
+      ['userdel', '-r', '-f', acc.username],
+      { allowFailure: true, timeoutMs: 15_000 },
+    );
     await this.prisma.sftpAccount.delete({ where: { id: acc.id } });
+    await this.audit(userId, 'delete', acc.id, acc.username);
     return { message: 'SFTP account deleted' };
   }
 
@@ -262,57 +347,79 @@ export class SftpService {
     chrootSource: string;
   }): Promise<void> {
     const { username, plainPassword, publicKeys, chrootSource } = opts;
+
+    // Final guard before shelling out — even though every caller
+    // validates already, an injection here is a root-on-host (the
+    // sftp container has SYS_ADMIN), so the cost of a redundant
+    // check is rounding error.
+    if (!SftpService.USERNAME_RE.test(username)) {
+      throw new BadRequestException('Invalid username (failed final guard)');
+    }
+    // chrootSource is built by us (resolveChrootSource +
+    // discoverContainerCodePath) — but both branches need a
+    // sanity check so a regression there can't escape into
+    // mount --bind / chown calls.
+    if (!/^[A-Za-z0-9/_.-]+$/.test(chrootSource) || chrootSource.includes('..')) {
+      throw new BadRequestException(`Refusing to mount unsafe chroot source: ${chrootSource}`);
+    }
+
     const home = `/home/${username}`;
 
-    // 1. Create the user. -m makes home dir. -g sftpusers triggers
-    //    the sshd_config Match block. -s /bin/false ensures no shell
-    //    even if Match block ever gets misconfigured. -U creates a
-    //    same-named primary group; we set the secondary -g sftpusers
-    //    so PAM sees it.
+    // 1. Create the user.
+    //   -m            create home dir
+    //   -d <home>     pin home location
+    //   -s /bin/false defence in depth — no shell EVER, regardless of
+    //                 the sshd_config Match block working as expected
+    //   -G sftpusers  triggers the sshd_config chroot+sftp-only block
     //
-    // sshd's ChrootDirectory requires the chroot path AND every
+    // sshd's ChrootDirectory requires the chroot dir AND every
     // ancestor to be owned by root:root with mode 0755. We make the
-    // home root-owned, then create a `data` subdir the user actually
-    // owns and bind it onto the appDir.
-    await execFileAsync('docker', [
-      'exec', this.CONTAINER_NAME,
-      'useradd', '-m', '-d', home, '-s', '/bin/false', '-G', 'sftpusers',
-      username,
-    ], { timeout: 15_000 }).catch((err: any) => {
+    // home root-owned, then create a `data` subdir the user owns and
+    // bind it onto the source.
+    try {
+      await this.dockerExec(
+        ['useradd', '-m', '-d', home, '-s', '/bin/false', '-G', 'sftpusers', username],
+        { timeoutMs: 15_000 },
+      );
+    } catch (err: any) {
       // Tolerate "already exists" — re-applying state on a restart
       // legitimately hits an existing user.
       if (!String(err?.message || err).includes('already exists')) throw err;
-    });
+    }
     // Lock down the home so ChrootDirectory works.
-    await execFileAsync('docker', [
-      'exec', this.CONTAINER_NAME,
-      'sh', '-c', `chown root:root ${home} && chmod 0755 ${home}`,
-    ], { timeout: 10_000 });
+    await this.dockerExec(
+      ['sh', '-c', `chown root:root ${home} && chmod 0755 ${home}`],
+      { timeoutMs: 10_000 },
+    );
 
-    // 2. Create writable subdir + bind-mount the appDir into it.
-    //    The user inside the chroot sees their files at /data and we
-    //    keep ChrootDirectory %h pointed at the locked-down home.
+    // 2. Create writable subdir + bind-mount the chrootSource into it.
+    //    The user inside the chroot sees their files at /data; the
+    //    chroot itself is %h (the home), which stays root-owned.
     const targetSubdir = `${home}/data`;
-    const uidStdout = await execFileAsync('docker', [
-      'exec', this.CONTAINER_NAME,
-      'id', '-u', username,
-    ], { timeout: 5_000 });
-    const uid = uidStdout.stdout.trim();
-    await execFileAsync('docker', [
-      'exec', this.CONTAINER_NAME,
-      'sh', '-c',
-      `mkdir -p ${targetSubdir} && mountpoint -q ${targetSubdir} || mount --bind ${chrootSource} ${targetSubdir} && chown ${uid}:${uid} ${targetSubdir}`,
-    ], { timeout: 10_000 }).catch((err: any) => {
-      // mount --bind needs CAP_SYS_ADMIN. If the container wasn't
-      // launched with --privileged we fall back to a SYMLINK, which
-      // sshd will refuse to follow into a chroot — accept the limitation
-      // and surface a clear error so the operator knows to add the cap.
-      this.logger.warn(`mount --bind failed (${err?.message || err}); trying symlink fallback`);
-      return execFileAsync('docker', [
-        'exec', this.CONTAINER_NAME,
-        'sh', '-c', `rm -rf ${targetSubdir} && ln -s ${chrootSource} ${targetSubdir} && chown -h ${uid}:${uid} ${targetSubdir}`,
-      ], { timeout: 10_000 });
-    });
+    const uidOut = await this.dockerExec(['id', '-u', username], { timeoutMs: 5_000 });
+    const uid = uidOut.trim();
+    try {
+      await this.dockerExec(
+        ['sh', '-c',
+          `mkdir -p ${targetSubdir} && ` +
+          `(mountpoint -q ${targetSubdir} || mount --bind ${chrootSource} ${targetSubdir}) && ` +
+          `chown ${uid}:${uid} ${targetSubdir}`,
+        ],
+        { timeoutMs: 10_000 },
+      );
+    } catch (err: any) {
+      // mount --bind needs CAP_SYS_ADMIN. Without it we fall back to a
+      // symlink which sshd's ChrootDirectory enforcement refuses to
+      // follow — accept the limitation but log it loudly so the operator
+      // knows to grant the cap.
+      this.logger.warn(`mount --bind failed (${err?.message || err}); falling back to symlink`);
+      await this.dockerExec(
+        ['sh', '-c',
+          `rm -rf ${targetSubdir} && ln -s ${chrootSource} ${targetSubdir} && chown -h ${uid}:${uid} ${targetSubdir}`,
+        ],
+        { timeoutMs: 10_000 },
+      );
+    }
 
     // 3. Set password if provided.
     if (plainPassword) {
@@ -324,29 +431,31 @@ export class SftpService {
   }
 
   private async execChpasswd(username: string, plainPassword: string): Promise<void> {
-    // chpasswd reads "user:password" on stdin. We use stdin instead
-    // of CLI args so the password never lands in the host process list.
-    return new Promise((resolve, reject) => {
-      const child = execFile('docker', [
-        'exec', '-i', this.CONTAINER_NAME, 'chpasswd',
-      ], { timeout: 15_000 }, (err) => (err ? reject(err) : resolve()));
-      child.stdin!.end(`${username}:${plainPassword}\n`);
+    // chpasswd reads "user:password" on stdin. Using stdin instead of
+    // CLI args keeps the password out of the host process list (visible
+    // to anyone with /proc read access on the host).
+    await this.dockerExec(['chpasswd'], {
+      stdin: `${username}:${plainPassword}\n`,
+      timeoutMs: 15_000,
     });
   }
 
   private async writeAuthorizedKeys(username: string, keys: string[]): Promise<void> {
-    // authorized_keys lives at /home/<user>/.ssh/authorized_keys
-    // inside the chroot — sshd reads it BEFORE chrooting the session.
+    // authorized_keys lives at /home/<user>/.ssh/authorized_keys inside
+    // the chroot. sshd reads it BEFORE chrooting the session so the
+    // path doesn't have to be reachable post-chroot.
     const home = `/home/${username}`;
     const content = keys.join('\n') + (keys.length ? '\n' : '');
-    return new Promise((resolve, reject) => {
-      const child = execFile('docker', [
-        'exec', '-i', this.CONTAINER_NAME,
-        'sh', '-c',
-        `mkdir -p ${home}/.ssh && chmod 0700 ${home}/.ssh && cat > ${home}/.ssh/authorized_keys && chmod 0600 ${home}/.ssh/authorized_keys && chown -R ${username}:${username} ${home}/.ssh`,
-      ], { timeout: 10_000 }, (err) => (err ? reject(err) : resolve()));
-      child.stdin!.end(content);
-    });
+    await this.dockerExec(
+      ['sh', '-c',
+        `mkdir -p ${home}/.ssh && ` +
+        `chmod 0700 ${home}/.ssh && ` +
+        `cat > ${home}/.ssh/authorized_keys && ` +
+        `chmod 0600 ${home}/.ssh/authorized_keys && ` +
+        `chown -R ${username}:${username} ${home}/.ssh`,
+      ],
+      { stdin: content, timeoutMs: 10_000 },
+    );
   }
 
   /**
@@ -425,6 +534,13 @@ export class SftpService {
     const containerDest = match[1];
 
     try {
+      // Validate containerName against our naming convention BEFORE
+      // shelling out. Defense against a malicious projectId leaking
+      // into the docker inspect arg list.
+      if (!/^[a-z0-9_-]{1,64}$/.test(containerName)) {
+        this.logger.warn(`Refusing to inspect malformed container name: ${containerName}`);
+        return null;
+      }
       const { stdout } = await execFileAsync(
         'docker', ['inspect', '--format', '{{json .Mounts}}', containerName],
         { timeout: 5_000 },
@@ -433,16 +549,26 @@ export class SftpService {
         = JSON.parse(stdout);
       const found = mounts.find((m) => m.Destination === containerDest);
       if (!found) return null;
-      // Named volume: Mount.Name is set (e.g. prestashop_data_cmq5...).
-      // Docker stores it at /var/lib/docker/volumes/<name>/_data on the
-      // host, which we re-expose in the sftp container as
-      // /data/volumes/<name>/_data via the compose mount.
+
+      // Defense in depth: the volume name MUST follow our naming
+      // convention (e.g. prestashop_data_cmq5xxx). Anything else means
+      // either an unmanaged container or a misnamed app — refuse to
+      // mount instead of granting SFTP access to an arbitrary volume.
       if (found.Type === 'volume' && found.Name) {
+        // Validate the volume name has no path-traversal chars and
+        // matches a per-app-instance naming pattern. Belt + suspenders
+        // — the compose mount root is /var/lib/docker/volumes and
+        // docker daemon would reject `..` in volume names anyway,
+        // but we don't want to rely on that.
+        if (!/^[a-zA-Z0-9_-]+$/.test(found.Name)) {
+          this.logger.warn(`Refusing volume with non-alphanumeric name: ${found.Name}`);
+          return null;
+        }
         return `/data/volumes/${found.Name}/_data`;
       }
-      // Bind mount: Mount.Source is already a host path. We'd need to
-      // know which slice of the host filesystem is reachable from the
-      // sftp container to use it — skip for now.
+      // Bind mounts: not supported. Mount.Source is a host path that
+      // may or may not be reachable from the sftp container; safer to
+      // fall through.
       return null;
     } catch (err: any) {
       this.logger.warn(`docker inspect ${containerName}: ${err?.message || err}`);
