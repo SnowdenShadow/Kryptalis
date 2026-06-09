@@ -53,6 +53,7 @@ export class SftpController {
         publicKeys: body.publicKeys,
         permission: body.permission,
         expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
+        allowShell: body.allowShell,
       },
     );
     // We return the plaintext password ONCE on creation so the user
@@ -80,6 +81,7 @@ export class SftpController {
       permission: body.permission,
       expiresAt: body.expiresAt === null ? null : body.expiresAt ? new Date(body.expiresAt) : undefined,
       publicKeys: body.publicKeys,
+      allowShell: body.allowShell,
     });
   }
 

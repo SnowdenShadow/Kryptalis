@@ -9,6 +9,8 @@ import {
   MaxLength,
   Matches,
 } from 'class-validator';
+// allowShell is on both create + update DTOs — declared after the
+// import block so we don't reshuffle the original ones.
 import { ApiProperty } from '@nestjs/swagger';
 import type { SftpPermission } from '@prisma/client';
 
@@ -49,6 +51,11 @@ export class CreateSftpAccountDto {
   @IsOptional()
   @IsDateString()
   expiresAt?: string;
+
+  @ApiProperty({ required: false, description: 'When true, the account can open an interactive SSH shell (still chrooted to the app sandbox). Default false = SFTP only.' })
+  @IsOptional()
+  @IsBoolean()
+  allowShell?: boolean;
 }
 
 export class UpdateSftpAccountDto {
@@ -70,4 +77,9 @@ export class UpdateSftpAccountDto {
   @IsOptional()
   @IsArray()
   publicKeys?: string[];
+
+  @ApiProperty({ required: false, description: 'Toggle interactive shell access' })
+  @IsOptional()
+  @IsBoolean()
+  allowShell?: boolean;
 }

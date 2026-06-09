@@ -664,6 +664,22 @@ model SftpAccount {
   // Disabled accounts stay in the table for audit but get pulled from
   // sshd_config on the next sync. UI lets the user re-enable.
   disabled      Boolean  @default(false)
+  // Shell access toggle.
+  //
+  // false (default) — pure SFTP. ForceCommand=internal-sftp + the
+  // user's login shell is /bin/false. Putty/Filezilla still work via
+  // SFTP, but `ssh` falls back to "This service allows sftp
+  // connections only."
+  //
+  // true — Putty/ssh gets an interactive bash shell INSIDE the sftp
+  // container's chroot (/home/<user>, with the app bind-mounted at
+  // /home/<user>/app). No ForceCommand override, no chroot bypass —
+  // the user still can't escape /home/<user>. Useful for editing
+  // configs inline, running build scripts, etc.
+  //
+  // Grant is per-account and audited — we don't expose host-level
+  // shell, only the SFTP container's chroot.
+  allowShell    Boolean  @default(false)
   // Optional auto-expiry. NULL = never expires. Past expiry → sync
   // treats the row as disabled.
   expiresAt     DateTime?

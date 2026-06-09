@@ -25,7 +25,6 @@ import { GitProvidersModule } from './modules/git-providers/git-providers.module
 import { AdminModule } from './modules/admin/admin.module';
 import { FilesModule } from './modules/files/files.module';
 import { SftpModule } from './modules/sftp/sftp.module';
-import { TerminalModule } from './modules/terminal/terminal.module';
 import { EmailModule } from './modules/email/email.module';
 import { ReverseProxyModule } from './modules/reverse-proxy/reverse-proxy.module';
 import { SystemModule } from './modules/system/system.module';
@@ -89,7 +88,6 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     AdminModule,
     FilesModule,
     SftpModule,
-    TerminalModule,
     EmailModule,
     ReverseProxyModule,
     SystemModule,

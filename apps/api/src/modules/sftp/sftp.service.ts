@@ -146,6 +146,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       publicKeys?: string[];
       permission?: SftpPermission;
       expiresAt?: Date;
+      allowShell?: boolean;
     },
   ): Promise<{ account: SftpAccount; plainPassword: string | null }> {
     // Read-only callers need DEVELOPER; anything that can write to the
@@ -198,6 +199,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
         projectId: scope === 'project' ? scopeId : null,
         permission: dto.permission ?? 'WRITE',
         expiresAt: dto.expiresAt,
+        allowShell: !!dto.allowShell,
         createdById: userId,
       },
     });
@@ -210,6 +212,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
         chrootSource,
         permission: account.permission,
         disabled: false,
+        allowShell: account.allowShell,
       });
     } catch (err: any) {
       // Roll back the DB row so the username doesn't get stuck. We log
@@ -254,6 +257,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       permission?: SftpPermission;
       expiresAt?: Date | null;
       publicKeys?: string[];
+      allowShell?: boolean;
     },
   ): Promise<SftpAccount> {
     const acc = await this.assertAccountAccess(userId, id, 'ADMIN');
@@ -262,6 +266,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     if (patch.disabled !== undefined) data.disabled = patch.disabled;
     if (patch.permission !== undefined) data.permission = patch.permission;
     if (patch.expiresAt !== undefined) data.expiresAt = patch.expiresAt;
+    if (patch.allowShell !== undefined) data.allowShell = patch.allowShell;
     if (patch.publicKeys !== undefined) {
       data.publicKeys = this.normalizePublicKeys(patch.publicKeys) as any;
     }
@@ -283,13 +288,25 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    if (patch.permission !== undefined || patch.disabled !== undefined) {
-      // Permission and disabled state both live in the dropin; rewrite
-      // it once. ChrootDirectory is always /home/<user> — never
-      // changes — so the dropin only needs username + permission +
-      // disabled.
+    // Login shell switches between /bin/bash and /bin/false based on
+    // allowShell. We chsh through usermod (POSIX-safe). If chsh fails
+    // (rare) the dropin still keeps ForceCommand=internal-sftp for
+    // non-shell accounts, so the user never actually gets a shell.
+    if (patch.allowShell !== undefined) {
+      const shell = patch.allowShell ? '/bin/bash' : '/bin/false';
+      await this.dockerExec(
+        ['usermod', '-s', shell, acc.username],
+        { allowFailure: true, timeoutMs: 10_000 },
+      );
+    }
+
+    if (patch.permission !== undefined || patch.disabled !== undefined || patch.allowShell !== undefined) {
+      // Permission, disabled state and shell-mode all live in the
+      // dropin; rewrite it once. ChrootDirectory is always /home/<user>
+      // — never changes — so the dropin only needs username +
+      // permission + disabled + allowShell.
       const chrootLeaf = `/home/${acc.username}`;
-      await this.writeUserDropin(acc.username, chrootLeaf, next.permission, next.disabled);
+      await this.writeUserDropin(acc.username, chrootLeaf, next.permission, next.disabled, next.allowShell);
       // ACL flips between rwx and rx when permission changes.
       // Skipping this on a READ→WRITE upgrade would leave the user
       // unable to write despite the dropin no longer carrying `-R`.
@@ -354,6 +371,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
           chrootSource,
           permission: row.permission,
           disabled: row.disabled || expired,
+          allowShell: row.allowShell,
         });
       } catch (err: any) {
         this.logger.warn(`Resync ${row.username} failed: ${err?.message || err}`);
@@ -521,37 +539,50 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     chrootSource: string;
     permission: SftpPermission;
     disabled: boolean;
+    allowShell: boolean;
   }): Promise<void> {
-    const { username, plainPassword, publicKeys, chrootSource, permission, disabled } = opts;
+    const { username, plainPassword, publicKeys, chrootSource, permission, disabled, allowShell } = opts;
 
     this.assertUsernameValid(username);
     this.assertChrootPathSafe(chrootSource);
 
     const home = `/home/${username}`;
     const chrootLeaf = home;
+    // /bin/false locks the account to SFTP only (sshd refuses session
+    // requests when the shell isn't on /etc/shells, but more
+    // importantly ForceCommand=internal-sftp in the dropin already
+    // covers it). /bin/bash gives Putty/ssh an interactive shell still
+    // chrooted to /home/<user>.
+    const shell = allowShell ? '/bin/bash' : '/bin/false';
 
-    // 1. Create the user. Home stays /home/<user>; we'll re-chown/chmod
-    //    it root:root 0755 below so sshd accepts it as a chroot leaf.
+    // 1. Create the user. If it already exists (re-sync after rebuild),
+    //    re-apply the shell via usermod so the allowShell flag actually
+    //    takes effect on resync.
     try {
       await this.dockerExec(
-        ['useradd', '-m', '-d', home, '-s', '/bin/false', '-G', 'sftpusers', username],
+        ['useradd', '-m', '-d', home, '-s', shell, '-G', 'sftpusers', username],
         { timeoutMs: 15_000 },
       );
     } catch (err: any) {
       if (!String(err?.message || err).includes('already exists')) throw err;
+      await this.dockerExec(
+        ['usermod', '-s', shell, username],
+        { allowFailure: true, timeoutMs: 10_000 },
+      );
     }
 
     // 2. Sterile chroot leaf + bind-mount the writable app data under
-    //    /home/<user>/app. Done in one shell call so a failure rolls
-    //    everything back cleanly via the `set -e`. The bind mount
-    //    points FROM chrootSource INTO our container's /home — Docker
-    //    daemon doesn't manage /home in this container, so there's no
+    //    /home/<user>/app. When allowShell is on, also bind-mount
+    //    /bin /lib /usr… RO so the user's bash actually has commands
+    //    to run inside the chroot. The bind mount points FROM
+    //    chrootSource INTO our container's /home — Docker daemon
+    //    doesn't manage /home in this container, so there's no
     //    daemon race like the old design had against Docker-managed
     //    volume paths.
-    await this.prepareChrootLeafAndBind(username, chrootSource);
+    await this.prepareChrootLeafAndBind(username, chrootSource, allowShell);
 
     // 3. Per-user sshd_config drop-in.
-    await this.writeUserDropin(username, chrootLeaf, permission, disabled);
+    await this.writeUserDropin(username, chrootLeaf, permission, disabled, allowShell);
 
     // 4. ACL on the bind target (/home/<user>/app), not the chroot
     //    leaf — see prepareChrootLeafAndBind for the why.
@@ -579,9 +610,16 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     // descriptor open inside. The actual unmount completes when the
     // last fd closes. Without -l, deleting a user with a live session
     // would block here and leave the bind mount stuck.
+    //
+    // We umount the app bind AND every potential shell chroot dir
+    // (the dropin might be missing/corrupted but the mounts could
+    // still be there). All best-effort.
+    const allBinds = ['app', ...SftpService.SHELL_CHROOT_BIND_DIRS]
+      .map((d) => `umount -l /home/${username}/${d} 2>/dev/null || true`)
+      .join(' ; ');
     await this.dockerExec(
-      ['sh', '-c', `umount -l /home/${username}/app 2>/dev/null || true`],
-      { allowFailure: true, timeoutMs: 5_000 },
+      ['sh', '-c', allBinds],
+      { allowFailure: true, timeoutMs: 10_000 },
     );
     await this.dockerExec(
       ['userdel', '-r', '-f', username],
@@ -596,51 +634,59 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Compose the per-user dropin. Each block sets:
-   *   - ChrootDirectory: the resolved app data path inside the SFTP
-   *     container.
-   *   - ForceCommand: internal-sftp (+ `-R` for READ-only accounts).
-   *     `-R` tells the SFTP subsystem to refuse every write op
-   *     server-side; this is the layer that actually enforces READ.
+   *   - ChrootDirectory: always /home/<user>. The writable app data is
+   *     bind-mounted at /home/<user>/app — so even shell users can't
+   *     walk out of the chroot.
+   *   - ForceCommand: internal-sftp (+ `-R` for READ accounts) when
+   *     allowShell=false. Omitted when allowShell=true so Putty/ssh
+   *     get the user's login shell (/bin/bash).
+   *   - PermitTTY / pty: enabled only when allowShell=true. Without
+   *     this, ssh would connect but the bash prompt would be useless
+   *     (no echo, no line editing).
    *   - DenyUsers: when the account is disabled, sshd refuses login
-   *     before PAM is even consulted. Belt + suspenders with the
-   *     usermod -L we already did.
-   *   - Forwarding blanket-off: tcp/X11/agent/tun/pty — none of these
-   *     are needed for SFTP and they each widen the blast radius if
-   *     compromised.
+   *     before PAM is consulted. Belt + suspenders with `usermod -L`.
+   *   - Forwarding blanket-off: tcp/X11/agent/tun. We keep these off
+   *     even for shell users — they don't need them and they widen the
+   *     blast radius if a credential is leaked.
    */
   private async writeUserDropin(
     username: string,
     chrootSource: string,
     permission: SftpPermission,
     disabled: boolean,
+    allowShell: boolean,
   ): Promise<void> {
     this.assertUsernameValid(username);
     this.assertChrootPathSafe(chrootSource);
     const dropinPath = `/etc/ssh/sshd_config.d/${username}.conf`;
-    const forceCmd = permission === 'READ'
-      ? 'internal-sftp -l VERBOSE -R'
-      : 'internal-sftp -l VERBOSE';
     const lines: string[] = [];
     if (disabled) {
-      // Refuse login at the protocol level. We keep the Match block
-      // so the username still resolves to a clear "DenyUsers" log
-      // line instead of "no such user".
       lines.push(`DenyUsers ${username}`);
     }
     lines.push(
       `Match User ${username}`,
       `  ChrootDirectory ${chrootSource}`,
-      `  ForceCommand ${forceCmd}`,
+    );
+    if (allowShell) {
+      // No ForceCommand → sshd runs the user's login shell.
+      // PermitTTY yes so the user gets a usable interactive prompt.
+      lines.push(`  PermitTTY yes`);
+    } else {
+      const forceCmd = permission === 'READ'
+        ? 'internal-sftp -l VERBOSE -R'
+        : 'internal-sftp -l VERBOSE';
+      lines.push(`  ForceCommand ${forceCmd}`);
+      lines.push(`  PermitTTY no`);
+    }
+    lines.push(
       `  AllowTcpForwarding no`,
       `  X11Forwarding no`,
       `  AllowAgentForwarding no`,
       `  PermitTunnel no`,
-      `  PermitTTY no`,
     );
     const body = lines.join('\n') + '\n';
-    // Write via stdin so the secret-less body still avoids the host
-    // process list (and our null/newline arg guard never sees the
-    // dropin contents on argv).
+    // Write via stdin so the body never lands on argv (and our
+    // null/newline arg guard never has to scan it).
     await this.dockerExec(
       ['sh', '-c', `mkdir -p /etc/ssh/sshd_config.d && cat > ${dropinPath} && chmod 0644 ${dropinPath}`],
       { stdin: body, timeoutMs: 10_000 },
@@ -676,44 +722,71 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    *   Docker-managed path INTO our own /home tree — Docker doesn't
    *   touch /home in this container, so no race.
    */
+  // Dirs we bind-mount RO into the chroot when allowShell is on. They
+  // are the minimum a real bash session needs (Alpine layout):
+  //
+  //   /bin   /sbin   /usr  → busybox + bash + nano/vi/awk/grep…
+  //   /lib   /lib64        → musl + dynamic linker
+  //   /etc                 → /etc/passwd /etc/group /etc/hosts (so
+  //                          `whoami`, `ls -l`, name resolution work).
+  //                          Only the in-container /etc — no host
+  //                          secrets there; just the SFTP container's
+  //                          own minimal config.
+  //
+  // The mounts are READ-ONLY so a shell user can't tamper with
+  // anything. The bind targets live INSIDE /home/<user>, so umount
+  // them along with the user dir on delete.
+  private static readonly SHELL_CHROOT_BIND_DIRS = ['bin', 'sbin', 'usr', 'lib', 'lib64', 'etc'];
+
   private async prepareChrootLeafAndBind(
     username: string,
     chrootSource: string,
+    allowShell: boolean,
   ): Promise<void> {
     this.assertUsernameValid(username);
     this.assertChrootPathSafe(chrootSource);
     const home = `/home/${username}`;
     const bindTarget = `${home}/app`;
-    // We always re-mount on apply. A previous mount might point at a
-    // stale source (the app was redeployed and the Docker volume name
-    // changed, e.g. on a marketplace re-install), or it might be a
-    // stale entry left after a container recreate where the kernel
-    // tracking is gone. Cheap unconditional umount + remount keeps the
-    // bind always pointing at the freshly-resolved source — and
-    // because mount --bind doesn't copy data, the cost is microseconds.
+    // App data bind. Always re-mount so resyncs after a redeploy
+    // point at the FRESH source (Docker volume names change on
+    // marketplace re-install).
+    const appMount =
+      `chown root:root ${home} && chmod 0755 ${home} && ` +
+      `mkdir -p ${bindTarget} && ` +
+      // Source may not exist yet on a freshly-provisioned shell-only
+      // account (no deploy yet) — make it.
+      `mkdir -p ${chrootSource} && ` +
+      `umount -l ${bindTarget} 2>/dev/null || true ; ` +
+      `mount --bind ${chrootSource} ${bindTarget}`;
+
+    // When shell is enabled we bind-mount the SFTP container's own
+    // /bin /sbin /usr /lib /lib64 /etc into the chroot so bash + its
+    // dynamic linker are reachable post-chroot. Read-only so the user
+    // can't tamper with the system files.
     //
-    // `umount -l` (lazy) so we don't block on a still-busy mount from
-    // a live SFTP session — the actual bind goes away once the last
-    // descriptor closes. `|| true` because the first apply on a new
-    // user has nothing to umount.
+    // When shell is disabled we tear those binds back down — toggling
+    // a user from shell→sftp-only should not leave their chroot
+    // populated with binaries they no longer need.
+    const shellSetup = allowShell
+      ? SftpService.SHELL_CHROOT_BIND_DIRS.map((d) =>
+          // `[ -d /src ]` guards against missing dirs (e.g. /lib64 on
+          // pure-musl Alpine). `mountpoint -q` makes the mount
+          // idempotent across resyncs.
+          `if [ -d /${d} ] && ! mountpoint -q ${home}/${d}; then ` +
+          `mkdir -p ${home}/${d} && mount --bind -o ro /${d} ${home}/${d}; fi`,
+        ).join(' && ')
+      : SftpService.SHELL_CHROOT_BIND_DIRS.map((d) =>
+          // Cleanup path: lazy-umount any existing bind, then rmdir
+          // the empty stub. rmdir is best-effort — it fails silently
+          // if the dir still has content (e.g. user wrote files there
+          // before we toggled off; we leave those untouched).
+          `if mountpoint -q ${home}/${d}; then umount -l ${home}/${d} 2>/dev/null || true; fi ; ` +
+          `rmdir ${home}/${d} 2>/dev/null || true`,
+        ).join(' ; ');
+
     await this.dockerExec(
-      ['sh', '-c',
-        // Sterile chroot leaf.
-        `chown root:root ${home} && chmod 0755 ${home} && ` +
-        `mkdir -p ${bindTarget} && ` +
-        // Make sure the source actually exists before we mount. For
-        // git deploys the path is created on first deploy; SFTP-only
-        // workflows (provision the user before pushing code) would
-        // otherwise blow up here with "mount: special device does not
-        // exist". `mkdir -p` is harmless if the dir already exists.
-        `mkdir -p ${chrootSource} && ` +
-        // Drop any existing mount first so we're never pointing at a
-        // stale Docker volume path or old chroot source.
-        `umount -l ${bindTarget} 2>/dev/null || true ; ` +
-        // Bind the fresh source.
-        `mount --bind ${chrootSource} ${bindTarget}`,
-      ],
-      { timeoutMs: 15_000 },
+      ['sh', '-c', `${appMount} ; ${shellSetup}`],
+      { timeoutMs: 30_000 },
     );
   }
 

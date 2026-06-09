@@ -16,7 +16,6 @@ import {
   Mail,
   FolderOpen,
   KeyRound,
-  Terminal as TerminalIcon,
   Settings,
   ShieldAlert,
   ChevronLeft,
@@ -50,7 +49,6 @@ const navigation: Array<{
   { key: 'nav.emails', href: '/dashboard/emails', icon: Mail },
   { key: 'nav.files', href: '/dashboard/files', icon: FolderOpen },
   { key: 'nav.sftp', href: '/dashboard/sftp', icon: KeyRound },
-  { key: 'nav.terminal', href: '/dashboard/terminal', icon: TerminalIcon },
   { key: 'nav.settings', href: '/dashboard/settings', icon: Settings },
 ];
 

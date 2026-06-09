@@ -5,9 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus, Loader2, Server, Copy, Check, RefreshCw, Trash2, Power,
   KeyRound, AlertCircle, Eye, EyeOff, Calendar, Terminal as TerminalIcon,
-  ExternalLink,
 } from 'lucide-react';
-import Link from 'next/link';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -49,6 +47,7 @@ interface SftpAccount {
   projectId: string | null;
   permission: 'READ' | 'WRITE' | 'ADMIN';
   disabled: boolean;
+  allowShell: boolean;
   expiresAt: string | null;
   lastUsedAt: string | null;
   publicKeys: string[];
@@ -120,6 +119,16 @@ export default function SftpPage() {
     onError: (err: Error) => toast.error(err.message),
   });
 
+  const shellToggleMutation = useMutation({
+    mutationFn: ({ id, allowShell }: { id: string; allowShell: boolean }) =>
+      api.patch(`/sftp/${id}`, { allowShell }),
+    onSuccess: (_, vars) => {
+      toast.success(vars.allowShell ? 'SSH shell enabled' : 'SSH shell disabled');
+      refetch();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/sftp/${id}`),
     onSuccess: () => {
@@ -150,18 +159,11 @@ export default function SftpPage() {
             chrooted to the app's own directory.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Link href="/dashboard/terminal">
-            <Button variant="outline" size="sm">
-              <TerminalIcon size={14} /> Web Terminal
-            </Button>
-          </Link>
-          {selectedAppId && (
-            <Button onClick={() => setShowCreate(true)}>
-              <Plus size={14} /> New account
-            </Button>
-          )}
-        </div>
+        {selectedAppId && (
+          <Button onClick={() => setShowCreate(true)}>
+            <Plus size={14} /> New account
+          </Button>
+        )}
       </div>
 
       {/* App picker */}
@@ -192,6 +194,7 @@ export default function SftpPage() {
           <ConnectionInfoCard
             appName={selectedApp.name}
             firstUsername={accounts.find((a) => !a.disabled)?.username}
+            hasShellAccount={accounts.some((a) => !a.disabled && a.allowShell)}
             copy={copy}
             copied={copied}
           />
@@ -234,6 +237,11 @@ export default function SftpPage() {
                             >
                               {acc.permission}
                             </Badge>
+                            {acc.allowShell && (
+                              <Badge variant="outline" className="text-[10px] gap-1 border-purple-500/40 text-purple-400">
+                                <TerminalIcon size={9} /> SSH shell
+                              </Badge>
+                            )}
                             {acc.publicKeys.length > 0 && (
                               <Badge variant="outline" className="text-[10px] gap-1">
                                 <KeyRound size={9} /> {acc.publicKeys.length} keys
@@ -264,6 +272,16 @@ export default function SftpPage() {
                           </div>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7"
+                            disabled={shellToggleMutation.isPending}
+                            onClick={() => shellToggleMutation.mutate({ id: acc.id, allowShell: !acc.allowShell })}
+                            title={acc.allowShell ? 'Disable SSH shell' : 'Enable SSH shell'}
+                          >
+                            <TerminalIcon size={12} className={acc.allowShell ? 'text-purple-400' : 'text-muted-foreground'} />
+                          </Button>
                           <Button
                             size="sm"
                             variant="ghost"
@@ -341,25 +359,20 @@ export default function SftpPage() {
 // hand to Filezilla. Pulls the hostname from window.location since the
 // dashboard is served on the same host as sshd.
 function ConnectionInfoCard({
-  appName, firstUsername, copy, copied,
+  appName, firstUsername, hasShellAccount, copy, copied,
 }: {
   appName: string;
   firstUsername?: string;
+  hasShellAccount: boolean;
   copy: (text: string, label: string) => void;
   copied: string | null;
 }) {
   const host = typeof window !== 'undefined' ? window.location.hostname : 'your-server';
   const port = 2222;
-  // Sample username placeholder lets the user copy a working command
-  // straight away if they already have an account, while making the
-  // "fill in the blank" obvious when they don't.
   const username = firstUsername || '<username>';
   const sftpUrl = `sftp://${username}@${host}:${port}`;
   const cliExample = `sftp -P ${port} ${username}@${host}`;
-  // FileZilla's site manager doesn't accept a URL bar paste with port
-  // and credentials inline, but it DOES accept a URL bar quickconnect
-  // — fine for the URL line, but the host+port form is what users
-  // actually paste into File → Site Manager.
+  const sshExample = `ssh -p ${port} ${username}@${host}`;
   const root = '/app';
 
   return (
@@ -368,17 +381,26 @@ function ConnectionInfoCard({
         <CardTitle className="text-sm flex items-center gap-2">
           Connection for {appName}
           <Badge variant="outline" className="text-[10px] gap-1">SFTP</Badge>
+          {hasShellAccount && (
+            <Badge variant="outline" className="text-[10px] gap-1 border-purple-500/40 text-purple-400">
+              <TerminalIcon size={9} /> SSH
+            </Badge>
+          )}
         </CardTitle>
         <CardDescription className="text-xs">
-          Once connected, your files live under <code className="px-1 py-0.5 rounded bg-muted font-mono text-[10px]">{root}/</code>.
+          Files land at <code className="px-1 py-0.5 rounded bg-muted font-mono text-[10px]">{root}/</code> inside the chroot.
+          {hasShellAccount && ' Shell accounts get bash in the same chroot.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
         <ConnLine label="Host" value={host} onCopy={() => copy(host, 'host')} copied={copied === 'host'} />
         <ConnLine label="Port" value={String(port)} onCopy={() => copy(String(port), 'port')} copied={copied === 'port'} />
-        <ConnLine label="Protocol" value="SFTP — SSH File Transfer Protocol" />
-        <ConnLine label="Quickconnect" value={sftpUrl} onCopy={() => copy(sftpUrl, 'url')} copied={copied === 'url'} />
-        <ConnLine label="CLI" value={cliExample} onCopy={() => copy(cliExample, 'cli')} copied={copied === 'cli'} />
+        <ConnLine label="Protocol" value="SFTP / SSH (same port)" />
+        <ConnLine label="Filezilla URL" value={sftpUrl} onCopy={() => copy(sftpUrl, 'url')} copied={copied === 'url'} />
+        <ConnLine label="SFTP CLI" value={cliExample} onCopy={() => copy(cliExample, 'cli')} copied={copied === 'cli'} />
+        {hasShellAccount && (
+          <ConnLine label="SSH CLI / Putty" value={sshExample} onCopy={() => copy(sshExample, 'ssh')} copied={copied === 'ssh'} />
+        )}
       </CardContent>
     </Card>
   );
@@ -422,6 +444,7 @@ function CreateAccountDialog({
   const [keys, setKeys] = useState('');
   const [permission, setPermission] = useState<'READ' | 'WRITE' | 'ADMIN'>('WRITE');
   const [expiresAt, setExpiresAt] = useState('');
+  const [allowShell, setAllowShell] = useState(false);
 
   function submit() {
     onCreate({
@@ -431,6 +454,7 @@ function CreateAccountDialog({
       ...(password.trim() ? { password: password.trim() } : {}),
       publicKeys: keys.split('\n').map((l) => l.trim()).filter(Boolean),
       permission,
+      allowShell,
       ...(expiresAt ? { expiresAt: new Date(expiresAt).toISOString() } : {}),
     });
   }
@@ -510,6 +534,25 @@ function CreateAccountDialog({
             />
           </div>
         </div>
+
+        {/* Shell access toggle */}
+        <label className="flex items-start gap-2 rounded-md border border-border bg-muted/30 p-2.5 cursor-pointer hover:bg-muted/50">
+          <input
+            type="checkbox"
+            checked={allowShell}
+            onChange={(e) => setAllowShell(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-primary cursor-pointer"
+          />
+          <div className="flex-1 space-y-0.5">
+            <div className="flex items-center gap-1.5 text-sm font-medium">
+              <TerminalIcon size={12} /> Allow SSH shell (Putty)
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              In addition to SFTP, the user can open a real shell with Putty / <code className="font-mono">ssh</code>.
+              They stay chrooted to the app sandbox — no host access. App data is at <code className="font-mono">/app</code>.
+            </p>
+          </div>
+        </label>
       </div>
 
       <DialogFooter>
