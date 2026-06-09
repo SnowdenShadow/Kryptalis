@@ -259,19 +259,26 @@ function EnvRow({
   row,
   onChange,
   onDelete,
+  phKey,
+  phValue,
+  titleHide,
+  titleShow,
 }: {
   row: { key: string; value: string };
   onChange: (next: { key: string; value: string }) => void;
   onDelete: () => void;
+  phKey: string;
+  phValue: string;
+  titleHide: string;
+  titleShow: string;
 }) {
   const looksSecret = /token|secret|key|password|pwd|api/i.test(row.key);
   const [show, setShow] = useState(!looksSecret);
-  // Re-mask when the key turns into a secret-looking name
   useEffect(() => { if (looksSecret && row.value) setShow(false); }, [looksSecret, row.key]);
   return (
     <div className="flex items-center gap-2">
       <Input
-        placeholder="KEY"
+        placeholder={phKey}
         className="font-mono"
         value={row.key}
         onChange={(e) => onChange({ ...row, key: e.target.value })}
@@ -280,7 +287,7 @@ function EnvRow({
       <div className="flex-1 relative">
         <Input
           type={show ? 'text' : 'password'}
-          placeholder="value"
+          placeholder={phValue}
           className="font-mono pr-8"
           value={row.value}
           onChange={(e) => onChange({ ...row, value: e.target.value })}
@@ -289,7 +296,7 @@ function EnvRow({
           type="button"
           onClick={() => setShow((s) => !s)}
           className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-          title={show ? 'Hide value' : 'Show value'}
+          title={show ? titleHide : titleShow}
         >
           {show ? <EyeOff size={12} /> : <Eye size={12} />}
         </button>
@@ -306,18 +313,26 @@ function RenameRow({
   slugName,
   onSave,
   saving,
+  tLabel,
+  tSave,
+  tReset,
+  tResetTitle,
 }: {
   current: string;
   slugName: string;
   onSave: (value: string) => void;
   saving: boolean;
+  tLabel: string;
+  tSave: string;
+  tReset: string;
+  tResetTitle: string;
 }) {
   const [value, setValue] = useState(current);
   const dirty = value.trim() !== current.trim();
   return (
     <div className="flex items-end gap-2">
       <div className="flex-1">
-        <Label className="text-xs text-muted-foreground">Display name</Label>
+        <Label className="text-xs text-muted-foreground">{tLabel}</Label>
         <Input
           value={value}
           onChange={(e) => setValue(e.target.value)}
@@ -330,7 +345,7 @@ function RenameRow({
         disabled={!dirty || saving || !value.trim()}
         onClick={() => onSave(value.trim())}
       >
-        {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />} Save
+        {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />} {tSave}
       </Button>
       {current !== slugName && (
         <Button
@@ -338,9 +353,9 @@ function RenameRow({
           variant="outline"
           disabled={saving}
           onClick={() => { setValue(slugName); onSave(''); }}
-          title="Revert to the canonical slug name"
+          title={tResetTitle}
         >
-          Reset
+          {tReset}
         </Button>
       )}
     </div>
@@ -846,7 +861,7 @@ export default function ApplicationDetailPage() {
                 </div>
                 <p className="text-xs text-muted-foreground mt-1">
                   <Clock size={12} className="inline mr-1" />
-                  Created {timeAgo(app.createdAt)}
+                  {t('apps.created2', { ago: timeAgo(app.createdAt) })}
                 </p>
               </CardContent>
             </Card>
@@ -854,20 +869,20 @@ export default function ApplicationDetailPage() {
             {/* Connection info */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg">Connection Info</CardTitle>
+                <CardTitle className="text-lg">{t('apps.connectionInfo')}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
                 {/* Public URLs — one row per reachable URL */}
                 <div className="rounded-lg border border-border p-3">
                   <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-                    Public URLs
+                    {t('apps.publicUrls')}
                   </p>
                   {(() => {
                     const urls = publicUrls(app, hostname);
                     if (urls.length === 0) {
                       return (
                         <p className="text-sm text-muted-foreground">
-                          No URL yet — start the app, then link a domain or open the port directly.
+                          {t('apps.noUrlYet')}
                         </p>
                       );
                     }
@@ -912,16 +927,16 @@ export default function ApplicationDetailPage() {
                                 variant={r.sslStatus === 'ACTIVE' ? 'success' : r.sslStatus === 'PENDING' ? 'warning' : 'destructive'}
                                 className="text-[10px]"
                                 title={
-                                  r.sslStatus === 'ACTIVE' ? 'SSL certificate active and valid' :
-                                  r.sslStatus === 'PENDING' ? "Let's Encrypt is provisioning a certificate — usually <30s after DNS propagates" :
-                                  'SSL provisioning failed. Check that DNS A/CNAME records point to this server.'
+                                  r.sslStatus === 'ACTIVE' ? t('apps.sslOkTooltip') :
+                                  r.sslStatus === 'PENDING' ? t('apps.sslPendingTooltip') :
+                                  t('apps.sslErrorTooltip')
                                 }
                               >
-                                {r.sslStatus === 'ACTIVE' ? 'SSL OK' : r.sslStatus === 'PENDING' ? 'SSL pending' : 'SSL error'}
+                                {r.sslStatus === 'ACTIVE' ? t('apps.sslOk') : r.sslStatus === 'PENDING' ? t('apps.sslPending') : t('apps.sslError')}
                               </Badge>
                             )}
                             {r.kind === 'ip' && (
-                              <Badge variant="outline" className="text-[10px]">direct IP</Badge>
+                              <Badge variant="outline" className="text-[10px]">{t('apps.directIp')}</Badge>
                             )}
                           </div>
                         ))}
@@ -932,20 +947,20 @@ export default function ApplicationDetailPage() {
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
                   <div className="rounded-lg border border-border p-3">
-                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Internal port</p>
-                    <p className="font-mono text-lg font-bold">{app.port || 'Not set'}</p>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">{t('apps.internalPort')}</p>
+                    <p className="font-mono text-lg font-bold">{app.port || t('apps.notSet')}</p>
                     {app.hostPort && (
                       <p className="text-[10px] text-muted-foreground mt-1">
-                        Published on host: <span className="font-mono font-semibold">:{app.hostPort}</span>
+                        {t('apps.publishedHost', { port: app.hostPort })}
                       </p>
                     )}
                   </div>
                   <div className="rounded-lg border border-border p-3">
-                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Framework</p>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">{t('apps.framework')}</p>
                     <p className="text-lg font-bold">{FRAMEWORK_LABELS[app.framework] || app.framework}</p>
                   </div>
                   <div className="rounded-lg border border-border p-3">
-                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Project</p>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">{t('apps.project')}</p>
                     {app.project ? (
                       <Link href={`/dashboard/projects/${app.project.id}`} className="text-lg font-bold text-primary hover:underline">
                         {app.project.name}
@@ -962,42 +977,42 @@ export default function ApplicationDetailPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg">
-                  <GitBranch size={18} /> Git Info
+                  <GitBranch size={18} /> {t('apps.gitInfo')}
                 </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                   <div className="space-y-3">
                     <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Repository URL</p>
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('apps.repoUrl')}</p>
                       <p className="mt-0.5 font-mono text-sm truncate">
-                        {app.gitUrl || <span className="text-muted-foreground">Not set</span>}
+                        {app.gitUrl || <span className="text-muted-foreground">{t('apps.notSet')}</span>}
                       </p>
                     </div>
                     <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Branch</p>
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('apps.branch')}</p>
                       <p className="mt-0.5 text-sm">
                         {app.gitBranch ? (
                           <Badge variant="outline" className="gap-1">
                             <GitBranch size={10} /> {app.gitBranch}
                           </Badge>
                         ) : (
-                          <span className="text-muted-foreground">Not set</span>
+                          <span className="text-muted-foreground">{t('apps.notSet')}</span>
                         )}
                       </p>
                     </div>
                   </div>
                   <div className="space-y-3">
                     <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Build Command</p>
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('apps.buildCommand')}</p>
                       <p className="mt-0.5 font-mono text-sm">
-                        {app.buildCommand || <span className="text-muted-foreground">Not set</span>}
+                        {app.buildCommand || <span className="text-muted-foreground">{t('apps.notSet')}</span>}
                       </p>
                     </div>
                     <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Start Command</p>
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('apps.startCommand')}</p>
                       <p className="mt-0.5 font-mono text-sm">
-                        {app.startCommand || <span className="text-muted-foreground">Not set</span>}
+                        {app.startCommand || <span className="text-muted-foreground">{t('apps.notSet')}</span>}
                       </p>
                     </div>
                   </div>
@@ -1014,7 +1029,7 @@ export default function ApplicationDetailPage() {
           <Card>
             <CardHeader className="flex flex-row items-center justify-between pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
-                <Terminal size={18} /> Logs
+                <Terminal size={18} /> {t('apps.logsHeader')}
               </CardTitle>
               <div className="flex items-center gap-2">
                 {/* Lines selector */}
@@ -1041,7 +1056,7 @@ export default function ApplicationDetailPage() {
                   onClick={() => setLogsAutoRefresh(!logsAutoRefresh)}
                   className="text-xs"
                 >
-                  {logsAutoRefresh ? 'Auto' : 'Paused'}
+                  {logsAutoRefresh ? t('apps.logsAuto') : t('apps.logsPaused')}
                 </Button>
                 {/* Manual refresh */}
                 <Button size="sm" variant="outline" onClick={() => refetchLogs()}>
@@ -1055,11 +1070,11 @@ export default function ApplicationDetailPage() {
                 className="rounded-lg bg-zinc-950 p-4 max-h-[500px] overflow-y-auto"
               >
                 <pre className="text-xs text-green-400 font-mono whitespace-pre-wrap break-all">
-                  {logsData?.logs || 'Waiting for logs...'}
+                  {logsData?.logs || t('apps.waitingLogs2')}
                 </pre>
               </div>
               <p className="text-xs text-muted-foreground mt-2">
-                {logsAutoRefresh ? 'Auto-refreshes every 3s' : 'Auto-refresh paused'} -- Showing last {logLines} lines
+                {logsAutoRefresh ? t('apps.logsHint') : t('apps.logsHintPaused')} — {t('apps.logsLines', { n: logLines })}
               </p>
             </CardContent>
           </Card>
@@ -1072,9 +1087,9 @@ export default function ApplicationDetailPage() {
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="flex items-center gap-2 text-lg">
-                <Terminal size={18} /> Terminal
+                <Terminal size={18} /> {t('apps.terminal')}
               </CardTitle>
-              <CardDescription>Execute commands in the application container</CardDescription>
+              <CardDescription>{t('apps.terminalDesc')}</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="rounded-lg bg-zinc-950 overflow-hidden">
@@ -1085,7 +1100,7 @@ export default function ApplicationDetailPage() {
                 >
                   {termHistory.length === 0 && (
                     <p className="text-xs text-zinc-500 font-mono">
-                      Type a command below and press Enter to execute...
+                      {t('apps.terminalTypeCmd')}
                     </p>
                   )}
                   {termHistory.map((entry, i) => (
@@ -1100,18 +1115,18 @@ export default function ApplicationDetailPage() {
                           entry.exitCode === 0 ? 'text-green-400' : 'text-red-400'
                         )}
                       >
-                        {entry.output || '(no output)'}
+                        {entry.output || t('apps.terminalNoOut')}
                       </pre>
                       {entry.exitCode !== 0 && (
                         <p className="text-xs font-mono text-red-500 pl-4 mt-0.5">
-                          exit code: {entry.exitCode}
+                          {t('apps.terminalExitCode', { code: entry.exitCode })}
                         </p>
                       )}
                     </div>
                   ))}
                   {execMutation.isPending && (
                     <div className="flex items-center gap-2 text-xs font-mono text-zinc-400">
-                      <span className="animate-pulse">Running...</span>
+                      <span className="animate-pulse">{t('apps.terminalRunning')}</span>
                     </div>
                   )}
                 </div>
@@ -1126,7 +1141,7 @@ export default function ApplicationDetailPage() {
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') handleTermSubmit();
                     }}
-                    placeholder="Type a command..."
+                    placeholder={t('apps.terminalPlaceholder')}
                     disabled={execMutation.isPending}
                     className="flex-1 bg-transparent text-zinc-200 text-sm font-mono outline-none placeholder:text-zinc-600 disabled:opacity-50"
                   />
@@ -1150,26 +1165,26 @@ export default function ApplicationDetailPage() {
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-lg">
-                <Layers size={18} /> Deployment History
+                <Layers size={18} /> {t('apps.deployHistoryHeader')}
               </CardTitle>
-              <CardDescription>Recent deployments for this application</CardDescription>
+              <CardDescription>{t('apps.deployHistoryDesc2')}</CardDescription>
             </CardHeader>
             <CardContent>
               {deployments.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
                   <Clock size={32} className="mb-2" />
-                  <p className="text-sm">No deployments yet</p>
+                  <p className="text-sm">{t('apps.deployNoneYet')}</p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b text-left text-muted-foreground">
-                        <th className="pb-2 pr-4 font-medium">Status</th>
-                        <th className="pb-2 pr-4 font-medium">Commit</th>
-                        <th className="pb-2 pr-4 font-medium">Message</th>
-                        <th className="pb-2 pr-4 font-medium">Duration</th>
-                        <th className="pb-2 font-medium">Date</th>
+                        <th className="pb-2 pr-4 font-medium">{t('apps.colStatus')}</th>
+                        <th className="pb-2 pr-4 font-medium">{t('apps.colCommit')}</th>
+                        <th className="pb-2 pr-4 font-medium">{t('apps.colMessage')}</th>
+                        <th className="pb-2 pr-4 font-medium">{t('apps.colDuration')}</th>
+                        <th className="pb-2 font-medium">{t('apps.colDate')}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1228,8 +1243,8 @@ export default function ApplicationDetailPage() {
                   </CardTitle>
                   <CardDescription>
                     {composeFile?.exists
-                      ? `Editing ${composeFile.path}. Save then redeploy to apply changes.`
-                      : 'No compose file yet — write one to provision this app via compose.'}
+                      ? t('apps.composeEditing', { path: composeFile.path ?? '' })
+                      : t('apps.composeMissing')}
                   </CardDescription>
                 </div>
                 <Button
@@ -1237,7 +1252,7 @@ export default function ApplicationDetailPage() {
                   disabled={composeDraft === null || composeDraft === composeFile?.content || saveComposeMutation.isPending}
                   onClick={() => composeDraft !== null && saveComposeMutation.mutate(composeDraft)}
                 >
-                  <Save size={14} /> {saveComposeMutation.isPending ? 'Saving...' : 'Save'}
+                  <Save size={14} /> {saveComposeMutation.isPending ? t('apps.savingDots') : t('apps.save')}
                 </Button>
               </CardHeader>
               <CardContent>
@@ -1258,9 +1273,7 @@ export default function ApplicationDetailPage() {
                     <FileCode size={18} /> Dockerfile
                   </CardTitle>
                   <CardDescription>
-                    {dockerfile?.exists
-                      ? 'Editing Dockerfile. Save then redeploy to apply.'
-                      : 'No Dockerfile — only used when compose absent.'}
+                    {dockerfile?.exists ? t('apps.dockerfileEditing') : t('apps.dockerfileMissing')}
                   </CardDescription>
                 </div>
                 <Button
@@ -1268,7 +1281,7 @@ export default function ApplicationDetailPage() {
                   disabled={dockerfileDraft === null || dockerfileDraft === dockerfile?.content || saveDockerfileMutation.isPending}
                   onClick={() => dockerfileDraft !== null && saveDockerfileMutation.mutate(dockerfileDraft)}
                 >
-                  <Save size={14} /> {saveDockerfileMutation.isPending ? 'Saving...' : 'Save'}
+                  <Save size={14} /> {saveDockerfileMutation.isPending ? t('apps.savingDots') : t('apps.save')}
                 </Button>
               </CardHeader>
               <CardContent>
@@ -1291,23 +1304,34 @@ export default function ApplicationDetailPage() {
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-lg">
-                <Plug size={18} /> Port Mapping
+                <Plug size={18} /> {t('apps.portsHeader')}
               </CardTitle>
-              <CardDescription>
-                Map container ports to host ports. Save then redeploy to apply.
-              </CardDescription>
+              <CardDescription>{t('apps.portsDesc2')}</CardDescription>
             </CardHeader>
             <CardContent>
               {!portsData ? (
-                <p className="text-sm text-muted-foreground">Loading...</p>
+                <p className="text-sm text-muted-foreground">{t('apps.loadingDots')}</p>
               ) : portsData.compose.length === 0 && portsData.dockerfileExposed.length === 0 ? (
                 <div className="flex items-start gap-3 rounded-lg border border-orange-500/30 bg-orange-500/5 p-4">
                   <AlertTriangle size={18} className="text-orange-500 shrink-0 mt-0.5" />
                   <div className="text-sm">
-                    <p className="font-semibold">No port declared</p>
+                    <p className="font-semibold">{t('apps.noPortHeader')}</p>
                     <p className="text-muted-foreground mt-1">
-                      Container will start but won&apos;t be reachable from the host.
-                      Add a <code>ports:</code> entry in <Link href="#" onClick={(e) => { e.preventDefault(); setActiveTab('files'); }} className="text-primary hover:underline">docker-compose.yml</Link> or an <code>EXPOSE</code> directive in your Dockerfile.
+                      {t('apps.noPortBody', { compose: '', file: '', expose: '' })
+                        .replace('{compose}', '__C__')
+                        .replace('{file}', '__F__')
+                        .replace('{expose}', '__E__')
+                        .split(/__C__|__F__|__E__/)
+                        .map((part, idx, arr) => (
+                          <React.Fragment key={idx}>
+                            {part}
+                            {idx === 0 && <code>ports:</code>}
+                            {idx === 1 && (
+                              <Link href="#" onClick={(e) => { e.preventDefault(); setActiveTab('files'); }} className="text-primary hover:underline">docker-compose.yml</Link>
+                            )}
+                            {idx === 2 && <code>EXPOSE</code>}
+                          </React.Fragment>
+                        ))}
                     </p>
                   </div>
                 </div>
@@ -1315,14 +1339,14 @@ export default function ApplicationDetailPage() {
                 <div className="space-y-4">
                   {portsData.compose.length > 0 && (
                     <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Compose</p>
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">{t('apps.composeSection')}</p>
                       <div className="space-y-2">
                         {portsData.compose.map((p, i) => (
                           <div key={`${p.service}-${p.container}-${i}`} className="flex items-center gap-3 rounded-md border border-border p-3">
                             <Badge variant="secondary" className="font-mono">{p.service}</Badge>
                             <div className="flex items-center gap-2 flex-1">
                               <div className="flex-1">
-                                <Label className="text-xs">Host port</Label>
+                                <Label className="text-xs">{t('apps.hostPort')}</Label>
                                 <Input
                                   type="number"
                                   min={1}
@@ -1334,7 +1358,7 @@ export default function ApplicationDetailPage() {
                               </div>
                               <ChevronRight size={14} className="mt-5 text-muted-foreground" />
                               <div className="flex-1">
-                                <Label className="text-xs">Container port</Label>
+                                <Label className="text-xs">{t('apps.containerPort')}</Label>
                                 <Input value={`${p.container}/${p.protocol}`} disabled className="font-mono h-8" />
                               </div>
                             </div>
@@ -1346,14 +1370,14 @@ export default function ApplicationDetailPage() {
 
                   {portsData.dockerfileExposed.length > 0 && portsData.compose.length === 0 && (
                     <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Dockerfile EXPOSE</p>
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">{t('apps.dockerfileExposeSection')}</p>
                       <div className="flex flex-wrap gap-2">
                         {portsData.dockerfileExposed.map((p) => (
                           <Badge key={p} variant="outline" className="font-mono">{p}</Badge>
                         ))}
                       </div>
                       <p className="text-xs text-muted-foreground mt-2">
-                        Switch to compose to remap ports — Dockerfile EXPOSE values are used as-is for both host and container.
+                        {t('apps.dockerfileExposeHint')}
                       </p>
                     </div>
                   )}
@@ -1371,7 +1395,7 @@ export default function ApplicationDetailPage() {
                           remapPortsMutation.mutate(mapping);
                         }}
                       >
-                        <Save size={14} /> {remapPortsMutation.isPending ? 'Saving...' : 'Save Mapping'}
+                        <Save size={14} /> {remapPortsMutation.isPending ? t('apps.savingDots') : t('apps.saveMapping')}
                       </Button>
                     </div>
                   )}
@@ -1389,11 +1413,9 @@ export default function ApplicationDetailPage() {
             <CardHeader className="flex flex-row items-start justify-between">
               <div>
                 <CardTitle className="flex items-center gap-2 text-lg">
-                  <Settings size={18} /> Environment Variables
+                  <Settings size={18} /> {t('apps.envHeader')}
                 </CardTitle>
-                <CardDescription>
-                  Variables injected into the container at start. Save then redeploy.
-                </CardDescription>
+                <CardDescription>{t('apps.envDesc2')}</CardDescription>
               </div>
               <Button
                 size="sm"
@@ -1407,7 +1429,7 @@ export default function ApplicationDetailPage() {
                 }}
                 disabled={saveEnvMutation.isPending}
               >
-                <Save size={14} /> {saveEnvMutation.isPending ? 'Saving...' : 'Save'}
+                <Save size={14} /> {saveEnvMutation.isPending ? t('apps.savingDots') : t('apps.save')}
               </Button>
             </CardHeader>
             <CardContent>
@@ -1418,6 +1440,10 @@ export default function ApplicationDetailPage() {
                     row={row}
                     onChange={(next) => setEnvDraft(d => d.map((r, j) => j === i ? next : r))}
                     onDelete={() => setEnvDraft(d => d.filter((_, j) => j !== i))}
+                    phKey={t('apps.envPlaceholderKey')}
+                    phValue={t('apps.envPlaceholderValue')}
+                    titleHide={t('apps.envHideValue')}
+                    titleShow={t('apps.envShowValue')}
                   />
                 ))}
                 <Button
@@ -1425,7 +1451,7 @@ export default function ApplicationDetailPage() {
                   variant="outline"
                   onClick={() => setEnvDraft(d => [...d, { key: '', value: '' }])}
                 >
-                  <Plus size={14} /> Add Variable
+                  <Plus size={14} /> {t('apps.addVariable')}
                 </Button>
               </div>
             </CardContent>
@@ -1443,12 +1469,20 @@ export default function ApplicationDetailPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg">
-                  <Settings size={18} /> Name
+                  <Settings size={18} /> {t('apps.nameTitle')}
                 </CardTitle>
                 <CardDescription>
-                  Change how this app appears in the dashboard. The internal slug
-                  (<code className="font-mono text-[11px]">{(app as any).slugName || app.name}</code>) and container name stay locked
-                  to avoid breaking the running stack.
+                  {(() => {
+                    const parts = t('apps.nameDesc', { slug: '__SLUG__' }).split('__SLUG__');
+                    return parts.map((part, idx) => (
+                      <React.Fragment key={idx}>
+                        {part}
+                        {idx === 0 && parts.length > 1 && (
+                          <code className="font-mono text-[11px]">{(app as any).slugName || app.name}</code>
+                        )}
+                      </React.Fragment>
+                    ));
+                  })()}
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -1457,6 +1491,10 @@ export default function ApplicationDetailPage() {
                   slugName={(app as any).slugName || app.name}
                   onSave={(v) => renameMutation.mutate(v)}
                   saving={renameMutation.isPending}
+                  tLabel={t('apps.nameLabel')}
+                  tSave={t('apps.save')}
+                  tReset={t('apps.nameReset')}
+                  tResetTitle={t('apps.nameResetTitle')}
                 />
               </CardContent>
             </Card>
@@ -1464,11 +1502,9 @@ export default function ApplicationDetailPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg">
-                  <Settings size={18} /> Build configuration
+                  <Settings size={18} /> {t('apps.buildCfg')}
                 </CardTitle>
-                <CardDescription>
-                  Snapshot of the build settings used the last time this app was deployed. Edit via Files → Compose / Dockerfile when needed.
-                </CardDescription>
+                <CardDescription>{t('apps.buildCfgDesc')}</CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -1476,18 +1512,18 @@ export default function ApplicationDetailPage() {
                     {app.gitUrl && (
                       <>
                         <div>
-                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Git URL</p>
+                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('apps.gitUrlLabel')}</p>
                           <p className="mt-0.5 font-mono text-sm truncate" title={app.gitUrl}>{app.gitUrl}</p>
                         </div>
                         <div>
-                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Branch</p>
+                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('apps.branch')}</p>
                           <p className="mt-0.5 text-sm">
                             {app.gitBranch ? (
                               <Badge variant="outline" className="gap-1">
                                 <GitBranch size={10} /> {app.gitBranch}
                               </Badge>
                             ) : (
-                              <span className="text-muted-foreground">Not set</span>
+                              <span className="text-muted-foreground">{t('apps.notSet')}</span>
                             )}
                           </p>
                         </div>
@@ -1495,14 +1531,14 @@ export default function ApplicationDetailPage() {
                     )}
                     {app.dockerImage && (
                       <div>
-                        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Docker image</p>
+                        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('apps.dockerImageLabel')}</p>
                         <p className="mt-0.5 font-mono text-sm break-all">{app.dockerImage}</p>
                       </div>
                     )}
                     <div>
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Port</p>
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('apps.portLabel')}</p>
                       <p className="mt-0.5 font-mono text-sm">
-                        {app.port || <span className="text-muted-foreground">Not set</span>}
+                        {app.port || <span className="text-muted-foreground">{t('apps.notSet')}</span>}
                       </p>
                     </div>
                   </div>
@@ -1510,15 +1546,15 @@ export default function ApplicationDetailPage() {
                     {(app.buildCommand || app.startCommand) && (
                       <>
                         <div>
-                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Build Command</p>
+                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('apps.buildCommand')}</p>
                           <p className="mt-0.5 font-mono text-sm">
-                            {app.buildCommand || <span className="text-muted-foreground">Not set</span>}
+                            {app.buildCommand || <span className="text-muted-foreground">{t('apps.notSet')}</span>}
                           </p>
                         </div>
                         <div>
-                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Start Command</p>
+                          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('apps.startCommand')}</p>
                           <p className="mt-0.5 font-mono text-sm">
-                            {app.startCommand || <span className="text-muted-foreground">Not set</span>}
+                            {app.startCommand || <span className="text-muted-foreground">{t('apps.notSet')}</span>}
                           </p>
                         </div>
                       </>
@@ -1533,11 +1569,9 @@ export default function ApplicationDetailPage() {
               <Card>
                 <CardHeader>
                   <CardTitle className="flex items-center gap-2 text-lg">
-                    <ExternalLink size={18} /> Public URL
+                    <ExternalLink size={18} /> {t('apps.publicUrlHeader')}
                   </CardTitle>
-                  <CardDescription>
-                    Choose how Kryptalis exposes this app on its domain.
-                  </CardDescription>
+                  <CardDescription>{t('apps.publicUrlDesc')}</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3">
                   <button
@@ -1550,9 +1584,18 @@ export default function ApplicationDetailPage() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <p className="font-medium text-sm">Clean URL (recommended)</p>
+                        <p className="font-medium text-sm">{t('apps.cleanUrl')}</p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          <span className="font-mono">https://{app.domains[0].domain}</span> — Caddy proxies on 443 with a Let's Encrypt cert.
+                          {(() => {
+                            const parts = t('apps.cleanUrlDesc', { url: '__URL__' }).split('__URL__');
+                            return (
+                              <>
+                                {parts[0]}
+                                <span className="font-mono">https://{app.domains[0].domain}</span>
+                                {parts[1] || ''}
+                              </>
+                            );
+                          })()}
                         </p>
                       </div>
                       {!app.customPort && <Check size={16} className="text-primary shrink-0 mt-0.5" />}
@@ -1568,9 +1611,18 @@ export default function ApplicationDetailPage() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <p className="font-medium text-sm">Port-pinned URL</p>
+                        <p className="font-medium text-sm">{t('apps.portUrl')}</p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          <span className="font-mono">http://{app.domains[0].domain}:{app.port}</span> — opens the container directly on its custom port. No HTTPS on this port (Caddy only proxies :443). Use clean URL above for HTTPS.
+                          {(() => {
+                            const parts = t('apps.portUrlDesc', { url: '__URL__' }).split('__URL__');
+                            return (
+                              <>
+                                {parts[0]}
+                                <span className="font-mono">http://{app.domains[0].domain}:{app.port}</span>
+                                {parts[1] || ''}
+                              </>
+                            );
+                          })()}
                         </p>
                       </div>
                       {app.customPort && <Check size={16} className="text-primary shrink-0 mt-0.5" />}
@@ -1584,10 +1636,19 @@ export default function ApplicationDetailPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg">
-                  <Plug size={18} /> Port bindings
+                  <Plug size={18} /> {t('apps.portBindings')}
                 </CardTitle>
                 <CardDescription>
-                  Expose this app on <span className="font-mono">https://&lt;domain&gt;:&lt;port&gt;</span>. Lets several apps share the same hostname on different ports.
+                  {(() => {
+                    const parts = t('apps.portBindingsDesc', { fmt: '__F__' }).split('__F__');
+                    return (
+                      <>
+                        {parts[0]}
+                        <span className="font-mono">https://&lt;domain&gt;:&lt;port&gt;</span>
+                        {parts[1] || ''}
+                      </>
+                    );
+                  })()}
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
@@ -1609,31 +1670,31 @@ export default function ApplicationDetailPage() {
                           onClick={() => removeBindingMutation.mutate(b.id)}
                           disabled={removeBindingMutation.isPending}
                         >
-                          <Trash2 size={12} /> Remove
+                          <Trash2 size={12} /> {t('apps.bindingRemove')}
                         </Button>
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <p className="text-xs text-muted-foreground">No port bindings yet.</p>
+                  <p className="text-xs text-muted-foreground">{t('apps.bindingNone')}</p>
                 )}
 
                 <div className="flex items-end gap-2 pt-2 border-t border-border">
                   <div className="flex-1">
-                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Domain</label>
+                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground">{t('apps.bindingDomain')}</label>
                     <select
                       value={newBindingDomainId}
                       onChange={(e) => setNewBindingDomainId(e.target.value)}
                       className="w-full mt-0.5 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
                     >
-                      <option value="">Pick a domain…</option>
+                      <option value="">{t('apps.bindingPickDomain')}</option>
                       {(allDomains || []).map((d: any) => (
                         <option key={d.id} value={d.id}>{d.domain}</option>
                       ))}
                     </select>
                   </div>
                   <div className="w-32">
-                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground">Port</label>
+                    <label className="text-[10px] uppercase tracking-wider text-muted-foreground">{t('apps.bindingPort')}</label>
                     <input
                       type="number"
                       placeholder={String(app.port || 8080)}
@@ -1654,12 +1715,10 @@ export default function ApplicationDetailPage() {
                     }}
                     disabled={addBindingMutation.isPending}
                   >
-                    <Plus size={14} /> Add
+                    <Plus size={14} /> {t('apps.bindingAdd')}
                   </Button>
                 </div>
-                <p className="text-[10px] text-muted-foreground">
-                  Port-pinned bindings open the container directly (http://, no TLS). The container's own port publish is what makes them reachable. For HTTPS use the clean URL on :443.
-                </p>
+                <p className="text-[10px] text-muted-foreground">{t('apps.bindingFooter')}</p>
               </CardContent>
             </Card>
 
@@ -1669,18 +1728,25 @@ export default function ApplicationDetailPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg">
-                  <Rocket size={18} /> Auto-Deploy & Webhook
+                  <Rocket size={18} /> {t('apps.webhookTitle')}
                 </CardTitle>
-                <CardDescription>
-                  Trigger a redeploy automatically when your Git provider receives a push.
-                </CardDescription>
+                <CardDescription>{t('apps.webhookDesc')}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between rounded-md border border-border p-3">
                   <div>
-                    <p className="font-medium text-sm">Auto-deploy on push</p>
+                    <p className="font-medium text-sm">{t('apps.autoDeploy')}</p>
                     <p className="text-xs text-muted-foreground">
-                      When enabled, every push to <code>{app.gitBranch || 'main'}</code> triggers a deploy.
+                      {(() => {
+                        const parts = t('apps.autoDeployDesc', { branch: '__B__' }).split('__B__');
+                        return (
+                          <>
+                            {parts[0]}
+                            <code>{app.gitBranch || 'main'}</code>
+                            {parts[1] || ''}
+                          </>
+                        );
+                      })()}
                     </p>
                   </div>
                   <Button
@@ -1689,24 +1755,24 @@ export default function ApplicationDetailPage() {
                     onClick={() => autoDeployMutation.mutate(!webhook?.autoDeploy)}
                     disabled={autoDeployMutation.isPending}
                   >
-                    {webhook?.autoDeploy ? 'Enabled' : 'Disabled'}
+                    {webhook?.autoDeploy ? t('apps.enabled') : t('apps.disabled')}
                   </Button>
                 </div>
 
                 <div className="space-y-2">
-                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Webhook URL</Label>
+                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">{t('apps.webhookUrl')}</Label>
                   <div className="flex gap-2">
                     <Input value={webhook?.url || ''} readOnly className="font-mono text-xs" />
                     <Button
                       size="sm"
                       variant="outline"
                       onClick={() => { if (webhook?.url) { navigator.clipboard.writeText(webhook.url); toast.success(t('toast.copied')); } }}
-                    >Copy</Button>
+                    >{t('apps.copy')}</Button>
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Webhook Secret</Label>
+                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">{t('apps.webhookSecret')}</Label>
                   <div className="flex gap-2">
                     <Input
                       value={webhook?.secret || ''}
@@ -1715,24 +1781,35 @@ export default function ApplicationDetailPage() {
                       className="font-mono text-xs"
                     />
                     <Button size="sm" variant="outline" onClick={() => setShowSecret(s => !s)}>
-                      {showSecret ? 'Hide' : 'Show'}
+                      {showSecret ? t('apps.hide') : t('apps.show')}
                     </Button>
                     <Button
                       size="sm"
                       variant="outline"
                       onClick={() => { if (webhook?.secret) { navigator.clipboard.writeText(webhook.secret); toast.success(t('toast.copied')); } }}
-                    >Copy</Button>
+                    >{t('apps.copy')}</Button>
                     <Button
                       size="sm"
                       variant="outline"
                       disabled={rotateWebhookMutation.isPending}
-                      onClick={() => { if (confirm('Rotate the secret? The old one will stop working.')) rotateWebhookMutation.mutate(); }}
+                      onClick={() => { if (confirm(t('apps.rotateConfirm'))) rotateWebhookMutation.mutate(); }}
                     >
-                      <RefreshCw size={12} /> Rotate
+                      <RefreshCw size={12} /> {t('apps.rotateSecret')}
                     </Button>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    GitHub: header <code>X-Hub-Signature-256</code> · GitLab: header <code>X-Gitlab-Token</code> (use secret as token).
+                    {(() => {
+                      const parts = t('apps.webhookHeadersHint', { gh: '__GH__', gl: '__GL__' }).split(/__GH__|__GL__/);
+                      return (
+                        <>
+                          {parts[0]}
+                          <code>X-Hub-Signature-256</code>
+                          {parts[1] || ''}
+                          <code>X-Gitlab-Token</code>
+                          {parts[2] || ''}
+                        </>
+                      );
+                    })()}
                   </p>
                 </div>
               </CardContent>
@@ -1742,14 +1819,12 @@ export default function ApplicationDetailPage() {
             {/* Danger zone */}
             <Card className="border-destructive/50">
               <CardHeader>
-                <CardTitle className="text-lg text-destructive">Danger Zone</CardTitle>
-                <CardDescription>
-                  Irreversible actions. This will stop all Docker containers and permanently delete the application.
-                </CardDescription>
+                <CardTitle className="text-lg text-destructive">{t('apps.dangerZone')}</CardTitle>
+                <CardDescription>{t('apps.dangerDesc')}</CardDescription>
               </CardHeader>
               <CardContent>
                 <Button variant="destructive" onClick={() => setShowDelete(true)}>
-                  <Trash2 size={14} /> Delete Application
+                  <Trash2 size={14} /> {t('apps.deleteApp')}
                 </Button>
               </CardContent>
             </Card>
@@ -1764,7 +1839,7 @@ export default function ApplicationDetailPage() {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Layers size={18} />
-            Deployment {liveDep?.id?.slice(0, 8)}
+            {t('apps.deployDialogTitle', { id: liveDep?.id?.slice(0, 8) || '' })}
             {liveDep && (
               <Badge variant={STATUS_VARIANT[liveDep.status] || 'secondary'} className="gap-1.5">
                 <StatusDot status={liveDep.status} />
@@ -1772,20 +1847,20 @@ export default function ApplicationDetailPage() {
               </Badge>
             )}
             {liveDep && !FINAL_STATES.has(liveDep.status) && (
-              <span className="text-xs text-muted-foreground animate-pulse ml-1">live</span>
+              <span className="text-xs text-muted-foreground animate-pulse ml-1">{t('apps.deployLive')}</span>
             )}
           </DialogTitle>
           <DialogDescription>
-            {liveDep?.commitMessage || 'No commit message'}
+            {liveDep?.commitMessage || t('apps.deployDialogNoMsg')}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 max-h-[60vh] overflow-y-auto">
           {liveDep?.buildLogs ? (
             <div>
               <p className="text-xs font-semibold mb-1 flex items-center gap-2">
-                Build logs
+                {t('apps.buildLogs')}
                 {!FINAL_STATES.has(liveDep.status) && (
-                  <span className="text-[10px] text-emerald-500 animate-pulse">● streaming</span>
+                  <span className="text-[10px] text-emerald-500 animate-pulse">{t('apps.streaming')}</span>
                 )}
               </p>
               <pre className="whitespace-pre-wrap break-all text-xs font-mono bg-zinc-950 text-green-300 p-3 rounded-md max-h-72 overflow-y-auto">
@@ -1796,23 +1871,23 @@ export default function ApplicationDetailPage() {
           ) : liveDep && !FINAL_STATES.has(liveDep.status) ? (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 size={14} className="animate-spin" />
-              Waiting for first log line...
+              {t('apps.waitingFirstLog2')}
             </div>
           ) : null}
           {liveDep?.deployLogs && (
             <div>
-              <p className="text-xs font-semibold mb-1 text-destructive">Error</p>
+              <p className="text-xs font-semibold mb-1 text-destructive">{t('apps.deployErr')}</p>
               <pre className="whitespace-pre-wrap break-all text-xs font-mono bg-red-950/40 text-red-200 p-3 rounded-md max-h-60 overflow-y-auto">
                 {liveDep.deployLogs}
               </pre>
             </div>
           )}
           {!liveDep?.buildLogs && !liveDep?.deployLogs && liveDep && FINAL_STATES.has(liveDep.status) && (
-            <p className="text-sm text-muted-foreground">No logs captured for this deployment.</p>
+            <p className="text-sm text-muted-foreground">{t('apps.deployNoLogs')}</p>
           )}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setDeploymentDetail(null)}>Close</Button>
+          <Button variant="outline" onClick={() => setDeploymentDetail(null)}>{t('apps.close')}</Button>
         </DialogFooter>
       </Dialog>
 
@@ -1821,11 +1896,8 @@ export default function ApplicationDetailPage() {
       {/* ------------------------------------------------------------------ */}
       <Dialog open={showDelete} onClose={() => setShowDelete(false)}>
         <DialogHeader>
-          <DialogTitle>{t('common.delete')} {app.name}</DialogTitle>
-          <DialogDescription>
-            This will stop all Docker containers and permanently delete the application.
-            This action cannot be undone.
-          </DialogDescription>
+          <DialogTitle>{t('apps.deleteTitle', { name: app.name })}</DialogTitle>
+          <DialogDescription>{t('apps.deleteBody')}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" onClick={() => setShowDelete(false)}>
@@ -1836,7 +1908,7 @@ export default function ApplicationDetailPage() {
             disabled={deleteMutation.isPending}
             onClick={() => deleteMutation.mutate()}
           >
-            {deleteMutation.isPending ? 'Deleting...' : t('common.delete')}
+            {deleteMutation.isPending ? t('apps.deletingDots') : t('common.delete')}
           </Button>
         </DialogFooter>
       </Dialog>
