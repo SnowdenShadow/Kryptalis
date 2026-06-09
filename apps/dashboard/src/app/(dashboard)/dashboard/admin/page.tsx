@@ -59,13 +59,15 @@ const STATUS_BADGE: Record<Status, 'success' | 'warning' | 'destructive'> = {
   ACTIVE: 'success', SUSPENDED: 'warning', BANNED: 'destructive',
 };
 
-function timeAgo(d: string | null) {
-  if (!d) return 'never';
-  const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+function makeTimeAgo(t: (k: string, v?: Record<string, string | number>) => string) {
+  return (d: string | null) => {
+    if (!d) return t('admin.timeNever');
+    const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
+    if (s < 60) return t('admin.timeJustNow');
+    if (s < 3600) return t('admin.timeMinAgo', { n: Math.floor(s / 60) });
+    if (s < 86400) return t('admin.timeHourAgo', { n: Math.floor(s / 3600) });
+    return t('admin.timeDayAgo', { n: Math.floor(s / 86400) });
+  };
 }
 
 export default function AdminPage() {
@@ -74,17 +76,13 @@ export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   const router = useRouter();
   const me = useAuthStore((s) => s.user);
+  const timeAgo = makeTimeAgo(t);
 
-  // Client-side role guard. The sidebar already hides this entry for
-  // non-admins, but a hand-typed /dashboard/admin URL would render the
-  // page and then 403 on every API call — confusing. Redirect to the
-  // dashboard with a toast instead of rendering a half-broken shell.
-  // The backend still enforces RBAC on every endpoint — this is purely
-  // UX defense in depth.
+  // Client-side role guard. Backend still enforces RBAC on every endpoint.
   if (me && me.role !== 'ADMIN' && me.role !== 'SUPERADMIN') {
     if (typeof window !== 'undefined') {
       router.replace('/dashboard');
-      toast.error('Admin panel is restricted to platform administrators.');
+      toast.error(t('admin.restricted'));
     }
     return null;
   }
@@ -197,9 +195,9 @@ export default function AdminPage() {
     { id: 'overview', label: t('admin.tab.overview'), icon: Activity },
     { id: 'users', label: t('admin.tab.users'), icon: Users },
     { id: 'settings', label: t('admin.tab.settings'), icon: Settings },
-    { id: 'system', label: t('admin.tab.system') || 'System Config', icon: Settings },
-    { id: 'infrastructure', label: t('admin.tab.infrastructure') || 'Infrastructure', icon: Activity },
-    { id: 'updates', label: t('admin.tab.updates') || 'Updates', icon: RefreshCw },
+    { id: 'system', label: t('admin.tab.system'), icon: Settings },
+    { id: 'infrastructure', label: t('admin.tab.infrastructure'), icon: Activity },
+    { id: 'updates', label: t('admin.tab.updates'), icon: RefreshCw },
     { id: 'audit', label: t('admin.tab.audit'), icon: ShieldAlert },
   ];
 
@@ -419,8 +417,8 @@ export default function AdminPage() {
             },
             {
               key: 'deployment_mode',
-              label: 'Deployment mode',
-              desc: 'LOCAL = single local server only. MULTI = users can pick from multiple registered servers. Changing this affects new projects only.',
+              label: t('admin.settings.deployModeLabel'),
+              desc: t('admin.settings.deployModeDesc'),
               type: 'deployMode',
             },
           ].map(s => {
@@ -466,7 +464,7 @@ export default function AdminPage() {
                     <Select
                       value={(val as string) ?? 'LOCAL'}
                       onChange={(e) => {
-                        if (confirm(`Switch deployment mode to ${e.target.value}? Existing projects keep their server; only new projects are affected.`)) {
+                        if (confirm(t('admin.settings.deployModeConfirm', { mode: e.target.value }))) {
                           updateSettingMutation.mutate({ key: s.key, value: e.target.value });
                         }
                       }}
