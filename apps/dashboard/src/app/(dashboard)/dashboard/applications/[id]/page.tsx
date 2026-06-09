@@ -910,8 +910,8 @@ export default function ApplicationDetailPage() {
                         kind: 'binding',
                       });
                     }
-                    if (rows.length === 0 && app.port) {
-                      rows.push({ url: appUrl(hostname, app.port), kind: 'ip' });
+                    if (rows.length === 0 && (app.hostPort || app.port)) {
+                      rows.push({ url: appUrl(hostname, app.hostPort || app.port!), kind: 'ip' });
                     }
                     return (
                       <div className="space-y-2">

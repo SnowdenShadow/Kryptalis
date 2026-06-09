@@ -294,6 +294,34 @@ function stripComposePorts(content: string): string {
  * from a compose file. Used to wire up Caddy's reverse_proxy target
  * without forcing a host port publish.
  */
+/**
+ * Pull every explicit `container_name` declared in the compose YAML.
+ * Used to defensively `docker rm -f` any pre-existing container by the
+ * same name BEFORE `compose up -d --build` — otherwise the user's hard-
+ * coded names collide with leftovers from a previous failed deploy or
+ * another stack using the same names, and compose hard-errors with
+ * "container name already in use".
+ *
+ * Returns the list of names. Services without an explicit container_name
+ * are omitted (compose auto-generates safe project-prefixed names for
+ * those, no collisions possible).
+ */
+function listComposeContainerNames(content: string): string[] {
+  try {
+    const doc: any = yaml.load(content);
+    if (!doc?.services || typeof doc.services !== 'object') return [];
+    const names: string[] = [];
+    for (const val of Object.values<any>(doc.services)) {
+      if (typeof val?.container_name === 'string' && val.container_name.trim()) {
+        names.push(val.container_name.trim());
+      }
+    }
+    return names;
+  } catch {
+    return [];
+  }
+}
+
 function readComposeContainerInfo(
   content: string,
   fallbackContainerName: string,
@@ -334,6 +362,44 @@ async function dockerCompose(
   if (envFile) argv.push('--env-file', envFile);
   argv.push(...args);
   return execFileAsync('docker', argv, { cwd: appDir, timeout: timeoutMs });
+}
+
+/**
+ * Pre-flight cleanup: remove any container that already holds one of the
+ * explicit `container_name` values the compose file is about to claim.
+ *
+ * Two scenarios this covers:
+ *   1. Previous failed deploy left a stopped container with the same name.
+ *   2. Operator manually started a container with this name out-of-band.
+ *
+ * Best-effort — if `docker rm` fails for any reason, we still try the
+ * compose up below; the real error is surfaced from there. Logging into
+ * `log` lets the user see exactly what we removed.
+ */
+async function removeCollidingContainers(
+  composeContent: string,
+  log: (line: string) => void,
+): Promise<void> {
+  const names = listComposeContainerNames(composeContent);
+  if (names.length === 0) return;
+  for (const name of names) {
+    try {
+      // `docker ps -a -q -f name=^<name>$` returns IDs of containers with
+      // an EXACT name match. The anchors are critical — without them,
+      // "enopya-web" would also match "enopya-web-backup" etc.
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['ps', '-a', '-q', '-f', `name=^${name}$`],
+        { timeout: 5_000 },
+      );
+      const id = stdout.trim();
+      if (!id) continue;
+      log(`> docker rm -f ${name}  (collision with existing container ${id.slice(0, 12)})`);
+      await execFileAsync('docker', ['rm', '-f', name], { timeout: 30_000 });
+    } catch (e: any) {
+      log(`(could not remove ${name}: ${e?.stderr || e?.message || 'unknown'} — continuing)`);
+    }
+  }
 }
 
 /**
@@ -845,6 +911,7 @@ export class ApplicationsService {
 
       log(`> docker compose pull`);
       await dockerCompose(appDir, ['pull'], undefined, 300_000);
+      await removeCollidingContainers(compose, log);
       log(`> docker compose up -d`);
       await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], undefined, 180_000);
 
@@ -980,6 +1047,7 @@ export class ApplicationsService {
 
       log('> docker compose pull');
       try { await dockerCompose(appDir, ['pull'], envFile, 300_000); } catch {}
+      await removeCollidingContainers(finalCompose, log);
       log('> docker compose up -d');
       await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], envFile, 300_000);
 
@@ -1138,11 +1206,13 @@ export class ApplicationsService {
           kryptalis_apps: { external: true, name: 'kryptalis-apps' },
         },
       };
-      fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), yaml.dump(composeDoc, { lineWidth: 200 }));
+      const composeStr = yaml.dump(composeDoc, { lineWidth: 200 });
+      fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), composeStr);
       log('> wrote docker-compose.yml');
 
       log('> docker compose build');
       await dockerCompose(appDir, ['build'], undefined, 900_000);
+      await removeCollidingContainers(composeStr, log);
       log('> docker compose up -d');
       await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], undefined, 180_000);
 
@@ -1554,8 +1624,11 @@ export class ApplicationsService {
         log('> docker compose pull');
         const r1 = await dockerCompose(appDir, ['pull'], envFile, 600_000).catch((e: any) => ({ stdout: '', stderr: e?.stderr || e?.message || '' }));
         log(r1.stdout + r1.stderr);
+        // Defensive: nuke any container squatting the explicit names this
+        // compose declares (leftovers from a failed deploy, etc).
+        await removeCollidingContainers(content, log);
         log('> docker compose up -d --build');
-        const r2 = await dockerCompose(appDir, ['up', '-d', '--build'], envFile, 900_000);
+        const r2 = await dockerCompose(appDir, ['up', '-d', '--build', '--remove-orphans'], envFile, 900_000);
         log(r2.stdout + r2.stderr);
       } else if (hasDockerfile) {
         const img = imageName(slug);
@@ -1658,8 +1731,9 @@ export class ApplicationsService {
         let composeContent = yaml.dump(doc, { lineWidth: 200 });
         if (projectNet) composeContent = attachProjectNetwork(composeContent, projectNet);
         fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), composeContent);
+        await removeCollidingContainers(composeContent, log);
         log('> docker compose up -d --build');
-        const r = await dockerCompose(appDir, ['up', '-d', '--build'], envFile, 900_000);
+        const r = await dockerCompose(appDir, ['up', '-d', '--build', '--remove-orphans'], envFile, 900_000);
         log(r.stdout + r.stderr);
       }
 
