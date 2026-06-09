@@ -144,7 +144,7 @@ export function QuickDeployDialog({
   const [name, setName] = useState('');
 
   // ── Networking — exclusive: domain OR host port ─────────────────
-  const [exposeMode, setExposeMode] = useState<'domain' | 'port' | 'none'>('none');
+  const [exposeMode, setExposeMode] = useState<'domain' | 'port' | 'none'>('domain');
   const [domainChoice, setDomainChoice] = useState<'new' | string>('new');
   const [newDomain, setNewDomain] = useState('');
   const [hostPort, setHostPort] = useState('');
@@ -671,7 +671,7 @@ export function QuickDeployDialog({
             <Label className="text-sm flex items-center gap-2">
               <Globe size={14} /> {t('quickDeploy.howToReach') || 'How will people reach it?'}
             </Label>
-            <div className="grid sm:grid-cols-3 gap-2">
+            <div className="grid sm:grid-cols-2 gap-2">
               <ExposeOption
                 active={exposeMode === 'domain'}
                 onClick={() => setExposeMode('domain')}
@@ -683,12 +683,6 @@ export function QuickDeployDialog({
                 onClick={() => setExposeMode('port')}
                 title={t('quickDeploy.optPort') || 'A host port'}
                 desc={t('quickDeploy.optPortDesc') || 'Reach at http://server-ip:port.'}
-              />
-              <ExposeOption
-                active={exposeMode === 'none'}
-                onClick={() => setExposeMode('none')}
-                title={t('quickDeploy.optNone') || 'Add later'}
-                desc={t('quickDeploy.optNoneDesc') || 'Skip for now, configure on the app page.'}
               />
             </div>
 
