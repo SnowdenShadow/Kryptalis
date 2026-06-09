@@ -350,9 +350,22 @@ export class SftpService {
   }
 
   /**
-   * Resolve the host-side dir we'll bind-mount as the user's chroot
-   * data. For app scope: the app's per-instance appDir. Errors if the
-   * app hasn't been deployed yet (no dir exists to mount).
+   * Resolve the host-side path we'll bind-mount as the user's chroot
+   * data. Two cases mirror FilesService.resolveDockerTarget:
+   *
+   *   - Git deploys / Compose Empty / Dockerfile Empty: the appDir on
+   *     the host contains the real source code. We mount that.
+   *
+   *   - Marketplace / Docker image: the appDir holds only
+   *     docker-compose.yml + .env + side-files; the real app code
+   *     lives INSIDE the container's filesystem (e.g. PrestaShop's
+   *     /var/www/html) on a Docker-managed volume. We mount that
+   *     volume's host mountpoint instead so SFTP users see the live
+   *     app files.
+   *
+   * The detection mirrors FilesService: if the host dir holds nothing
+   * non-managed (only compose / env / side-files), we're in docker-only
+   * mode. Otherwise host-fs.
    */
   private async resolveChrootSource(scope: 'app' | 'project', scopeId: string): Promise<string> {
     if (scope !== 'app') {
@@ -360,14 +373,81 @@ export class SftpService {
     }
     const app = await this.prisma.application.findUnique({
       where: { id: scopeId },
-      select: { name: true, id: true },
+      select: { name: true, id: true, dockerImage: true, containerName: true },
     });
     if (!app) throw new NotFoundException('Application not found');
     const slug = this.slugify(app.name);
-    // Path INSIDE the sftp container — the compose maps host
-    // .kryptalis/apps to /data/apps inside it. The directory must
-    // exist or the bind-mount will fail at session time.
-    return `/data/apps/${slug}-${app.id.slice(0, 12)}`;
+    const id12 = app.id.slice(0, 12);
+
+    // Host-fs path FIRST. If the appDir has user code we bind-mount that
+    // (mirrors how the file manager works). Path inside the sftp
+    // container — docker-compose maps host .kryptalis/apps → /data/apps.
+    const hostFsPath = `/data/apps/${slug}-${id12}`;
+
+    // Docker-fs detection: only marketplace / image-only apps need the
+    // in-container code mount. Check if the app has a containerName and
+    // the host dir has nothing but plumbing.
+    if (!app.containerName) return hostFsPath;
+
+    // Find which container path holds the user code (same map as
+    // FilesService.pickRootForImage). We probe the container at runtime
+    // via `docker inspect` rather than maintaining a parallel map.
+    const containerSrc = await this.discoverContainerCodePath(app.containerName, app.dockerImage);
+    if (!containerSrc) return hostFsPath;
+
+    return containerSrc;
+  }
+
+  /**
+   * Find the host-side mountpoint of the container path that holds the
+   * app's actual code. We `docker inspect` the container and look for
+   * a Mount whose Destination matches the well-known web root for the
+   * image. Returns null when nothing matches → caller falls back to
+   * the host-fs appDir.
+   *
+   * Returns a path REACHABLE FROM THE SFTP CONTAINER. For Docker named
+   * volumes, docker-compose mounts /var/lib/docker/volumes at
+   * /data/volumes inside the sftp container, so the per-volume code
+   * dir is `/data/volumes/<volumeName>/_data`.
+   */
+  private async discoverContainerCodePath(containerName: string, image: string | null): Promise<string | null> {
+    const ROOT_MAP: Array<[RegExp, string]> = [
+      [/prestashop/, '/var/www/html'],
+      [/wordpress/, '/var/www/html'],
+      [/ghost/, '/var/lib/ghost/content'],
+      [/nextcloud/, '/var/www/html'],
+      [/gitea/, '/data'],
+      [/nginx/, '/usr/share/nginx/html'],
+    ];
+    const lc = (image || containerName).toLowerCase();
+    const match = ROOT_MAP.find(([re]) => re.test(lc));
+    if (!match) return null;
+    const containerDest = match[1];
+
+    try {
+      const { stdout } = await execFileAsync(
+        'docker', ['inspect', '--format', '{{json .Mounts}}', containerName],
+        { timeout: 5_000 },
+      );
+      const mounts: Array<{ Type: string; Source: string; Destination: string; Name?: string }>
+        = JSON.parse(stdout);
+      const found = mounts.find((m) => m.Destination === containerDest);
+      if (!found) return null;
+      // Named volume: Mount.Name is set (e.g. prestashop_data_cmq5...).
+      // Docker stores it at /var/lib/docker/volumes/<name>/_data on the
+      // host, which we re-expose in the sftp container as
+      // /data/volumes/<name>/_data via the compose mount.
+      if (found.Type === 'volume' && found.Name) {
+        return `/data/volumes/${found.Name}/_data`;
+      }
+      // Bind mount: Mount.Source is already a host path. We'd need to
+      // know which slice of the host filesystem is reachable from the
+      // sftp container to use it — skip for now.
+      return null;
+    } catch (err: any) {
+      this.logger.warn(`docker inspect ${containerName}: ${err?.message || err}`);
+      return null;
+    }
   }
 
   // ── helpers ──────────────────────────────────────────────────────

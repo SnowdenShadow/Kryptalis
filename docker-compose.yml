@@ -194,6 +194,15 @@ services:
       # populates /home/<user>/<appname> as a symlink/bind into
       # /data/apps/<slug-id12>/.
       - ./.kryptalis/apps:/data/apps
+      # Marketplace / docker-image apps store their actual code in
+      # Docker-managed volumes (PrestaShop's /var/www/html, WordPress's
+      # same, etc.). To let SFTP users browse those live files we mount
+      # the docker volumes root read-write. SftpService resolves each
+      # app's volume via `docker inspect` at account-create time and
+      # bind-mounts the matching _data dir into the user's home.
+      # The `:ro` would prevent writes — we want WRITE for marketplace
+      # apps too so users can edit themes/plugins/config.
+      - /var/lib/docker/volumes:/data/volumes
     healthcheck:
       # pgrep catches both straight-up crash AND the no-hostkey
       # restart loop we hit with atmoz.
