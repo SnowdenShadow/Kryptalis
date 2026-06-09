@@ -53,7 +53,7 @@ export class GitOAuthService {
   // The client_id below is intentionally a placeholder — replace it with
   // the OAuth App you registered on github.com/settings/developers when
   // you cut a release. Until then, installs need their own GITHUB_OAUTH_CLIENT_ID.
-  private static readonly DEFAULT_GITHUB_CLIENT_ID = 'Iv23liKryptalisDefault';
+  private static readonly DEFAULT_GITHUB_CLIENT_ID = 'Iv23liZpglAixq8V3OwG';
 
   constructor(
     private prisma: PrismaService,
