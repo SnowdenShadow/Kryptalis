@@ -22,8 +22,15 @@ FROM alpine:3.20
 #   /etc/shadow updates authenticate sessions correctly).
 # - shadow: GNU `useradd`/`userdel`/`chpasswd` (Alpine's busybox
 #   `adduser` lacks features we depend on).
+# - acl: POSIX ACLs. We need them because sshd refuses to start a
+#   chrooted session unless ChrootDirectory is root-owned with mode
+#   <= 0755 — but at the same time, the SFTP user has to be able to
+#   write inside the chroot root. ACLs give per-user rwx on top of
+#   the root:root 0755 base, which sshd ignores (it only checks
+#   owner/mode) but the kernel honors. Default ACLs make new files
+#   inherit the permission so users can keep creating things.
 # - bash: nicer interactive debug shell for ops.
-RUN apk add --no-cache openssh openssh-server-pam shadow bash \
+RUN apk add --no-cache openssh openssh-server-pam shadow acl bash \
  && rm -rf /var/cache/apk/*
 
 # sshd_config — chroot every non-root account into /home/<user>, force

@@ -289,6 +289,12 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       // when the app's deploy mode changes (separate code path).
       const chrootSource = await this.resolveChrootSourceForAccount(acc);
       await this.writeUserDropin(acc.username, chrootSource, next.permission, next.disabled);
+      // ACL flips between rwx and rx when the permission tier changes.
+      // Skipping this on a READ→WRITE upgrade would leave the user
+      // unable to write despite the dropin no longer carrying `-R`.
+      if (patch.permission !== undefined) {
+        await this.prepareChrootLeaf(acc.username, chrootSource, next.permission);
+      }
       await this.reloadSshd();
     }
 
@@ -515,8 +521,8 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     // 2. Per-user sshd_config drop-in.
     await this.writeUserDropin(username, chrootSource, permission, disabled);
 
-    // 3. Tighten chroot leaf ownership.
-    await this.prepareChrootLeaf(username, chrootSource);
+    // 3. Tighten chroot leaf ownership + grant per-user ACL.
+    await this.prepareChrootLeaf(username, chrootSource, permission);
 
     // 4. Password.
     if (plainPassword) await this.execChpasswd(username, plainPassword);
@@ -603,19 +609,46 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * sshd's ChrootDirectory requires the LEAF to be owned by root with
-   * mode <= 0755. Files INSIDE the leaf need to be readable (and, for
-   * WRITE accounts, writable) by the SFTP user — they're typically
-   * owned by an app's runtime user (e.g. www-data uid 33), so we add
-   * the SFTP uid to their group via `chgrp` and `chmod g+rX`.
+   * Prepare the chroot leaf so:
    *
-   * find … -mindepth 1 -maxdepth 1 -exec chgrp +
-   *   - mindepth 1: skip the leaf itself (we just chowned it root)
-   *   - maxdepth 1: don't recurse — too slow on large code trees;
-   *     children's groups inherit on creation, and chmod g+rX takes
-   *     care of perms.
+   *   1. sshd accepts it. sshd's `safely_chroot()` walks every ancestor
+   *      of ChrootDirectory and requires each to be owned by root with
+   *      no group/world write bit. If anything else fails this check
+   *      the session dies with "bad ownership or modes for chroot
+   *      directory".
+   *
+   *   2. The SFTP user can still write inside the chroot root. sshd's
+   *      ancestor check is purely uid+mode based — it does NOT inspect
+   *      POSIX ACLs. So we layer a per-user ACL on top of the
+   *      root:root 0755 base: sshd sees the safe mode, the kernel
+   *      honours the ACL on actual write()/unlink()/mkdir() syscalls.
+   *
+   *      `setfacl -m u:<user>:rwx <leaf>`     — direct grant on the
+   *                                              chroot root so the
+   *                                              user can mkdir/touch
+   *                                              there.
+   *      `setfacl -d -m u:<user>:rwx <leaf>`  — default ACL so files
+   *                                              the user creates
+   *                                              inherit the perms
+   *                                              recursively.
+   *      `setfacl -R -m u:<user>:rwX <leaf>/` — apply to every existing
+   *                                              child too (covers
+   *                                              files owned by
+   *                                              www-data inside
+   *                                              marketplace apps).
+   *      `X` (capital) = execute only on dirs, never on plain files
+   *      — sshd's chrooted user shouldn't gain exec on text content.
+   *
+   *   3. READ-only accounts collapse `rwx` → `rx` / `rwX` → `rX`. The
+   *      sshd-side `internal-sftp -R` still enforces RO at the
+   *      protocol layer (server refuses write ops outright); the ACL
+   *      tightening is just defence in depth.
    */
-  private async prepareChrootLeaf(username: string, chrootSource: string): Promise<void> {
+  private async prepareChrootLeaf(
+    username: string,
+    chrootSource: string,
+    permission: SftpPermission,
+  ): Promise<void> {
     this.assertUsernameValid(username);
     this.assertChrootPathSafe(chrootSource);
     const uidOut = await this.dockerExec(['id', '-u', username], { timeoutMs: 5_000 });
@@ -623,13 +656,25 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     if (!/^\d+$/.test(uid)) {
       throw new BadRequestException(`Could not resolve uid for ${username}`);
     }
+    const aclLeaf = permission === 'READ' ? `u:${uid}:rx` : `u:${uid}:rwx`;
+    const aclTree = permission === 'READ' ? `u:${uid}:rX` : `u:${uid}:rwX`;
     await this.dockerExec(
       ['sh', '-c',
+        // sshd ancestor check.
         `chown root:root ${chrootSource} && chmod 0755 ${chrootSource} && ` +
-        `find ${chrootSource} -mindepth 1 -maxdepth 1 -exec chgrp -h ${uid} {} + 2>/dev/null || true && ` +
-        `chmod -R g+rX ${chrootSource}/ 2>/dev/null || true`,
+        // Per-user ACL on the chroot root + default ACL so new children
+        // inherit. `setfacl -d` writes the default to the dir itself.
+        `setfacl -m ${aclLeaf} ${chrootSource} && ` +
+        `setfacl -d -m ${aclLeaf} ${chrootSource} && ` +
+        // Apply to existing tree. Recursive ACL on a huge codebase can
+        // take seconds (PrestaShop is ~80k files); we allow up to 60s
+        // here and tolerate failure so a partial application doesn't
+        // brick account creation. Worst case the user can read the
+        // leaf and most children but a few stragglers stay restricted
+        // — the next ACL run on update/rotate will repair them.
+        `setfacl -R -m ${aclTree} ${chrootSource}/ 2>/dev/null || true`,
       ],
-      { timeoutMs: 30_000, allowFailure: true },
+      { timeoutMs: 60_000, allowFailure: true },
     );
   }
 
