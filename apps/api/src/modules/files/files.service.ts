@@ -309,6 +309,19 @@ export class FilesService {
 
     const slug = this.slugify(app.name);
     const hostDir = this.appRootDir(appId, slug);
+
+    // Fast path: if the image is one of our known "lives entirely in the
+    // container" templates (PrestaShop, WordPress, Ghost, Nextcloud,
+    // Gitea, nginx, httpd, n8n, grafana, code-server), the user's actual
+    // files are NEVER on the host — they're inside the container's
+    // /var/www/html or equivalent. Bypass the heuristic below so a
+    // renamed slug (SIDE_FILES lookup miss) or a stray top-level file
+    // doesn't flip us back to host-fs and hide the real codebase.
+    const imageHint = (app.dockerImage || app.containerName || '').toLowerCase();
+    const containerRoot = pickRootForImage(imageHint);
+    if (containerRoot !== '/') {
+      return { containerName: app.containerName, rootDir: containerRoot };
+    }
     // If the host dir actually has source code (more than platform-
     // managed deploy artefacts), prefer host-fs. Otherwise the host
     // dir is just the compose + .env + a handful of side-files the

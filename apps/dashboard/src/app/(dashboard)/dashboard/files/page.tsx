@@ -41,6 +41,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { api } from '@/lib/api';
+import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
 type Role = 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER';
@@ -127,23 +128,21 @@ function iconForFile(name: string) {
 }
 
 // ── relative date formatter ──────────────────────────────────────────────
-// Twitter-style ("just now", "2m ago", "yesterday", "Mar 14") with a tooltip
-// hint for the exact ISO timestamp so users can hover for precision.
-function fmtRelativeDate(iso: string) {
-  const t = new Date(iso).getTime();
-  if (!Number.isFinite(t)) return iso;
-  const s = Math.floor((Date.now() - t) / 1000);
-  if (s < 5) return 'just now';
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+function fmtRelativeDate(iso: string, t: (k: string, v?: Record<string, string | number>) => string) {
+  const ts = new Date(iso).getTime();
+  if (!Number.isFinite(ts)) return iso;
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 5) return t('files.justNow');
+  if (s < 60) return t('files.secAgo', { n: s });
+  if (s < 3600) return t('files.minAgo', { n: Math.floor(s / 60) });
+  if (s < 86400) return t('files.hourAgo', { n: Math.floor(s / 3600) });
   const d = Math.floor(s / 86400);
-  if (d === 1) return 'yesterday';
-  if (d < 7) return `${d}d ago`;
+  if (d === 1) return t('files.yesterday');
+  if (d < 7) return t('files.dayAgo', { n: d });
   if (d < 365) {
-    return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
-  return new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short' });
+  return new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'short' });
 }
 
 type SortKey = 'name' | 'size' | 'modified' | 'type';
@@ -179,6 +178,7 @@ function fmtGiB(bytes: number) {
 }
 
 export default function FilesPage() {
+  const { t } = useTranslation();
   const [selected, setSelected] = useState<{ scope: 'app' | 'db'; id: string; role: Role; name: string; projectId: string } | null>(null);
   const [currentPath, setCurrentPath] = useState('');
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
@@ -322,7 +322,7 @@ export default function FilesPage() {
       path: currentPath ? `${currentPath}/${name}` : name,
     }),
     onSuccess: () => {
-      toast.success('Folder created');
+      toast.success(t('files.toastFolder'));
       setNewFolderOpen(false);
       setNewFolderName('');
       refetchListing();
@@ -335,7 +335,7 @@ export default function FilesPage() {
     mutationFn: ({ from, to }: { from: string; to: string }) =>
       api.patch(`/files/${selected!.scope}/${selected!.id}/rename`, { from, to }),
     onSuccess: () => {
-      toast.success('Renamed');
+      toast.success(t('files.toastRenamed'));
       setRenameTarget(null);
       setRenameValue('');
       refetchListing();
@@ -348,7 +348,7 @@ export default function FilesPage() {
     mutationFn: (p: string) =>
       api.delete(`/files/${selected!.scope}/${selected!.id}/entry?path=${encodeURIComponent(p)}`),
     onSuccess: () => {
-      toast.success('Deleted');
+      toast.success(t('files.toastDeleted'));
       setDeleteTarget(null);
       refetchListing();
       refetchUsage();
@@ -370,8 +370,8 @@ export default function FilesPage() {
       return { total: paths.length, fails };
     },
     onSuccess: ({ total, fails }) => {
-      if (fails === 0) toast.success(`Deleted ${total} item${total === 1 ? '' : 's'}`);
-      else toast.warning(`${total - fails} deleted, ${fails} failed`);
+      if (fails === 0) toast.success(t('files.toastBulkOk', { n: total }));
+      else toast.warning(t('files.toastBulkPartial', { ok: total - fails, fail: fails }));
       setBulkDeleteOpen(false);
       setSelectedPaths(new Set());
       refetchListing();
@@ -384,7 +384,7 @@ export default function FilesPage() {
     mutationFn: ({ path, content }: { path: string; content: string }) =>
       api.patch(`/files/${selected!.scope}/${selected!.id}/file`, { path, content }),
     onSuccess: (_, vars) => {
-      toast.success('Saved');
+      toast.success(t('files.toastSaved'));
       setEditing((e) => (e ? { ...e, original: vars.content } : e));
       refetchListing();
       refetchUsage();
@@ -403,7 +403,9 @@ export default function FilesPage() {
   useEffect(() => {
     if (readData && readingPath) {
       if (readData.binary) {
-        toast.message(readData.message || 'Binary file', { description: `${fmtSize(readData.size)} — use download.` });
+        toast.message(readData.message || t('files.editorBinary'), {
+          description: t('files.editorBinaryDesc', { size: fmtSize(readData.size) }),
+        });
         setReadingPath(null);
         return;
       }
@@ -432,9 +434,9 @@ export default function FilesPage() {
           const err = await res.json().catch(() => ({ message: 'Upload failed' }));
           throw new Error(err.message || 'Upload failed');
         }
-        toast.success(`Uploaded ${f.name}`);
+        toast.success(t('files.toastUploaded', { name: f.name }));
       } catch (e: any) {
-        toast.error(e.message || `Failed to upload ${f.name}`);
+        toast.error(e.message || t('files.toastUploadFail', { name: f.name }));
       }
     }
     if (uploadInputRef.current) uploadInputRef.current.value = '';
@@ -483,10 +485,8 @@ export default function FilesPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-3xl font-bold">File Manager</h1>
-        <p className="text-muted-foreground">
-          Browse and edit files of your applications and databases. Permissions cascade from project roles.
-        </p>
+        <h1 className="text-3xl font-bold">{t('files.title')}</h1>
+        <p className="text-muted-foreground max-w-2xl">{t('files.subtitle')}</p>
       </div>
 
       {/* ── Project storage quota bar ──────────────────────────────── */}
@@ -494,9 +494,13 @@ export default function FilesPage() {
         <Card>
           <CardContent className="p-3">
             <div className="flex items-center justify-between text-xs mb-1.5">
-              <span className="font-medium">Project storage</span>
+              <span className="font-medium">{t('files.quotaTitle')}</span>
               <span className={cn('font-mono', labelColor)}>
-                {fmtGiB(usedBytes)} / {fmtGiB(quotaBytes)} used ({pct.toFixed(0)}%)
+                {t('files.quotaUsed', {
+                  used: fmtGiB(usedBytes),
+                  quota: fmtGiB(quotaBytes),
+                  pct: pct.toFixed(0),
+                })}
               </span>
             </div>
             <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
@@ -507,7 +511,7 @@ export default function FilesPage() {
             </div>
             {pct > 95 && (
               <p className="mt-1.5 text-xs text-red-500 flex items-center gap-1">
-                <AlertTriangle size={11} /> Quota nearly full — uploads will be refused once full.
+                <AlertTriangle size={11} /> {t('files.quotaWarn')}
               </p>
             )}
           </CardContent>
@@ -522,8 +526,8 @@ export default function FilesPage() {
               <div className="p-4"><Loader2 className="animate-spin" size={16} /></div>
             ) : scopes.length === 0 ? (
               <div className="p-4 text-sm text-muted-foreground text-center">
-                <p>No projects accessible.</p>
-                <Link href="/dashboard/projects" className="text-primary hover:underline text-xs">Create one</Link>
+                <p>{t('files.scopeNone')}</p>
+                <Link href="/dashboard/projects" className="text-primary hover:underline text-xs">{t('files.scopeCreate')}</Link>
               </div>
             ) : (
               scopes.map(p => {
@@ -542,7 +546,7 @@ export default function FilesPage() {
                     {open && (
                       <div className="ml-3 mt-0.5 border-l border-border pl-2 space-y-0.5">
                         {p.applications.length === 0 && p.databases.length === 0 && (
-                          <p className="text-xs text-muted-foreground py-1.5">empty</p>
+                          <p className="text-xs text-muted-foreground py-1.5">{t('files.scopeEmpty')}</p>
                         )}
                         {p.applications.map(a => (
                           <button
@@ -556,7 +560,7 @@ export default function FilesPage() {
                             <Rocket size={12} />
                             <span className="flex-1 truncate">{a.name}</span>
                             {!a.hasFiles && (
-                              <span className="text-[9px] text-muted-foreground italic">empty</span>
+                              <span className="text-[9px] text-muted-foreground italic">{t('files.scopeEmpty')}</span>
                             )}
                           </button>
                         ))}
@@ -591,10 +595,8 @@ export default function FilesPage() {
           {!selected ? (
             <CardContent className="flex flex-col items-center justify-center py-20 text-center">
               <Folder size={48} className="mb-4 text-muted-foreground" />
-              <p className="text-lg font-medium">Select an application or database</p>
-              <p className="text-sm text-muted-foreground mt-1">
-                Choose a scope from the left panel to browse its files.
-              </p>
+              <p className="text-lg font-medium">{t('files.pickScope')}</p>
+              <p className="text-sm text-muted-foreground mt-1">{t('files.pickScopeDesc')}</p>
             </CardContent>
           ) : (
             <>
@@ -614,19 +616,19 @@ export default function FilesPage() {
                 <div className="flex items-center gap-2">
                   <div className="relative w-44">
                     <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                    <Input className="pl-7 h-8 text-xs" placeholder="Filter..." value={search}
+                    <Input className="pl-7 h-8 text-xs" placeholder={t('files.filter')} value={search}
                       onChange={(e) => setSearch(e.target.value)} />
                   </div>
-                  <Button size="sm" variant="outline" onClick={() => refetchListing()}>
+                  <Button size="sm" variant="outline" onClick={() => refetchListing()} title={t('files.refresh')}>
                     <RefreshCw size={12} />
                   </Button>
                   {canEdit && (
                     <>
                       <Button size="sm" variant="outline" onClick={() => setNewFolderOpen(true)}>
-                        <FolderPlus size={12} /> Folder
+                        <FolderPlus size={12} /> {t('files.newFolder')}
                       </Button>
                       <Button size="sm" onClick={() => uploadInputRef.current?.click()}>
-                        <Upload size={12} /> Upload
+                        <Upload size={12} /> {t('files.upload')}
                       </Button>
                       <input
                         ref={uploadInputRef}
@@ -643,7 +645,7 @@ export default function FilesPage() {
               {!canEdit && (
                 <div className="flex items-center gap-2 border-b border-border bg-orange-500/5 px-3 py-2 text-xs text-muted-foreground">
                   <AlertTriangle size={12} className="text-orange-500" />
-                  Read-only — your role ({selected.role}) does not allow modifications.
+                  {t('files.readonly', { role: selected.role })}
                 </div>
               )}
 
@@ -658,7 +660,7 @@ export default function FilesPage() {
                     }}
                     className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
                   >
-                    <ArrowLeft size={12} /> parent directory
+                    <ArrowLeft size={12} /> {t('files.parent')}
                   </button>
                 </div>
               )}
@@ -672,6 +674,7 @@ export default function FilesPage() {
                   onChange={(v) => setEditing((e) => (e ? { ...e, draft: v } : e))}
                   onSave={() => writeMutation.mutate({ path: editing.path, content: editing.draft })}
                   onClose={() => setEditing(null)}
+                  t={t}
                 />
               ) : (
                 <CardContent
@@ -705,7 +708,7 @@ export default function FilesPage() {
                   {dragDepth > 0 && canEdit && (
                     <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
                       <div className="bg-primary/90 text-primary-foreground rounded-lg px-6 py-4 shadow-lg flex items-center gap-2 font-medium">
-                        <Upload size={18} /> Drop to upload into {currentPath || 'root'}
+                        <Upload size={18} /> {t('files.dropHere', { path: currentPath || 'root' })}
                       </div>
                     </div>
                   )}
@@ -714,13 +717,13 @@ export default function FilesPage() {
                   {selectedPaths.size > 0 && (
                     <div className="border-b border-border bg-primary/5 px-3 py-1.5 flex items-center gap-2 text-xs">
                       <span className="font-medium">
-                        {selectedPaths.size} selected
+                        {t('files.selectedCount', { n: selectedPaths.size })}
                       </span>
                       <button
                         onClick={() => setSelectedPaths(new Set())}
                         className="text-muted-foreground hover:text-foreground"
                       >
-                        Clear
+                        {t('files.clear')}
                       </button>
                       <div className="flex-1" />
                       {canDelete && (
@@ -729,15 +732,12 @@ export default function FilesPage() {
                           variant="ghost"
                           className="text-xs h-7 text-destructive hover:bg-destructive/10"
                           onClick={() => {
-                            // Treat bulk delete as a confirm step: show the
-                            // standard delete dialog with the count instead
-                            // of just nuking everything on click.
                             const list = filteredEntries.filter((e) => selectedPaths.has(e.path));
                             if (list.length === 1) setDeleteTarget(list[0]);
                             else setBulkDeleteOpen(true);
                           }}
                         >
-                          <Trash2 size={12} /> Delete
+                          <Trash2 size={12} /> {t('files.delete')}
                         </Button>
                       )}
                     </div>
@@ -749,9 +749,9 @@ export default function FilesPage() {
                     </div>
                   ) : filteredEntries.length === 0 ? (
                     <div className="py-16 text-center text-muted-foreground text-sm">
-                      {search ? `No file matches "${search}"` : 'Empty directory'}
+                      {search ? t('files.noMatch', { q: search }) : t('files.empty')}
                       {canEdit && !search && (
-                        <p className="mt-2 text-xs">Drop files here or click Upload above.</p>
+                        <p className="mt-2 text-xs">{t('files.emptyHint')}</p>
                       )}
                     </div>
                   ) : (
@@ -764,31 +764,31 @@ export default function FilesPage() {
                               checked={allSelected}
                               onChange={toggleAll}
                               className="h-3.5 w-3.5 cursor-pointer accent-primary"
-                              title={allSelected ? 'Deselect all' : 'Select all'}
+                              title={allSelected ? t('files.deselectAll') : t('files.selectAll')}
                             />
                           </th>
                           <SortableTh
-                            label="Name"
+                            label={t('files.colName')}
                             active={sortKey === 'name'}
                             dir={sortDir}
                             onClick={() => toggleSort('name')}
                           />
                           <SortableTh
-                            label="Size"
+                            label={t('files.colSize')}
                             active={sortKey === 'size'}
                             dir={sortDir}
                             onClick={() => toggleSort('size')}
                             className="w-24"
                           />
                           <SortableTh
-                            label="Modified"
+                            label={t('files.colModified')}
                             active={sortKey === 'modified'}
                             dir={sortDir}
                             onClick={() => toggleSort('modified')}
                             className="w-32"
                           />
-                          <th className="px-3 py-2 font-medium w-20 font-mono text-[11px]">Perm</th>
-                          <th className="px-3 py-2 font-medium w-28 text-right">Actions</th>
+                          <th className="px-3 py-2 font-medium w-20 font-mono text-[11px]">{t('files.colPerm')}</th>
+                          <th className="px-3 py-2 font-medium w-28 text-right">{t('files.colActions')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -838,25 +838,25 @@ export default function FilesPage() {
                                 className="px-3 py-1.5 text-muted-foreground text-xs"
                                 title={new Date(e.modifiedAt).toLocaleString()}
                               >
-                                {fmtRelativeDate(e.modifiedAt)}
+                                {fmtRelativeDate(e.modifiedAt, t)}
                               </td>
                               <td className="px-3 py-1.5 text-muted-foreground font-mono text-[11px]">{e.permissions}</td>
                               <td className="px-3 py-1.5">
-                                <div className="flex justify-end gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <div className="flex justify-end gap-0.5 opacity-60 group-hover:opacity-100 transition-opacity">
                                   {!isDir && (
-                                    <Button size="icon" variant="ghost" className="h-7 w-7" title="Download"
+                                    <Button size="icon" variant="ghost" className="h-7 w-7" title={t('files.actionDownload')}
                                       onClick={() => handleDownload(e.path, e.name)}>
                                       <Download size={13} />
                                     </Button>
                                   )}
                                   {canEdit && (
-                                    <Button size="icon" variant="ghost" className="h-7 w-7" title="Rename"
+                                    <Button size="icon" variant="ghost" className="h-7 w-7" title={t('files.actionRename')}
                                       onClick={() => { setRenameTarget(e); setRenameValue(e.name); }}>
                                       <Pencil size={13} />
                                     </Button>
                                   )}
                                   {canDelete && (
-                                    <Button size="icon" variant="ghost" className="h-7 w-7 hover:text-destructive" title="Delete"
+                                    <Button size="icon" variant="ghost" className="h-7 w-7 hover:text-destructive" title={t('files.actionDelete')}
                                       onClick={() => setDeleteTarget(e)}>
                                       <Trash2 size={13} />
                                     </Button>
@@ -879,20 +879,20 @@ export default function FilesPage() {
       {/* ── new folder dialog ── */}
       <Dialog open={newFolderOpen} onClose={() => setNewFolderOpen(false)}>
         <DialogHeader>
-          <DialogTitle>New folder</DialogTitle>
-          <DialogDescription>In {currentPath || '/'}</DialogDescription>
+          <DialogTitle>{t('files.dlgNewFolder')}</DialogTitle>
+          <DialogDescription>{t('files.dlgNewFolderIn', { path: currentPath || '/' })}</DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <Label>Name</Label>
-          <Input value={newFolderName} onChange={(e) => setNewFolderName(e.target.value)} placeholder="folder-name" />
+          <Label>{t('files.dlgName')}</Label>
+          <Input value={newFolderName} onChange={(e) => setNewFolderName(e.target.value)} placeholder={t('files.dlgFolderName')} />
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setNewFolderOpen(false)}>Cancel</Button>
+          <Button variant="outline" onClick={() => setNewFolderOpen(false)}>{t('common.cancel')}</Button>
           <Button
             disabled={!newFolderName.trim() || mkdirMutation.isPending}
             onClick={() => mkdirMutation.mutate(newFolderName.trim())}
           >
-            {mkdirMutation.isPending ? 'Creating...' : 'Create'}
+            {mkdirMutation.isPending ? t('files.dlgCreating') : t('files.dlgCreate')}
           </Button>
         </DialogFooter>
       </Dialog>
@@ -900,15 +900,15 @@ export default function FilesPage() {
       {/* ── rename dialog ── */}
       <Dialog open={!!renameTarget} onClose={() => setRenameTarget(null)}>
         <DialogHeader>
-          <DialogTitle>Rename</DialogTitle>
+          <DialogTitle>{t('files.dlgRename')}</DialogTitle>
           <DialogDescription>{renameTarget?.name}</DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
-          <Label>New name</Label>
+          <Label>{t('files.dlgRenameLabel')}</Label>
           <Input value={renameValue} onChange={(e) => setRenameValue(e.target.value)} />
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button>
+          <Button variant="outline" onClick={() => setRenameTarget(null)}>{t('common.cancel')}</Button>
           <Button
             disabled={!renameValue.trim() || renameMutation.isPending}
             onClick={() => {
@@ -918,7 +918,7 @@ export default function FilesPage() {
               renameMutation.mutate({ from: renameTarget.path, to });
             }}
           >
-            {renameMutation.isPending ? 'Renaming...' : 'Rename'}
+            {renameMutation.isPending ? t('files.dlgRenaming') : t('files.dlgRename')}
           </Button>
         </DialogFooter>
       </Dialog>
@@ -926,20 +926,20 @@ export default function FilesPage() {
       {/* ── delete dialog ── */}
       <Dialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)}>
         <DialogHeader>
-          <DialogTitle>Delete</DialogTitle>
+          <DialogTitle>{t('files.dlgDeleteOne', { name: deleteTarget?.name || '' })}</DialogTitle>
           <DialogDescription>
-            Delete <strong>{deleteTarget?.name}</strong>?
-            {deleteTarget?.type === 'directory' && ' This will remove all contents recursively.'} This cannot be undone.
+            {deleteTarget?.type === 'directory' ? t('files.dlgDeleteFolder') + ' ' : ''}
+            {t('files.dlgDeleteIrr')}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+          <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t('common.cancel')}</Button>
           <Button
             variant="destructive"
             disabled={removeMutation.isPending}
             onClick={() => deleteTarget && removeMutation.mutate(deleteTarget.path)}
           >
-            {removeMutation.isPending ? 'Deleting...' : 'Delete'}
+            {removeMutation.isPending ? t('files.dlgDeleting') : t('files.dlgDelete')}
           </Button>
         </DialogFooter>
       </Dialog>
@@ -947,22 +947,19 @@ export default function FilesPage() {
       {/* ── bulk delete dialog ── */}
       <Dialog open={bulkDeleteOpen} onClose={() => setBulkDeleteOpen(false)}>
         <DialogHeader>
-          <DialogTitle>Delete {selectedPaths.size} items</DialogTitle>
-          <DialogDescription>
-            Permanently delete the selected files and folders? Folders are
-            removed recursively. This cannot be undone.
-          </DialogDescription>
+          <DialogTitle>{t('files.dlgBulkTitle', { n: selectedPaths.size })}</DialogTitle>
+          <DialogDescription>{t('files.dlgBulkDesc')}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setBulkDeleteOpen(false)}>Cancel</Button>
+          <Button variant="outline" onClick={() => setBulkDeleteOpen(false)}>{t('common.cancel')}</Button>
           <Button
             variant="destructive"
             disabled={bulkDeleteMutation.isPending}
             onClick={() => bulkDeleteMutation.mutate(Array.from(selectedPaths))}
           >
             {bulkDeleteMutation.isPending
-              ? `Deleting ${selectedPaths.size}...`
-              : `Delete ${selectedPaths.size} items`}
+              ? t('files.dlgBulkDeleting', { n: selectedPaths.size })
+              : t('files.dlgBulkConfirm', { n: selectedPaths.size })}
           </Button>
         </DialogFooter>
       </Dialog>
@@ -995,6 +992,7 @@ function Editor({
   onChange,
   onSave,
   onClose,
+  t,
 }: {
   editing: { path: string; original: string; draft: string };
   canEdit: boolean;
@@ -1002,6 +1000,7 @@ function Editor({
   onChange: (v: string) => void;
   onSave: () => void;
   onClose: () => void;
+  t: (key: string, vars?: Record<string, string | number>) => string;
 }) {
   const dirty = editing.draft !== editing.original;
   return (
@@ -1010,19 +1009,19 @@ function Editor({
         <div className="flex items-center gap-2">
           <FileIcon size={14} />
           <span className="font-mono text-xs">{editing.path}</span>
-          {dirty && <Badge variant="warning" className="text-[10px]">modified</Badge>}
+          {dirty && <Badge variant="warning" className="text-[10px]">{t('files.editorModified')}</Badge>}
         </div>
         <div className="flex items-center gap-2">
           {canEdit && (
             <Button size="sm" disabled={!dirty || saving} onClick={onSave}>
-              <Save size={12} /> {saving ? 'Saving...' : 'Save'}
+              <Save size={12} /> {saving ? t('files.editorSaving') : t('files.editorSave')}
             </Button>
           )}
           <Button size="sm" variant="outline" onClick={() => {
-            if (dirty && !confirm('Discard unsaved changes?')) return;
+            if (dirty && !confirm(t('files.editorDiscard'))) return;
             onClose();
           }}>
-            <X size={12} /> Close
+            <X size={12} /> {t('files.editorClose')}
           </Button>
         </div>
       </div>
