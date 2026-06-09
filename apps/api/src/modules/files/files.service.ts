@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   BadRequestException,
   ForbiddenException,
@@ -138,6 +139,8 @@ interface QuotaCacheEntry {
 
 @Injectable()
 export class FilesService {
+  private readonly logger = new Logger(FilesService.name);
+
   // Cache of computed storage usage per projectId. Walking a tree is O(N
   // files + dirs) of statSync calls — back-to-back uploads in a session
   // would re-walk every time without this. TTL is 60s; entries also get
@@ -303,9 +306,15 @@ export class FilesService {
         gitUrl: true,
       },
     });
-    if (!app) return null;
+    if (!app) {
+      this.logger.warn(`resolveDockerTarget(${appId}): app not found`);
+      return null;
+    }
     // No container_name → can't address the container; fall through to host-fs.
-    if (!app.containerName) return null;
+    if (!app.containerName) {
+      this.logger.warn(`resolveDockerTarget(${appId}): no containerName → host-fs`);
+      return null;
+    }
 
     const slug = this.slugify(app.name);
     const hostDir = this.appRootDir(appId, slug);
@@ -319,6 +328,7 @@ export class FilesService {
     // doesn't flip us back to host-fs and hide the real codebase.
     const imageHint = (app.dockerImage || app.containerName || '').toLowerCase();
     const containerRoot = pickRootForImage(imageHint);
+    this.logger.log(`resolveDockerTarget(${appId}) name=${app.name} container=${app.containerName} image=${app.dockerImage} → root=${containerRoot}`);
     if (containerRoot !== '/') {
       return { containerName: app.containerName, rootDir: containerRoot };
     }
