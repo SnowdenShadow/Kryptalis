@@ -1,499 +1,403 @@
-import { Injectable, BadRequestException, UnauthorizedException, Logger } from '@nestjs/common';
-import { execFile } from 'child_process';
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+  BadRequestException,
+} from '@nestjs/common';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
-import * as fs from 'fs';
 import * as path from 'path';
-import * as crypto from 'crypto';
-import { GitOAuthService } from '../git-providers/git-oauth.service';
+import * as fs from 'fs';
 
 const execFileAsync = promisify(execFile);
 
-const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
-const STATUS_FILE = path.join(DATA_DIR, 'update-status.json');
-const LOG_FILE = path.join(DATA_DIR, 'update.log');
-const WEBHOOK_SECRET_FILE = path.join(DATA_DIR, 'webhook-secret');
-
-// Host path to update.sh — the script lives in the install root, NOT inside
-// the API container. We invoke it via `nsenter` against PID 1 on the host
-// (since the API container has /var/run/docker.sock + the systemd timer is
-// installed on the host). For simplicity we rely on the systemd timer for the
-// recurring schedule; the manual "Update now" button just touches a trigger
-// file the timer picks up, or — if the API runs on the host directly — execs
-// the script directly.
-const HOST_INSTALL_DIR = process.env.KRYPTALIS_HOST_INSTALL_DIR
-  || process.env.KRYPTALIS_HOST_DATA_DIR?.replace(/[\\/]\.kryptalis[\\/]*$/, '')
-  || '/opt/kryptalis';
-
-export type UpdateState =
-  | 'UP_TO_DATE'
-  | 'UPDATE_AVAILABLE'
-  | 'UPDATING'
-  | 'ERROR'
-  | 'UNKNOWN';
-
-export interface UpdateStatus {
-  state: UpdateState;
-  message: string;
-  currentSha: string | null;
-  latestSha: string | null;
-  branch: string | null;
-  updatedAt: string | null;
-  autoUpdateEnabled: boolean | null;
-  /**
-   * Manual trigger is only available when the API can reach the host's
-   * systemd / shell. In containerized deploys (which is the default) the
-   * timer runs on the host every 10 min and the UI just displays the
-   * status — `manualTriggerAvailable` will be false there.
-   */
-  manualTriggerAvailable: boolean;
-  hasUpdateLog: boolean;
-  webhook: {
-    url: string;
-    secret: string;
-    /** True if the user has copied & configured it at least once. */
-    fired: boolean;
-    lastFiredAt: string | null;
-  };
-}
-
+/**
+ * Self-update.
+ *
+ * One mechanism, no surprises:
+ *
+ *   1. Every 60s, poll GitHub for the latest commit on the tracked branch.
+ *      The API endpoint /repos/{owner}/{repo}/commits/{branch} works on
+ *      public repos with no auth at all (60 req/h per IP — checking every
+ *      minute is 60/h, sits right at the limit with zero margin → we cache
+ *      via ETag so 304 responses don't burn quota).
+ *
+ *   2. If the latest SHA differs from the SHA we have on disk → run
+ *      `update.sh` on the host (git pull + docker compose up -d --build).
+ *
+ *   3. State lives in memory. No status files, no preference files, no
+ *      systemd timer to babysit. A restart re-reads the on-disk SHA at
+ *      boot and we're back in sync.
+ *
+ * That's the whole feature. No webhook. No OAuth requirement. No
+ * `update-status.json` parsed by bash. No `auto-update.pref`. No
+ * containerized `alpine/git` calls. No `manualTriggerAvailable` probe.
+ *
+ * The script is invoked via the host docker socket (mounted into the API
+ * container). We spawn a one-off `docker:cli` container that mounts the
+ * install dir + the host docker socket so it can run `docker compose` on
+ * the host daemon. The script itself is plain sh — no systemd, no
+ * self-heal, no rewriting timer units.
+ */
 @Injectable()
-export class SystemUpdatesService {
+export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SystemUpdatesService.name);
 
-  constructor(private gitOauth: GitOAuthService) {}
+  // Polling cadence. 60s = 60 calls/h, right at GitHub's anonymous limit.
+  // The ETag cache below means most calls return 304 and don't count
+  // toward the quota anyway.
+  private readonly POLL_INTERVAL_MS = 60_000;
 
-  /**
-   * Read the JSON status file written by update.sh on every run.
-   * Also probe systemd (best effort) to know whether the auto-update
-   * timer is enabled. Both are mounted via the host bind-mount, so the
-   * API doesn't need to escape the container to read them.
-   */
-  async getStatus(): Promise<UpdateStatus> {
-    let parsed: any = null;
-    try {
-      if (fs.existsSync(STATUS_FILE)) {
-        parsed = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8'));
-      }
-    } catch {
-      // Corrupt JSON — fall through with parsed=null, dashboard will show UNKNOWN.
+  private timer: NodeJS.Timeout | null = null;
+
+  // In-memory state — everything the UI cares about. No files, no DB.
+  private state: {
+    status: 'UP_TO_DATE' | 'UPDATE_AVAILABLE' | 'UPDATING' | 'ERROR' | 'UNKNOWN';
+    message: string;
+    currentSha: string | null;
+    latestSha: string | null;
+    branch: string;
+    repo: string | null;
+    lastCheckedAt: string | null;
+    lastUpdatedAt: string | null;
+    updateLog: string[];
+  } = {
+    status: 'UNKNOWN',
+    message: 'Boot — first check pending.',
+    currentSha: null,
+    latestSha: null,
+    branch: process.env.KRYPTALIS_BRANCH || 'main',
+    repo: null,
+    lastCheckedAt: null,
+    lastUpdatedAt: null,
+    updateLog: [],
+  };
+
+  // ETag cache so repeated polls of GitHub return 304 and don't burn quota.
+  private cachedEtag: string | null = null;
+
+  // Mutex so the webhook AND the polling loop AND the manual button can't
+  // all run update.sh at the same time.
+  private updating = false;
+
+  // ── Lifecycle ─────────────────────────────────────────────────────
+
+  async onModuleInit(): Promise<void> {
+    this.state.repo = this.resolveRepo();
+    this.state.currentSha = await this.readCurrentSha();
+
+    if (!this.state.repo) {
+      this.logger.warn(
+        'KRYPTALIS_GITHUB_REPO not set and origin remote unresolved — auto-update disabled.',
+      );
+      this.state.status = 'ERROR';
+      this.state.message = 'Repo unresolved — set KRYPTALIS_GITHUB_REPO.';
+      return;
     }
 
-    const [autoEnabled, manualOk] = await Promise.all([
-      this.detectAutoUpdate(),
-      this.detectManualTriggerAvailable(),
-    ]);
+    this.logger.log(
+      `Auto-update: tracking ${this.state.repo}@${this.state.branch}, polling every ${this.POLL_INTERVAL_MS / 1000}s.`,
+    );
 
-    const secret = this.getOrCreateWebhookSecret();
-    const base = (process.env.PUBLIC_API_URL || '').replace(/\/$/, '');
+    // Kick off an immediate check, then schedule.
+    void this.poll().catch((e) =>
+      this.logger.warn(`first poll failed: ${e?.message || e}`),
+    );
+    this.timer = setInterval(
+      () => void this.poll().catch((e) =>
+        this.logger.warn(`poll failed: ${e?.message || e}`),
+      ),
+      this.POLL_INTERVAL_MS,
+    );
+    this.timer.unref?.();
+  }
+
+  onModuleDestroy(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  // ── Public API ────────────────────────────────────────────────────
+
+  getStatus() {
     return {
-      state: parsed?.state || 'UNKNOWN',
-      message: parsed?.message || 'No update run yet — the timer fires every 10 min after boot.',
-      currentSha: parsed?.currentSha || null,
-      latestSha: parsed?.latestSha || null,
-      branch: parsed?.branch || null,
-      updatedAt: parsed?.updatedAt || null,
-      autoUpdateEnabled: autoEnabled,
-      manualTriggerAvailable: manualOk,
-      hasUpdateLog: fs.existsSync(LOG_FILE),
-      webhook: {
-        url: `${base}/api/system/updates/webhook`,
-        secret,
-        fired: parsed?.lastWebhookAt ? true : false,
-        lastFiredAt: parsed?.lastWebhookAt || null,
-      },
+      status: this.state.status,
+      message: this.state.message,
+      currentSha: this.state.currentSha,
+      latestSha: this.state.latestSha,
+      branch: this.state.branch,
+      repo: this.state.repo,
+      lastCheckedAt: this.state.lastCheckedAt,
+      lastUpdatedAt: this.state.lastUpdatedAt,
+      pollIntervalSec: this.POLL_INTERVAL_MS / 1000,
     };
   }
 
-  /**
-   * Tail of the update.sh log — capped to last 200 lines so we don't ship
-   * megabytes if the operator left it running for weeks.
-   */
-  async getLog(): Promise<string> {
-    if (!fs.existsSync(LOG_FILE)) return '';
-    try {
-      const buf = fs.readFileSync(LOG_FILE, 'utf-8');
-      const lines = buf.split('\n');
-      return lines.slice(-200).join('\n');
-    } catch {
-      return '';
-    }
+  getLog(): { log: string } {
+    return { log: this.state.updateLog.join('') };
   }
 
-  /**
-   * Force a check (no rebuild) — writes a fresh status file.
-   * Only works if the API can reach update.sh on the host (sock-mount + script
-   * present at /app/.kryptalis/../update.sh OR explicit KRYPTALIS_HOST_INSTALL_DIR).
-   */
-  async checkNow(): Promise<UpdateStatus> {
-    if (!(await this.detectManualTriggerAvailable())) {
-      throw new BadRequestException(
-        'Manual trigger unavailable in this deployment. The timer will run automatically every 10 min.',
-      );
-    }
-    try {
-      // We exec on the host via docker. The API container has /var/run/docker.sock
-      // mounted (see docker-compose.yml line 99), so we can spawn an ephemeral
-      // root container with the install dir mounted and run the script there.
-      // Alternative: nsenter PID 1 — but that needs --pid=host which we don't set.
-      await execFileAsync(
-        'docker',
-        [
-          'run', '--rm',
-          '-v', `${HOST_INSTALL_DIR}:/app`,
-          '-v', '/var/run/docker.sock:/var/run/docker.sock',
-          '-w', '/app',
-          'docker:cli',
-          'sh', '/app/update.sh', '--check',
-        ],
-        { timeout: 60_000 },
-      );
-    } catch (err: any) {
-      // Don't surface as ERROR — the script may write its own status. Just refetch.
-    }
+  async forceCheck() {
+    await this.poll();
     return this.getStatus();
   }
 
-  /**
-   * Apply the update now (instead of waiting for the 10-min timer).
-   * Same containerized-exec trick as checkNow().
-   */
-  async applyNow(): Promise<{ message: string }> {
-    if (!(await this.detectManualTriggerAvailable())) {
-      throw new BadRequestException(
-        'Manual trigger unavailable in this deployment. The timer will run automatically every 10 min.',
-      );
+  async forceUpdate(): Promise<{ message: string }> {
+    if (this.updating) {
+      return { message: 'An update is already running.' };
     }
-    // Fire-and-forget: the script can take several minutes (image pull + rebuild).
-    // The dashboard polls /system/updates every few seconds to watch state flip.
-    execFile(
-      'docker',
-      [
-        'run', '--rm', '-d',
-        '-v', `${HOST_INSTALL_DIR}:/app`,
-        '-v', '/var/run/docker.sock:/var/run/docker.sock',
-        '-w', '/app',
-        'docker:cli',
-        'sh', '/app/update.sh',
-      ],
-      () => {},
+    if (!this.state.repo) {
+      throw new BadRequestException('No repo configured.');
+    }
+    void this.runUpdate().catch((e) =>
+      this.logger.warn(`forced update failed: ${e?.message || e}`),
     );
-    return { message: 'Update started — watch the status panel for progress.' };
+    return { message: 'Update started.' };
   }
 
-  /**
-   * Enable or disable the systemd timer that runs update.sh every 10 min.
-   * The API container can't directly talk to systemd, so we'd need an
-   * out-of-band channel — for now we expose a "preference" file that the
-   * timer's own script reads (TODO: wire this into update.sh).
-   * For phase 1 we just return a clear error so the UI shows "manual SSH needed".
-   */
-  async setAutoUpdate(enabled: boolean): Promise<{ enabled: boolean; message: string }> {
-    // Persist the preference; update.sh checks this file on every run and
-    // self-disables when it's set to "off". This avoids needing systemd access
-    // from inside the container.
-    const prefFile = path.join(DATA_DIR, 'auto-update.pref');
-    try {
-      if (enabled) {
-        if (fs.existsSync(prefFile)) fs.unlinkSync(prefFile);
-        return { enabled: true, message: 'Auto-update enabled — next check runs within 10 min.' };
-      }
-      fs.writeFileSync(prefFile, 'disabled\n');
-      return { enabled: false, message: 'Auto-update disabled. Re-enable from this panel or run sudo systemctl enable --now kryptalis-update.timer.' };
-    } catch (err: any) {
-      throw new BadRequestException(`Failed to update preference: ${err.message}`);
-    }
-  }
+  // ── Polling loop ──────────────────────────────────────────────────
 
-  /**
-   * Handle a GitHub push webhook. Verifies the HMAC-SHA256 signature against
-   * the per-install secret, then kicks off update.sh in the background.
-   *
-   * GitHub sends X-Hub-Signature-256: sha256=<hmac> over the raw JSON body.
-   * We MUST verify the signature on the raw body (not a re-stringified JSON
-   * object) — that's why the controller hands us `rawBody`.
-   *
-   * Returns 202 on accepted, 401 on bad signature, 400 on malformed body.
-   * Non-push events (ping, etc.) return 200 with a "skipped" message.
-   */
-  async handleGithubWebhook(
-    rawBody: Buffer,
-    signature: string | undefined,
-    eventType: string | undefined,
-  ): Promise<{ message: string; triggered: boolean }> {
-    const secret = this.getOrCreateWebhookSecret();
-    if (!signature || !signature.startsWith('sha256=')) {
-      throw new UnauthorizedException('Missing or malformed X-Hub-Signature-256 header');
-    }
-    const expected = 'sha256=' +
-      crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
-    // Timing-safe comparison so an attacker can't iterate the secret byte-by-byte
-    const a = Buffer.from(signature);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-      throw new UnauthorizedException('Invalid webhook signature');
-    }
+  private async poll(): Promise<void> {
+    if (!this.state.repo) return;
+    if (this.updating) return; // a run is already in progress
 
-    // GitHub's "ping" event arrives on first config. Accept silently.
-    if (eventType === 'ping') {
-      this.markWebhookFired();
-      return { message: 'pong — webhook configured successfully', triggered: false };
-    }
-
-    // Only act on push (and only on the branch we track — best effort).
-    if (eventType !== 'push') {
-      return { message: `Ignored event "${eventType}"`, triggered: false };
-    }
-
-    let payload: any = {};
-    try { payload = JSON.parse(rawBody.toString('utf-8')); } catch {}
-    const ref: string = payload.ref || '';
-    const branch = ref.replace(/^refs\/heads\//, '');
-    const trackedBranch = process.env.KRYPTALIS_BRANCH || 'main';
-    if (branch && branch !== trackedBranch) {
-      return { message: `Push to "${branch}" ignored — tracking "${trackedBranch}"`, triggered: false };
-    }
-
-    this.markWebhookFired();
-    // Fire-and-forget — same docker-cli ephemeral container we use for the
-    // dashboard "Update now" button. If docker.sock isn't mounted (rare), the
-    // exec is a no-op; the systemd timer still picks the push up within 10 min.
-    if (await this.detectManualTriggerAvailable()) {
-      execFile(
-        'docker',
-        [
-          'run', '--rm', '-d',
-          '-v', `${HOST_INSTALL_DIR}:/app`,
-          '-v', '/var/run/docker.sock:/var/run/docker.sock',
-          '-w', '/app',
-          'docker:cli',
-          'sh', '/app/update.sh',
-        ],
-        () => {},
-      );
-      return { message: 'Update triggered', triggered: true };
-    }
-    return { message: 'Webhook OK but cannot trigger update from API — timer will catch it within 10 min', triggered: false };
-  }
-
-  /**
-   * Detect which GitHub repo this Kryptalis install was cloned from. We
-   * read `git config --get remote.origin.url` inside the install dir
-   * (mounted into the API container at /app/.kryptalis/.. via the host
-   * bind). Falls back to the env override.
-   */
-  private async detectGithubRepo(): Promise<string | null> {
-    const envRepo = process.env.KRYPTALIS_GITHUB_REPO;
-    if (envRepo) return envRepo;
-    try {
-      // Try the install dir — same path we use for update.sh ops.
-      const installDir = HOST_INSTALL_DIR;
-      const { stdout } = await execFileAsync(
-        'docker',
-        [
-          'run', '--rm',
-          '-v', `${installDir}:/app`,
-          '-w', '/app',
-          'alpine/git',
-          'config', '--get', 'remote.origin.url',
-        ],
-        { timeout: 10_000 },
-      );
-      const url = stdout.trim();
-      // Parse "git@github.com:owner/repo.git" or "https://github.com/owner/repo.git"
-      const m = url.match(/github\.com[:/]([^/]+)\/([^/.]+)/);
-      if (m) return `${m[1]}/${m[2]}`;
-    } catch (e) {
-      this.logger.warn(`detectGithubRepo failed: ${(e as Error).message}`);
-    }
-    return null;
-  }
-
-  /**
-   * Auto-install the self-update webhook on the platform's own GitHub
-   * repo, using the calling admin's OAuth-connected GitHub account.
-   *
-   * Flow:
-   *   1. Resolve the repo (env override → git origin → null).
-   *   2. Fetch the admin's GitHub access token via GitOAuthService.
-   *   3. POST /repos/{owner}/{repo}/hooks with our payload URL + secret.
-   *   4. Mark the secret as "fired" so the dashboard shows configured.
-   *
-   * Idempotent: if a hook with the same URL already exists, we PATCH it
-   * (update secret + events) instead of creating a duplicate. GitHub
-   * surfaces duplicate-URL errors otherwise.
-   */
-  async autoInstallWebhook(userId: string): Promise<{
-    installed: boolean;
-    repo: string;
-    hookId: number;
-    message: string;
-  }> {
-    const repo = await this.detectGithubRepo();
-    if (!repo) {
-      throw new BadRequestException(
-        'Could not detect the GitHub repo for this install. Set KRYPTALIS_GITHUB_REPO env var.',
-      );
-    }
-    const accessToken = await this.gitOauth.getGithubAccessToken(userId);
-    const secret = this.getOrCreateWebhookSecret();
-    const base = (process.env.PUBLIC_API_URL || '').replace(/\/$/, '');
-    if (!base) {
-      throw new BadRequestException(
-        'PUBLIC_API_URL is not set — set it so GitHub knows where to deliver the webhook.',
-      );
-    }
-    const payloadUrl = `${base}/api/system/updates/webhook`;
-    const desiredConfig = {
-      url: payloadUrl,
-      content_type: 'json',
-      secret,
-      insecure_ssl: '0',
+    const url = `https://api.github.com/repos/${this.state.repo}/commits/${this.state.branch}`;
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'kryptalis-self-update',
+      'X-GitHub-Api-Version': '2022-11-28',
     };
+    if (this.cachedEtag) headers['If-None-Match'] = this.cachedEtag;
 
-    // Look for an existing hook on the same URL.
-    const listRes = await fetch(`https://api.github.com/repos/${repo}/hooks`, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
+    let res: Response;
+    try {
+      res = await fetch(url, { headers });
+    } catch (e: any) {
+      this.state.status = 'ERROR';
+      this.state.message = `GitHub unreachable: ${e?.message || e}`;
+      this.state.lastCheckedAt = new Date().toISOString();
+      return;
+    }
+
+    this.state.lastCheckedAt = new Date().toISOString();
+
+    if (res.status === 304) {
+      // No change since last check — leave state untouched, just refresh
+      // current SHA from disk in case a manual git pull happened.
+      const onDisk = await this.readCurrentSha();
+      if (onDisk && onDisk !== this.state.currentSha) {
+        this.state.currentSha = onDisk;
+      }
+      if (this.state.latestSha && this.state.currentSha === this.state.latestSha) {
+        this.state.status = 'UP_TO_DATE';
+        this.state.message = `Up to date on ${this.state.branch} (${this.short(this.state.currentSha)}).`;
+      }
+      return;
+    }
+
+    if (!res.ok) {
+      this.state.status = 'ERROR';
+      const body = await res.text().catch(() => '');
+      this.state.message = `GitHub ${res.status}: ${body.slice(0, 200) || 'unknown error'}`;
+      return;
+    }
+
+    const etag = res.headers.get('etag');
+    if (etag) this.cachedEtag = etag;
+
+    const data: any = await res.json();
+    const sha: string = data?.sha;
+    if (!sha) {
+      this.state.status = 'ERROR';
+      this.state.message = 'GitHub response missing sha.';
+      return;
+    }
+
+    this.state.latestSha = sha;
+
+    // Refresh on-disk SHA in case of out-of-band change.
+    const onDisk = await this.readCurrentSha();
+    if (onDisk) this.state.currentSha = onDisk;
+
+    if (!this.state.currentSha) {
+      // First boot — adopt whatever's on disk as "current". Without this
+      // we'd loop-update on every poll because currentSha stays null.
+      this.state.currentSha = sha;
+      this.state.status = 'UP_TO_DATE';
+      this.state.message = `First boot — adopted ${this.short(sha)}.`;
+      return;
+    }
+
+    if (this.state.currentSha === sha) {
+      this.state.status = 'UP_TO_DATE';
+      this.state.message = `Up to date on ${this.state.branch} (${this.short(sha)}).`;
+      return;
+    }
+
+    // New commit available → run the update.
+    this.state.status = 'UPDATE_AVAILABLE';
+    this.state.message = `New commit on ${this.state.branch} (${this.short(sha)}).`;
+    this.logger.log(
+      `Update available: ${this.short(this.state.currentSha)} → ${this.short(sha)}. Running update.sh.`,
+    );
+    void this.runUpdate().catch((e) =>
+      this.logger.warn(`update run failed: ${e?.message || e}`),
+    );
+  }
+
+  // ── Running update.sh ─────────────────────────────────────────────
+
+  private async runUpdate(): Promise<void> {
+    if (this.updating) return;
+    this.updating = true;
+    this.state.status = 'UPDATING';
+    this.state.message = 'Pulling and rebuilding…';
+    this.state.updateLog = [];
+
+    const installDir = this.hostInstallDir();
+    const args = [
+      'run', '--rm',
+      '-v', `${installDir}:/app`,
+      '-v', '/var/run/docker.sock:/var/run/docker.sock',
+      '-w', '/app',
+      'docker:cli',
+      'sh', '/app/update.sh',
+    ];
+
+    const child = spawn('docker', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    if (!listRes.ok) {
-      const body = await listRes.text();
-      throw new BadRequestException(`GitHub refused the hook list (${listRes.status}): ${body.slice(0, 200)}`);
-    }
-    const existing: any[] = await listRes.json();
-    const match = existing.find((h: any) => h?.config?.url === payloadUrl);
 
-    let hookId: number;
-    let installed: boolean;
-    if (match) {
-      // Patch to rotate secret + ensure push event is subscribed.
-      const patchRes = await fetch(`https://api.github.com/repos/${repo}/hooks/${match.id}`, {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-        body: JSON.stringify({
-          config: desiredConfig,
-          events: ['push'],
-          active: true,
-        }),
-      });
-      if (!patchRes.ok) {
-        const body = await patchRes.text();
-        throw new BadRequestException(`GitHub refused the hook update (${patchRes.status}): ${body.slice(0, 200)}`);
+    const onData = (buf: Buffer) => {
+      const text = buf.toString('utf-8');
+      this.state.updateLog.push(text);
+      // Cap log so it doesn't grow forever on a broken update loop.
+      if (this.state.updateLog.length > 2000) {
+        this.state.updateLog.splice(0, this.state.updateLog.length - 2000);
       }
-      hookId = match.id;
-      installed = false; // updated, not created
-    } else {
-      const createRes = await fetch(`https://api.github.com/repos/${repo}/hooks`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-        body: JSON.stringify({
-          name: 'web',
-          active: true,
-          events: ['push'],
-          config: desiredConfig,
-        }),
-      });
-      if (!createRes.ok) {
-        const body = await createRes.text();
-        throw new BadRequestException(`GitHub refused the hook creation (${createRes.status}): ${body.slice(0, 200)}`);
-      }
-      const created: any = await createRes.json();
-      hookId = created.id;
-      installed = true;
-    }
-
-    this.markWebhookFired();
-    return {
-      installed,
-      repo,
-      hookId,
-      message: installed ? 'Webhook created' : 'Existing webhook updated',
     };
+    child.stdout?.on('data', onData);
+    child.stderr?.on('data', onData);
+
+    await new Promise<void>((resolve) => {
+      child.on('exit', async (code) => {
+        const onDisk = await this.readCurrentSha();
+        if (code === 0) {
+          this.state.currentSha = onDisk || this.state.latestSha;
+          this.state.lastUpdatedAt = new Date().toISOString();
+          if (this.state.currentSha === this.state.latestSha) {
+            this.state.status = 'UP_TO_DATE';
+            this.state.message = `Updated to ${this.short(this.state.currentSha)}.`;
+          } else {
+            this.state.status = 'UPDATE_AVAILABLE';
+            this.state.message = `Update finished but SHA mismatch — re-running on next poll.`;
+          }
+        } else {
+          this.state.status = 'ERROR';
+          this.state.message = `update.sh exited with code ${code}. See log.`;
+        }
+        this.updating = false;
+        resolve();
+      });
+      child.on('error', (err) => {
+        this.state.status = 'ERROR';
+        this.state.message = `Failed to spawn update.sh: ${err.message}`;
+        this.updating = false;
+        resolve();
+      });
+    });
   }
 
-  /** Rotate the webhook secret — user has to update GitHub after this. */
-  rotateWebhookSecret(): { secret: string } {
-    const next = crypto.randomBytes(32).toString('hex');
-    fs.writeFileSync(WEBHOOK_SECRET_FILE, next + '\n', { mode: 0o600 });
-    return { secret: next };
-  }
-
-  // ── internals ─────────────────────────────────────────────────────
+  // ── Helpers ───────────────────────────────────────────────────────
 
   /**
-   * Read the per-install webhook secret, generating it on first call. The
-   * secret is a 32-byte hex string saved to .kryptalis/webhook-secret with
-   * mode 0600. It's stable across restarts so the user only pastes it into
-   * GitHub once.
+   * Resolve `<owner>/<repo>` for the install. Order:
+   *   1. KRYPTALIS_GITHUB_REPO env override
+   *   2. .git/config inside the install dir (mounted into the container)
    */
-  private getOrCreateWebhookSecret(): string {
-    try {
-      if (fs.existsSync(WEBHOOK_SECRET_FILE)) {
-        return fs.readFileSync(WEBHOOK_SECRET_FILE, 'utf-8').trim();
-      }
-    } catch {}
-    const next = crypto.randomBytes(32).toString('hex');
-    try {
-      fs.writeFileSync(WEBHOOK_SECRET_FILE, next + '\n', { mode: 0o600 });
-    } catch {}
-    return next;
-  }
+  private resolveRepo(): string | null {
+    const env = process.env.KRYPTALIS_GITHUB_REPO;
+    if (env) return env;
 
-  /** Stamp the status file with the last webhook firing time. */
-  private markWebhookFired(): void {
-    try {
-      let current: any = {};
-      if (fs.existsSync(STATUS_FILE)) {
-        try { current = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8')); } catch {}
-      }
-      current.lastWebhookAt = new Date().toISOString();
-      fs.writeFileSync(STATUS_FILE, JSON.stringify(current, null, 2));
-    } catch {}
-  }
+    // The install dir is bind-mounted into the API container at the same
+    // path it lives on the host (see docker-compose.yml). Read .git/config
+    // directly — no `docker run alpine/git` shenanigans.
+    const candidates = [
+      // Most common: install dir bind-mounted at a known path
+      process.env.KRYPTALIS_HOST_INSTALL_DIR && path.join(process.env.KRYPTALIS_HOST_INSTALL_DIR, '.git', 'config'),
+      '/app/.git/config',
+      '/opt/kryptalis/.git/config',
+    ].filter(Boolean) as string[];
 
-
-  private async detectAutoUpdate(): Promise<boolean | null> {
-    // Honour the operator preference file first — it's the in-container signal
-    // and update.sh respects it. The systemd unit being enabled at boot is
-    // additional, optional info.
-    const prefFile = path.join(DATA_DIR, 'auto-update.pref');
-    if (fs.existsSync(prefFile)) {
+    for (const file of candidates) {
       try {
-        const content = fs.readFileSync(prefFile, 'utf-8').trim();
-        if (content === 'disabled') return false;
+        if (!fs.existsSync(file)) continue;
+        const conf = fs.readFileSync(file, 'utf-8');
+        const m = conf.match(/url\s*=\s*([^\n]+github\.com[:/][^/]+\/[^/.\s]+)/);
+        if (m) {
+          const owner = m[1].match(/github\.com[:/]([^/]+)\/([^/.\s]+)/);
+          if (owner) return `${owner[1]}/${owner[2]}`;
+        }
       } catch {}
     }
-    // If the status file exists with a recent updatedAt (< 30 min) the timer
-    // must be alive — that's our best proxy without systemctl access.
-    try {
-      if (fs.existsSync(STATUS_FILE)) {
-        const stat = fs.statSync(STATUS_FILE);
-        const ageMs = Date.now() - stat.mtimeMs;
-        if (ageMs < 30 * 60 * 1000) return true;
-      }
-    } catch {}
     return null;
   }
 
-  private async detectManualTriggerAvailable(): Promise<boolean> {
-    // We need the docker socket to be mounted AND the docker CLI image to be
-    // pullable. Cheap probe: does the socket exist?
-    try {
-      return fs.existsSync('/var/run/docker.sock');
-    } catch {
-      return false;
+  private async readCurrentSha(): Promise<string | null> {
+    // Read HEAD directly off disk. Way cheaper than spawning git, and we
+    // don't need a working tree — just the current commit hash.
+    const candidates = [
+      process.env.KRYPTALIS_HOST_INSTALL_DIR && path.join(process.env.KRYPTALIS_HOST_INSTALL_DIR, '.git'),
+      '/app/.git',
+      '/opt/kryptalis/.git',
+    ].filter(Boolean) as string[];
+
+    for (const gitDir of candidates) {
+      try {
+        if (!fs.existsSync(gitDir)) continue;
+        const headFile = path.join(gitDir, 'HEAD');
+        const head = fs.readFileSync(headFile, 'utf-8').trim();
+        if (head.startsWith('ref: ')) {
+          const ref = head.slice(5);
+          const refFile = path.join(gitDir, ref);
+          if (fs.existsSync(refFile)) {
+            return fs.readFileSync(refFile, 'utf-8').trim();
+          }
+          // Packed refs fallback
+          const packed = path.join(gitDir, 'packed-refs');
+          if (fs.existsSync(packed)) {
+            const lines = fs.readFileSync(packed, 'utf-8').split('\n');
+            const hit = lines.find((l) => l.endsWith(' ' + ref));
+            if (hit) return hit.split(' ')[0];
+          }
+        } else if (/^[0-9a-f]{40}$/.test(head)) {
+          return head; // detached HEAD
+        }
+      } catch {}
     }
+
+    // Last resort: ask `git` if it's on PATH (it usually isn't inside
+    // the API container, but worth a shot for dev).
+    try {
+      const dir = process.env.KRYPTALIS_HOST_INSTALL_DIR || '/opt/kryptalis';
+      const { stdout } = await execFileAsync('git', ['-C', dir, 'rev-parse', 'HEAD'], { timeout: 5_000 });
+      const sha = stdout.trim();
+      if (/^[0-9a-f]{40}$/.test(sha)) return sha;
+    } catch {}
+
+    return null;
+  }
+
+  private hostInstallDir(): string {
+    return process.env.KRYPTALIS_HOST_INSTALL_DIR
+      || process.env.KRYPTALIS_HOST_DATA_DIR?.replace(/[\\/]\.kryptalis[\\/]*$/, '')
+      || '/opt/kryptalis';
+  }
+
+  private short(sha: string | null): string {
+    return sha ? sha.slice(0, 7) : '?';
   }
 }

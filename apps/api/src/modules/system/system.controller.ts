@@ -1,32 +1,9 @@
-import { Controller, Get, Post, Body, UseGuards, Req, Headers, HttpCode } from '@nestjs/common';
+import { Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { SystemUpdatesService } from './system-updates.service';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
-
-/**
- * GitHub webhook is PUBLIC (no JWT) — auth is the HMAC signature in the
- * X-Hub-Signature-256 header verified against the per-install secret. So
- * the webhook route lives on a separate controller without the auth guards.
- */
-@ApiTags('System')
-@Controller('system')
-export class SystemWebhookController {
-  constructor(private updates: SystemUpdatesService) {}
-
-  @Post('updates/webhook')
-  @HttpCode(202)
-  @ApiOperation({ summary: 'GitHub push webhook → trigger self-update (no JWT — HMAC-verified)' })
-  async webhook(
-    @Req() req: any,
-    @Headers('x-hub-signature-256') signature: string,
-    @Headers('x-github-event') eventType: string,
-  ) {
-    return this.updates.handleGithubWebhook(req.rawBody, signature, eventType);
-  }
-}
 
 @ApiTags('System')
 @ApiBearerAuth()
@@ -37,44 +14,26 @@ export class SystemController {
   constructor(private updates: SystemUpdatesService) {}
 
   @Get('updates')
-  @ApiOperation({ summary: 'Current update status (SHA, branch, last run)' })
+  @ApiOperation({ summary: 'Current update state (poll-based)' })
   getStatus() {
     return this.updates.getStatus();
   }
 
   @Get('updates/log')
-  @ApiOperation({ summary: 'Tail of the update.sh log file' })
-  async getLog() {
-    return { log: await this.updates.getLog() };
+  @ApiOperation({ summary: 'In-memory log of the last update.sh run' })
+  getLog() {
+    return this.updates.getLog();
   }
 
   @Post('updates/check')
-  @ApiOperation({ summary: 'Force a fetch from origin (does not rebuild)' })
+  @ApiOperation({ summary: 'Force an immediate poll (instead of waiting for the 60s tick)' })
   check() {
-    return this.updates.checkNow();
+    return this.updates.forceCheck();
   }
 
   @Post('updates/apply')
-  @ApiOperation({ summary: 'Pull + rebuild now (instead of waiting for the timer)' })
+  @ApiOperation({ summary: 'Force an update run (bypasses the SHA check)' })
   apply() {
-    return this.updates.applyNow();
-  }
-
-  @Post('updates/auto')
-  @ApiOperation({ summary: 'Enable or disable the 10-min auto-update timer' })
-  setAuto(@Body('enabled') enabled: boolean) {
-    return this.updates.setAutoUpdate(!!enabled);
-  }
-
-  @Post('updates/webhook/rotate')
-  @ApiOperation({ summary: 'Rotate the GitHub webhook secret (must re-paste in GitHub)' })
-  rotateWebhook() {
-    return this.updates.rotateWebhookSecret();
-  }
-
-  @Post('updates/webhook/install')
-  @ApiOperation({ summary: 'Auto-install the webhook on GitHub using the admin’s OAuth-connected account' })
-  installWebhook(@CurrentUser('id') userId: string) {
-    return this.updates.autoInstallWebhook(userId);
+    return this.updates.forceUpdate();
   }
 }
