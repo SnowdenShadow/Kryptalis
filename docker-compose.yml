@@ -212,19 +212,27 @@ services:
       - sftp_homes:/home
       - ./.kryptalis/apps:/data/apps
       # Marketplace + docker-image apps store code in named volumes.
-      # We mount the volumes root RW so SftpService can `mount --bind`
-      # a per-account subset into /home/<user>/data. Defence in depth:
-      #
+      # bind-propagation: rshared is CRITICAL: without it, the SFTP
+      # container only sees /var/lib/docker/volumes as a flat directory
+      # — every Docker named volume is actually a SUB-MOUNT (overlayfs)
+      # of /var/lib/docker/volumes/<name>/_data, and Docker daemon
+      # creates these mounts in the HOST namespace AFTER the SFTP
+      # container starts. Without mount propagation, the SFTP namespace
+      # sees the directory entries but reads zero bytes from inside.
+      # rshared = recursively share mount events both ways. The compose
+      # file syntax for this is the long-form "type: bind" block.
+      - type: bind
+        source: /var/lib/docker/volumes
+        target: /data/volumes
+        bind:
+          propagation: rshared
+      # Defence in depth on top of the above:
       #   1. SftpService.discoverContainerCodePath VALIDATES the volume
-      #      name belongs to the requested app (via docker inspect) —
-      #      a user cannot ask for "give me access to <random volume>".
-      #   2. The chroot inside sshd_config (`ChrootDirectory %h`) keeps
-      #      every session locked into /home/<user>, which only shows
-      #      the bind target — never the parent /data/volumes tree.
-      #   3. /home/<user> is root-owned 0755, so even if a user shells
-      #      out (they can't — internal-sftp + /bin/false) they can't
-      #      list siblings under /data/volumes.
-      - /var/lib/docker/volumes:/data/volumes
+      #      name belongs to the requested app via docker inspect.
+      #   2. The chroot in sshd_config (`ChrootDirectory %h`) locks
+      #      every session into /home/<user>, never exposing /data/volumes.
+      #   3. /home/<user> is root-owned 0755, so even if internal-sftp
+      #      were misconfigured the user can't list siblings.
     healthcheck:
       test: ["CMD-SHELL", "pgrep sshd || exit 1"]
       interval: 30s
