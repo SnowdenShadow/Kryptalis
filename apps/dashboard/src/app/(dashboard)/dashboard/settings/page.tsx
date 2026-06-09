@@ -87,12 +87,9 @@ interface UpdateStatus {
   };
 }
 
-// Tiny UA → "Browser on OS" parser. Intentionally heuristic: matches the
-// big four browsers and the big three OSes; falls back to raw UA when
-// nothing recognizable is found (the request to keep it "simple" rules
-// out pulling in `ua-parser-js`).
-function parseUA(ua: string | null | undefined): string {
-  if (!ua) return 'Unknown device';
+// Tiny UA → "Browser on OS" parser. Heuristic, falls back to raw UA.
+function parseUA(ua: string | null | undefined, fallback: string): string {
+  if (!ua) return fallback;
   const browser =
     /Edg\//.test(ua) ? 'Edge' :
     /OPR\//.test(ua) ? 'Opera' :
@@ -107,32 +104,32 @@ function parseUA(ua: string | null | undefined): string {
     /iPhone|iPad|iOS/.test(ua) ? 'iOS' :
     /Linux/.test(ua) ? 'Linux' :
     null;
-  if (browser && os) return `${browser} on ${os}`;
+  if (browser && os) return `${browser} · ${os}`;
   return ua;
 }
 
-function formatRelative(iso: string): string {
+function formatRelative(iso: string, t: (k: string, v?: Record<string, string | number>) => string): string {
   const then = new Date(iso).getTime();
   if (!then) return iso;
   const diff = Date.now() - then;
   const s = Math.floor(diff / 1000);
-  if (s < 60) return 'just now';
+  if (s < 60) return t('settings.timeJustNow');
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m} minute${m === 1 ? '' : 's'} ago`;
+  if (m < 60) return t('settings.timeMinute', { n: m });
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h} hour${h === 1 ? '' : 's'} ago`;
+  if (h < 24) return t('settings.timeHour', { n: h });
   const d = Math.floor(h / 24);
-  if (d < 30) return `${d} day${d === 1 ? '' : 's'} ago`;
+  if (d < 30) return t('settings.timeDay', { n: d });
   return new Date(iso).toLocaleDateString();
 }
 
-const notificationEvents = [
-  'Deployment completed',
-  'Deployment failed',
-  'Server offline',
-  'SSL certificate expiring',
-  'Backup completed',
-  'Backup failed',
+const NOTIF_EVENT_KEYS = [
+  'settings.notifEv.deployOk',
+  'settings.notifEv.deployFail',
+  'settings.notifEv.serverOff',
+  'settings.notifEv.sslExpire',
+  'settings.notifEv.backupOk',
+  'settings.notifEv.backupFail',
 ];
 
 const notificationChannels = [
@@ -146,9 +143,11 @@ const notificationChannels = [
 function InfrastructureTab({
   serverMode,
   onModeChange,
+  t,
 }: {
   serverMode: 'local' | 'multi';
   onModeChange: (m: 'local' | 'multi') => void;
+  t: (key: string, vars?: Record<string, string | number>) => string;
 }) {
   const qc = useQueryClient();
   const router = useRouter();
@@ -166,8 +165,6 @@ function InfrastructureTab({
     queryFn: () => api.get('/applications'),
   });
 
-  // For the "to-local" check: any apps deployed on a non-local server?
-  const localServer = servers.find((s) => s.host === '127.0.0.1');
   const remoteServers = servers.filter((s) => s.host !== '127.0.0.1');
   const appsOnRemote = apps.filter((a: any) => a.project?.server && a.project.server.host !== '127.0.0.1');
 
@@ -175,12 +172,11 @@ function InfrastructureTab({
     mutationFn: (next: 'LOCAL' | 'MULTI') =>
       api.patch('/admin/settings/deployment_mode', { value: next }),
     onSuccess: (_, next) => {
-      toast.success(`Mode set to ${next}`);
+      toast.success(t('settings.deployToastSet', { mode: next }));
       qc.invalidateQueries({ queryKey: ['public-settings'] });
       qc.invalidateQueries({ queryKey: ['servers'] });
       setShowConfirm(null);
       onModeChange(next === 'MULTI' ? 'multi' : 'local');
-      // Going MULTI with no remote servers? Send them to /servers to add one.
       if (next === 'MULTI' && remoteServers.length === 0) {
         setTimeout(() => router.push('/dashboard/servers'), 400);
       }
@@ -190,21 +186,29 @@ function InfrastructureTab({
 
   function attemptSwitch(target: 'local' | 'multi') {
     if (target === serverMode) return;
-    if (target === 'multi') setShowConfirm('to-multi');
-    else setShowConfirm('to-local');
+    setShowConfirm(target === 'multi' ? 'to-multi' : 'to-local');
+  }
+
+  function withLink(key: string, label: string) {
+    const raw = t(key, { link: '__LINK__' });
+    const [before, after = ''] = raw.split('__LINK__');
+    return (
+      <>
+        {before}
+        <Link href="/dashboard/servers" className="text-primary hover:underline">{label}</Link>
+        {after}
+      </>
+    );
   }
 
   return (
     <div className="space-y-5">
-      {/* Mode picker */}
       <Card>
         <CardHeader>
           <CardTitle className="text-lg flex items-center gap-2">
-            <Share2 size={18} /> Deployment mode
+            <Share2 size={18} /> {t('settings.deployMode')}
           </CardTitle>
-          <CardDescription>
-            Local = everything on this VPS. Multi = add other VPS as deployment targets via the Kryptalis agent.
-          </CardDescription>
+          <CardDescription>{t('settings.deployModeDesc')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <button
@@ -219,10 +223,8 @@ function InfrastructureTab({
             <div className="flex items-start gap-3">
               <HardDrive size={20} className="text-primary mt-0.5 shrink-0" />
               <div className="flex-1">
-                <p className="font-medium text-sm">Local server</p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Single-host setup. All apps run on this VPS. Simplest, no other VPS to manage.
-                </p>
+                <p className="font-medium text-sm">{t('settings.deployLocal')}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{t('settings.deployLocalDesc')}</p>
               </div>
               {serverMode === 'local' && <Check size={16} className="text-primary shrink-0" />}
             </div>
@@ -240,10 +242,10 @@ function InfrastructureTab({
             <div className="flex items-start gap-3">
               <Share2 size={20} className="text-primary mt-0.5 shrink-0" />
               <div className="flex-1">
-                <p className="font-medium text-sm">Multi-server</p>
+                <p className="font-medium text-sm">{t('settings.deployMulti')}</p>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  This VPS + extra VPS connected via the Kryptalis agent. Apps can be deployed on any registered server.
-                  Add servers from <Link href="/dashboard/servers" className="text-primary hover:underline">/dashboard/servers</Link>.
+                  {t('settings.deployMultiDesc')}{' '}
+                  {withLink('settings.deployMultiAddHint', '/dashboard/servers')}
                 </p>
               </div>
               {serverMode === 'multi' && <Check size={16} className="text-primary shrink-0" />}
@@ -251,22 +253,19 @@ function InfrastructureTab({
           </button>
 
           {!isAdmin && (
-            <p className="text-xs text-muted-foreground italic">
-              Only platform admins can change the deployment mode.
-            </p>
+            <p className="text-xs text-muted-foreground italic">{t('settings.deployAdminOnly')}</p>
           )}
         </CardContent>
       </Card>
 
-      {/* Servers summary — show registered servers in MULTI mode */}
       {serverMode === 'multi' && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
-              <Server size={16} /> Registered servers ({servers.length})
+              <Server size={16} /> {t('settings.deployServersTitle', { n: servers.length })}
             </CardTitle>
             <CardDescription>
-              <Link href="/dashboard/servers" className="text-primary hover:underline">Manage servers</Link> to add or remove.
+              {withLink('settings.deployServersManageHint', t('settings.deployServersManage'))}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -281,7 +280,7 @@ function InfrastructureTab({
                     )} />
                     <span className="font-mono">{s.name}</span>
                     <span className="text-muted-foreground">{s.host}</span>
-                    {s.host === '127.0.0.1' && <Badge variant="outline" className="text-[10px]">local</Badge>}
+                    {s.host === '127.0.0.1' && <Badge variant="outline" className="text-[10px]">{t('settings.deployServerLocal')}</Badge>}
                   </div>
                   <Badge variant="outline" className="text-[10px]">{s.status}</Badge>
                 </div>
@@ -291,50 +290,47 @@ function InfrastructureTab({
         </Card>
       )}
 
-      {/* Confirm switch dialog */}
       <Dialog open={!!showConfirm} onClose={() => setShowConfirm(null)}>
         <DialogHeader>
           <DialogTitle>
-            Switch to {showConfirm === 'to-multi' ? 'Multi-server' : 'Local'} mode?
+            {showConfirm === 'to-multi' ? t('settings.deploySwitchTitleMulti') : t('settings.deploySwitchTitleLocal')}
           </DialogTitle>
           <DialogDescription>
             {showConfirm === 'to-multi'
-              ? 'Multi-server lets you add extra VPS as deployment targets. Apps already on this VPS keep running here.'
-              : 'Switching back to Local mode hides the multi-server UI. Apps currently deployed on remote VPS will keep running — they just disappear from the dashboard until you switch back.'}
+              ? t('settings.deploySwitchDescMulti')
+              : t('settings.deploySwitchDescLocal')}
           </DialogDescription>
         </DialogHeader>
 
         {showConfirm === 'to-local' && appsOnRemote.length > 0 && (
           <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 space-y-2">
             <p className="text-xs font-semibold text-orange-500 flex items-center gap-1">
-              <AlertCircle size={12} /> {appsOnRemote.length} app{appsOnRemote.length !== 1 ? 's are' : ' is'} running on remote servers
+              <AlertCircle size={12} /> {t('settings.deployAppsOnRemote', { n: appsOnRemote.length })}
             </p>
             <ul className="text-xs text-muted-foreground list-disc list-inside">
               {appsOnRemote.slice(0, 5).map((a: any) => (
-                <li key={a.id}><span className="font-mono">{a.name}</span> on {a.project?.server?.name}</li>
+                <li key={a.id}><span className="font-mono">{a.name}</span> · {a.project?.server?.name}</li>
               ))}
-              {appsOnRemote.length > 5 && <li>+ {appsOnRemote.length - 5} more</li>}
+              {appsOnRemote.length > 5 && <li>{t('settings.deployMoreApps', { n: appsOnRemote.length - 5 })}</li>}
             </ul>
-            <p className="text-[10px] text-muted-foreground">
-              These won't be deleted, but you won't see them in the dashboard until Multi mode is re-enabled or the apps are moved to the local server.
-            </p>
+            <p className="text-[10px] text-muted-foreground">{t('settings.deployAppsOnRemoteHint')}</p>
           </div>
         )}
 
         {showConfirm === 'to-multi' && remoteServers.length === 0 && (
           <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-            After switching, head to <Link href="/dashboard/servers" className="text-primary hover:underline">/dashboard/servers</Link> to add your first remote VPS. The dashboard will generate an install command you run on the new server.
+            {withLink('settings.deployFirstRemoteHint', '/dashboard/servers')}
           </div>
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => setShowConfirm(null)}>Cancel</Button>
+          <Button variant="outline" onClick={() => setShowConfirm(null)}>{t('common.cancel')}</Button>
           <Button
             disabled={switchModeMutation.isPending}
             onClick={() => switchModeMutation.mutate(showConfirm === 'to-multi' ? 'MULTI' : 'LOCAL')}
           >
             {switchModeMutation.isPending && <Loader2 size={12} className="animate-spin" />}
-            Confirm switch
+            {t('settings.deployConfirmBtn')}
           </Button>
         </DialogFooter>
       </Dialog>
@@ -392,9 +388,9 @@ export default function SettingsPage() {
   const enable2faMutation = useMutation({
     mutationFn: (code: string) => api.post<{ backupCodes: string[] }>('/auth/2fa/enable', { code }),
     onSuccess: (data) => {
-      setTwoFa((t) => ({ ...t, step: 'done', backupCodes: data.backupCodes }));
+      setTwoFa((prev) => ({ ...prev, step: 'done', backupCodes: data.backupCodes }));
       queryClient.invalidateQueries({ queryKey: ['auth-me'] });
-      toast.success('Two-factor enabled');
+      toast.success(t('settings.twoFaToastEnabled'));
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -404,7 +400,7 @@ export default function SettingsPage() {
     onSuccess: () => {
       setTwoFa({ step: 'idle' });
       queryClient.invalidateQueries({ queryKey: ['auth-me'] });
-      toast.success('Two-factor disabled');
+      toast.success(t('settings.twoFaToastDisabled'));
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -425,7 +421,7 @@ export default function SettingsPage() {
   const revokeSession = useMutation({
     mutationFn: (id: string) => api.delete(`/auth/sessions/${id}`),
     onSuccess: () => {
-      toast.success('Session revoked');
+      toast.success(t('settings.sessionsToastRevoked'));
       refetchSessions();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -433,7 +429,7 @@ export default function SettingsPage() {
   const revokeOthers = useMutation({
     mutationFn: () => api.delete('/auth/sessions') as Promise<{ revoked: number }>,
     onSuccess: (d) => {
-      toast.success(`Logged out of ${d.revoked} other session${d.revoked === 1 ? '' : 's'}`);
+      toast.success(t('settings.sessionsToastLoggedOut', { n: d.revoked }));
       refetchSessions();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -452,7 +448,7 @@ export default function SettingsPage() {
     mutationFn: (data: any) => api.post('/git-providers', data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['git-providers'] });
-      toast.success('Git provider connected');
+      toast.success(t('settings.gitToastAdded'));
       setShowAddGit(false);
       setGitForm({ provider: 'GITHUB', name: '', token: '' });
     },
@@ -463,7 +459,7 @@ export default function SettingsPage() {
     mutationFn: (id: string) => api.delete(`/git-providers/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['git-providers'] });
-      toast.success('Git provider disconnected');
+      toast.success(t('settings.gitToastRemoved'));
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -523,7 +519,7 @@ export default function SettingsPage() {
 
   const saveProfile = useMutation({
     mutationFn: () => api.patch('/auth/profile', { name: profileName }),
-    onSuccess: () => toast.success('Profile updated'),
+    onSuccess: () => toast.success(t('settings.profileToastSaved')),
     onError: (error: Error) => toast.error(error.message),
   });
 
@@ -534,7 +530,7 @@ export default function SettingsPage() {
         newPassword,
       }),
     onSuccess: () => {
-      toast.success('Password changed');
+      toast.success(t('settings.pwToastChanged'));
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
@@ -555,10 +551,8 @@ export default function SettingsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold">Settings</h1>
-        <p className="text-muted-foreground">
-          Manage your account and preferences
-        </p>
+        <h1 className="text-3xl font-bold">{t('settings.title')}</h1>
+        <p className="text-muted-foreground">{t('settings.subtitle')}</p>
       </div>
 
       <div className="flex gap-1 rounded-lg border border-border bg-muted/50 p-1 overflow-x-auto">
@@ -583,38 +577,36 @@ export default function SettingsPage() {
       {activeTab === 'profile' && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Profile Information</CardTitle>
-            <CardDescription>Update your personal details</CardDescription>
+            <CardTitle className="text-lg">{t('settings.profileInfo')}</CardTitle>
+            <CardDescription>{t('settings.profileDesc')}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="name">Name</Label>
+              <Label htmlFor="name">{t('settings.name')}</Label>
               <Input
                 id="name"
-                placeholder="Your name"
+                placeholder={t('settings.namePh')}
                 value={profileName}
                 onChange={(e) => setProfileName(e.target.value)}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="email">Email</Label>
+              <Label htmlFor="email">{t('common.email')}</Label>
               <Input
                 id="email"
-                placeholder="your@email.com"
+                placeholder={t('settings.emailPh')}
                 value={profileEmail}
                 onChange={(e) => setProfileEmail(e.target.value)}
                 disabled
               />
-              <p className="text-xs text-muted-foreground">
-                Email cannot be changed
-              </p>
+              <p className="text-xs text-muted-foreground">{t('settings.emailCantChange')}</p>
             </div>
             <Button
               onClick={() => saveProfile.mutate()}
               disabled={saveProfile.isPending}
             >
               <Save size={14} />
-              Save Changes
+              {t('settings.saveChanges')}
             </Button>
           </CardContent>
         </Card>
@@ -625,14 +617,12 @@ export default function SettingsPage() {
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">Change Password</CardTitle>
-              <CardDescription>
-                Update your password to keep your account secure
-              </CardDescription>
+              <CardTitle className="text-lg">{t('settings.changePassword')}</CardTitle>
+              <CardDescription>{t('settings.changePasswordDesc')}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="current-password">Current Password</Label>
+                <Label htmlFor="current-password">{t('settings.currentPassword')}</Label>
                 <Input
                   id="current-password"
                   type="password"
@@ -641,7 +631,7 @@ export default function SettingsPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="new-password">New Password</Label>
+                <Label htmlFor="new-password">{t('settings.newPassword')}</Label>
                 <Input
                   id="new-password"
                   type="password"
@@ -650,7 +640,7 @@ export default function SettingsPage() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="confirm-password">Confirm New Password</Label>
+                <Label htmlFor="confirm-password">{t('settings.confirmPassword')}</Label>
                 <Input
                   id="confirm-password"
                   type="password"
@@ -668,26 +658,24 @@ export default function SettingsPage() {
                 }
               >
                 <Key size={14} />
-                Change Password
+                {t('settings.changePwBtn')}
               </Button>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">Two-Factor Authentication</CardTitle>
-              <CardDescription>
-                Add an extra layer of security to your account
-              </CardDescription>
+              <CardTitle className="text-lg">{t('settings.twoFactor')}</CardTitle>
+              <CardDescription>{t('settings.twoFactorDesc')}</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
                   <Smartphone size={20} className="text-muted-foreground" />
                   <div>
-                    <p className="text-sm font-medium">Authenticator App</p>
+                    <p className="text-sm font-medium">{t('settings.authenticatorApp')}</p>
                     <p className="text-xs text-muted-foreground">
-                      {twoFactorEnabled ? 'Enabled' : 'Not configured'}
+                      {twoFactorEnabled ? t('settings.enabled') : t('settings.notConfigured')}
                     </p>
                   </div>
                 </div>
@@ -703,7 +691,7 @@ export default function SettingsPage() {
                     }
                   }}
                 >
-                  {twoFactorEnabled ? 'Disable' : 'Enable'}
+                  {twoFactorEnabled ? t('settings.disable') : t('settings.enable')}
                 </Button>
               </div>
             </CardContent>
@@ -713,10 +701,8 @@ export default function SettingsPage() {
             <CardHeader>
               <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div>
-                  <CardTitle className="text-lg">Active sessions</CardTitle>
-                  <CardDescription>
-                    Every device currently signed into your account. Revoke any you don’t recognize.
-                  </CardDescription>
+                  <CardTitle className="text-lg">{t('settings.sessions')}</CardTitle>
+                  <CardDescription>{t('settings.sessionsDesc')}</CardDescription>
                 </div>
                 {sessions.filter((s) => !s.isCurrent).length > 0 && (
                   <Button
@@ -728,7 +714,7 @@ export default function SettingsPage() {
                     {revokeOthers.isPending
                       ? <Loader2 size={12} className="animate-spin" />
                       : <LogOut size={12} />}
-                    Log out everywhere else
+                    {t('settings.sessionsLogoutAll')}
                   </Button>
                 )}
               </div>
@@ -737,7 +723,7 @@ export default function SettingsPage() {
               {sessions.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-8 text-muted-foreground text-sm">
                   <Monitor size={28} className="mb-2" />
-                  <p>No active sessions found</p>
+                  <p>{t('settings.sessionsNone')}</p>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -754,14 +740,14 @@ export default function SettingsPage() {
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
                             <p className="text-sm font-medium truncate">
-                              {parseUA(s.userAgent)}
+                              {parseUA(s.userAgent, t('settings.sessionsUnknownDev'))}
                             </p>
                             {s.isCurrent && (
-                              <Badge variant="success" className="text-[10px]">This device</Badge>
+                              <Badge variant="success" className="text-[10px]">{t('settings.sessionsCurrent')}</Badge>
                             )}
                           </div>
                           <p className="text-xs text-muted-foreground mt-0.5">
-                            {s.ipAddress || 'unknown IP'} · signed in {formatRelative(s.createdAt)}
+                            {s.ipAddress || t('settings.sessionsUnknownIp')} · {t('settings.sessionsSignedIn', { ago: formatRelative(s.createdAt, t) })}
                           </p>
                         </div>
                       </div>
@@ -776,7 +762,7 @@ export default function SettingsPage() {
                           {revokeSession.isPending
                             ? <Loader2 size={14} className="animate-spin" />
                             : <Trash2 size={14} />}
-                          Revoke
+                          {t('settings.sessionsRevoke')}
                         </Button>
                       )}
                     </div>
@@ -793,17 +779,15 @@ export default function SettingsPage() {
       {activeTab === 'notifications' && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Notification Preferences</CardTitle>
-            <CardDescription>
-              Choose how you want to be notified about events
-            </CardDescription>
+            <CardTitle className="text-lg">{t('settings.notifPrefs')}</CardTitle>
+            <CardDescription>{t('settings.notifPrefsDesc')}</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-border text-left text-sm text-muted-foreground">
-                    <th className="px-4 py-3 font-medium">Event</th>
+                    <th className="px-4 py-3 font-medium">{t('settings.notifColEvent')}</th>
                     {notificationChannels.map((channel) => (
                       <th
                         key={channel.key}
@@ -818,21 +802,21 @@ export default function SettingsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {notificationEvents.map((event) => (
+                  {NOTIF_EVENT_KEYS.map((evKey) => (
                     <tr
-                      key={event}
+                      key={evKey}
                       className="border-b border-border last:border-0"
                     >
-                      <td className="px-4 py-3 text-sm font-medium">{event}</td>
+                      <td className="px-4 py-3 text-sm font-medium">{t(evKey)}</td>
                       {notificationChannels.map((channel) => (
                         <td key={channel.key} className="px-4 py-3 text-center">
                           <button
                             onClick={() =>
-                              toggleNotification(event, channel.key)
+                              toggleNotification(evKey, channel.key)
                             }
                             className={cn(
                               'h-5 w-9 rounded-full transition-colors',
-                              notifications[event]?.[channel.key]
+                              notifications[evKey]?.[channel.key]
                                 ? 'bg-primary'
                                 : 'bg-muted'
                             )}
@@ -840,7 +824,7 @@ export default function SettingsPage() {
                             <div
                               className={cn(
                                 'h-4 w-4 rounded-full bg-white transition-transform',
-                                notifications[event]?.[channel.key]
+                                notifications[evKey]?.[channel.key]
                                   ? 'translate-x-4'
                                   : 'translate-x-0.5'
                               )}
@@ -919,13 +903,13 @@ export default function SettingsPage() {
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between flex-wrap gap-3">
                 <div>
-                  <CardTitle className="text-lg">Git Providers</CardTitle>
-                  <CardDescription>Connect your Git accounts to deploy from private repositories</CardDescription>
+                  <CardTitle className="text-lg">{t('settings.gitTitle')}</CardTitle>
+                  <CardDescription>{t('settings.gitDesc')}</CardDescription>
                 </div>
                 <Button onClick={() => setShowAddGit(true)}>
-                  <Plus size={14} /> Connect Provider
+                  <Plus size={14} /> {t('settings.gitConnect')}
                 </Button>
               </div>
             </CardHeader>
@@ -933,8 +917,8 @@ export default function SettingsPage() {
               {gitProviders.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
                   <GitBranch size={36} className="mb-2" />
-                  <p>No Git providers connected</p>
-                  <p className="text-xs mt-1">Connect GitHub, GitLab or Bitbucket to deploy private repos</p>
+                  <p>{t('settings.gitNone')}</p>
+                  <p className="text-xs mt-1">{t('settings.gitNoneHint')}</p>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -950,7 +934,7 @@ export default function SettingsPage() {
                               {gp.provider} · @{gp.username}
                             </p>
                           </div>
-                          <Badge variant="success" className="ml-2">Connected</Badge>
+                          <Badge variant="success" className="ml-2">{t('settings.gitConnected')}</Badge>
                         </div>
                         <Button size="sm" variant="ghost" className="text-destructive"
                           onClick={() => deleteGitMutation.mutate(gp.id)}>
@@ -966,32 +950,38 @@ export default function SettingsPage() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">How to create a token</CardTitle>
+              <CardTitle className="text-lg">{t('settings.gitHowTitle')}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm text-muted-foreground">
               <div>
                 <p className="font-semibold text-foreground">GitHub</p>
-                <p>Settings → Developer settings → Personal access tokens → Generate new token (classic). Scopes: <code className="text-xs bg-muted px-1 rounded">repo</code></p>
+                <p>{t('settings.gitHowGithub', { scope: '' }).split('{scope}')[0]}
+                  <code className="text-xs bg-muted px-1 rounded">repo</code>
+                </p>
               </div>
               <div>
                 <p className="font-semibold text-foreground">GitLab</p>
-                <p>User Settings → Access Tokens → Create token. Scopes: <code className="text-xs bg-muted px-1 rounded">read_repository, read_api</code></p>
+                <p>{t('settings.gitHowGitlab', { scope: '' }).split('{scope}')[0]}
+                  <code className="text-xs bg-muted px-1 rounded">read_repository, read_api</code>
+                </p>
               </div>
               <div>
                 <p className="font-semibold text-foreground">Bitbucket</p>
-                <p>Personal settings → App passwords → Create app password. Permissions: <code className="text-xs bg-muted px-1 rounded">Repositories: Read</code></p>
+                <p>{t('settings.gitHowBitbucket', { scope: '' }).split('{scope}')[0]}
+                  <code className="text-xs bg-muted px-1 rounded">Repositories: Read</code>
+                </p>
               </div>
             </CardContent>
           </Card>
 
           <Dialog open={showAddGit} onClose={() => setShowAddGit(false)}>
             <DialogHeader>
-              <DialogTitle>Connect Git Provider</DialogTitle>
-              <DialogDescription>Paste your personal access token to list your repos</DialogDescription>
+              <DialogTitle>{t('settings.gitDlgTitle')}</DialogTitle>
+              <DialogDescription>{t('settings.gitDlgDesc')}</DialogDescription>
             </DialogHeader>
             <div className="space-y-4">
               <div className="space-y-2">
-                <Label>Provider</Label>
+                <Label>{t('settings.gitProvider')}</Label>
                 <Select value={gitForm.provider} onChange={(e) => setGitForm({ ...gitForm, provider: e.target.value })}>
                   <option value="GITHUB">🐙 GitHub</option>
                   <option value="GITLAB">🦊 GitLab</option>
@@ -999,21 +989,23 @@ export default function SettingsPage() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label>Display Name</Label>
-                <Input placeholder="e.g. My GitHub" value={gitForm.name}
+                <Label>{t('settings.gitDisplayName')}</Label>
+                <Input placeholder={t('settings.gitDisplayPh')} value={gitForm.name}
                   onChange={(e) => setGitForm({ ...gitForm, name: e.target.value })} />
               </div>
               <div className="space-y-2">
-                <Label>Personal Access Token</Label>
+                <Label>{t('settings.gitToken')}</Label>
                 <Input type="password" placeholder="ghp_..." value={gitForm.token}
                   onChange={(e) => setGitForm({ ...gitForm, token: e.target.value })} className="font-mono" />
               </div>
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setShowAddGit(false)}>Cancel</Button>
+              <Button variant="outline" onClick={() => setShowAddGit(false)}>{t('common.cancel')}</Button>
               <Button disabled={!gitForm.name || !gitForm.token || addGitMutation.isPending}
                 onClick={() => addGitMutation.mutate(gitForm)}>
-                {addGitMutation.isPending ? <><Loader2 size={14} className="animate-spin" /> Connecting...</> : 'Connect'}
+                {addGitMutation.isPending
+                  ? <><Loader2 size={14} className="animate-spin" /> {t('settings.gitConnecting')}</>
+                  : t('settings.gitConnectBtn')}
               </Button>
             </DialogFooter>
           </Dialog>
@@ -1024,11 +1016,8 @@ export default function SettingsPage() {
       {/* 2FA enrollment dialog */}
       <Dialog open={twoFa.step === 'enroll'} onClose={() => setTwoFa({ step: 'idle' })}>
         <DialogHeader>
-          <DialogTitle>Enable two-factor authentication</DialogTitle>
-          <DialogDescription>
-            Scan the QR code in your authenticator app (or paste the secret manually),
-            then enter the 6-digit code to confirm.
-          </DialogDescription>
+          <DialogTitle>{t('settings.twoFaEnrollTitle')}</DialogTitle>
+          <DialogDescription>{t('settings.twoFaEnrollDesc')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           {twoFa.otpauth && (
@@ -1038,27 +1027,27 @@ export default function SettingsPage() {
           )}
           {twoFa.secret && (
             <div className="rounded-md border border-border bg-muted/30 p-2.5">
-              <Label className="text-[10px] uppercase text-muted-foreground">Secret</Label>
+              <Label className="text-[10px] uppercase text-muted-foreground">{t('settings.twoFaSecret')}</Label>
               <p className="font-mono text-xs select-all break-all mt-1">{twoFa.secret}</p>
             </div>
           )}
           <div>
-            <Label className="text-xs">Verification code</Label>
+            <Label className="text-xs">{t('settings.twoFaCode')}</Label>
             <Input
               placeholder="123456"
               value={twoFa.code || ''}
-              onChange={(e) => setTwoFa((t) => ({ ...t, code: e.target.value }))}
+              onChange={(e) => setTwoFa((prev) => ({ ...prev, code: e.target.value }))}
               maxLength={6}
             />
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setTwoFa({ step: 'idle' })}>Cancel</Button>
+          <Button variant="outline" onClick={() => setTwoFa({ step: 'idle' })}>{t('common.cancel')}</Button>
           <Button
             disabled={!twoFa.code || enable2faMutation.isPending}
             onClick={() => twoFa.code && enable2faMutation.mutate(twoFa.code)}
           >
-            Confirm
+            {t('settings.twoFaConfirm')}
           </Button>
         </DialogFooter>
       </Dialog>
@@ -1066,10 +1055,8 @@ export default function SettingsPage() {
       {/* 2FA backup codes shown once */}
       <Dialog open={twoFa.step === 'done'} onClose={() => setTwoFa({ step: 'idle' })}>
         <DialogHeader>
-          <DialogTitle>Save your backup codes</DialogTitle>
-          <DialogDescription>
-            Each can be used once if you lose your authenticator. Store them somewhere safe.
-          </DialogDescription>
+          <DialogTitle>{t('settings.twoFaBackupTitle')}</DialogTitle>
+          <DialogDescription>{t('settings.twoFaBackupDesc')}</DialogDescription>
         </DialogHeader>
         <div className="grid grid-cols-2 gap-2">
           {(twoFa.backupCodes || []).map((c) => (
@@ -1077,36 +1064,36 @@ export default function SettingsPage() {
           ))}
         </div>
         <DialogFooter>
-          <Button onClick={() => setTwoFa({ step: 'idle' })}>Done</Button>
+          <Button onClick={() => setTwoFa({ step: 'idle' })}>{t('settings.twoFaDone')}</Button>
         </DialogFooter>
       </Dialog>
 
       {/* 2FA disable dialog */}
       <Dialog open={twoFa.step === 'disable'} onClose={() => setTwoFa({ step: 'idle' })}>
         <DialogHeader>
-          <DialogTitle>Disable two-factor</DialogTitle>
-          <DialogDescription>Confirm with your password and a current TOTP code.</DialogDescription>
+          <DialogTitle>{t('settings.twoFaDisableTitle')}</DialogTitle>
+          <DialogDescription>{t('settings.twoFaDisableDesc')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div>
-            <Label className="text-xs">Password</Label>
+            <Label className="text-xs">{t('settings.twoFaPassword')}</Label>
             <Input
               type="password"
               value={twoFa.disablePassword || ''}
-              onChange={(e) => setTwoFa((t) => ({ ...t, disablePassword: e.target.value }))}
+              onChange={(e) => setTwoFa((prev) => ({ ...prev, disablePassword: e.target.value }))}
             />
           </div>
           <div>
-            <Label className="text-xs">Current TOTP code</Label>
+            <Label className="text-xs">{t('settings.twoFaCurrentCode')}</Label>
             <Input
               maxLength={6}
               value={twoFa.disableCode || ''}
-              onChange={(e) => setTwoFa((t) => ({ ...t, disableCode: e.target.value }))}
+              onChange={(e) => setTwoFa((prev) => ({ ...prev, disableCode: e.target.value }))}
             />
           </div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setTwoFa({ step: 'idle' })}>Cancel</Button>
+          <Button variant="outline" onClick={() => setTwoFa({ step: 'idle' })}>{t('common.cancel')}</Button>
           <Button
             variant="destructive"
             disabled={!twoFa.disablePassword || !twoFa.disableCode || disable2faMutation.isPending}
@@ -1115,7 +1102,7 @@ export default function SettingsPage() {
               code: twoFa.disableCode || '',
             })}
           >
-            Disable
+            {t('settings.disable')}
           </Button>
         </DialogFooter>
       </Dialog>
