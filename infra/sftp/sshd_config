@@ -3,9 +3,13 @@
 # Two principles:
 #   1. SFTP-only — every non-root login is forced to internal-sftp.
 #      No shell, no port forward, no agent forward, no X11.
-#   2. Chrooted — every account's home dir is bind-mounted onto its
-#      Kryptalis app sandbox at create time; ChrootDirectory %h locks
-#      the user into that home.
+#   2. Chrooted — each account gets a per-user drop-in in
+#      /etc/ssh/sshd_config.d/<user>.conf that points ChrootDirectory
+#      straight at the app's data path (host-fs dir for git deploys,
+#      Docker volume's _data dir for marketplace/image apps). The
+#      drop-in also re-asserts ForceCommand + forwarding bans so the
+#      policy travels with the account regardless of any future
+#      global default change.
 
 Port 22
 AddressFamily any

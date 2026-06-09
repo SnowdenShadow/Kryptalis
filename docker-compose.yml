@@ -166,23 +166,23 @@ services:
     ports:
       - "${SFTP_PORT:-2222}:22"
     # Hardening — see infra/sftp/Dockerfile for the matching image-side
-    # tightening (apt drops, /bin/false shell, no sudo, no su, etc.):
+    # tightening (/bin/false shell on every account, no sudo, no su):
     #
-    #   - Drop EVERY capability we don't actively need. CHOWN/FOWNER/
-    #     DAC_OVERRIDE/FSETID/SETUID/SETGID are required by sshd's
-    #     PAM module + chpasswd to write /etc/shadow at runtime;
-    #     SYS_ADMIN is required for `mount --bind` to chroot users
-    #     into their app sandbox. Everything else (NET_RAW, SYS_TIME,
-    #     SYS_PTRACE, MKNOD, AUDIT_*, …) goes.
+    #   - cap_drop ALL → strip every Linux capability, then re-grant
+    #     only what sshd + PAM strictly need:
+    #       CHOWN/FOWNER/DAC_OVERRIDE/FSETID — PAM writes /etc/shadow
+    #         and chpasswd manipulates file modes/owners as non-root.
+    #       SETUID/SETGID — sshd drops privs to the connecting user.
+    #       SYS_CHROOT   — ChrootDirectory + sshd privsep chroot.
+    #     We deliberately do NOT grant SYS_ADMIN. The earlier
+    #     architecture used `mount --bind` to graft Docker volumes
+    #     into per-user chroots, but it raced the Docker daemon and
+    #     could wipe app volumes. The current design uses per-user
+    #     ChrootDirectory drop-ins (/etc/ssh/sshd_config.d/<user>.conf)
+    #     which sshd evaluates itself — no mount magic needed.
     #   - no-new-privileges blocks SUID escalation inside the container
     #     even if a user manages to write a binary to a writable mount.
-    #   - The PID limit caps fork bombs from a compromised account.
-    # Minimal capability set. No SYS_ADMIN — we used to need it for
-    # mount --bind to graft Docker volumes into per-user chroots, but
-    # that approach raced the Docker daemon and could wipe app
-    # volumes. The new architecture uses per-user ChrootDirectory
-    # drop-ins in /etc/ssh/sshd_config.d/, which need none of those
-    # privileges; sshd handles the chroot itself with just SYS_CHROOT.
+    #   - pids_limit caps fork bombs from a compromised account.
     cap_drop:
       - ALL
     cap_add:
@@ -199,21 +199,28 @@ services:
     pids_limit: 200
     # Filesystem-level access:
     #
-    #   - .kryptalis/apps RW: needed so git-deploys / compose-empty
-    #     apps can be SFTP-edited. The chroot Match block in
-    #     sshd_config keeps each user inside their own /home/<user>.
-    #   - docker volumes RO: marketplace apps store their code in
-    #     named volumes. We mount the WHOLE volumes root because the
-    #     volume name is per-instance (e.g. prestashop_data_cmq5xxx)
-    #     and we'd have to regenerate the compose file on every new
-    #     marketplace install otherwise. Read-only by default; the
-    #     SftpService remount-binds a per-user subset to RW on demand
-    #     via `mount --bind` (which honours the RO of the upstream),
-    #     so writes to volumes go through an explicit code path.
-    #   - sftp_homes (named): /home, world-readable inside the
-    #     container only. Per-user dirs are chmod 0700 by sshd.
+    #   - sftp_host_keys: persists ONLY the two host private/public key
+    #     pairs (ssh_host_ed25519_key + ssh_host_rsa_key) at
+    #     /var/lib/kryptalis-sftp-keys. The entrypoint symlinks them into
+    #     /etc/ssh at boot. We deliberately do NOT mount the whole
+    #     /etc/ssh — a named volume mounted there would mask the baked
+    #     sshd_config (and any future image-side changes), and the only
+    #     thing we actually need to survive container recreate is the
+    #     keys (so client `known_hosts` doesn't break).
+    #   - sftp_users: PAM/shadow state (named — survives recreate).
+    #   - sftp_homes: /home; per-user dirs are 0700 (created by useradd).
+    #   - .kryptalis/apps RW: git-deploys / compose-empty apps live
+    #     here. Per-user ChrootDirectory keeps each user inside their
+    #     own slice.
+    #   - /var/lib/docker/volumes via rshared bind: marketplace apps
+    #     store their code in Docker-managed named volumes. We mount
+    #     the volumes ROOT so per-instance volume names (e.g.
+    #     prestashop_data_cmq5xxx) need no compose regen on every new
+    #     install. SftpService.discoverContainerCodePath validates the
+    #     target volume actually belongs to the requested app before
+    #     pointing the chroot at it.
     volumes:
-      - sftp_host_keys:/etc/ssh
+      - sftp_host_keys:/var/lib/kryptalis-sftp-keys
       - sftp_users:/etc/sftp-state
       - sftp_homes:/home
       - ./.kryptalis/apps:/data/apps

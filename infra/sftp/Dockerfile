@@ -1,29 +1,28 @@
 # Minimal OpenSSH-only image dedicated to SFTP.
 #
-# Why not atmoz/sftp:
-#   - Refuses to boot without users at CLI args.
-#   - Hot-reloading users requires an entrypoint dance the project
-#     doesn't actually support cleanly.
-#   - users.conf format isn't documented and the parsing is fragile.
-#
-# What this image does instead:
+# What this image does:
 #   - Boots sshd standalone with NO users by default.
-#   - Idle entrypoint generates host keys on first boot (persisted in
-#     a named volume) so client `known_hosts` stays valid across
-#     redeploys.
+#   - The entrypoint generates host keys on first boot, persisting
+#     them in /var/lib/kryptalis-sftp-keys (a named volume) so client
+#     `known_hosts` stays valid across redeploys. The keys are
+#     symlinked into /etc/ssh at boot — we don't mount /etc/ssh from a
+#     volume because that would mask the baked sshd_config.
 #   - Kryptalis API does `docker exec kryptalis-sftp useradd ...` +
-#     `chpasswd -e` over the docker socket to add/remove accounts at
-#     runtime. No restart needed for CRUD.
+#     `chpasswd` over the docker socket to add/remove accounts at
+#     runtime. No container restart needed for CRUD.
+#   - Per-user sshd_config drop-ins in /etc/ssh/sshd_config.d enforce
+#     chroot + sftp-only + read/write permission.
 #   - SFTP-only: every account gets ForceCommand=internal-sftp + a
 #     /bin/false shell so a compromised credential can never get a
 #     real shell.
 FROM alpine:3.20
 
-# - openssh: the daemon itself, plus sftp-server.
-# - shadow: GNU `useradd` / `chpasswd` (Alpine's busybox `adduser` doesn't
-#   support `--no-create-home` cleanly + crypt-encrypted passwords via -e).
-# - openssh-server-pam: PAM session module so chroot works.
-# - bash: entrypoint reads /etc/profile etc. for nicer interactive debug.
+# - openssh: the daemon itself, plus sftp-server + ssh-keygen.
+# - openssh-server-pam: PAM session module (required so chpasswd-driven
+#   /etc/shadow updates authenticate sessions correctly).
+# - shadow: GNU `useradd`/`userdel`/`chpasswd` (Alpine's busybox
+#   `adduser` lacks features we depend on).
+# - bash: nicer interactive debug shell for ops.
 RUN apk add --no-cache openssh openssh-server-pam shadow bash \
  && rm -rf /var/cache/apk/*
 
