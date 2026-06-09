@@ -5,12 +5,9 @@ import {
   OnModuleDestroy,
   BadRequestException,
 } from '@nestjs/common';
-import { execFile, spawn } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * Self-update.
@@ -51,7 +48,16 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
 
   private timer: NodeJS.Timeout | null = null;
 
-  // In-memory state — everything the UI cares about. No files, no DB.
+  // The shared log file written by update.sh inside the docker:cli
+  // container — visible to the API through the .kryptalis bind mount.
+  private readonly LOG_FILE = '/app/.kryptalis/update.log';
+
+  // Marker file the API touches before spawning update.sh, and clears
+  // when it sees a clean post-update state. Survives API restart so we
+  // know an update was in progress and recover correctly.
+  private readonly UPDATING_MARKER = '/app/.kryptalis/.update-running';
+
+  // In-memory state — everything the UI cares about.
   private state: {
     status: 'UP_TO_DATE' | 'UPDATE_AVAILABLE' | 'UPDATING' | 'ERROR' | 'UNKNOWN';
     message: string;
@@ -61,7 +67,6 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     repo: string | null;
     lastCheckedAt: string | null;
     lastUpdatedAt: string | null;
-    updateLog: string[];
   } = {
     status: 'UNKNOWN',
     message: 'Boot — first check pending.',
@@ -71,7 +76,6 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     repo: null,
     lastCheckedAt: null,
     lastUpdatedAt: null,
-    updateLog: [],
   };
 
   // ETag cache so repeated polls of GitHub return 304 and don't burn quota.
@@ -86,6 +90,17 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit(): Promise<void> {
     this.state.repo = this.resolveRepo();
     this.state.currentSha = await this.readCurrentSha();
+
+    // If the API was restarted by `docker compose up -d --build` during
+    // an update, the marker file is still on disk. Recover gracefully.
+    if (fs.existsSync(this.UPDATING_MARKER)) {
+      this.state.status = 'UPDATING';
+      this.state.message = 'Recovering from in-progress update…';
+      this.updating = true;
+      // Watch for the marker to disappear (update.sh removes it on exit)
+      // OR for the log file to stop growing for > 60s (treat as done).
+      this.watchUpdateCompletion();
+    }
 
     if (!this.state.repo) {
       this.logger.warn(
@@ -113,6 +128,45 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     this.timer.unref?.();
   }
 
+  /** Poll the marker + log file mtime to detect end-of-update post-restart. */
+  private watchUpdateCompletion(): void {
+    const tick = async () => {
+      try {
+        if (!fs.existsSync(this.UPDATING_MARKER)) {
+          // Update done.
+          const sha = await this.readCurrentSha();
+          if (sha) this.state.currentSha = sha;
+          this.state.lastUpdatedAt = new Date().toISOString();
+          if (this.state.currentSha && this.state.currentSha === this.state.latestSha) {
+            this.state.status = 'UP_TO_DATE';
+            this.state.message = `Updated to ${this.short(this.state.currentSha)}.`;
+          } else {
+            this.state.status = 'UP_TO_DATE';
+            this.state.message = `Update finished (${this.short(this.state.currentSha)}).`;
+          }
+          this.updating = false;
+          return;
+        }
+        // Stale marker check: log file untouched for > 5 min → assume crashed
+        if (fs.existsSync(this.LOG_FILE)) {
+          const stat = fs.statSync(this.LOG_FILE);
+          if (Date.now() - stat.mtimeMs > 5 * 60 * 1000) {
+            this.state.status = 'ERROR';
+            this.state.message = 'Update appears stuck. Check the log.';
+            this.updating = false;
+            try { fs.unlinkSync(this.UPDATING_MARKER); } catch {}
+            return;
+          }
+        }
+        setTimeout(tick, 2000);
+      } catch (e) {
+        this.logger.warn(`watchUpdateCompletion: ${(e as Error).message}`);
+        setTimeout(tick, 2000);
+      }
+    };
+    setTimeout(tick, 2000);
+  }
+
   onModuleDestroy(): void {
     if (this.timer) {
       clearInterval(this.timer);
@@ -137,7 +191,16 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   }
 
   getLog(): { log: string } {
-    return { log: this.state.updateLog.join('') };
+    try {
+      if (fs.existsSync(this.LOG_FILE)) {
+        const buf = fs.readFileSync(this.LOG_FILE, 'utf-8');
+        // Cap at 200 KB to protect against runaway scripts.
+        return { log: buf.length > 200_000 ? buf.slice(-200_000) : buf };
+      }
+    } catch (e) {
+      this.logger.warn(`getLog: ${(e as Error).message}`);
+    }
+    return { log: '' };
   }
 
   async forceCheck() {
@@ -255,92 +318,76 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     this.updating = true;
     this.state.status = 'UPDATING';
     this.state.message = 'Pulling and rebuilding…';
-    this.state.updateLog = [];
+
+    // Touch the marker BEFORE spawning so onModuleInit can recover if
+    // we get killed mid-flight when `docker compose up -d --build api`
+    // (run by update.sh) tears down THIS container.
+    try {
+      fs.mkdirSync(path.dirname(this.UPDATING_MARKER), { recursive: true });
+      fs.writeFileSync(this.UPDATING_MARKER, new Date().toISOString());
+    } catch (e) {
+      this.logger.warn(`could not write marker: ${(e as Error).message}`);
+    }
 
     const installDir = this.hostInstallDir();
     const args = [
-      'run', '--rm',
+      'run', '--rm', '-d',
       '-v', `${installDir}:/app`,
       '-v', '/var/run/docker.sock:/var/run/docker.sock',
       '-w', '/app',
       'docker:cli',
-      'sh', '/app/update.sh',
+      'sh', '-c',
+      // Wrapper cleans the marker on exit no matter what.
+      `sh /app/update.sh; rc=$?; rm -f /app/.kryptalis/.update-running; exit $rc`,
     ];
 
+    // Fire-and-forget. Container runs on the host docker daemon — it
+    // survives THIS API container being recreated by update.sh.
     const child = spawn('docker', args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'ignore', 'ignore'],
+      detached: true,
+    });
+    child.unref();
+    child.on('error', (err) => {
+      this.logger.warn(`spawn docker failed: ${err.message}`);
+      this.state.status = 'ERROR';
+      this.state.message = `Failed to spawn update: ${err.message}`;
+      this.updating = false;
+      try { fs.unlinkSync(this.UPDATING_MARKER); } catch {}
     });
 
-    const onData = (buf: Buffer) => {
-      const text = buf.toString('utf-8');
-      this.state.updateLog.push(text);
-      // Cap log so it doesn't grow forever on a broken update loop.
-      if (this.state.updateLog.length > 2000) {
-        this.state.updateLog.splice(0, this.state.updateLog.length - 2000);
-      }
-    };
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', onData);
-
-    await new Promise<void>((resolve) => {
-      child.on('exit', async (code) => {
-        const onDisk = await this.readCurrentSha();
-        if (code === 0) {
-          this.state.currentSha = onDisk || this.state.latestSha;
-          this.state.lastUpdatedAt = new Date().toISOString();
-          if (this.state.currentSha === this.state.latestSha) {
-            this.state.status = 'UP_TO_DATE';
-            this.state.message = `Updated to ${this.short(this.state.currentSha)}.`;
-          } else {
-            this.state.status = 'UPDATE_AVAILABLE';
-            this.state.message = `Update finished but SHA mismatch — re-running on next poll.`;
-          }
-        } else {
-          this.state.status = 'ERROR';
-          this.state.message = `update.sh exited with code ${code}. See log.`;
-        }
-        this.updating = false;
-        resolve();
-      });
-      child.on('error', (err) => {
-        this.state.status = 'ERROR';
-        this.state.message = `Failed to spawn update.sh: ${err.message}`;
-        this.updating = false;
-        resolve();
-      });
-    });
+    // Watch the marker file to know when the update finishes.
+    this.watchUpdateCompletion();
   }
 
   // ── Helpers ───────────────────────────────────────────────────────
 
+  // Path WHERE inside the API container the install dir is mounted (RO).
+  // See docker-compose.yml — `.` is bind-mounted to /app/install-host:ro.
+  // Falls back to a few common paths for dev / alternative setups.
+  private readonly INSTALL_RO_CANDIDATES = [
+    '/app/install-host',
+    '/app',
+    '/opt/kryptalis',
+  ];
+
   /**
    * Resolve `<owner>/<repo>` for the install. Order:
    *   1. KRYPTALIS_GITHUB_REPO env override
-   *   2. .git/config inside the install dir (mounted into the container)
+   *   2. .git/config inside any of the candidate mount paths
    */
   private resolveRepo(): string | null {
     const env = process.env.KRYPTALIS_GITHUB_REPO;
     if (env) return env;
 
-    // The install dir is bind-mounted into the API container at the same
-    // path it lives on the host (see docker-compose.yml). Read .git/config
-    // directly — no `docker run alpine/git` shenanigans.
-    const candidates = [
-      // Most common: install dir bind-mounted at a known path
-      process.env.KRYPTALIS_HOST_INSTALL_DIR && path.join(process.env.KRYPTALIS_HOST_INSTALL_DIR, '.git', 'config'),
-      '/app/.git/config',
-      '/opt/kryptalis/.git/config',
-    ].filter(Boolean) as string[];
-
-    for (const file of candidates) {
+    for (const root of this.INSTALL_RO_CANDIDATES) {
+      const file = path.join(root, '.git', 'config');
       try {
         if (!fs.existsSync(file)) continue;
         const conf = fs.readFileSync(file, 'utf-8');
-        const m = conf.match(/url\s*=\s*([^\n]+github\.com[:/][^/]+\/[^/.\s]+)/);
-        if (m) {
-          const owner = m[1].match(/github\.com[:/]([^/]+)\/([^/.\s]+)/);
-          if (owner) return `${owner[1]}/${owner[2]}`;
-        }
+        // url = https://github.com/owner/repo.git OR git@github.com:owner/repo.git
+        const m = conf.match(/url\s*=\s*\S*github\.com[:/]([^/\s]+)\/([^/\s]+?)(\.git)?\s*$/im);
+        if (m) return `${m[1]}/${m[2]}`;
       } catch {}
     }
     return null;
@@ -349,13 +396,8 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   private async readCurrentSha(): Promise<string | null> {
     // Read HEAD directly off disk. Way cheaper than spawning git, and we
     // don't need a working tree — just the current commit hash.
-    const candidates = [
-      process.env.KRYPTALIS_HOST_INSTALL_DIR && path.join(process.env.KRYPTALIS_HOST_INSTALL_DIR, '.git'),
-      '/app/.git',
-      '/opt/kryptalis/.git',
-    ].filter(Boolean) as string[];
-
-    for (const gitDir of candidates) {
+    for (const root of this.INSTALL_RO_CANDIDATES) {
+      const gitDir = path.join(root, '.git');
       try {
         if (!fs.existsSync(gitDir)) continue;
         const headFile = path.join(gitDir, 'HEAD');
@@ -364,9 +406,10 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
           const ref = head.slice(5);
           const refFile = path.join(gitDir, ref);
           if (fs.existsSync(refFile)) {
-            return fs.readFileSync(refFile, 'utf-8').trim();
+            const v = fs.readFileSync(refFile, 'utf-8').trim();
+            if (/^[0-9a-f]{40}$/.test(v)) return v;
           }
-          // Packed refs fallback
+          // Packed refs fallback (no per-ref file after gc)
           const packed = path.join(gitDir, 'packed-refs');
           if (fs.existsSync(packed)) {
             const lines = fs.readFileSync(packed, 'utf-8').split('\n');
@@ -378,16 +421,6 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
         }
       } catch {}
     }
-
-    // Last resort: ask `git` if it's on PATH (it usually isn't inside
-    // the API container, but worth a shot for dev).
-    try {
-      const dir = process.env.KRYPTALIS_HOST_INSTALL_DIR || '/opt/kryptalis';
-      const { stdout } = await execFileAsync('git', ['-C', dir, 'rev-parse', 'HEAD'], { timeout: 5_000 });
-      const sha = stdout.trim();
-      if (/^[0-9a-f]{40}$/.test(sha)) return sha;
-    } catch {}
-
     return null;
   }
 

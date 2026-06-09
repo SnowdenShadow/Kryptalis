@@ -121,6 +121,16 @@ services:
       # Public origin of the dashboard, used to build CTA links inside
       # email bodies. Defaults to localhost:3000 when unset.
       PUBLIC_DASHBOARD_URL: ${PUBLIC_DASHBOARD_URL:-http://localhost:3000}
+      # Auto-update: the install dir on the HOST. The API reads its
+      # current SHA from <install_dir>/.git and spawns update.sh via
+      # docker run with this dir mounted. Defaults to ${PWD} so the
+      # value matches wherever `docker compose up` was run from.
+      KRYPTALIS_HOST_INSTALL_DIR: ${PWD}
+      # Optional — override the auto-detected owner/repo (the API
+      # otherwise parses .git/config). Useful when running a fork.
+      KRYPTALIS_GITHUB_REPO: ${KRYPTALIS_GITHUB_REPO:-}
+      # Which branch the auto-update tracks. Default: main.
+      KRYPTALIS_BRANCH: ${KRYPTALIS_BRANCH:-main}
     ports:
       - "4000:4000"
     healthcheck:
@@ -140,6 +150,12 @@ services:
       # bindings). Mounting the override file individually keeps the rest
       # of the repo read-only.
       - ./docker-compose.override.yml:/app/install-root/docker-compose.override.yml
+      # Auto-update: read-only access to the install dir so the API can
+      # resolve the current commit SHA (.git/HEAD) and the GitHub remote
+      # (.git/config). update.sh itself does NOT run from this mount —
+      # it spawns a separate `docker run docker:cli` container with the
+      # host install path mounted instead.
+      - .:/app/install-host:ro
     networks:
       # default — talk to postgres/redis here.
       - default
