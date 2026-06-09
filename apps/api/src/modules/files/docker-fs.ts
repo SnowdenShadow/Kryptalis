@@ -153,7 +153,7 @@ export async function listDir(target: DockerFsTarget, relPath: string): Promise<
     if (!line || line.startsWith('total ')) continue;
     // Long-iso format: drwxr-xr-x  2 root root  4096 2025-12-12 18:32 name
     const m = line.match(
-      /^([dlcbsp\-])([rwxsStT\-]{9})\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\S+)\s+(\S+)\s+(.+)$/,
+      /^([dlcbsp\-])([rwxsStT\-]{9})[+.]?\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\S+)\s+(\S+)\s+(.+)$/,
     );
     if (!m) continue;
     const [, typeChar, modeStr, sizeStr, date, time, nameField] = m;
