@@ -1,9 +1,10 @@
-import { Injectable, BadRequestException, UnauthorizedException } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException, Logger } from '@nestjs/common';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { GitOAuthService } from '../git-providers/git-oauth.service';
 
 const execFileAsync = promisify(execFile);
 
@@ -57,6 +58,10 @@ export interface UpdateStatus {
 
 @Injectable()
 export class SystemUpdatesService {
+  private readonly logger = new Logger(SystemUpdatesService.name);
+
+  constructor(private gitOauth: GitOAuthService) {}
+
   /**
    * Read the JSON status file written by update.sh on every run.
    * Also probe systemd (best effort) to know whether the auto-update
@@ -268,6 +273,154 @@ export class SystemUpdatesService {
       return { message: 'Update triggered', triggered: true };
     }
     return { message: 'Webhook OK but cannot trigger update from API — timer will catch it within 10 min', triggered: false };
+  }
+
+  /**
+   * Detect which GitHub repo this Kryptalis install was cloned from. We
+   * read `git config --get remote.origin.url` inside the install dir
+   * (mounted into the API container at /app/.kryptalis/.. via the host
+   * bind). Falls back to the env override.
+   */
+  private async detectGithubRepo(): Promise<string | null> {
+    const envRepo = process.env.KRYPTALIS_GITHUB_REPO;
+    if (envRepo) return envRepo;
+    try {
+      // Try the install dir — same path we use for update.sh ops.
+      const installDir = HOST_INSTALL_DIR;
+      const { stdout } = await execFileAsync(
+        'docker',
+        [
+          'run', '--rm',
+          '-v', `${installDir}:/app`,
+          '-w', '/app',
+          'alpine/git',
+          'config', '--get', 'remote.origin.url',
+        ],
+        { timeout: 10_000 },
+      );
+      const url = stdout.trim();
+      // Parse "git@github.com:owner/repo.git" or "https://github.com/owner/repo.git"
+      const m = url.match(/github\.com[:/]([^/]+)\/([^/.]+)/);
+      if (m) return `${m[1]}/${m[2]}`;
+    } catch (e) {
+      this.logger.warn(`detectGithubRepo failed: ${(e as Error).message}`);
+    }
+    return null;
+  }
+
+  /**
+   * Auto-install the self-update webhook on the platform's own GitHub
+   * repo, using the calling admin's OAuth-connected GitHub account.
+   *
+   * Flow:
+   *   1. Resolve the repo (env override → git origin → null).
+   *   2. Fetch the admin's GitHub access token via GitOAuthService.
+   *   3. POST /repos/{owner}/{repo}/hooks with our payload URL + secret.
+   *   4. Mark the secret as "fired" so the dashboard shows configured.
+   *
+   * Idempotent: if a hook with the same URL already exists, we PATCH it
+   * (update secret + events) instead of creating a duplicate. GitHub
+   * surfaces duplicate-URL errors otherwise.
+   */
+  async autoInstallWebhook(userId: string): Promise<{
+    installed: boolean;
+    repo: string;
+    hookId: number;
+    message: string;
+  }> {
+    const repo = await this.detectGithubRepo();
+    if (!repo) {
+      throw new BadRequestException(
+        'Could not detect the GitHub repo for this install. Set KRYPTALIS_GITHUB_REPO env var.',
+      );
+    }
+    const accessToken = await this.gitOauth.getGithubAccessToken(userId);
+    const secret = this.getOrCreateWebhookSecret();
+    const base = (process.env.PUBLIC_API_URL || '').replace(/\/$/, '');
+    if (!base) {
+      throw new BadRequestException(
+        'PUBLIC_API_URL is not set — set it so GitHub knows where to deliver the webhook.',
+      );
+    }
+    const payloadUrl = `${base}/api/system/updates/webhook`;
+    const desiredConfig = {
+      url: payloadUrl,
+      content_type: 'json',
+      secret,
+      insecure_ssl: '0',
+    };
+
+    // Look for an existing hook on the same URL.
+    const listRes = await fetch(`https://api.github.com/repos/${repo}/hooks`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+    if (!listRes.ok) {
+      const body = await listRes.text();
+      throw new BadRequestException(`GitHub refused the hook list (${listRes.status}): ${body.slice(0, 200)}`);
+    }
+    const existing: any[] = await listRes.json();
+    const match = existing.find((h: any) => h?.config?.url === payloadUrl);
+
+    let hookId: number;
+    let installed: boolean;
+    if (match) {
+      // Patch to rotate secret + ensure push event is subscribed.
+      const patchRes = await fetch(`https://api.github.com/repos/${repo}/hooks/${match.id}`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        body: JSON.stringify({
+          config: desiredConfig,
+          events: ['push'],
+          active: true,
+        }),
+      });
+      if (!patchRes.ok) {
+        const body = await patchRes.text();
+        throw new BadRequestException(`GitHub refused the hook update (${patchRes.status}): ${body.slice(0, 200)}`);
+      }
+      hookId = match.id;
+      installed = false; // updated, not created
+    } else {
+      const createRes = await fetch(`https://api.github.com/repos/${repo}/hooks`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        body: JSON.stringify({
+          name: 'web',
+          active: true,
+          events: ['push'],
+          config: desiredConfig,
+        }),
+      });
+      if (!createRes.ok) {
+        const body = await createRes.text();
+        throw new BadRequestException(`GitHub refused the hook creation (${createRes.status}): ${body.slice(0, 200)}`);
+      }
+      const created: any = await createRes.json();
+      hookId = created.id;
+      installed = true;
+    }
+
+    this.markWebhookFired();
+    return {
+      installed,
+      repo,
+      hookId,
+      message: installed ? 'Webhook created' : 'Existing webhook updated',
+    };
   }
 
   /** Rotate the webhook secret — user has to update GitHub after this. */

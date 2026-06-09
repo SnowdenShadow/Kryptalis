@@ -4,6 +4,7 @@ import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { SystemUpdatesService } from './system-updates.service';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 /**
  * GitHub webhook is PUBLIC (no JWT) — auth is the HMAC signature in the
@@ -69,5 +70,11 @@ export class SystemController {
   @ApiOperation({ summary: 'Rotate the GitHub webhook secret (must re-paste in GitHub)' })
   rotateWebhook() {
     return this.updates.rotateWebhookSecret();
+  }
+
+  @Post('updates/webhook/install')
+  @ApiOperation({ summary: 'Auto-install the webhook on GitHub using the admin’s OAuth-connected account' })
+  installWebhook(@CurrentUser('id') userId: string) {
+    return this.updates.autoInstallWebhook(userId);
   }
 }

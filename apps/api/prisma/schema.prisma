@@ -49,6 +49,12 @@ model GitProvider {
   provider  String
   name      String
   token     String
+  // 'PAT' = legacy personal access token, 'OAUTH' = OAuth flow (auto-refresh)
+  authMode  String   @default("PAT")
+  // OAuth state — only set when authMode='OAUTH'. Stored encrypted via EncryptionService.
+  refreshToken String?
+  expiresAt DateTime?
+  scopes    String?
   username  String?
   avatarUrl String?
   createdAt DateTime @default(now())

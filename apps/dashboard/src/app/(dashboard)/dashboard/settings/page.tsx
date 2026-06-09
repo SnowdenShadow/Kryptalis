@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '@/lib/i18n';
 import { useAuthStore } from '@/lib/store';
@@ -341,7 +341,9 @@ function InfrastructureTab({
 export default function SettingsPage() {
   const authMe = useAuthStore((s) => s.user);
   const isAdmin = authMe?.role === 'ADMIN' || authMe?.role === 'SUPERADMIN';
-  const [activeTab, setActiveTab] = useState<Tab>('profile');
+  const searchParams = useSearchParams();
+  const initialTab = (searchParams?.get('tab') as Tab | null) || 'profile';
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab);
   const [profileName, setProfileName] = useState('');
   const [profileEmail, setProfileEmail] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
@@ -505,6 +507,102 @@ export default function SettingsPage() {
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // Is GitHub OAuth available on this install?
+  const { data: githubOAuthStatus } = useQuery<{ configured: boolean }>({
+    queryKey: ['oauth-status', 'github'],
+    queryFn: () => api.get('/git-providers/oauth/github/status'),
+  });
+
+  // GitHub Device Flow state
+  type DeviceState = {
+    deviceCode: string;
+    userCode: string;
+    verificationUri: string;
+    verificationUriComplete?: string;
+    interval: number;
+    expiresAt: number;
+  };
+  const [device, setDevice] = useState<DeviceState | null>(null);
+
+  async function startGithubDeviceFlow() {
+    try {
+      const r = await api.post<{
+        deviceCode: string;
+        userCode: string;
+        verificationUri: string;
+        verificationUriComplete?: string;
+        interval: number;
+        expiresIn: number;
+      }>('/git-providers/oauth/github/device/start');
+      setDevice({
+        deviceCode: r.deviceCode,
+        userCode: r.userCode,
+        verificationUri: r.verificationUri,
+        verificationUriComplete: r.verificationUriComplete,
+        interval: Math.max(5, r.interval),
+        expiresAt: Date.now() + r.expiresIn * 1000,
+      });
+      if (r.verificationUriComplete) {
+        window.open(r.verificationUriComplete, '_blank', 'noopener,noreferrer');
+      }
+    } catch (e: any) {
+      toast.error(e.message || t('settings.gitOAuthNotConfigured'));
+    }
+  }
+
+  // Poll while the user is authorizing
+  useEffect(() => {
+    if (!device) return;
+    let cancelled = false;
+    let intervalMs = device.interval * 1000;
+    let timer: ReturnType<typeof setTimeout>;
+    async function tick() {
+      if (cancelled || !device) return;
+      if (Date.now() > device.expiresAt) {
+        toast.error(t('settings.gitDeviceExpired'));
+        setDevice(null);
+        return;
+      }
+      try {
+        const r = await api.post<{ state: string; message?: string }>(
+          '/git-providers/oauth/github/device/poll',
+          { deviceCode: device.deviceCode },
+        );
+        if (cancelled) return;
+        if (r.state === 'authorized') {
+          toast.success(t('settings.gitOAuthOk'));
+          queryClient.invalidateQueries({ queryKey: ['git-providers'] });
+          setDevice(null);
+          return;
+        }
+        if (r.state === 'slow_down') intervalMs += 5000;
+        if (r.state === 'denied') {
+          toast.error(t('settings.gitDeviceDenied'));
+          setDevice(null);
+          return;
+        }
+        if (r.state === 'expired') {
+          toast.error(t('settings.gitDeviceExpired'));
+          setDevice(null);
+          return;
+        }
+        if (r.state === 'error') {
+          toast.error(t('settings.gitDeviceErr', { err: r.message || 'unknown' }));
+          setDevice(null);
+          return;
+        }
+        // pending → keep polling
+        timer = setTimeout(tick, intervalMs);
+      } catch (e: any) {
+        if (cancelled) return;
+        // Network blip — keep trying for the whole expires_in window.
+        timer = setTimeout(tick, intervalMs);
+      }
+    }
+    timer = setTimeout(tick, intervalMs);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [device, queryClient, t]);
 
   // Read deployment mode from public-settings (single source of truth, platform-wide)
   const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
@@ -974,44 +1072,118 @@ export default function SettingsPage() {
             </CardContent>
           </Card>
 
-          <Dialog open={showAddGit} onClose={() => setShowAddGit(false)}>
+          <Dialog open={showAddGit} onClose={() => setShowAddGit(false)} className="max-w-lg">
             <DialogHeader>
               <DialogTitle>{t('settings.gitDlgTitle')}</DialogTitle>
               <DialogDescription>{t('settings.gitDlgDesc')}</DialogDescription>
             </DialogHeader>
             <div className="space-y-4">
+              {/* OAuth (one-click via Device Flow) */}
               <div className="space-y-2">
-                <Label>{t('settings.gitProvider')}</Label>
-                <Select value={gitForm.provider} onChange={(e) => setGitForm({ ...gitForm, provider: e.target.value })}>
-                  <option value="GITHUB">🐙 GitHub</option>
-                  <option value="GITLAB">🦊 GitLab</option>
-                  <option value="BITBUCKET">🪣 Bitbucket</option>
-                </Select>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                  {t('settings.gitConnectModeOAuth')}
+                </p>
+                <Button
+                  className="w-full justify-start gap-3 h-11"
+                  disabled={!githubOAuthStatus?.configured || !!device}
+                  onClick={startGithubDeviceFlow}
+                >
+                  <span className="text-lg">🐙</span> {t('settings.gitOAuthGithub')}
+                </Button>
+                {!githubOAuthStatus?.configured && (
+                  <p className="text-[11px] text-muted-foreground italic">
+                    {t('settings.gitOAuthNotConfigured')}
+                  </p>
+                )}
               </div>
-              <div className="space-y-2">
-                <Label>{t('settings.gitDisplayName')}</Label>
-                <Input placeholder={t('settings.gitDisplayPh')} value={gitForm.name}
-                  onChange={(e) => setGitForm({ ...gitForm, name: e.target.value })} />
+
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-border" /></div>
+                <div className="relative flex justify-center text-[10px] uppercase">
+                  <span className="bg-background px-2 text-muted-foreground">{t('settings.gitOrPAT')}</span>
+                </div>
               </div>
-              <div className="space-y-2">
-                <Label>{t('settings.gitToken')}</Label>
-                <Input type="password" placeholder="ghp_..." value={gitForm.token}
-                  onChange={(e) => setGitForm({ ...gitForm, token: e.target.value })} className="font-mono" />
-              </div>
+
+              {/* PAT fallback (advanced) */}
+              <details className="space-y-2 rounded-md border border-border p-3 text-sm">
+                <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
+                  {t('settings.gitConnectModePat')}
+                </summary>
+                <div className="space-y-3 pt-2">
+                  <div className="space-y-2">
+                    <Label>{t('settings.gitProvider')}</Label>
+                    <Select value={gitForm.provider} onChange={(e) => setGitForm({ ...gitForm, provider: e.target.value })}>
+                      <option value="GITHUB">🐙 GitHub</option>
+                      <option value="GITLAB">🦊 GitLab</option>
+                      <option value="BITBUCKET">🪣 Bitbucket</option>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t('settings.gitDisplayName')}</Label>
+                    <Input placeholder={t('settings.gitDisplayPh')} value={gitForm.name}
+                      onChange={(e) => setGitForm({ ...gitForm, name: e.target.value })} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>{t('settings.gitToken')}</Label>
+                    <Input type="password" placeholder="ghp_..." value={gitForm.token}
+                      onChange={(e) => setGitForm({ ...gitForm, token: e.target.value })} className="font-mono" />
+                  </div>
+                  <Button
+                    className="w-full"
+                    disabled={!gitForm.name || !gitForm.token || addGitMutation.isPending}
+                    onClick={() => addGitMutation.mutate(gitForm)}
+                  >
+                    {addGitMutation.isPending
+                      ? <><Loader2 size={14} className="animate-spin" /> {t('settings.gitConnecting')}</>
+                      : t('settings.gitConnectBtn')}
+                  </Button>
+                </div>
+              </details>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setShowAddGit(false)}>{t('common.cancel')}</Button>
-              <Button disabled={!gitForm.name || !gitForm.token || addGitMutation.isPending}
-                onClick={() => addGitMutation.mutate(gitForm)}>
-                {addGitMutation.isPending
-                  ? <><Loader2 size={14} className="animate-spin" /> {t('settings.gitConnecting')}</>
-                  : t('settings.gitConnectBtn')}
-              </Button>
             </DialogFooter>
           </Dialog>
         </div>
       )}
 
+
+      {/* GitHub Device Flow dialog */}
+      <Dialog open={!!device} onClose={() => setDevice(null)} className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>{t('settings.gitDeviceTitle')}</DialogTitle>
+          <DialogDescription>{t('settings.gitDeviceStep1')}</DialogDescription>
+        </DialogHeader>
+        {device && (
+          <div className="space-y-4 py-2">
+            <div className="rounded-md border border-border bg-muted/30 p-4 text-center">
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                {t('settings.gitDeviceCode')}
+              </p>
+              <p className="font-mono text-3xl font-bold tracking-widest select-all">
+                {device.userCode}
+              </p>
+            </div>
+            <a
+              href={device.verificationUriComplete || device.verificationUri}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block"
+            >
+              <Button className="w-full justify-center gap-2 h-11">
+                🐙 {t('settings.gitDeviceOpenBtn')}
+              </Button>
+            </a>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 size={12} className="animate-spin" />
+              {t('settings.gitDeviceStep2')}
+            </div>
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setDevice(null)}>{t('common.cancel')}</Button>
+        </DialogFooter>
+      </Dialog>
 
       {/* 2FA enrollment dialog */}
       <Dialog open={twoFa.step === 'enroll'} onClose={() => setTwoFa({ step: 'idle' })}>

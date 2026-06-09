@@ -90,6 +90,18 @@ export function UpdatesTab() {
     },
     onError: (e: Error) => toast.error(e.message),
   });
+  const installWebhook = useMutation({
+    mutationFn: () => api.post('/system/updates/webhook/install') as Promise<{ installed: boolean; repo: string }>,
+    onSuccess: (d) => {
+      toast.success(
+        d.installed
+          ? t('admin.updates.webhookInstalled', { repo: d.repo })
+          : t('admin.updates.webhookUpdated', { repo: d.repo })
+      );
+      refetchUpdate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
 
   const [revealSecret, setRevealSecret] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
@@ -277,58 +289,74 @@ export function UpdatesTab() {
             </CardTitle>
             <CardDescription>{t('admin.updates.webhookDesc')}</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="space-y-1">
-              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{t('admin.updates.webhookUrl')}</p>
-              <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
-                <code className="font-mono text-xs flex-1 truncate">{updateStatus.webhook.url}</code>
-                <Button size="icon" variant="ghost" className="h-7 w-7"
-                  onClick={() => copyText(updateStatus.webhook!.url, 'url')}>
-                  {copied === 'url'
-                    ? <Check size={12} className="text-emerald-500" />
-                    : <Copy size={12} />}
+          <CardContent className="space-y-4">
+            {/* Primary: one-click install */}
+            <Button
+              className="w-full justify-center gap-2 h-11"
+              disabled={installWebhook.isPending}
+              onClick={() => installWebhook.mutate()}
+            >
+              {installWebhook.isPending ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" /> {t('admin.updates.webhookInstalling')}
+                </>
+              ) : (
+                <>
+                  <span className="text-base">🐙</span> {t('admin.updates.webhookInstall')}
+                </>
+              )}
+            </Button>
+
+            {/* Fallback: manual setup */}
+            <details className="rounded-md border border-border p-3 text-sm">
+              <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
+                {t('admin.updates.webhookManualDetails')}
+              </summary>
+              <div className="space-y-3 pt-3">
+                <div className="space-y-1">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{t('admin.updates.webhookUrl')}</p>
+                  <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+                    <code className="font-mono text-xs flex-1 truncate">{updateStatus.webhook.url}</code>
+                    <Button size="icon" variant="ghost" className="h-7 w-7"
+                      onClick={() => copyText(updateStatus.webhook!.url, 'url')}>
+                      {copied === 'url' ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+                    </Button>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{t('admin.updates.webhookSecret')}</p>
+                  <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+                    <code className="font-mono text-xs flex-1 truncate">
+                      {revealSecret ? updateStatus.webhook.secret : '••••••••••••••••••••••••••••••••'}
+                    </code>
+                    <Button size="icon" variant="ghost" className="h-7 w-7"
+                      onClick={() => setRevealSecret((v) => !v)}>
+                      {revealSecret ? <EyeOff size={12} /> : <Eye size={12} />}
+                    </Button>
+                    <Button size="icon" variant="ghost" className="h-7 w-7"
+                      onClick={() => copyText(updateStatus.webhook!.secret, 'secret')}>
+                      {copied === 'secret' ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+                    </Button>
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {t('admin.updates.webhookSteps', { ct: 'application/json', event: 'Just the push event' })}
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={rotateWebhook.isPending}
+                  onClick={() => {
+                    if (confirm(t('admin.updates.webhookRotateConfirm'))) rotateWebhook.mutate();
+                  }}
+                >
+                  {rotateWebhook.isPending
+                    ? <Loader2 size={12} className="animate-spin" />
+                    : <RefreshCw size={12} />}
+                  {t('admin.updates.webhookRotate')}
                 </Button>
               </div>
-            </div>
-            <div className="space-y-1">
-              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{t('admin.updates.webhookSecret')}</p>
-              <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
-                <code className="font-mono text-xs flex-1 truncate">
-                  {revealSecret ? updateStatus.webhook.secret : '••••••••••••••••••••••••••••••••'}
-                </code>
-                <Button size="icon" variant="ghost" className="h-7 w-7"
-                  onClick={() => setRevealSecret((v) => !v)}>
-                  {revealSecret ? <EyeOff size={12} /> : <Eye size={12} />}
-                </Button>
-                <Button size="icon" variant="ghost" className="h-7 w-7"
-                  onClick={() => copyText(updateStatus.webhook!.secret, 'secret')}>
-                  {copied === 'secret'
-                    ? <Check size={12} className="text-emerald-500" />
-                    : <Copy size={12} />}
-                </Button>
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {t('admin.updates.webhookSteps', {
-                ct: 'application/json',
-                event: 'Just the push event',
-              })}
-            </p>
-            <div>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={rotateWebhook.isPending}
-                onClick={() => {
-                  if (confirm(t('admin.updates.webhookRotateConfirm'))) rotateWebhook.mutate();
-                }}
-              >
-                {rotateWebhook.isPending
-                  ? <Loader2 size={12} className="animate-spin" />
-                  : <RefreshCw size={12} />}
-                {t('admin.updates.webhookRotate')}
-              </Button>
-            </div>
+            </details>
           </CardContent>
         </Card>
       )}

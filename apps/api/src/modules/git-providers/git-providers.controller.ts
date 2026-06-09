@@ -1,7 +1,8 @@
-import { Controller, Get, Post, Delete, Param, Body, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Param, Body, Query, UseGuards, BadRequestException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { GitProvidersService } from './git-providers.service';
+import { GitOAuthService } from './git-oauth.service';
 import { CreateGitProviderDto } from './dto/create-git-provider.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
@@ -10,7 +11,33 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 @UseGuards(AuthGuard('jwt'))
 @Controller('git-providers')
 export class GitProvidersController {
-  constructor(private svc: GitProvidersService) {}
+  constructor(
+    private svc: GitProvidersService,
+    private oauth: GitOAuthService,
+  ) {}
+
+  // ── OAuth Device Flow ───────────────────────────────────────────────
+
+  @Get('oauth/github/status')
+  @ApiOperation({ summary: 'Whether GitHub OAuth is configured on this install' })
+  oauthStatus() {
+    return { configured: this.oauth.isConfigured('GITHUB') };
+  }
+
+  @Post('oauth/github/device/start')
+  @ApiOperation({ summary: 'Start GitHub device-flow → returns the user_code to display' })
+  startDevice() {
+    return this.oauth.startGithubDeviceFlow();
+  }
+
+  @Post('oauth/github/device/poll')
+  @ApiOperation({ summary: 'Poll GitHub for the access token — call repeatedly until state=authorized' })
+  pollDevice(
+    @CurrentUser('id') userId: string,
+    @Body('deviceCode') deviceCode: string,
+  ) {
+    return this.oauth.pollGithubDeviceFlow(userId, deviceCode);
+  }
 
   @Post()
   @ApiOperation({ summary: 'Connect a git provider' })
