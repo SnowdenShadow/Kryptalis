@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus, Loader2, Server, Copy, Check, RefreshCw, Trash2, Power,
   KeyRound, AlertCircle, Eye, EyeOff, Calendar, Terminal as TerminalIcon,
+  Lightbulb,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -17,22 +18,8 @@ import {
   Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
 import { api } from '@/lib/api';
+import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
-
-/**
- * SFTP accounts dashboard.
- *
- * One page to create / rotate / disable / delete SFTP access for any
- * application the user can administer. Designed for the "I want to give
- * a contractor Filezilla access to this WordPress" flow.
- *
- * UX flow:
- *   1. Pick an app (top selector).
- *   2. See the list of existing accounts.
- *   3. "New account" → modal → generated password shown ONCE.
- *   4. Connection-info card with host/port/username/cmd-line snippets
- *      so the user can paste straight into Filezilla.
- */
 
 interface ScopeApp { id: string; name: string; projectId: string; framework: string; status: string }
 interface ProjectScope {
@@ -57,6 +44,7 @@ interface SftpAccount {
 
 export default function SftpPage() {
   const qc = useQueryClient();
+  const { t } = useTranslation();
 
   const [selectedAppId, setSelectedAppId] = useState<string>('');
   const [showCreate, setShowCreate] = useState(false);
@@ -64,9 +52,6 @@ export default function SftpPage() {
   const [copied, setCopied] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<SftpAccount | null>(null);
 
-  // Reuse the /files/scopes API — it already returns every app the
-  // current user can see, keyed by project + role. We don't need a
-  // dedicated /sftp/scopes endpoint just yet.
   const { data: scopes = [] } = useQuery<ProjectScope[]>({
     queryKey: ['file-scopes'],
     queryFn: () => api.get('/files/scopes'),
@@ -80,18 +65,15 @@ export default function SftpPage() {
 
   const { data: accounts = [], refetch } = useQuery<SftpAccount[]>({
     queryKey: ['sftp-accounts', selectedAppId],
-    queryFn: () =>
-      api.get(`/sftp?scope=app&scopeId=${selectedAppId}`),
+    queryFn: () => api.get(`/sftp?scope=app&scopeId=${selectedAppId}`),
     enabled: !!selectedAppId,
   });
 
   const createMutation = useMutation({
     mutationFn: (body: any) => api.post<SftpAccount>('/sftp', body),
     onSuccess: (acc) => {
-      toast.success(`Account ${acc.username} created`);
+      toast.success(t('sftp.toastCreated', { username: acc.username }));
       if (acc.plainPassword) {
-        // Surface the once-only password in the row so the user can
-        // copy it before refreshing.
         setRevealedPasswords((r) => ({ ...r, [acc.id]: acc.plainPassword! }));
       }
       setShowCreate(false);
@@ -103,7 +85,7 @@ export default function SftpPage() {
   const rotateMutation = useMutation({
     mutationFn: (id: string) => api.post<{ plainPassword: string }>(`/sftp/${id}/rotate`),
     onSuccess: (res, id) => {
-      toast.success('Password rotated');
+      toast.success(t('sftp.toastRotated'));
       setRevealedPasswords((r) => ({ ...r, [id]: res.plainPassword }));
     },
     onError: (err: Error) => toast.error(err.message),
@@ -113,7 +95,7 @@ export default function SftpPage() {
     mutationFn: ({ id, disabled }: { id: string; disabled: boolean }) =>
       api.patch(`/sftp/${id}`, { disabled }),
     onSuccess: () => {
-      toast.success('Account updated');
+      toast.success(t('sftp.toastUpdated'));
       refetch();
     },
     onError: (err: Error) => toast.error(err.message),
@@ -123,7 +105,7 @@ export default function SftpPage() {
     mutationFn: ({ id, allowShell }: { id: string; allowShell: boolean }) =>
       api.patch(`/sftp/${id}`, { allowShell }),
     onSuccess: (_, vars) => {
-      toast.success(vars.allowShell ? 'SSH shell enabled' : 'SSH shell disabled');
+      toast.success(vars.allowShell ? t('sftp.toastShellOn') : t('sftp.toastShellOff'));
       refetch();
     },
     onError: (err: Error) => toast.error(err.message),
@@ -132,7 +114,7 @@ export default function SftpPage() {
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/sftp/${id}`),
     onSuccess: () => {
-      toast.success('Account deleted');
+      toast.success(t('sftp.toastDeleted'));
       setDeleteTarget(null);
       refetch();
     },
@@ -152,31 +134,26 @@ export default function SftpPage() {
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-3xl font-bold flex items-center gap-2">
-            <Server size={26} /> SFTP Access
+            <Server size={26} /> {t('sftp.title')}
           </h1>
-          <p className="text-muted-foreground">
-            Issue Filezilla / WinSCP credentials for your apps. Sessions are
-            chrooted to the app's own directory.
-          </p>
+          <p className="text-muted-foreground max-w-2xl">{t('sftp.subtitle')}</p>
         </div>
         {selectedAppId && (
           <Button onClick={() => setShowCreate(true)}>
-            <Plus size={14} /> New account
+            <Plus size={14} /> {t('sftp.newAccount')}
           </Button>
         )}
       </div>
 
-      {/* App picker */}
+      {/* Step 1 — App picker */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Application</CardTitle>
-          <CardDescription className="text-xs">
-            Pick the app whose files should be exposed over SFTP.
-          </CardDescription>
+          <CardTitle className="text-sm">{t('sftp.step1')}</CardTitle>
+          <CardDescription className="text-xs">{t('sftp.step1Desc')}</CardDescription>
         </CardHeader>
         <CardContent>
           <Select value={selectedAppId} onChange={(e) => setSelectedAppId(e.target.value)}>
-            <option value="">Pick an application…</option>
+            <option value="">{t('sftp.step1Pick')}</option>
             {scopes.map((p) => (
               <optgroup key={p.id} label={p.name}>
                 {p.applications.map((a) => (
@@ -190,29 +167,29 @@ export default function SftpPage() {
 
       {selectedApp && (
         <>
-          {/* Connection info card */}
+          {/* Step 2 — Connection info */}
           <ConnectionInfoCard
             appName={selectedApp.name}
             firstUsername={accounts.find((a) => !a.disabled)?.username}
             hasShellAccount={accounts.some((a) => !a.disabled && a.allowShell)}
             copy={copy}
             copied={copied}
+            t={t}
           />
 
-          {/* Accounts list */}
+          {/* Step 3 — Accounts list */}
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Accounts</CardTitle>
-              <CardDescription>
-                Each row is a separate Filezilla login. Disabling preserves
-                the row but drops the SSH user; rotating issues a fresh
-                password and shows it once.
-              </CardDescription>
+              <CardTitle className="text-base">{t('sftp.step3')}</CardTitle>
+              <CardDescription>{t('sftp.step3Desc')}</CardDescription>
             </CardHeader>
             <CardContent>
               {accounts.length === 0 ? (
                 <div className="py-8 text-center text-sm text-muted-foreground">
-                  No accounts yet. Click <span className="font-medium">New account</span> to create one.
+                  <p>{t('sftp.noAccounts')}</p>
+                  <p className="mt-1">
+                    {t('sftp.noAccountsCta', { label: t('sftp.newAccount') })}
+                  </p>
                 </div>
               ) : (
                 <div className="divide-y divide-border">
@@ -220,12 +197,16 @@ export default function SftpPage() {
                     const expired = acc.expiresAt && new Date(acc.expiresAt) < new Date();
                     const pw = revealedPasswords[acc.id];
                     return (
-                      <div key={acc.id} className="py-3 flex items-start justify-between gap-3">
+                      <div
+                        key={acc.id}
+                        className="py-3 flex flex-col sm:flex-row sm:items-start gap-3 sm:gap-4"
+                      >
+                        {/* Left: identity & metadata */}
                         <div className="space-y-1.5 min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="font-mono font-medium">{acc.username}</span>
-                            {acc.disabled && <Badge variant="outline" className="text-[10px]">disabled</Badge>}
-                            {expired && <Badge variant="destructive" className="text-[10px]">expired</Badge>}
+                            {acc.disabled && <Badge variant="outline" className="text-[10px]">{t('sftp.disabled')}</Badge>}
+                            {expired && <Badge variant="destructive" className="text-[10px]">{t('sftp.expired')}</Badge>}
                             <Badge
                               variant="outline"
                               className={cn(
@@ -235,23 +216,23 @@ export default function SftpPage() {
                                 acc.permission === 'ADMIN' && 'border-amber-500/40 text-amber-400',
                               )}
                             >
-                              {acc.permission}
+                              {t(`sftp.perm${acc.permission}`)}
                             </Badge>
                             {acc.allowShell && (
                               <Badge variant="outline" className="text-[10px] gap-1 border-purple-500/40 text-purple-400">
-                                <TerminalIcon size={9} /> SSH shell
+                                <TerminalIcon size={9} /> {t('sftp.shellOn')}
                               </Badge>
                             )}
                             {acc.publicKeys.length > 0 && (
                               <Badge variant="outline" className="text-[10px] gap-1">
-                                <KeyRound size={9} /> {acc.publicKeys.length} keys
+                                <KeyRound size={9} /> {t('sftp.keysCount', { n: acc.publicKeys.length })}
                               </Badge>
                             )}
                           </div>
                           {pw && (
                             <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-2 space-y-1">
                               <p className="text-[10px] text-emerald-500 font-medium uppercase tracking-wider flex items-center gap-1">
-                                <AlertCircle size={10} /> Password shown once
+                                <AlertCircle size={10} /> {t('sftp.passwordShownOnce')}
                               </p>
                               <div className="flex items-center gap-2">
                                 <code className="font-mono text-xs flex-1 truncate">{pw}</code>
@@ -262,54 +243,64 @@ export default function SftpPage() {
                             </div>
                           )}
                           <div className="text-[11px] text-muted-foreground flex items-center gap-3 flex-wrap">
-                            <span>created {timeAgo(acc.createdAt)}</span>
-                            {acc.lastUsedAt && <span>last used {timeAgo(acc.lastUsedAt)}</span>}
+                            <span>{t('sftp.created', { ago: timeAgo(acc.createdAt, t) })}</span>
+                            {acc.lastUsedAt && <span>{t('sftp.lastUsed', { ago: timeAgo(acc.lastUsedAt, t) })}</span>}
                             {acc.expiresAt && !expired && (
                               <span className="flex items-center gap-1">
-                                <Calendar size={10} /> expires {timeAgo(acc.expiresAt)}
+                                <Calendar size={10} /> {t('sftp.expires', { ago: timeAgo(acc.expiresAt, t) })}
                               </span>
                             )}
                           </div>
                         </div>
-                        <div className="flex items-center gap-1 shrink-0">
+
+                        {/* Right: labelled action buttons */}
+                        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                           <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-7 w-7"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 text-xs gap-1.5"
                             disabled={shellToggleMutation.isPending}
                             onClick={() => shellToggleMutation.mutate({ id: acc.id, allowShell: !acc.allowShell })}
-                            title={acc.allowShell ? 'Disable SSH shell' : 'Enable SSH shell'}
+                            title={acc.allowShell ? t('sftp.actionShellDisable') : t('sftp.actionShellEnable')}
                           >
                             <TerminalIcon size={12} className={acc.allowShell ? 'text-purple-400' : 'text-muted-foreground'} />
+                            {acc.allowShell ? t('sftp.actionShellDisable') : t('sftp.actionShellEnable')}
                           </Button>
                           <Button
                             size="sm"
-                            variant="ghost"
-                            className="text-xs h-7"
+                            variant="outline"
+                            className="h-8 text-xs gap-1.5"
                             disabled={rotateMutation.isPending}
                             onClick={() => rotateMutation.mutate(acc.id)}
-                            title="Rotate password"
+                            title={t('sftp.actionRotate')}
                           >
-                            <RefreshCw size={12} /> Rotate
+                            {rotateMutation.isPending && rotateMutation.variables === acc.id ? (
+                              <Loader2 size={12} className="animate-spin" />
+                            ) : (
+                              <RefreshCw size={12} />
+                            )}
+                            {t('sftp.actionRotate')}
                           </Button>
                           <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-7 w-7"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 text-xs gap-1.5"
                             disabled={toggleMutation.isPending}
                             onClick={() => toggleMutation.mutate({ id: acc.id, disabled: !acc.disabled })}
-                            title={acc.disabled ? 'Enable' : 'Disable'}
+                            title={acc.disabled ? t('sftp.actionEnable') : t('sftp.actionDisable')}
                           >
                             <Power size={12} className={acc.disabled ? 'text-muted-foreground' : 'text-emerald-500'} />
+                            {acc.disabled ? t('sftp.actionEnable') : t('sftp.actionDisable')}
                           </Button>
                           <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-7 w-7 hover:text-destructive"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 text-xs gap-1.5 hover:border-destructive/60 hover:text-destructive"
                             onClick={() => setDeleteTarget(acc)}
-                            title="Delete"
+                            title={t('sftp.actionDelete')}
                           >
                             <Trash2 size={12} />
+                            {t('common.delete')}
                           </Button>
                         </div>
                       </div>
@@ -329,24 +320,22 @@ export default function SftpPage() {
         appName={selectedApp?.name}
         onCreate={(body) => createMutation.mutate(body)}
         creating={createMutation.isPending}
+        t={t}
       />
 
       <Dialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)}>
         <DialogHeader>
-          <DialogTitle>Delete {deleteTarget?.username}?</DialogTitle>
-          <DialogDescription>
-            Permanently removes this SFTP account. Any open sessions are
-            dropped on the next sync (~3 seconds).
-          </DialogDescription>
+          <DialogTitle>{t('sftp.deleteTitle', { username: deleteTarget?.username || '' })}</DialogTitle>
+          <DialogDescription>{t('sftp.deleteDesc')}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+          <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t('common.cancel')}</Button>
           <Button
             variant="destructive"
             disabled={deleteMutation.isPending}
             onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
           >
-            {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
+            {deleteMutation.isPending ? t('common.deleting') : t('common.delete')}
           </Button>
         </DialogFooter>
       </Dialog>
@@ -355,17 +344,15 @@ export default function SftpPage() {
 }
 
 // ── Connection info card ─────────────────────────────────────────────
-// Shows the host, port, and a ready-to-paste sftp:// URL the user can
-// hand to Filezilla. Pulls the hostname from window.location since the
-// dashboard is served on the same host as sshd.
 function ConnectionInfoCard({
-  appName, firstUsername, hasShellAccount, copy, copied,
+  appName, firstUsername, hasShellAccount, copy, copied, t,
 }: {
   appName: string;
   firstUsername?: string;
   hasShellAccount: boolean;
   copy: (text: string, label: string) => void;
   copied: string | null;
+  t: (key: string, vars?: Record<string, string | number>) => string;
 }) {
   const host = typeof window !== 'undefined' ? window.location.hostname : 'your-server';
   const port = 2222;
@@ -378,8 +365,8 @@ function ConnectionInfoCard({
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm flex items-center gap-2">
-          Connection for {appName}
+        <CardTitle className="text-sm flex items-center gap-2 flex-wrap">
+          <span>{t('sftp.step2')} — {appName}</span>
           <Badge variant="outline" className="text-[10px] gap-1">SFTP</Badge>
           {hasShellAccount && (
             <Badge variant="outline" className="text-[10px] gap-1 border-purple-500/40 text-purple-400">
@@ -388,19 +375,26 @@ function ConnectionInfoCard({
           )}
         </CardTitle>
         <CardDescription className="text-xs">
-          Files land at <code className="px-1 py-0.5 rounded bg-muted font-mono text-[10px]">{root}/</code> inside the chroot.
-          {hasShellAccount && ' Shell accounts get bash in the same chroot.'}
+          {t('sftp.step2Desc')}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
-        <ConnLine label="Host" value={host} onCopy={() => copy(host, 'host')} copied={copied === 'host'} />
-        <ConnLine label="Port" value={String(port)} onCopy={() => copy(String(port), 'port')} copied={copied === 'port'} />
-        <ConnLine label="Protocol" value="SFTP / SSH (same port)" />
-        <ConnLine label="Filezilla URL" value={sftpUrl} onCopy={() => copy(sftpUrl, 'url')} copied={copied === 'url'} />
-        <ConnLine label="SFTP CLI" value={cliExample} onCopy={() => copy(cliExample, 'cli')} copied={copied === 'cli'} />
+        <ConnLine label={t('sftp.host')} value={host} onCopy={() => copy(host, 'host')} copied={copied === 'host'} />
+        <ConnLine label={t('sftp.port')} value={String(port)} onCopy={() => copy(String(port), 'port')} copied={copied === 'port'} />
+        <ConnLine label={t('sftp.protocol')} value={t('sftp.protocolValue')} />
+        <ConnLine label={t('sftp.filezillaUrl')} value={sftpUrl} onCopy={() => copy(sftpUrl, 'url')} copied={copied === 'url'} />
+        <ConnLine label={t('sftp.cliExample')} value={cliExample} onCopy={() => copy(cliExample, 'cli')} copied={copied === 'cli'} />
         {hasShellAccount && (
-          <ConnLine label="SSH CLI / Putty" value={sshExample} onCopy={() => copy(sshExample, 'ssh')} copied={copied === 'ssh'} />
+          <ConnLine label={t('sftp.sshExample')} value={sshExample} onCopy={() => copy(sshExample, 'ssh')} copied={copied === 'ssh'} />
         )}
+        <div className="mt-3 flex items-start gap-2 rounded-md border border-blue-500/20 bg-blue-500/5 p-2.5 text-xs text-blue-300/90">
+          <Lightbulb size={14} className="mt-0.5 shrink-0 text-blue-400" />
+          <p>
+            {t('sftp.filesAt')}{' '}
+            <code className="px-1 py-0.5 rounded bg-blue-500/15 font-mono text-[11px]">{root}/</code>
+            {hasShellAccount && <> · {t('sftp.shellNote')}</>}
+          </p>
+        </div>
       </CardContent>
     </Card>
   );
@@ -415,7 +409,7 @@ function ConnLine({
   copied?: boolean;
 }) {
   return (
-    <div className="grid grid-cols-[110px_1fr_32px] items-center gap-2 text-sm">
+    <div className="grid grid-cols-[150px_1fr_32px] items-center gap-2 text-sm">
       <span className="text-muted-foreground text-xs">{label}</span>
       <code className="font-mono text-xs truncate">{value}</code>
       {onCopy && (
@@ -429,7 +423,7 @@ function ConnLine({
 
 // ── Create dialog ─────────────────────────────────────────────────────
 function CreateAccountDialog({
-  open, onClose, appId, appName, onCreate, creating,
+  open, onClose, appId, appName, onCreate, creating, t,
 }: {
   open: boolean;
   onClose: () => void;
@@ -437,6 +431,7 @@ function CreateAccountDialog({
   appName: string | undefined;
   onCreate: (body: any) => void;
   creating: boolean;
+  t: (key: string, vars?: Record<string, string | number>) => string;
 }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -464,35 +459,33 @@ function CreateAccountDialog({
   return (
     <Dialog open={open} onClose={onClose} className="max-w-lg">
       <DialogHeader>
-        <DialogTitle>New SFTP account</DialogTitle>
-        <DialogDescription>
-          For {appName}. Username + (password or SSH keys). Leave the
-          password blank to auto-generate a strong one.
-        </DialogDescription>
+        <DialogTitle>{t('sftp.dialogTitle')}</DialogTitle>
+        <DialogDescription>{t('sftp.dialogDesc', { appName: appName || '' })}</DialogDescription>
       </DialogHeader>
 
       <div className="space-y-3 py-2">
         <div className="space-y-1">
-          <Label>Username</Label>
+          <Label>{t('sftp.fldUsername')}</Label>
           <Input
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             placeholder="ftp_user"
             className="font-mono"
           />
-          <p className="text-[11px] text-muted-foreground">
-            Lowercase, 3-32 chars, starts with a letter. a-z 0-9 _ -
-          </p>
+          <p className="text-[11px] text-muted-foreground">{t('sftp.fldUsernameHint')}</p>
         </div>
 
         <div className="space-y-1">
-          <Label>Password <span className="text-muted-foreground font-normal">(optional)</span></Label>
+          <Label>
+            {t('sftp.fldPassword')}{' '}
+            <span className="text-muted-foreground font-normal">({t('common.optional')})</span>
+          </Label>
           <div className="relative">
             <Input
               type={showPw ? 'text' : 'password'}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Leave blank to auto-generate"
+              placeholder={t('sftp.fldPasswordPlaceholder')}
               className="pr-9"
             />
             <button
@@ -506,7 +499,10 @@ function CreateAccountDialog({
         </div>
 
         <div className="space-y-1">
-          <Label>SSH public keys <span className="text-muted-foreground font-normal">(optional, one per line)</span></Label>
+          <Label>
+            {t('sftp.fldKeys')}{' '}
+            <span className="text-muted-foreground font-normal">({t('common.optional')})</span>
+          </Label>
           <textarea
             value={keys}
             onChange={(e) => setKeys(e.target.value)}
@@ -514,19 +510,23 @@ function CreateAccountDialog({
             spellCheck={false}
             className="w-full min-h-[80px] rounded-md border border-border bg-background p-2 font-mono text-xs"
           />
+          <p className="text-[11px] text-muted-foreground">{t('sftp.fldKeysHint')}</p>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1">
-            <Label>Permission</Label>
+            <Label>{t('sftp.fldPermission')}</Label>
             <Select value={permission} onChange={(e) => setPermission(e.target.value as any)}>
-              <option value="READ">Read-only</option>
-              <option value="WRITE">Read &amp; Write</option>
-              <option value="ADMIN">Admin</option>
+              <option value="READ">{t('sftp.permREAD')}</option>
+              <option value="WRITE">{t('sftp.permWRITE')}</option>
+              <option value="ADMIN">{t('sftp.permADMIN')}</option>
             </Select>
           </div>
           <div className="space-y-1">
-            <Label>Expires <span className="text-muted-foreground font-normal">(optional)</span></Label>
+            <Label>
+              {t('sftp.fldExpires')}{' '}
+              <span className="text-muted-foreground font-normal">({t('common.optional')})</span>
+            </Label>
             <Input
               type="date"
               value={expiresAt}
@@ -535,7 +535,6 @@ function CreateAccountDialog({
           </div>
         </div>
 
-        {/* Shell access toggle */}
         <label className="flex items-start gap-2 rounded-md border border-border bg-muted/30 p-2.5 cursor-pointer hover:bg-muted/50">
           <input
             type="checkbox"
@@ -545,31 +544,28 @@ function CreateAccountDialog({
           />
           <div className="flex-1 space-y-0.5">
             <div className="flex items-center gap-1.5 text-sm font-medium">
-              <TerminalIcon size={12} /> Allow SSH shell (Putty)
+              <TerminalIcon size={12} /> {t('sftp.fldShell')}
             </div>
-            <p className="text-[11px] text-muted-foreground">
-              In addition to SFTP, the user can open a real shell with Putty / <code className="font-mono">ssh</code>.
-              They stay chrooted to the app sandbox — no host access. App data is at <code className="font-mono">/app</code>.
-            </p>
+            <p className="text-[11px] text-muted-foreground">{t('sftp.fldShellHint')}</p>
           </div>
         </label>
       </div>
 
       <DialogFooter>
-        <Button variant="outline" onClick={onClose}>Cancel</Button>
+        <Button variant="outline" onClick={onClose}>{t('common.cancel')}</Button>
         <Button disabled={!valid || creating} onClick={submit}>
           {creating && <Loader2 size={14} className="animate-spin" />}
-          Create account
+          {creating ? t('sftp.createBtnLoading') : t('sftp.createBtn')}
         </Button>
       </DialogFooter>
     </Dialog>
   );
 }
 
-function timeAgo(iso: string) {
+function timeAgo(iso: string, t: (key: string, vars?: Record<string, string | number>) => string) {
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  if (s < 60) return t('sftp.justNow');
+  if (s < 3600) return t('sftp.minAgo', { n: Math.floor(s / 60) });
+  if (s < 86400) return t('sftp.hourAgo', { n: Math.floor(s / 3600) });
+  return t('sftp.dayAgo', { n: Math.floor(s / 86400) });
 }
