@@ -163,27 +163,29 @@ const LOG_LINE_OPTIONS = [50, 100, 200, 500] as const;
 // Order matches the actual user journey: see → check history → debug live
 // → poke at runtime → tweak config. Settings always last (potentially
 // dangerous), Files/Terminal further right because they're rarely needed.
-const TABS: { id: TabId; label: string }[] = [
-  { id: 'overview', label: 'Overview' },
-  { id: 'deployments', label: 'Deployments' },
-  { id: 'logs', label: 'Logs' },
-  { id: 'env', label: 'Env vars' },
-  { id: 'ports', label: 'Ports' },
-  { id: 'terminal', label: 'Terminal' },
-  { id: 'files', label: 'Files' },
-  { id: 'settings', label: 'Settings' },
+const TAB_IDS: { id: TabId; key: string }[] = [
+  { id: 'overview', key: 'apps.tab.overview' },
+  { id: 'deployments', key: 'apps.tab.deployments' },
+  { id: 'logs', key: 'apps.tab.logs' },
+  { id: 'env', key: 'apps.tab.envVars' },
+  { id: 'ports', key: 'apps.tab.ports' },
+  { id: 'terminal', key: 'apps.tab.terminal' },
+  { id: 'files', key: 'apps.tab.files' },
+  { id: 'settings', key: 'apps.tab.settings' },
 ];
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function timeAgo(date: string) {
-  const s = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+function makeTimeAgo(t: (k: string, v?: Record<string, string | number>) => string) {
+  return (date: string) => {
+    const s = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
+    if (s < 60) return t('apps.timeJust');
+    if (s < 3600) return t('apps.timeMin', { n: Math.floor(s / 60) });
+    if (s < 86400) return t('apps.timeHour', { n: Math.floor(s / 3600) });
+    return t('apps.timeDay', { n: Math.floor(s / 86400) });
+  };
 }
 
 function formatDuration(ms: number) {
@@ -379,6 +381,7 @@ export default function ApplicationDetailPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const id = params.id as string;
+  const timeAgo = makeTimeAgo(t);
 
   // Tab state
   const [activeTab, setActiveTab] = useState<TabId>('overview');
@@ -812,9 +815,9 @@ export default function ApplicationDetailPage() {
                 variant="outline"
                 disabled={redeployMutation.isPending || app.status === 'DEPLOYING'}
                 onClick={() => redeployMutation.mutate()}
-                title={app.gitUrl ? 'Pull latest commit and rebuild' : 'Re-pull image and recreate container'}
+                title={app.gitUrl ? t('apps.redeployTitleGit') : t('apps.redeployTitleImage')}
               >
-                <Rocket size={14} /> Redeploy
+                <Rocket size={14} /> {t('apps.redeploy2')}
               </Button>
             )}
             <Button variant="destructive" onClick={() => setShowDelete(true)}>
@@ -825,7 +828,7 @@ export default function ApplicationDetailPage() {
       </div>
 
       <div className="flex gap-1 border-b border-border px-6">
-        {TABS.map(tab => (
+        {TAB_IDS.map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
@@ -836,7 +839,7 @@ export default function ApplicationDetailPage() {
                 : 'border-transparent text-muted-foreground hover:text-foreground'
             )}
           >
-            {tab.label}
+            {t(tab.key)}
           </button>
         ))}
       </div>

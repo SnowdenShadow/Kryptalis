@@ -178,6 +178,14 @@ export const translations: Record<string, Record<string, string>> = {
     'apps.deployNoLogs': 'No logs captured for this deployment.',
     'apps.deployLive': 'live',
     'apps.close': 'Close',
+    'apps.redeploy2': 'Redeploy',
+    'apps.redeployTitleGit': 'Pull latest commit and rebuild',
+    'apps.redeployTitleImage': 'Re-pull image and recreate container',
+    'apps.timeJust': 'just now',
+    'apps.timeMin': '{n}m ago',
+    'apps.timeHour': '{n}h ago',
+    'apps.timeDay': '{n}d ago',
+    'apps.tab.envVars': 'Env vars',
 
     // ── domains ────────────────────────────────────────────────────
     'domains.title': 'Domains', 'domains.subtitle': 'Manage your domains and SSL certificates', 'domains.add': 'Add Domain', 'domains.empty': 'No domains configured', 'domains.emptyDesc': 'Add a domain to get started', 'domains.domain': 'Domain', 'domains.application': 'Application', 'domains.ssl': 'SSL Status', 'domains.autoSsl': 'Auto SSL',
@@ -858,6 +866,14 @@ export const translations: Record<string, Record<string, string>> = {
     'apps.deployNoLogs': 'Aucun log capturé pour ce déploiement.',
     'apps.deployLive': 'live',
     'apps.close': 'Fermer',
+    'apps.redeploy2': 'Redéployer',
+    'apps.redeployTitleGit': 'Pull le dernier commit et rebuild',
+    'apps.redeployTitleImage': 'Re-pull l\'image et recrée le container',
+    'apps.timeJust': "à l'instant",
+    'apps.timeMin': 'il y a {n} min',
+    'apps.timeHour': 'il y a {n} h',
+    'apps.timeDay': 'il y a {n} j',
+    'apps.tab.envVars': 'Variables env',
 
     // ── domains/etc ────────────────────────────────────────────────
     'domains.title': 'Domaines', 'domains.subtitle': 'Gérez vos domaines et certificats SSL', 'domains.add': 'Ajouter un domaine', 'domains.empty': 'Aucun domaine configuré', 'domains.emptyDesc': 'Ajoutez un domaine pour commencer', 'domains.domain': 'Domaine', 'domains.application': 'Application', 'domains.ssl': 'Statut SSL', 'domains.autoSsl': 'SSL automatique',
