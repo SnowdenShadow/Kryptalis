@@ -283,7 +283,7 @@ export default function DatabasesPage() {
                 variant={filterProjectId === '' ? 'default' : 'outline'}
                 onClick={() => setFilterProjectId('')}
               >
-                All
+                {t('databases.filterAll')}
               </Button>
               {projects.map((p) => (
                 <Button
@@ -329,13 +329,13 @@ export default function DatabasesPage() {
             <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted">
               <Database size={32} className="text-muted-foreground" />
             </div>
-            <p className="mt-4 text-lg font-semibold">No databases yet</p>
+            <p className="mt-4 text-lg font-semibold">{t('databases.empty')}</p>
             <p className="mt-1 text-sm text-muted-foreground">
-              Create your first database to get started
+              {t('databases.emptyDescLong')}
             </p>
             <Button className="mt-6" onClick={() => setShowCreateDialog(true)}>
               <Plus size={16} />
-              Create your first database
+              {t('databases.emptyCta')}
             </Button>
           </CardContent>
         </Card>
@@ -371,13 +371,13 @@ export default function DatabasesPage() {
                             {deploying ? (
                               <>
                                 <Loader2 size={12} className="animate-spin text-warning" />
-                                <span className="text-warning">Deploying...</span>
+                                <span className="text-warning">{t('databases.statusDeploying')}</span>
                               </>
                             ) : (
                               <>
                                 <span className={cn('inline-block h-2 w-2 rounded-full', running ? 'bg-emerald-500' : 'bg-red-500')} />
                                 <span className={running ? 'text-emerald-500' : 'text-red-400'}>
-                                  {running ? 'Running' : 'Stopped'}
+                                  {running ? t('databases.statusRunning') : t('databases.statusStopped')}
                                 </span>
                               </>
                             )}
@@ -392,7 +392,7 @@ export default function DatabasesPage() {
                             </Link>
                           ) : (
                             <Badge variant="outline" className="text-[10px] text-muted-foreground border-dashed">
-                              <LinkIcon size={9} className="mr-1" /> Unlinked
+                              <LinkIcon size={9} className="mr-1" /> {t('databases.unlinked')}
                             </Badge>
                           )}
                           {db.application && (
@@ -406,9 +406,9 @@ export default function DatabasesPage() {
                             <Badge
                               variant="outline"
                               className="text-[10px] border-amber-500/40 text-amber-500"
-                              title={`Detected from the parent app's docker-compose.yml${db.serviceName ? ` (service: ${db.serviceName})` : ''}. Lifecycle is owned by the app.`}
+                              title={t('databases.autoTitle', { service: db.serviceName ? t('databases.autoTitleService', { name: db.serviceName }) : '' })}
                             >
-                              auto
+                              {t('databases.autoBadge')}
                             </Badge>
                           )}
                         </div>
@@ -429,10 +429,10 @@ export default function DatabasesPage() {
                               variant="ghost"
                               size="sm"
                               className="h-8 text-xs"
-                              title="Managed by parent app — open app to start/stop/delete"
+                              title={t('databases.manageInAppTitle')}
                             >
                               <Rocket size={12} className="mr-1" />
-                              Manage in app
+                              {t('databases.manageInApp')}
                             </Button>
                           </Link>
                         ) : null
@@ -445,7 +445,7 @@ export default function DatabasesPage() {
                               className="h-8 w-8 text-muted-foreground hover:text-orange-500"
                               disabled={dbActionMutation.isPending}
                               onClick={() => dbActionMutation.mutate({ id: db.id, action: 'stop' })}
-                              title="Stop"
+                              title={t('databases.actionStop')}
                             >
                               <Square size={14} />
                             </Button>
@@ -457,7 +457,7 @@ export default function DatabasesPage() {
                               className="h-8 w-8 text-muted-foreground hover:text-emerald-500"
                               disabled={dbActionMutation.isPending}
                               onClick={() => dbActionMutation.mutate({ id: db.id, action: 'start' })}
-                              title="Start"
+                              title={t('databases.actionStart')}
                             >
                               <Play size={14} />
                             </Button>
@@ -480,24 +480,24 @@ export default function DatabasesPage() {
                   {/* Connection details */}
                   <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2.5">
                     <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                      Connection Details
+                      {t('databases.connectionDetails')}
                     </p>
 
                     <div className="grid grid-cols-[80px_1fr] gap-y-2 text-sm">
                       {/* Host */}
-                      <span className="text-muted-foreground">Host</span>
+                      <span className="text-muted-foreground">{t('databases.host')}</span>
                       <span className="font-mono text-foreground">{db.host}</span>
 
                       {/* Port */}
-                      <span className="text-muted-foreground">Port</span>
+                      <span className="text-muted-foreground">{t('databases.port')}</span>
                       <span className="font-mono text-foreground">{db.port}</span>
 
                       {/* Username */}
-                      <span className="text-muted-foreground">User</span>
+                      <span className="text-muted-foreground">{t('databases.user')}</span>
                       <span className="font-mono text-foreground">{db.username}</span>
 
                       {/* Password */}
-                      <span className="text-muted-foreground">Password</span>
+                      <span className="text-muted-foreground">{t('databases.password')}</span>
                       <div className="flex items-center gap-1.5">
                         <span className="font-mono text-foreground">
                           {pwVisible ? db.password : '••••••••••••'}
@@ -506,7 +506,7 @@ export default function DatabasesPage() {
                           type="button"
                           onClick={() => togglePasswordVisibility(db.id)}
                           className="inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:text-foreground"
-                          title={pwVisible ? 'Hide password' : 'Show password'}
+                          title={pwVisible ? t('databases.hidePassword') : t('databases.showPassword')}
                         >
                           {pwVisible ? <EyeOff size={13} /> : <Eye size={13} />}
                         </button>
@@ -518,14 +518,14 @@ export default function DatabasesPage() {
                   <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
                     <div className="flex items-center justify-between">
                       <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                        Connection String
+                        {t('databases.connectionString')}
                       </p>
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
                           onClick={() => toggleConnStringVisibility(db.id)}
                           className="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
-                          title={connVisible ? 'Hide' : 'Reveal'}
+                          title={connVisible ? t('databases.hide') : t('databases.reveal')}
                         >
                           {connVisible ? <EyeOff size={14} /> : <Eye size={14} />}
                         </button>
@@ -533,7 +533,7 @@ export default function DatabasesPage() {
                           type="button"
                           onClick={() => copyToClipboard(db.connectionString, db.id)}
                           className="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
-                          title="Copy connection string"
+                          title={t('databases.copyConnString')}
                         >
                           {isCopied ? (
                             <Check size={14} className="text-emerald-500" />
@@ -554,7 +554,7 @@ export default function DatabasesPage() {
 
                   {/* Created date */}
                   <div className="text-xs text-muted-foreground">
-                    Created {formatDate(db.createdAt)}
+                    {t('databases.createdOn', { date: formatDate(db.createdAt) })}
                   </div>
                 </CardContent>
               </Card>
@@ -568,7 +568,7 @@ export default function DatabasesPage() {
         <DialogHeader>
           <DialogTitle>{t('databases.create')}</DialogTitle>
           <DialogDescription>
-            Provision a new database on your local server
+            {t('databases.createDesc')}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleCreate} className="space-y-4">
@@ -576,7 +576,7 @@ export default function DatabasesPage() {
             <Label htmlFor="db-name">{t('common.name')}</Label>
             <Input
               id="db-name"
-              placeholder="my-database"
+              placeholder={t('databases.namePlaceholder')}
               value={name}
               onChange={(e) => setName(e.target.value)}
               required
@@ -599,40 +599,40 @@ export default function DatabasesPage() {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="db-project">Project *</Label>
+            <Label htmlFor="db-project">{t('databases.projectLabel')}</Label>
             <Select
               id="db-project"
               value={projectId}
               onChange={(e) => { setProjectId(e.target.value); setApplicationId(''); }}
               required
             >
-              <option value="">Select a project</option>
+              <option value="">{t('databases.selectProject')}</option>
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </Select>
             {projects.length === 0 && (
               <p className="text-xs text-muted-foreground">
-                You need to <Link href="/dashboard/projects" className="text-primary hover:underline">create a project</Link> first.
+                {t('databases.needProjectBefore')}<Link href="/dashboard/projects" className="text-primary hover:underline">{t('databases.needProjectLink')}</Link>{t('databases.needProjectAfter')}
               </p>
             )}
           </div>
 
           {projectId && appsForCurrentProject.length > 0 && (
             <div className="space-y-2">
-              <Label htmlFor="db-app">Application (optional)</Label>
+              <Label htmlFor="db-app">{t('databases.appLabel')}</Label>
               <Select
                 id="db-app"
                 value={applicationId}
                 onChange={(e) => setApplicationId(e.target.value)}
               >
-                <option value="">Project-wide (no specific app)</option>
+                <option value="">{t('databases.projectWide')}</option>
                 {appsForCurrentProject.map((a) => (
                   <option key={a.id} value={a.id}>{a.name}</option>
                 ))}
               </Select>
               <p className="text-xs text-muted-foreground">
-                Link this database to a specific app for easier ownership tracking.
+                {t('databases.appHint')}
               </p>
             </div>
           )}
@@ -641,25 +641,25 @@ export default function DatabasesPage() {
             <Label htmlFor="db-username">{t('databases.username')}</Label>
             <Input
               id="db-username"
-              placeholder="Defaults to database name"
+              placeholder={t('databases.usernamePlaceholder')}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
             />
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="db-password">Password (optional)</Label>
+            <Label htmlFor="db-password">{t('databases.passwordLabel')}</Label>
             <Input
               id="db-password"
               type="password"
-              placeholder="Auto-generated if empty"
+              placeholder={t('databases.passwordPlaceholder')}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
           </div>
 
           <p className="text-xs text-muted-foreground">
-            Server: auto (local)
+            {t('databases.serverInfo')}
           </p>
 
           <DialogFooter>
@@ -679,13 +679,13 @@ export default function DatabasesPage() {
       {/* Delete Confirmation Dialog */}
       <Dialog open={!!deleteId} onClose={() => setDeleteId(null)}>
         <DialogHeader>
-          <DialogTitle>Delete Database</DialogTitle>
+          <DialogTitle>{t('databases.deleteTitle')}</DialogTitle>
           <DialogDescription>
-            Are you sure you want to delete{' '}
+            {t('databases.deleteConfirmBefore')}
             <span className="font-semibold text-foreground">
               {deletingDb?.name}
             </span>
-            ? All data will be permanently lost. This action cannot be undone.
+            {t('databases.deleteConfirmAfter')}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>

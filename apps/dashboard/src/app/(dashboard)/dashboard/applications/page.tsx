@@ -135,12 +135,14 @@ const HTTPS_PORTS = [443, 8443, 9443];
 // Helpers
 // ---------------------------------------------------------------------------
 
-function timeAgo(date: string) {
-  const s = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+function makeTimeAgo(t: (k: string, v?: Record<string, string | number>) => string) {
+  return (date: string) => {
+    const s = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
+    if (s < 60) return t('apps.timeJust');
+    if (s < 3600) return t('apps.timeMin', { n: Math.floor(s / 60) });
+    if (s < 86400) return t('apps.timeHour', { n: Math.floor(s / 3600) });
+    return t('apps.timeDay', { n: Math.floor(s / 86400) });
+  };
 }
 
 function appUrl(port: number) {
@@ -203,6 +205,7 @@ function StatusDot({ status }: { status: string }) {
 
 export default function ApplicationsPage() {
   const { t } = useTranslation();
+  const timeAgo = makeTimeAgo(t);
   const router = useRouter();
   const queryClient = useQueryClient();
 
@@ -541,7 +544,7 @@ export default function ApplicationsPage() {
           setNewDomainName('');
           setDeployDomainId('');
         } catch (err: any) {
-          toastError(err, 'App created, but domain attach failed');
+          toastError(err, t('apps.toastAppCreatedDomainFailed'));
         }
       },
     });
@@ -618,7 +621,7 @@ export default function ApplicationsPage() {
           <div className="relative flex-1 max-w-md">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Search applications..."
+              placeholder={t('apps.searchPlaceholder')}
               className="pl-9"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -630,16 +633,16 @@ export default function ApplicationsPage() {
               onChange={(e) => setFilterStatus(e.target.value as any)}
               className="h-9 w-auto min-w-[140px]"
             >
-              <option value="">All statuses</option>
-              <option value="RUNNING">Running</option>
-              <option value="STOPPED">Stopped</option>
-              <option value="DEPLOYING">Deploying / Building</option>
-              <option value="ERROR">Error</option>
+              <option value="">{t('apps.filterAllStatuses')}</option>
+              <option value="RUNNING">{t('apps.statusRunning')}</option>
+              <option value="STOPPED">{t('apps.statusStopped')}</option>
+              <option value="DEPLOYING">{t('apps.statusDeployingBuilding')}</option>
+              <option value="ERROR">{t('apps.statusError')}</option>
             </Select>
             {projects.length <= 6 ? (
               <>
                 <Button size="sm" variant={filterProject === '' ? 'default' : 'outline'} onClick={() => setFilterProject('')}>
-                  All projects
+                  {t('apps.filterAllProjects')}
                 </Button>
                 {projects.map((p) => (
                   <Button
@@ -658,7 +661,7 @@ export default function ApplicationsPage() {
                 onChange={(e) => setFilterProject(e.target.value)}
                 className="h-9 w-auto min-w-[160px]"
               >
-                <option value="">All projects</option>
+                <option value="">{t('apps.filterAllProjects')}</option>
                 {projects.map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
@@ -666,7 +669,7 @@ export default function ApplicationsPage() {
             )}
             {(search || filterProject || filterStatus) && (
               <Button size="sm" variant="ghost" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); }}>
-                Clear
+                {t('apps.filterClear')}
               </Button>
             )}
           </div>
@@ -707,9 +710,9 @@ export default function ApplicationsPage() {
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12 gap-3">
             <Search size={40} className="text-muted-foreground" />
-            <p className="text-muted-foreground">No applications match the current filters.</p>
+            <p className="text-muted-foreground">{t('apps.filterNoMatch')}</p>
             <Button size="sm" variant="outline" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); }}>
-              Clear filters
+              {t('apps.filterClearAll')}
             </Button>
           </CardContent>
         </Card>
@@ -744,7 +747,7 @@ export default function ApplicationsPage() {
           const isRunning = app.status === 'RUNNING';
           const isStopped = app.status === 'STOPPED';
           const isDeploying = app.status === 'DEPLOYING' || app.status === 'BUILDING';
-          const statusLabel = app.status === 'RUNNING' ? 'Running' : app.status === 'STOPPED' ? 'Stopped' : app.status === 'ERROR' ? 'Error' : app.status === 'DEPLOYING' ? 'Deploying' : app.status;
+          const statusLabel = app.status === 'RUNNING' ? t('apps.statusRunning') : app.status === 'STOPPED' ? t('apps.statusStopped') : app.status === 'ERROR' ? t('apps.statusError') : app.status === 'DEPLOYING' ? t('apps.statusDeploying') : app.status === 'BUILDING' ? t('apps.statusBuilding') : app.status;
 
             return (
               <Card
@@ -778,14 +781,14 @@ export default function ApplicationsPage() {
                           size="sm"
                           className="shrink-0"
                           disabled={!isRunning}
-                          title={isRunning ? 'Open public URL' : 'App must be running'}
+                          title={isRunning ? t('apps.openTooltip') : t('apps.openDisabledTooltip')}
                           onClick={(e) => {
                             stop(e);
                             const url = publicAppUrl(app);
                             if (url) window.open(url, '_blank');
                           }}
                         >
-                          <ExternalLink size={12} /> Open
+                          <ExternalLink size={12} /> {t('apps.openLabel')}
                         </Button>
                       )}
                     </div>
@@ -794,7 +797,7 @@ export default function ApplicationsPage() {
                     <div className="grid grid-cols-2 gap-3 text-sm">
                       {app.project?.name && (
                         <div>
-                          <p className="text-xs text-muted-foreground">Project</p>
+                          <p className="text-xs text-muted-foreground">{t('apps.project')}</p>
                           <Link
                             href={`/dashboard/projects/${app.project.id}`}
                             className="font-medium hover:underline"
@@ -807,7 +810,7 @@ export default function ApplicationsPage() {
                       {app.port && !app.customPort && (
                         <div>
                           <p className="text-xs text-muted-foreground">
-                            {app.hostPort ? 'Port (host → container)' : 'Port'}
+                            {app.hostPort ? t('apps.portHostContainer') : t('apps.port')}
                           </p>
                           <p className="font-mono font-medium">
                             {app.hostPort ? `${app.hostPort} → ${app.port}` : app.port}
@@ -816,7 +819,7 @@ export default function ApplicationsPage() {
                       )}
                       {app.gitUrl && (
                         <div className="col-span-2">
-                          <p className="text-xs text-muted-foreground">Git Repository</p>
+                          <p className="text-xs text-muted-foreground">{t('apps.gitRepository')}</p>
                           <div className="flex items-center gap-2" title={app.gitUrl}>
                             <span className="font-mono text-xs truncate">{truncateGitUrl(app.gitUrl)}</span>
                             {app.gitBranch && (
@@ -832,7 +835,7 @@ export default function ApplicationsPage() {
                     {/* Routes — single source of truth for URLs + SSL state */}
                     {((app.domains && app.domains.length > 0) || (app.portBindings && app.portBindings.length > 0)) && (
                       <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1.5">
-                        <p className="text-xs font-medium text-muted-foreground">URLs</p>
+                        <p className="text-xs font-medium text-muted-foreground">{t('apps.publicUrls')}</p>
                         {(app.domains || []).map((d) => {
                           const url = app.customPort && app.port ? `https://${d.domain}:${app.port}` : `https://${d.domain}`;
                           return (
@@ -850,12 +853,12 @@ export default function ApplicationsPage() {
                                 variant={d.sslStatus === 'ACTIVE' ? 'success' : d.sslStatus === 'PENDING' ? 'warning' : 'destructive'}
                                 className="text-[10px] shrink-0"
                                 title={
-                                  d.sslStatus === 'ACTIVE' ? 'SSL certificate active' :
-                                  d.sslStatus === 'PENDING' ? "Let's Encrypt provisioning…" :
-                                  'SSL provisioning failed — check DNS records'
+                                  d.sslStatus === 'ACTIVE' ? t('apps.sslOkTooltip') :
+                                  d.sslStatus === 'PENDING' ? t('apps.sslPendingTooltip') :
+                                  t('apps.sslErrorTooltip')
                                 }
                               >
-                                {d.sslStatus === 'ACTIVE' ? 'SSL OK' : d.sslStatus === 'PENDING' ? 'SSL pending' : 'SSL error'}
+                                {d.sslStatus === 'ACTIVE' ? t('apps.sslOk') : d.sslStatus === 'PENDING' ? t('apps.sslPending') : t('apps.sslError')}
                               </Badge>
                             </div>
                           );
@@ -875,7 +878,7 @@ export default function ApplicationsPage() {
                               variant={b.domain.sslStatus === 'ACTIVE' ? 'success' : 'outline'}
                               className="text-[10px] shrink-0"
                             >
-                              {b.domain.sslStatus === 'ACTIVE' ? 'SSL OK' : 'SSL pending'}
+                              {b.domain.sslStatus === 'ACTIVE' ? t('apps.sslOk') : t('apps.sslPending')}
                             </Badge>
                           </div>
                         ))}
@@ -889,24 +892,24 @@ export default function ApplicationsPage() {
                         {isStopped && (
                           <Button size="sm" variant="outline" disabled={actionMutation.isPending}
                             onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'start' }); }}>
-                            <Play size={14} /> Start
+                            <Play size={14} /> {t('apps.start')}
                           </Button>
                         )}
                         {isRunning && (
                           <>
                             <Button size="sm" variant="outline" disabled={actionMutation.isPending}
                               onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'stop' }); }}>
-                              <Square size={14} /> Stop
+                              <Square size={14} /> {t('apps.stop')}
                             </Button>
                             <Button size="sm" variant="outline" disabled={actionMutation.isPending}
                               onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'restart' }); }}>
-                              <RotateCcw size={14} /> Restart
+                              <RotateCcw size={14} /> {t('apps.restart')}
                             </Button>
                           </>
                         )}
                         <Button size="sm" variant="outline"
                           onClick={(e) => { stop(e); setLogsAppId(app.id); setLogsAppName(app.name); }}>
-                          <Terminal size={14} /> Logs
+                          <Terminal size={14} /> {t('apps.logsButton')}
                         </Button>
                         <Button size="sm" variant="destructive"
                           onClick={(e) => { stop(e); setDeleteTarget(app); }}>
@@ -940,7 +943,7 @@ export default function ApplicationsPage() {
                       className="h-7 text-xs"
                       onClick={() => setShowQuickDeploy(true)}
                     >
-                      <Plus size={12} /> Add app
+                      <Plus size={12} /> {t('apps.addApp')}
                     </Button>
                   </div>
                 )}
@@ -953,7 +956,7 @@ export default function ApplicationsPage() {
               <section className="space-y-3">
                 {showHeaders && (
                   <div className="flex items-center justify-between border-b border-border pb-1.5">
-                    <span className="text-sm font-semibold text-muted-foreground">No project</span>
+                    <span className="text-sm font-semibold text-muted-foreground">{t('apps.noProjectGroup')}</span>
                     <Badge variant="secondary" className="text-[10px]">{orphan.length}</Badge>
                   </div>
                 )}
@@ -975,10 +978,9 @@ export default function ApplicationsPage() {
       {/* ---- Delete Confirmation Dialog ---- */}
       <Dialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)}>
         <DialogHeader>
-          <DialogTitle>Delete Application</DialogTitle>
+          <DialogTitle>{t('apps.deleteApp')}</DialogTitle>
           <DialogDescription>
-            Are you sure you want to delete <strong>{deleteTarget?.name}</strong>? This will stop all
-            containers and permanently remove the application. This action cannot be undone.
+            {t('apps.deleteBodyName', { name: deleteTarget?.name ?? '' })}
           </DialogDescription>
         </DialogHeader>
 
@@ -991,7 +993,7 @@ export default function ApplicationsPage() {
             disabled={deleteMutation.isPending}
             onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
           >
-            {deleteMutation.isPending ? 'Deleting...' : t('common.delete')}
+            {deleteMutation.isPending ? t('common.deleting') : t('common.delete')}
           </Button>
         </DialogFooter>
       </Dialog>
@@ -1001,10 +1003,10 @@ export default function ApplicationsPage() {
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Terminal size={18} />
-            Logs — {logsAppName}
+            {t('apps.logsDialogTitle', { name: logsAppName })}
           </DialogTitle>
           <DialogDescription>
-            Live application logs (auto-refreshes every 5s)
+            {t('apps.logsDialogDesc')}
           </DialogDescription>
         </DialogHeader>
 
@@ -1016,17 +1018,17 @@ export default function ApplicationsPage() {
               onClick={() => refetchLogs()}
             >
               <RefreshCw size={14} />
-              Refresh
+              {t('apps.refresh')}
             </Button>
           </div>
 
           <div className="max-h-96 overflow-y-auto rounded-md bg-zinc-950 p-4 font-mono text-xs text-green-400">
             {logsLoading ? (
-              <p className="text-muted-foreground">Loading logs...</p>
+              <p className="text-muted-foreground">{t('apps.logsLoading')}</p>
             ) : logsData?.logs ? (
               <pre className="whitespace-pre-wrap break-all">{logsData.logs}</pre>
             ) : (
-              <p className="text-muted-foreground">No logs available</p>
+              <p className="text-muted-foreground">{t('apps.logsNone')}</p>
             )}
             <div ref={logsEndRef} />
           </div>
@@ -1034,7 +1036,7 @@ export default function ApplicationsPage() {
 
         <DialogFooter>
           <Button variant="outline" onClick={() => setLogsAppId(null)}>
-            Close
+            {t('common.close')}
           </Button>
         </DialogFooter>
       </Dialog>

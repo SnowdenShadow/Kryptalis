@@ -343,17 +343,17 @@ export default function MonitoringPage() {
       {stats && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground">{stats.cpu.model}</span>
-          <span>{stats.cpu.cores} cores</span>
+          <span>{stats.cpu.cores} {t('monitoring.cores')}</span>
           <span className="capitalize">{stats.platform} {stats.release}</span>
           <span>{stats.arch}</span>
-          <span>Up {stats.uptime.formatted}</span>
+          <span>{t('monitoring.up')} {stats.uptime.formatted}</span>
         </div>
       )}
 
       {!stats ? (
         <Card>
           <CardContent className="flex items-center justify-center py-16">
-            <p className="text-sm text-muted-foreground">Loading server stats...</p>
+            <p className="text-sm text-muted-foreground">{t('monitoring.loadingStats')}</p>
           </CardContent>
         </Card>
       ) : (
@@ -375,7 +375,7 @@ export default function MonitoringPage() {
                     CPU
                   </div>
                   <p className="text-lg font-bold leading-tight">{cpuAvg.toFixed(1)}%</p>
-                  <p className="text-[10px] text-muted-foreground">{stats.cpu.cores} cores</p>
+                  <p className="text-[10px] text-muted-foreground">{stats.cpu.cores} {t('monitoring.cores')}</p>
                 </div>
               </div>
             </Card>
@@ -435,7 +435,7 @@ export default function MonitoringPage() {
                     Network
                   </div>
                   <p className="text-sm font-bold leading-tight font-mono">{primaryIp}</p>
-                  <p className="text-[10px] text-muted-foreground">{ifaceCount} interface{ifaceCount !== 1 ? 's' : ''}</p>
+                  <p className="text-[10px] text-muted-foreground">{ifaceCount} {ifaceCount !== 1 ? t('monitoring.interfaces') : t('monitoring.interface')}</p>
                 </div>
               </div>
             </Card>
@@ -449,7 +449,7 @@ export default function MonitoringPage() {
                 <CardHeader className="px-4 py-3 pb-0">
                   <CardTitle className="flex items-center gap-2 text-sm font-medium">
                     <Cpu size={14} className="text-violet-500" />
-                    CPU History
+                    {t('monitoring.cpuHistory')}
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="px-4 pb-3 pt-2">
@@ -501,7 +501,7 @@ export default function MonitoringPage() {
                 <CardHeader className="px-4 py-3 pb-0">
                   <CardTitle className="flex items-center gap-2 text-sm font-medium">
                     <MemoryStick size={14} className="text-blue-500" />
-                    Memory History
+                    {t('monitoring.memoryHistory')}
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="px-4 pb-3 pt-2">
@@ -533,7 +533,7 @@ export default function MonitoringPage() {
                         />
                         <Tooltip
                           {...chartTooltipStyle}
-                          formatter={(value: number) => [`${value} GB`, 'RAM Used']}
+                          formatter={(value: number) => [`${value} GB`, t('monitoring.ramUsedLabel')]}
                         />
                         <Area
                           type="monotone"
@@ -557,7 +557,7 @@ export default function MonitoringPage() {
               <CardHeader className="px-4 py-3 pb-0">
                 <CardTitle className="flex items-center gap-2 text-sm font-medium">
                   <HardDrive size={14} className="text-orange-500" />
-                  Disk Usage
+                  {t('monitoring.diskUsage')}
                 </CardTitle>
               </CardHeader>
               <CardContent className="px-4 pb-4 pt-3">
@@ -575,15 +575,15 @@ export default function MonitoringPage() {
                   </div>
                   <div className="grid grid-cols-3 gap-3 text-center flex-1">
                     <div>
-                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Used</p>
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{t('monitoring.used')}</p>
                       <p className="text-sm font-bold">{diskUsedGB} GB</p>
                     </div>
                     <div>
-                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Free</p>
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{t('monitoring.free')}</p>
                       <p className="text-sm font-bold">{diskFreeGB} GB</p>
                     </div>
                     <div>
-                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Total</p>
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{t('monitoring.total')}</p>
                       <p className="text-sm font-bold">{diskTotalGB} GB</p>
                     </div>
                   </div>
@@ -602,7 +602,7 @@ export default function MonitoringPage() {
               <CardHeader className="px-4 py-3 pb-0">
                 <CardTitle className="flex items-center gap-2 text-sm font-medium">
                   <Container size={14} className="text-blue-500" />
-                  Docker Containers
+                  {t('monitoring.dockerContainers')}
                   {stats.dockerContainers.length > 0 && (
                     <Badge variant="secondary" className="ml-auto text-[10px]">
                       {stats.dockerContainers.length}
@@ -612,16 +612,16 @@ export default function MonitoringPage() {
               </CardHeader>
               <CardContent className="px-0 pb-0 pt-2">
                 {stats.dockerContainers.length === 0 ? (
-                  <p className="px-4 pb-4 text-xs text-muted-foreground">No containers running</p>
+                  <p className="px-4 pb-4 text-xs text-muted-foreground">{t('monitoring.noContainersRunning')}</p>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs">
                       <thead>
                         <tr className="border-b border-border text-left text-muted-foreground">
-                          <th className="px-4 py-1.5 font-medium">Name</th>
-                          <th className="px-4 py-1.5 font-medium">Image</th>
-                          <th className="px-4 py-1.5 font-medium">Status</th>
-                          <th className="px-4 py-1.5 font-medium">Ports</th>
+                          <th className="px-4 py-1.5 font-medium">{t('monitoring.colName')}</th>
+                          <th className="px-4 py-1.5 font-medium">{t('monitoring.colImage')}</th>
+                          <th className="px-4 py-1.5 font-medium">{t('monitoring.colStatus')}</th>
+                          <th className="px-4 py-1.5 font-medium">{t('monitoring.colPorts')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -652,21 +652,21 @@ export default function MonitoringPage() {
               <CardHeader className="px-4 py-3 pb-0">
                 <CardTitle className="flex items-center gap-2 text-sm font-medium">
                   <Activity size={14} className="text-violet-500" />
-                  Top Processes
-                  <span className="ml-auto text-[10px] text-muted-foreground font-normal">by memory</span>
+                  {t('monitoring.topProcesses')}
+                  <span className="ml-auto text-[10px] text-muted-foreground font-normal">{t('monitoring.byMemory')}</span>
                 </CardTitle>
               </CardHeader>
               <CardContent className="px-0 pb-0 pt-2">
                 {topProcesses.length === 0 ? (
-                  <p className="px-4 pb-4 text-xs text-muted-foreground">No process data</p>
+                  <p className="px-4 pb-4 text-xs text-muted-foreground">{t('monitoring.noProcessData')}</p>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs">
                       <thead>
                         <tr className="border-b border-border text-left text-muted-foreground">
                           <th className="px-4 py-1.5 font-medium">#</th>
-                          <th className="px-4 py-1.5 font-medium">Process</th>
-                          <th className="px-4 py-1.5 font-medium text-right">Memory</th>
+                          <th className="px-4 py-1.5 font-medium">{t('monitoring.colProcess')}</th>
+                          <th className="px-4 py-1.5 font-medium text-right">{t('monitoring.colMemory')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -693,12 +693,12 @@ export default function MonitoringPage() {
               <CardHeader className="px-4 py-3 pb-0">
                 <CardTitle className="flex items-center gap-2 text-sm font-medium">
                   <Network size={14} className="text-violet-500" />
-                  Network Interfaces
+                  {t('monitoring.networkInterfaces')}
                 </CardTitle>
               </CardHeader>
               <CardContent className="px-4 pb-4 pt-3">
                 {stats.network.interfaces.length === 0 ? (
-                  <p className="text-xs text-muted-foreground">No interfaces detected</p>
+                  <p className="text-xs text-muted-foreground">{t('monitoring.noInterfaces')}</p>
                 ) : (
                   <div className="space-y-2">
                     {stats.network.interfaces.map((iface) => (
@@ -746,9 +746,9 @@ export default function MonitoringPage() {
               {alertRules.length === 0 ? (
                 <CardContent className="flex flex-col items-center justify-center py-8">
                   <Bell size={28} className="mb-2 text-muted-foreground" />
-                  <p className="text-sm font-medium">No alert rules configured</p>
+                  <p className="text-sm font-medium">{t('monitoring.noAlertRules')}</p>
                   <p className="mt-0.5 text-xs text-muted-foreground">
-                    Create rules to get notified when metrics exceed thresholds
+                    {t('monitoring.noAlertRulesDesc')}
                   </p>
                 </CardContent>
               ) : (
@@ -761,7 +761,7 @@ export default function MonitoringPage() {
                           <th className="px-4 py-2 font-medium">{t('monitoring.metric')}</th>
                           <th className="px-4 py-2 font-medium">{t('monitoring.threshold')}</th>
                           <th className="px-4 py-2 font-medium">{t('monitoring.channel')}</th>
-                          <th className="px-4 py-2 font-medium">Actions</th>
+                          <th className="px-4 py-2 font-medium">{t('common.actions')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -802,9 +802,9 @@ export default function MonitoringPage() {
           {/* Add Alert Dialog */}
           <Dialog open={showAlertDialog} onClose={() => setShowAlertDialog(false)}>
             <DialogHeader>
-              <DialogTitle>Create Alert Rule</DialogTitle>
+              <DialogTitle>{t('monitoring.createAlertRule')}</DialogTitle>
               <DialogDescription>
-                Get notified when a metric exceeds a threshold.
+                {t('monitoring.createAlertDesc')}
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-4">
@@ -812,7 +812,7 @@ export default function MonitoringPage() {
                 <Label htmlFor="alert-name">{t('common.name')}</Label>
                 <Input
                   id="alert-name"
-                  placeholder="e.g. High CPU Alert"
+                  placeholder={t('monitoring.alertNamePlaceholder')}
                   value={alertForm.name}
                   onChange={(e) => setAlertForm((f) => ({ ...f, name: e.target.value }))}
                 />
@@ -847,15 +847,15 @@ export default function MonitoringPage() {
                   value={alertForm.channel}
                   onChange={(e) => setAlertForm((f) => ({ ...f, channel: e.target.value }))}
                 >
-                  <option value="EMAIL">Email</option>
-                  <option value="DISCORD">Discord</option>
-                  <option value="SLACK">Slack</option>
-                  <option value="WEBHOOK">Webhook</option>
+                  <option value="EMAIL">{t('monitoring.channelEmail')}</option>
+                  <option value="DISCORD">{t('monitoring.channelDiscord')}</option>
+                  <option value="SLACK">{t('monitoring.channelSlack')}</option>
+                  <option value="WEBHOOK">{t('monitoring.channelWebhook')}</option>
                 </Select>
               </div>
               {alertForm.channel === 'WEBHOOK' && (
                 <div className="space-y-2">
-                  <Label htmlFor="alert-webhook">Webhook URL</Label>
+                  <Label htmlFor="alert-webhook">{t('monitoring.webhookUrl')}</Label>
                   <Input
                     id="alert-webhook"
                     placeholder="https://..."
@@ -873,7 +873,7 @@ export default function MonitoringPage() {
                 onClick={handleCreateAlert}
                 disabled={!alertForm.name || createAlert.isPending}
               >
-                {createAlert.isPending ? 'Creating...' : t('common.create')}
+                {createAlert.isPending ? t('common.creating') : t('common.create')}
               </Button>
             </DialogFooter>
           </Dialog>

@@ -71,12 +71,14 @@ interface DnsRecords {
   checkedAt: string;
 }
 
-function timeAgo(d: string) {
-  const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+function makeTimeAgo(t: (k: string, v?: Record<string, string | number>) => string) {
+  return (d: string) => {
+    const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
+    if (s < 60) return t('domains.timeJust');
+    if (s < 3600) return t('domains.timeMin', { n: Math.floor(s / 60) });
+    if (s < 86400) return t('domains.timeHour', { n: Math.floor(s / 3600) });
+    return t('domains.timeDay', { n: Math.floor(s / 86400) });
+  };
 }
 
 function daysUntil(d: string) {
@@ -124,6 +126,7 @@ function groupByApex(domains: Domain[]): ApexGroup[] {
 
 // ── DNS Health badge component ────────────────────────────────────────
 function HealthBadge({ domainId }: { domainId: string }) {
+  const { t } = useTranslation();
   const { data: health, refetch, isFetching } = useQuery<DnsHealth>({
     queryKey: ['domain-health', domainId],
     queryFn: () => api.get(`/domains/${domainId}/health`),
@@ -137,7 +140,7 @@ function HealthBadge({ domainId }: { domainId: string }) {
     : 0;
   const overall: DnsCheckStatus = failCount > 0 ? 'FAIL' : warnCount > 0 ? 'WARN' : 'OK';
   const variant = overall === 'OK' ? 'success' : overall === 'WARN' ? 'warning' : 'destructive';
-  const label = overall === 'OK' ? 'DNS OK' : overall === 'WARN' ? `${warnCount} warn` : `${failCount} fail`;
+  const label = overall === 'OK' ? t('domains.dnsOk') : overall === 'WARN' ? t('domains.dnsWarn', { n: warnCount }) : t('domains.dnsFail', { n: failCount });
 
   return (
     <button
@@ -175,6 +178,8 @@ function DomainCard({
   onOpenDns: (d: Domain) => void;
   copiedId: string;
 }) {
+  const { t } = useTranslation();
+  const timeAgo = useMemo(() => makeTimeAgo(t), [t]);
   const sslOk = domain.sslStatus === 'ACTIVE';
   const sslPending = domain.sslStatus === 'PENDING';
   const sslBad = domain.sslStatus === 'EXPIRED' || domain.sslStatus === 'ERROR';
@@ -204,24 +209,24 @@ function DomainCard({
                   className="text-[10px]"
                   title={
                     domain.status === 'ACTIVE'
-                      ? 'Domain is live and routing traffic to its app.'
+                      ? t('domains.statusTitleActive')
                       : domain.status === 'PENDING'
-                      ? 'Domain reserved — SSL is being provisioned. Link an app to start serving traffic.'
-                      : 'Domain is not reachable.'
+                      ? t('domains.statusTitlePending')
+                      : t('domains.statusTitleError')
                   }
                 >
-                  {domain.status === 'PENDING' ? 'RESERVED' : domain.status}
+                  {domain.status === 'PENDING' ? t('domains.statusReserved') : domain.status}
                 </Badge>
                 <HealthBadge domainId={domain.id} />
                 <span className="text-[10px] text-muted-foreground">{timeAgo(domain.createdAt)}</span>
               </div>
             </div>
             <div className="flex gap-1 shrink-0">
-              <Button size="sm" variant="outline" title="DNS records & health"
+              <Button size="sm" variant="outline" title={t('domains.dnsRecordsHealth')}
                 onClick={() => onOpenDns(domain)}>
                 <Info size={12} />
               </Button>
-              <Button size="sm" variant="outline" title="Add subdomain"
+              <Button size="sm" variant="outline" title={t('domains.addSubdomain')}
                 onClick={() => onAddSubdomain(domain.domain)}>
                 <Plus size={12} />
               </Button>
@@ -234,29 +239,29 @@ function DomainCard({
           {/* info row: SSL + app + project */}
           <div className="grid grid-cols-3 gap-2 text-xs">
             <div className="rounded-md border border-border p-2">
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider">SSL</p>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{t('domains.sslLabel')}</p>
               <div className="flex items-center gap-1 mt-0.5">
                 {sslOk && <ShieldCheck size={12} className="text-emerald-500" />}
                 {sslPending && <Lock size={12} className="text-orange-500" />}
                 {sslBad && <ShieldX size={12} className="text-red-500" />}
                 <span className={cn('text-xs font-semibold', sslOk ? 'text-emerald-500' : sslPending ? 'text-orange-500' : sslBad ? 'text-red-500' : '')}>
-                  {sslOk ? 'Active' : sslPending ? 'Pending' : domain.sslStatus === 'EXPIRED' ? 'Expired' : 'Error'}
+                  {sslOk ? t('domains.sslActive') : sslPending ? t('domains.sslPending') : domain.sslStatus === 'EXPIRED' ? t('domains.sslExpired') : t('domains.sslError')}
                 </span>
               </div>
               {expiryDays !== null && sslOk && (
                 <p className="text-[10px] text-muted-foreground mt-0.5">
-                  {expiryDays}d left
+                  {t('domains.daysLeft', { n: expiryDays })}
                 </p>
               )}
               {(sslBad || (sslOk && expiryDays !== null && expiryDays < 30)) && (
                 <Button size="sm" variant="outline" className="mt-1 h-5 text-[10px] px-1.5"
                   onClick={() => onRenew(domain.id)}>
-                  <RefreshCw size={9} /> Renew
+                  <RefreshCw size={9} /> {t('domains.renew')}
                 </Button>
               )}
             </div>
             <div className="rounded-md border border-border p-2">
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider">App</p>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{t('domains.appLabel')}</p>
               {domain.application ? (
                 <Link href={`/dashboard/applications/${domain.application.id}`} className="text-xs font-medium hover:underline block truncate">
                   {domain.application.name}
@@ -266,7 +271,7 @@ function DomainCard({
               )}
             </div>
             <div className="rounded-md border border-border p-2">
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Project</p>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{t('domains.projectLabel')}</p>
               {(() => {
                 const proj = domain.project || domain.application?.project;
                 return proj ? (
@@ -311,6 +316,7 @@ function DnsHealthDialog({
   onCopy: (text: string, id: string) => void;
   copiedId: string;
 }) {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<'health' | 'records'>('health');
   const { data, isLoading, isFetching, refetch } = useQuery<DnsHealth>({
     queryKey: ['domain-health-detail', domain.id],
@@ -336,7 +342,7 @@ function DnsHealthDialog({
           <Globe size={16} /> {domain.domain}
         </DialogTitle>
         <DialogDescription>
-          Live DNS resolution check + the records you should set at your registrar.
+          {t('domains.dialogDesc')}
         </DialogDescription>
       </DialogHeader>
 
@@ -349,7 +355,7 @@ function DnsHealthDialog({
             tab === 'health' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'
           )}
         >
-          Health & recommended
+          {t('domains.tabHealth')}
         </button>
         <button
           onClick={() => setTab('records')}
@@ -358,7 +364,7 @@ function DnsHealthDialog({
             tab === 'records' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'
           )}
         >
-          All records
+          {t('domains.tabRecords')}
         </button>
       </div>
 
@@ -374,10 +380,10 @@ function DnsHealthDialog({
             {/* live checks */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Live verification</p>
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('domains.liveVerification')}</p>
                 <Button size="sm" variant="outline" onClick={() => refetch()} disabled={isFetching}>
                   {isFetching ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
-                  Recheck
+                  {t('domains.recheck')}
                 </Button>
               </div>
               {Object.entries(data.checks).map(([key, check]) => {
@@ -401,14 +407,14 @@ function DnsHealthDialog({
                 );
               })}
               <p className="text-[10px] text-muted-foreground">
-                Resolved against Cloudflare (1.1.1.1) at {new Date(data.checkedAt).toLocaleTimeString()}.
+                {t('domains.resolvedAt', { time: new Date(data.checkedAt).toLocaleTimeString() })}
               </p>
             </div>
 
             {/* records to set */}
             {data.recommendedRecords.length > 0 && (
               <div className="space-y-2">
-                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Records to set at your DNS provider</p>
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('domains.recordsToSet')}</p>
                 {data.recommendedRecords.map((r, i) => {
                   const value = r.priority !== undefined ? `${r.priority} ${r.value}` : r.value;
                   const copyText = `${r.host}\t${r.type}\t${value}`;
@@ -423,7 +429,7 @@ function DnsHealthDialog({
                         <button
                           className="ml-auto text-muted-foreground hover:text-foreground"
                           onClick={() => onCopy(copyText, cid)}
-                          title="Copy host / type / value"
+                          title={t('domains.copyHostTypeValue')}
                         >
                           {copiedId === cid ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
                         </button>
@@ -435,10 +441,10 @@ function DnsHealthDialog({
                 {data.hasMail && (
                   <div className="rounded-md border border-orange-500/30 bg-orange-500/5 p-2.5 text-xs">
                     <p className="font-semibold text-orange-500 flex items-center gap-1">
-                      <Mail size={11} /> Mail server attached
+                      <Mail size={11} /> {t('domains.mailServerAttached')}
                     </p>
                     <p className="text-muted-foreground mt-1">
-                      Open the Email tab for the full deliverability check (SPF / DKIM / DMARC / PTR / autodiscover).
+                      {t('domains.mailServerHint')}
                     </p>
                   </div>
                 )}
@@ -459,14 +465,14 @@ function DnsHealthDialog({
                 {/* Reconciliation: expected vs actual */}
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Expected records</p>
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('domains.expectedRecords')}</p>
                     <Button size="sm" variant="outline" onClick={() => refetchRecords()} disabled={recordsFetching}>
                       {recordsFetching ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
-                      Verify now
+                      {t('domains.verifyNow')}
                     </Button>
                   </div>
                   {records.expected.length === 0 ? (
-                    <p className="text-xs text-muted-foreground italic">No specific records expected for this domain.</p>
+                    <p className="text-xs text-muted-foreground italic">{t('domains.noExpectedRecords')}</p>
                   ) : (
                     records.expected.map((e, i) => {
                       const cls =
@@ -492,7 +498,7 @@ function DnsHealthDialog({
                             <button
                               className="ml-auto text-muted-foreground hover:text-foreground"
                               onClick={() => onCopy(copyText, cid)}
-                              title="Copy host / type / value"
+                              title={t('domains.copyHostTypeValue')}
                             >
                               {copiedId === cid ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
                             </button>
@@ -500,11 +506,11 @@ function DnsHealthDialog({
                           <p className="text-[10px] text-muted-foreground">{e.reason}</p>
                           {e.status === 'WRONG' && e.actualValue && (
                             <p className="text-[10px] text-red-500 font-mono">
-                              Currently resolves to: {e.actualValue}
+                              {t('domains.currentlyResolves', { value: e.actualValue })}
                             </p>
                           )}
                           {e.status === 'MISSING' && (
-                            <p className="text-[10px] text-orange-500">Not set yet.</p>
+                            <p className="text-[10px] text-orange-500">{t('domains.notSetYet')}</p>
                           )}
                         </div>
                       );
@@ -514,7 +520,7 @@ function DnsHealthDialog({
 
                 {/* All detected records */}
                 <div className="space-y-2 mt-4">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Currently detected (live)</p>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('domains.currentlyDetected')}</p>
                   {(['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS'] as DnsRecordType[]).map((type) => {
                     const list = records.actual[type];
                     if (!list || list.length === 0) return null;
@@ -522,7 +528,7 @@ function DnsHealthDialog({
                       <div key={type} className="rounded-md border border-border p-2.5">
                         <div className="flex items-center gap-2 mb-1">
                           <Badge variant="outline" className="font-mono text-[10px]">{type}</Badge>
-                          <span className="text-[10px] text-muted-foreground">{list.length} record{list.length > 1 ? 's' : ''}</span>
+                          <span className="text-[10px] text-muted-foreground">{list.length > 1 ? t('domains.recordsCount', { n: list.length }) : t('domains.recordSingle', { n: list.length })}</span>
                         </div>
                         {list.map((r, i) => (
                           <p key={i} className="font-mono text-[11px] break-all">
@@ -533,13 +539,13 @@ function DnsHealthDialog({
                       </div>
                     );
                   })}
-                  {(['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS'] as DnsRecordType[]).every((t) => (records.actual[t] || []).length === 0) && (
-                    <p className="text-xs text-muted-foreground italic">No records detected. Domain may not be propagated yet.</p>
+                  {(['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'NS'] as DnsRecordType[]).every((typ) => (records.actual[typ] || []).length === 0) && (
+                    <p className="text-xs text-muted-foreground italic">{t('domains.noRecordsDetected')}</p>
                   )}
                 </div>
 
                 <p className="text-[10px] text-muted-foreground mt-2">
-                  Resolved against Cloudflare (1.1.1.1) at {new Date(records.checkedAt).toLocaleTimeString()}.
+                  {t('domains.resolvedAt', { time: new Date(records.checkedAt).toLocaleTimeString() })}
                 </p>
               </>
             )}
@@ -548,7 +554,7 @@ function DnsHealthDialog({
       </div>
 
       <DialogFooter>
-        <Button variant="outline" onClick={onClose}>Close</Button>
+        <Button variant="outline" onClick={onClose}>{t('domains.close')}</Button>
       </DialogFooter>
     </Dialog>
   );
@@ -746,23 +752,23 @@ export default function DomainsPage() {
           )} />
           <div className="flex-1">
             <p className="text-sm font-medium">
-              Reverse proxy {proxyStatus.running ? 'running' : 'stopped'}
+              {proxyStatus.running ? t('domains.proxyRunning') : t('domains.proxyStopped')}
             </p>
             <p className="text-xs text-muted-foreground">
               {proxyStatus.running
-                ? 'Caddy is routing traffic from :80/:443 to your linked apps.'
-                : 'Apps with linked domains are only reachable via their host port directly.'}
+                ? t('domains.proxyRunningDesc')
+                : t('domains.proxyStoppedDesc')}
             </p>
           </div>
           {proxyStatus.running ? (
             <Button size="sm" variant="outline" disabled={proxySyncMutation.isPending}
               onClick={() => proxySyncMutation.mutate()}>
-              <RefreshCw size={12} /> {proxySyncMutation.isPending ? 'Reloading...' : 'Resync'}
+              <RefreshCw size={12} /> {proxySyncMutation.isPending ? t('domains.proxyReloading') : t('domains.proxyResync')}
             </Button>
           ) : (
             <Button size="sm" disabled={proxyStartMutation.isPending}
               onClick={() => proxyStartMutation.mutate()}>
-              {proxyStartMutation.isPending ? 'Starting...' : 'Start'}
+              {proxyStartMutation.isPending ? t('domains.proxyStarting') : t('domains.proxyStart')}
             </Button>
           )}
         </div>
@@ -773,12 +779,12 @@ export default function DomainsPage() {
         <div className="flex items-center gap-3 flex-wrap">
           <div className="relative flex-1 max-w-md">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <Input placeholder="Search domains..." className="pl-9" value={search} onChange={e => setSearch(e.target.value)} />
+            <Input placeholder={t('domains.searchPlaceholder')} className="pl-9" value={search} onChange={e => setSearch(e.target.value)} />
           </div>
           {projects.length > 0 && (
             <div className="flex items-center gap-2 flex-wrap">
               <Button size="sm" variant={filterProjectId === '' ? 'default' : 'outline'} onClick={() => setFilterProjectId('')}>
-                All
+                {t('domains.filterAll')}
               </Button>
               {projects.map((p) => (
                 <Button
@@ -832,13 +838,13 @@ export default function DomainsPage() {
                     <Globe size={12} />
                     <span className="font-mono">{g.apex}</span>
                     <Badge variant="outline" className="text-[10px]">
-                      {totalCount} record{totalCount !== 1 ? 's' : ''}
+                      {totalCount !== 1 ? t('domains.groupRecords', { n: totalCount }) : t('domains.groupRecord', { n: totalCount })}
                     </Badge>
                   </button>
                   {!g.apexDomain && (
                     <Button size="sm" variant="outline" className="h-7 text-xs"
                       onClick={() => openAddSubdomain(g.apex)}>
-                      <Plus size={11} /> Sub
+                      <Plus size={11} /> {t('domains.subShort')}
                     </Button>
                   )}
                 </div>
@@ -889,28 +895,28 @@ export default function DomainsPage() {
       <Dialog open={showAdd} onClose={closeAdd}>
         <DialogHeader>
           <DialogTitle>{t('domains.add')}</DialogTitle>
-          <DialogDescription>Add an apex domain or a subdomain</DialogDescription>
+          <DialogDescription>{t('domains.addDesc')}</DialogDescription>
         </DialogHeader>
         <form onSubmit={handleCreate} className="space-y-4">
           <div className="space-y-2">
-            <Label>Domain name</Label>
+            <Label>{t('domains.domainName')}</Label>
             <Input
               data-domain-input
-              placeholder="app.example.com"
+              placeholder={t('domains.domainPlaceholder')}
               value={domainName}
               onChange={e => setDomainName(e.target.value)}
               required
               className="font-mono"
             />
             <p className="text-[10px] text-muted-foreground">
-              Apex (athexis.xyz) → A record. Subdomain (api.athexis.xyz) → CNAME to the apex.
+              {t('domains.domainHint')}
             </p>
           </div>
 
           <div className="space-y-2">
-            <Label>Project *</Label>
+            <Label>{t('domains.projectRequired')}</Label>
             <Select value={createProjectId} onChange={(e) => { setCreateProjectId(e.target.value); setApplicationId(''); }} required>
-              <option value="">— Select a project —</option>
+              <option value="">{t('domains.selectProject')}</option>
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
@@ -919,28 +925,28 @@ export default function DomainsPage() {
 
           {createProjectId && appsForCreate.length > 0 && (
             <div className="space-y-2">
-              <Label>Application (optional)</Label>
+              <Label>{t('domains.applicationOptional')}</Label>
               <Select value={applicationId} onChange={(e) => setApplicationId(e.target.value)}>
-                <option value="">— No app —</option>
+                <option value="">{t('domains.noApp')}</option>
                 {appsForCreate.map((a) => (
                   <option key={a.id} value={a.id}>{a.name}</option>
                 ))}
               </Select>
               <p className="text-xs text-muted-foreground">
-                Optional — link to an app to route HTTP traffic to it. Leave empty for mail-only domains.
+                {t('domains.appHint')}
               </p>
             </div>
           )}
           <div className="flex items-center gap-2">
             <input id="auto-ssl" type="checkbox" checked={autoSsl} onChange={e => setAutoSsl(e.target.checked)} className="h-4 w-4 rounded border-input" />
-            <Label htmlFor="auto-ssl">Auto SSL (Let's Encrypt)</Label>
+            <Label htmlFor="auto-ssl">{t('domains.autoSslLabel')}</Label>
           </div>
           <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1">
             <p className="text-xs text-muted-foreground">
-              <strong>1.</strong> At your DNS provider, add:{' '}
+              <strong>1.</strong> {t('domains.dnsStep1')}{' '}
               {(() => {
                 const h = domainName.trim();
-                if (!h || h.startsWith('.')) return <span className="font-mono">{h || 'your domain'} → {serverIp}</span>;
+                if (!h || h.startsWith('.')) return <span className="font-mono">{h || t('domains.yourDomain')} → {serverIp}</span>;
                 const labels = h.split('.');
                 if (labels.length > 2) {
                   return <span className="font-mono">CNAME {h} → {labels.slice(-2).join('.')}</span>;
@@ -949,7 +955,7 @@ export default function DomainsPage() {
               })()}
             </p>
             <p className="text-xs text-muted-foreground">
-              <strong>2.</strong> Wait ~5 min for propagation. SSL provisions automatically.
+              <strong>2.</strong> {t('domains.dnsStep2')}
             </p>
           </div>
           <DialogFooter>
@@ -975,19 +981,19 @@ export default function DomainsPage() {
 
       <Dialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)}>
         <DialogHeader>
-          <DialogTitle>Delete Domain</DialogTitle>
+          <DialogTitle>{t('domains.deleteTitle')}</DialogTitle>
           <DialogDescription>
-            Delete <span className="font-mono font-semibold text-foreground">{deleteTarget?.domain}</span>?
+            {t('domains.deleteConfirm', { domain: deleteTarget?.domain || '' })}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2 px-1 pb-2">
-          <p className="text-sm font-medium">This will permanently remove:</p>
+          <p className="text-sm font-medium">{t('domains.deleteWillRemove')}</p>
           <ul className="text-sm list-disc list-inside text-muted-foreground space-y-1">
-            <li>The DNS guide, SSL certificate, and reverse-proxy route</li>
-            <li>The mail server stack (if deployed)</li>
-            <li>All mailboxes, aliases, stored emails, and the DKIM key</li>
+            <li>{t('domains.deleteItem1')}</li>
+            <li>{t('domains.deleteItem2')}</li>
+            <li>{t('domains.deleteItem3')}</li>
           </ul>
-          <p className="text-xs text-orange-500 font-medium pt-1">This action is irreversible.</p>
+          <p className="text-xs text-orange-500 font-medium pt-1">{t('domains.deleteIrreversible')}</p>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t('common.cancel')}</Button>

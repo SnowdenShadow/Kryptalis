@@ -79,6 +79,13 @@ function formatBytes(bytes: number): string {
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
 
+const ACTION_TOAST_KEY: Record<string, string> = {
+  start: 'docker.toastStart',
+  stop: 'docker.toastStop',
+  restart: 'docker.toastRestart',
+  remove: 'docker.toastRemove',
+};
+
 export default function DockerPage() {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<Tab>('containers');
@@ -118,7 +125,8 @@ export default function DockerPage() {
     mutationFn: ({ containerId, action }: { containerId: string; action: string }) =>
       api.post(`/docker/servers/${serverId}/containers/action`, { containerId, action }),
     onSuccess: (_, { action }) => {
-      toast.success(`Container ${action} successful`);
+      const key = ACTION_TOAST_KEY[action] ?? 'docker.toastStart';
+      toast.success(t(key));
       queryClient.invalidateQueries({ queryKey: ['docker', 'containers', serverId] });
     },
     onError: (error: Error) => {
@@ -136,14 +144,13 @@ export default function DockerPage() {
       </div>
 
       <div className="rounded-lg border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
-        Docker shows <strong>all containers</strong> running on your server, including system containers.
-        To manage Kryptalis-deployed applications, use the <a href="/dashboard/applications" className="text-primary hover:underline">Applications</a> page.
+        {t('docker.infoBannerPrefix')}<strong>{t('docker.infoBannerBold')}</strong>{t('docker.infoBannerMiddle')}<a href="/dashboard/applications" className="text-primary hover:underline">{t('docker.infoBannerLink')}</a>{t('docker.infoBannerSuffix')}
       </div>
 
       {!serverId ? (
         <Card>
           <CardContent className="flex items-center justify-center py-16">
-            <p className="text-sm text-muted-foreground">Loading server...</p>
+            <p className="text-sm text-muted-foreground">{t('docker.loadingServer')}</p>
           </CardContent>
         </Card>
       ) : (
@@ -172,14 +179,14 @@ export default function DockerPage() {
             <Card>
               {containersLoading ? (
                 <CardContent className="flex items-center justify-center py-16">
-                  <p className="text-sm text-muted-foreground">Loading containers...</p>
+                  <p className="text-sm text-muted-foreground">{t('docker.loadingContainers')}</p>
                 </CardContent>
               ) : containers.length === 0 ? (
                 <CardContent className="flex flex-col items-center justify-center py-16">
                   <Container size={48} className="mb-4 text-muted-foreground" />
                   <p className="text-lg font-medium">{t('docker.noContainers')}</p>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Deploy an application to create containers
+                    {t('docker.noContainersDesc')}
                   </p>
                 </CardContent>
               ) : (
@@ -188,11 +195,11 @@ export default function DockerPage() {
                     <table className="w-full">
                       <thead>
                         <tr className="border-b border-border text-left text-sm text-muted-foreground">
-                          <th className="px-6 py-3 font-medium">Name</th>
-                          <th className="px-6 py-3 font-medium">Image</th>
-                          <th className="px-6 py-3 font-medium">Status</th>
-                          <th className="px-6 py-3 font-medium">Ports</th>
-                          <th className="px-6 py-3 font-medium">Actions</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colName')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colImage')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colStatus')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colPorts')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colActions')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -223,7 +230,7 @@ export default function DockerPage() {
                                   size="icon"
                                   variant="ghost"
                                   className="h-8 w-8"
-                                  title="Start"
+                                  title={t('docker.actionStart')}
                                   disabled={containerAction.isPending}
                                   onClick={() =>
                                     containerAction.mutate({
@@ -238,7 +245,7 @@ export default function DockerPage() {
                                   size="icon"
                                   variant="ghost"
                                   className="h-8 w-8"
-                                  title="Stop"
+                                  title={t('docker.actionStop')}
                                   disabled={containerAction.isPending}
                                   onClick={() =>
                                     containerAction.mutate({
@@ -253,7 +260,7 @@ export default function DockerPage() {
                                   size="icon"
                                   variant="ghost"
                                   className="h-8 w-8"
-                                  title="Restart"
+                                  title={t('docker.actionRestart')}
                                   disabled={containerAction.isPending}
                                   onClick={() =>
                                     containerAction.mutate({
@@ -268,7 +275,7 @@ export default function DockerPage() {
                                   size="icon"
                                   variant="ghost"
                                   className="h-8 w-8 text-destructive"
-                                  title="Remove"
+                                  title={t('docker.actionRemove')}
                                   disabled={containerAction.isPending}
                                   onClick={() =>
                                     containerAction.mutate({
@@ -296,14 +303,14 @@ export default function DockerPage() {
             <Card>
               {imagesLoading ? (
                 <CardContent className="flex items-center justify-center py-16">
-                  <p className="text-sm text-muted-foreground">Loading images...</p>
+                  <p className="text-sm text-muted-foreground">{t('docker.loadingImages')}</p>
                 </CardContent>
               ) : images.length === 0 ? (
                 <CardContent className="flex flex-col items-center justify-center py-16">
                   <Image size={48} className="mb-4 text-muted-foreground" />
                   <p className="text-lg font-medium">{t('docker.noImages')}</p>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Pull or build Docker images to get started
+                    {t('docker.noImagesDesc')}
                   </p>
                 </CardContent>
               ) : (
@@ -312,10 +319,10 @@ export default function DockerPage() {
                     <table className="w-full">
                       <thead>
                         <tr className="border-b border-border text-left text-sm text-muted-foreground">
-                          <th className="px-6 py-3 font-medium">ID</th>
-                          <th className="px-6 py-3 font-medium">Tags</th>
-                          <th className="px-6 py-3 font-medium">Size</th>
-                          <th className="px-6 py-3 font-medium">Created</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colId')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colTags')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colSize')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colCreated')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -336,7 +343,7 @@ export default function DockerPage() {
                                     </Badge>
                                   ))
                                 ) : (
-                                  <span className="text-sm text-muted-foreground">&lt;none&gt;</span>
+                                  <span className="text-sm text-muted-foreground">{t('docker.tagNone')}</span>
                                 )}
                               </div>
                             </td>
@@ -361,14 +368,14 @@ export default function DockerPage() {
             <Card>
               {networksLoading ? (
                 <CardContent className="flex items-center justify-center py-16">
-                  <p className="text-sm text-muted-foreground">Loading networks...</p>
+                  <p className="text-sm text-muted-foreground">{t('docker.loadingNetworks')}</p>
                 </CardContent>
               ) : networks.length === 0 ? (
                 <CardContent className="flex flex-col items-center justify-center py-16">
                   <Network size={48} className="mb-4 text-muted-foreground" />
                   <p className="text-lg font-medium">{t('docker.noNetworks')}</p>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Docker networks will appear here
+                    {t('docker.noNetworksDesc')}
                   </p>
                 </CardContent>
               ) : (
@@ -377,9 +384,9 @@ export default function DockerPage() {
                     <table className="w-full">
                       <thead>
                         <tr className="border-b border-border text-left text-sm text-muted-foreground">
-                          <th className="px-6 py-3 font-medium">Name</th>
-                          <th className="px-6 py-3 font-medium">Driver</th>
-                          <th className="px-6 py-3 font-medium">Scope</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colName')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colDriver')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colScope')}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -410,14 +417,14 @@ export default function DockerPage() {
             <Card>
               {volumesLoading ? (
                 <CardContent className="flex items-center justify-center py-16">
-                  <p className="text-sm text-muted-foreground">Loading volumes...</p>
+                  <p className="text-sm text-muted-foreground">{t('docker.loadingVolumes')}</p>
                 </CardContent>
               ) : volumes.length === 0 ? (
                 <CardContent className="flex flex-col items-center justify-center py-16">
                   <HardDrive size={48} className="mb-4 text-muted-foreground" />
                   <p className="text-lg font-medium">{t('docker.noVolumes')}</p>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Docker volumes will appear here
+                    {t('docker.noVolumesDesc')}
                   </p>
                 </CardContent>
               ) : (
@@ -426,9 +433,9 @@ export default function DockerPage() {
                     <table className="w-full">
                       <thead>
                         <tr className="border-b border-border text-left text-sm text-muted-foreground">
-                          <th className="px-6 py-3 font-medium">Name</th>
-                          <th className="px-6 py-3 font-medium">Driver</th>
-                          <th className="px-6 py-3 font-medium">Mountpoint</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colName')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colDriver')}</th>
+                          <th className="px-6 py-3 font-medium">{t('docker.colMountpoint')}</th>
                         </tr>
                       </thead>
                       <tbody>
