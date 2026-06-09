@@ -4,8 +4,10 @@ import { useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus, Loader2, Server, Copy, Check, RefreshCw, Trash2, Power,
-  KeyRound, AlertCircle, Eye, EyeOff, Calendar,
+  KeyRound, AlertCircle, Eye, EyeOff, Calendar, Terminal as TerminalIcon,
+  ExternalLink,
 } from 'lucide-react';
+import Link from 'next/link';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -148,11 +150,18 @@ export default function SftpPage() {
             chrooted to the app's own directory.
           </p>
         </div>
-        {selectedAppId && (
-          <Button onClick={() => setShowCreate(true)}>
-            <Plus size={14} /> New account
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          <Link href="/dashboard/terminal">
+            <Button variant="outline" size="sm">
+              <TerminalIcon size={14} /> Web Terminal
+            </Button>
+          </Link>
+          {selectedAppId && (
+            <Button onClick={() => setShowCreate(true)}>
+              <Plus size={14} /> New account
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* App picker */}
@@ -182,6 +191,7 @@ export default function SftpPage() {
           {/* Connection info card */}
           <ConnectionInfoCard
             appName={selectedApp.name}
+            firstUsername={accounts.find((a) => !a.disabled)?.username}
             copy={copy}
             copied={copied}
           />
@@ -331,27 +341,43 @@ export default function SftpPage() {
 // hand to Filezilla. Pulls the hostname from window.location since the
 // dashboard is served on the same host as sshd.
 function ConnectionInfoCard({
-  appName, copy, copied,
+  appName, firstUsername, copy, copied,
 }: {
   appName: string;
+  firstUsername?: string;
   copy: (text: string, label: string) => void;
   copied: string | null;
 }) {
   const host = typeof window !== 'undefined' ? window.location.hostname : 'your-server';
   const port = 2222;
-  const sftpUrl = `sftp://${host}:${port}`;
-  const cliExample = `sftp -P ${port} <username>@${host}`;
+  // Sample username placeholder lets the user copy a working command
+  // straight away if they already have an account, while making the
+  // "fill in the blank" obvious when they don't.
+  const username = firstUsername || '<username>';
+  const sftpUrl = `sftp://${username}@${host}:${port}`;
+  const cliExample = `sftp -P ${port} ${username}@${host}`;
+  // FileZilla's site manager doesn't accept a URL bar paste with port
+  // and credentials inline, but it DOES accept a URL bar quickconnect
+  // — fine for the URL line, but the host+port form is what users
+  // actually paste into File → Site Manager.
+  const root = '/app';
 
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm">Connection for {appName}</CardTitle>
+        <CardTitle className="text-sm flex items-center gap-2">
+          Connection for {appName}
+          <Badge variant="outline" className="text-[10px] gap-1">SFTP</Badge>
+        </CardTitle>
+        <CardDescription className="text-xs">
+          Once connected, your files live under <code className="px-1 py-0.5 rounded bg-muted font-mono text-[10px]">{root}/</code>.
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-2">
         <ConnLine label="Host" value={host} onCopy={() => copy(host, 'host')} copied={copied === 'host'} />
         <ConnLine label="Port" value={String(port)} onCopy={() => copy(String(port), 'port')} copied={copied === 'port'} />
-        <ConnLine label="Protocol" value="SFTP (SSH File Transfer Protocol)" />
-        <ConnLine label="Filezilla URL" value={sftpUrl} onCopy={() => copy(sftpUrl, 'url')} copied={copied === 'url'} />
+        <ConnLine label="Protocol" value="SFTP — SSH File Transfer Protocol" />
+        <ConnLine label="Quickconnect" value={sftpUrl} onCopy={() => copy(sftpUrl, 'url')} copied={copied === 'url'} />
         <ConnLine label="CLI" value={cliExample} onCopy={() => copy(cliExample, 'cli')} copied={copied === 'cli'} />
       </CardContent>
     </Card>

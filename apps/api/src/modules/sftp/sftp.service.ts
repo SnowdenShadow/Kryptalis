@@ -383,7 +383,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
           where: { id: row.id },
           data: { disabled: true },
         });
-        await this.audit('system', 'disable', row.id, row.username, { reason: 'expired' });
+        await this.audit(null, 'disable', row.id, row.username, { reason: 'expired' });
       } catch (err: any) {
         this.logger.warn(`Sweep of ${row.username} failed: ${err?.message || err}`);
       }
@@ -396,22 +396,43 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    * Append an AuditLog row. Failures are swallowed — we never want to
    * roll back a successful CRUD because of a logging blip — but logged
    * loudly so ops can investigate.
+   *
+   * The schema is { userId, action, resource, resourceId, details } —
+   * we used to write the wrong field names (resourceType / metadata)
+   * which silently dropped every row via the `as any` escape hatch.
+   *
+   * userId can be `null` for system-driven events (expiry sweep). The
+   * column itself is non-nullable + has an FK, so we use the createdBy
+   * field of the underlying account row in that case.
    */
   private async audit(
-    userId: string,
+    userId: string | null,
     action: 'create' | 'rotate' | 'disable' | 'enable' | 'update' | 'delete',
     accountId: string,
     username: string,
     extra: Record<string, unknown> = {},
   ): Promise<void> {
     try {
-      await (this.prisma as any).auditLog?.create?.({
+      // System events have no acting user — fall back to the account
+      // creator so the FK stays valid and the audit trail still
+      // attributes the change to a real user. The `reason` field in
+      // details disambiguates ("expired" vs a real CRUD).
+      let actor = userId;
+      if (!actor) {
+        const row = await this.prisma.sftpAccount.findUnique({
+          where: { id: accountId },
+          select: { createdById: true },
+        });
+        actor = row?.createdById ?? null;
+      }
+      if (!actor) return;
+      await this.prisma.auditLog.create({
         data: {
-          userId,
-          resourceType: 'sftp_account',
+          userId: actor,
+          resource: 'sftp_account',
           resourceId: accountId,
           action: `sftp.${action}`,
-          metadata: { username, ...extra },
+          details: { username, ...extra },
         },
       });
     } catch (e: any) {
@@ -554,8 +575,12 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     // the mount might already be gone (manual cleanup, container
     // recreate without resync, etc.) and we still want userdel to
     // run.
+    // `umount -l` (lazy): detach the mount even if a session has a
+    // descriptor open inside. The actual unmount completes when the
+    // last fd closes. Without -l, deleting a user with a live session
+    // would block here and leave the bind mount stuck.
     await this.dockerExec(
-      ['sh', '-c', `umount /home/${username}/app 2>/dev/null || true`],
+      ['sh', '-c', `umount -l /home/${username}/app 2>/dev/null || true`],
       { allowFailure: true, timeoutMs: 5_000 },
     );
     await this.dockerExec(
@@ -659,16 +684,34 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     this.assertChrootPathSafe(chrootSource);
     const home = `/home/${username}`;
     const bindTarget = `${home}/app`;
+    // We always re-mount on apply. A previous mount might point at a
+    // stale source (the app was redeployed and the Docker volume name
+    // changed, e.g. on a marketplace re-install), or it might be a
+    // stale entry left after a container recreate where the kernel
+    // tracking is gone. Cheap unconditional umount + remount keeps the
+    // bind always pointing at the freshly-resolved source — and
+    // because mount --bind doesn't copy data, the cost is microseconds.
+    //
+    // `umount -l` (lazy) so we don't block on a still-busy mount from
+    // a live SFTP session — the actual bind goes away once the last
+    // descriptor closes. `|| true` because the first apply on a new
+    // user has nothing to umount.
     await this.dockerExec(
       ['sh', '-c',
         // Sterile chroot leaf.
         `chown root:root ${home} && chmod 0755 ${home} && ` +
         `mkdir -p ${bindTarget} && ` +
-        // Idempotent bind mount. If something is mounted at bindTarget
-        // already (e.g. resync after container restart and a previous
-        // session left it mounted), skip — `mountpoint -q` short-
-        // circuits cleanly.
-        `if ! mountpoint -q ${bindTarget}; then mount --bind ${chrootSource} ${bindTarget}; fi`,
+        // Make sure the source actually exists before we mount. For
+        // git deploys the path is created on first deploy; SFTP-only
+        // workflows (provision the user before pushing code) would
+        // otherwise blow up here with "mount: special device does not
+        // exist". `mkdir -p` is harmless if the dir already exists.
+        `mkdir -p ${chrootSource} && ` +
+        // Drop any existing mount first so we're never pointing at a
+        // stale Docker volume path or old chroot source.
+        `umount -l ${bindTarget} 2>/dev/null || true ; ` +
+        // Bind the fresh source.
+        `mount --bind ${chrootSource} ${bindTarget}`,
       ],
       { timeoutMs: 15_000 },
     );
