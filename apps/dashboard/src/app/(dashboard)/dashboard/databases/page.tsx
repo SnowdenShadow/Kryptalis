@@ -38,30 +38,13 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
+import type { DatabaseResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
-interface DatabaseItem {
-  id: string;
-  name: string;
-  type: string;
-  serverId: string;
-  projectId: string | null;
-  applicationId: string | null;
-  host: string;
-  port: number;
-  username: string;
-  password: string;
-  size: string | null;
-  createdAt: string;
-  status: string;
-  connectionString: string;
-  autoImported?: boolean;
-  serviceName?: string | null;
-  project?: { id: string; name: string } | null;
-  application?: { id: string; name: string } | null;
-}
+// Shared API resource type — local alias keeps the diff/readability small.
+type DatabaseItem = DatabaseResponse;
 
 interface ProjectOpt { id: string; name: string }
 interface AppOpt { id: string; name: string; projectId: string }

@@ -30,25 +30,15 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
+import type { BackupResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
-interface Backup {
-  id: string;
-  name: string;
-  serverId: string;
-  server?: { id: string; name: string } | null;
-  target: string;
-  status: string;
-  size: number | null;
-  sizeBytes: number | string | null;
-  sha256: string | null;
-  encryptedAt: boolean;
-  schedule: string | null;
-  lastRunAt: string | null;
-  createdAt: string;
-}
+// Shared API resource type — local alias keeps the diff/readability small.
+// Note: GET /backups returns plain rows (no `server` relation) — the server
+// name is resolved locally against the /servers/local query.
+type Backup = BackupResponse;
 
 const TARGETS = [
   { value: 'LOCAL', label: 'Local' },
@@ -253,7 +243,7 @@ export default function BackupsPage() {
                       <td className="px-6 py-4 text-sm text-muted-foreground">
                         <span className="flex items-center gap-1">
                           <Server size={14} />
-                          {backup.server?.name || '—'}
+                          {(backup.serverId === server?.id ? server?.name : null) || '—'}
                         </span>
                       </td>
                       <td className="px-6 py-4">

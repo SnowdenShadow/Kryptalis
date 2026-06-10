@@ -43,6 +43,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
+import type { ApplicationResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -54,26 +55,8 @@ import { QuickDeployDialog } from './quick-deploy';
 // Types
 // ---------------------------------------------------------------------------
 
-interface Application {
-  id: string;
-  name: string;
-  projectId: string;
-  framework: string;
-  status: string;
-  gitUrl: string | null;
-  gitBranch: string | null;
-  port: number | null;
-  hostPort?: number | null;
-  createdAt: string;
-  project?: { id: string; name: string };
-  customPort?: boolean;
-  domains?: { id: string; domain: string; sslStatus: string }[];
-  portBindings?: {
-    id: string;
-    port: number;
-    domain: { id: string; domain: string; sslStatus: string };
-  }[];
-}
+// Shared API resource type — local alias keeps the diff/readability small.
+type Application = ApplicationResponse;
 
 interface ProjectOption {
   id: string;

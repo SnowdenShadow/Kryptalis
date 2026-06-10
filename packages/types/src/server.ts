@@ -9,22 +9,38 @@ export interface CreateServerRequest {
   password?: string;
 }
 
+export interface AgentTokenResponse {
+  id: string;
+  token: string;
+  serverId?: string;
+  expiresAt?: string | null;
+  createdAt?: string;
+}
+
+/**
+ * Server as returned by GET /servers (full Prisma row).
+ * BigInt columns (totalMemory, totalDisk) are serialized as decimal strings
+ * by the API (see BigInt.prototype.toJSON in apps/api/src/main.ts) — wrap
+ * them in Number() with a guard before doing arithmetic.
+ */
 export interface ServerResponse {
   id: string;
   name: string;
   host: string;
   port: number;
   username: string;
-  status: ServerStatus;
+  status: `${ServerStatus}`;
   os: string | null;
   arch: string | null;
-  totalMemory: number | null;
-  totalDisk: number | null;
+  totalMemory: string | null;
+  totalDisk: string | null;
   cpuCores: number | null;
   agentVersion: string | null;
   lastSeenAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Included by GET /servers/local only. */
+  agentTokens?: AgentTokenResponse[];
 }
 
 export interface ServerMetrics {

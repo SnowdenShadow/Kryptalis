@@ -17,17 +17,14 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import type { DomainResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { makeTimeAgo } from '@/lib/app-format';
 
-interface Domain {
-  id: string; domain: string; applicationId: string | null; projectId: string | null;
-  status: string; sslStatus: string; sslExpiresAt: string | null; createdAt: string;
-  project?: { id: string; name: string } | null;
-  application?: { id: string; name: string; project?: { id: string; name: string } } | null;
-}
+// Shared API resource type — local alias keeps the diff/readability small.
+type Domain = DomainResponse;
 
 type DnsCheckStatus = 'OK' | 'WARN' | 'FAIL' | 'UNKNOWN';
 interface DnsCheck { status: DnsCheckStatus; message: string }
