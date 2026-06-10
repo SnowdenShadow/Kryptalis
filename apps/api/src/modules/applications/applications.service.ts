@@ -2071,6 +2071,7 @@ export class ApplicationsService {
       });
       await this.runDockerImageDeploy(deployment.id, app.id, app.name, app.dockerImage, {
         port: app.port ?? undefined,
+        hostPort: app.hostPort ?? undefined,
         envVars: this.decryptEnvVars(app.envVars),
       });
       return { message: 'Image re-pulled and stack recreated', deploymentId: deployment.id };
@@ -2100,6 +2101,7 @@ export class ApplicationsService {
     });
     this.runDeploy(deployment.id, id, app.name, app.gitUrl, app.gitBranch || 'main', {
       port: app.port,
+      hostPort: app.hostPort ?? undefined,
       envVars: this.decryptEnvVars(app.envVars),
       buildCommand: app.buildCommand,
       startCommand: app.startCommand,
