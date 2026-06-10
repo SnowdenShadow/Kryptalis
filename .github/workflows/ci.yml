@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  node:
+    name: Node (API + Dashboard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build shared types
+        run: pnpm --filter @kryptalis/types build
+
+      - name: Generate Prisma client
+        working-directory: apps/api
+        run: pnpm exec prisma generate
+
+      - name: Type-check API
+        run: pnpm --filter @kryptalis/api exec tsc --noEmit
+
+      - name: Type-check Dashboard
+        run: pnpm --filter @kryptalis/dashboard exec tsc --noEmit
+
+      - name: Lint API
+        continue-on-error: false
+        run: pnpm --filter @kryptalis/api lint
+
+      - name: Lint Dashboard
+        continue-on-error: false
+        run: pnpm --filter @kryptalis/dashboard lint
+
+      - name: Test API
+        run: pnpm --filter @kryptalis/api exec vitest run --passWithNoTests
+
+  go:
+    name: Go (Agent)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/agent
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: apps/agent/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./...

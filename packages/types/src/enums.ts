@@ -1,31 +1,41 @@
+// Mirrors of the Prisma enums (apps/api/prisma/schema.prisma).
+//
+// Values are UPPERCASE strings because that is what the API actually
+// serializes — the previous lowercase values ('running', 'deploy') never
+// matched a real API response, which is why nothing consumed this package.
+// Keep these in sync with schema.prisma when adding values.
+
 export enum ServerStatus {
-  ONLINE = 'online',
-  OFFLINE = 'offline',
-  PROVISIONING = 'provisioning',
-  MAINTENANCE = 'maintenance',
-  ERROR = 'error',
+  ONLINE = 'ONLINE',
+  OFFLINE = 'OFFLINE',
+  PROVISIONING = 'PROVISIONING',
+  PENDING_INSTALL = 'PENDING_INSTALL',
+  MAINTENANCE = 'MAINTENANCE',
+  ERROR = 'ERROR',
 }
 
 export enum DeploymentStatus {
-  PENDING = 'pending',
-  BUILDING = 'building',
-  DEPLOYING = 'deploying',
-  RUNNING = 'running',
-  FAILED = 'failed',
-  CANCELLED = 'cancelled',
-  ROLLING_BACK = 'rolling_back',
-  ROLLED_BACK = 'rolled_back',
+  PENDING = 'PENDING',
+  BUILDING = 'BUILDING',
+  DEPLOYING = 'DEPLOYING',
+  RUNNING = 'RUNNING',
+  FAILED = 'FAILED',
+  CANCELLED = 'CANCELLED',
+  ROLLING_BACK = 'ROLLING_BACK',
+  ROLLED_BACK = 'ROLLED_BACK',
 }
 
 export enum ApplicationStatus {
-  RUNNING = 'running',
-  STOPPED = 'stopped',
-  BUILDING = 'building',
-  DEPLOYING = 'deploying',
-  ERROR = 'error',
-  UNKNOWN = 'unknown',
+  RUNNING = 'RUNNING',
+  STOPPED = 'STOPPED',
+  BUILDING = 'BUILDING',
+  DEPLOYING = 'DEPLOYING',
+  ERROR = 'ERROR',
+  UNKNOWN = 'UNKNOWN',
 }
 
+// Docker container states (docker inspect .State.Status) — these ARE
+// lowercase on the wire, that's Docker's format, not Prisma's.
 export enum ContainerStatus {
   RUNNING = 'running',
   STOPPED = 'stopped',
@@ -36,98 +46,122 @@ export enum ContainerStatus {
 }
 
 export enum DomainStatus {
-  ACTIVE = 'active',
-  PENDING = 'pending',
-  ERROR = 'error',
+  ACTIVE = 'ACTIVE',
+  PENDING = 'PENDING',
+  ERROR = 'ERROR',
 }
 
 export enum SSLStatus {
-  ACTIVE = 'active',
-  PENDING = 'pending',
-  EXPIRED = 'expired',
-  ERROR = 'error',
+  ACTIVE = 'ACTIVE',
+  PENDING = 'PENDING',
+  EXPIRED = 'EXPIRED',
+  ERROR = 'ERROR',
 }
 
 export enum BackupStatus {
-  PENDING = 'pending',
-  IN_PROGRESS = 'in_progress',
-  COMPLETED = 'completed',
-  FAILED = 'failed',
+  PENDING = 'PENDING',
+  IN_PROGRESS = 'IN_PROGRESS',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
 }
 
 export enum BackupTarget {
-  LOCAL = 'local',
-  S3 = 's3',
-  R2 = 'r2',
-  B2 = 'b2',
+  LOCAL = 'LOCAL',
+  S3 = 'S3',
+  R2 = 'R2',
+  B2 = 'B2',
 }
 
 export enum DatabaseType {
-  POSTGRESQL = 'postgresql',
-  MYSQL = 'mysql',
-  MARIADB = 'mariadb',
-  REDIS = 'redis',
-  KEYDB = 'keydb',
-  DRAGONFLY = 'dragonfly',
-  MONGODB = 'mongodb',
-  CLICKHOUSE = 'clickhouse',
+  POSTGRESQL = 'POSTGRESQL',
+  MYSQL = 'MYSQL',
+  MARIADB = 'MARIADB',
+  REDIS = 'REDIS',
+  KEYDB = 'KEYDB',
+  DRAGONFLY = 'DRAGONFLY',
+  MONGODB = 'MONGODB',
+  CLICKHOUSE = 'CLICKHOUSE',
 }
 
 export enum GitProvider {
-  GITHUB = 'github',
-  GITLAB = 'gitlab',
-  BITBUCKET = 'bitbucket',
-  FORGEJO = 'forgejo',
-  GITEA = 'gitea',
+  GITHUB = 'GITHUB',
+  GITLAB = 'GITLAB',
+  BITBUCKET = 'BITBUCKET',
+  FORGEJO = 'FORGEJO',
+  GITEA = 'GITEA',
 }
 
 export enum AppFramework {
-  NEXTJS = 'nextjs',
-  REACT = 'react',
-  VUE = 'vue',
-  ANGULAR = 'angular',
-  NESTJS = 'nestjs',
-  EXPRESS = 'express',
-  LARAVEL = 'laravel',
-  SYMFONY = 'symfony',
-  DJANGO = 'django',
-  FLASK = 'flask',
-  FASTAPI = 'fastapi',
-  STATIC = 'static',
-  DOCKER = 'docker',
-  DOCKER_COMPOSE = 'docker_compose',
+  NEXTJS = 'NEXTJS',
+  REACT = 'REACT',
+  VUE = 'VUE',
+  ANGULAR = 'ANGULAR',
+  NESTJS = 'NESTJS',
+  EXPRESS = 'EXPRESS',
+  LARAVEL = 'LARAVEL',
+  SYMFONY = 'SYMFONY',
+  DJANGO = 'DJANGO',
+  FLASK = 'FLASK',
+  FASTAPI = 'FASTAPI',
+  STATIC = 'STATIC',
+  DOCKER = 'DOCKER',
+  DOCKER_COMPOSE = 'DOCKER_COMPOSE',
 }
 
 export enum UserRole {
-  ADMIN = 'admin',
-  USER = 'user',
-  VIEWER = 'viewer',
+  SUPERADMIN = 'SUPERADMIN',
+  ADMIN = 'ADMIN',
+  USER = 'USER',
+  VIEWER = 'VIEWER',
+}
+
+export enum UserStatus {
+  ACTIVE = 'ACTIVE',
+  SUSPENDED = 'SUSPENDED',
+  BANNED = 'BANNED',
+  PENDING_VERIFICATION = 'PENDING_VERIFICATION',
+}
+
+export enum ProjectRole {
+  OWNER = 'OWNER',
+  ADMIN = 'ADMIN',
+  DEVELOPER = 'DEVELOPER',
+  VIEWER = 'VIEWER',
 }
 
 export enum TaskType {
-  DEPLOY = 'deploy',
-  BUILD = 'build',
-  RESTART = 'restart',
-  STOP = 'stop',
-  BACKUP = 'backup',
-  SSL_ISSUE = 'ssl_issue',
-  SSL_RENEW = 'ssl_renew',
-  DNS_UPDATE = 'dns_update',
-  MONITOR = 'monitor',
+  DEPLOY = 'DEPLOY',
+  BUILD = 'BUILD',
+  START = 'START',
+  RESTART = 'RESTART',
+  STOP = 'STOP',
+  REMOVE = 'REMOVE',
+  LOGS = 'LOGS',
+  EXEC = 'EXEC',
+  STATUS = 'STATUS',
+  FILE_READ = 'FILE_READ',
+  FILE_WRITE = 'FILE_WRITE',
+  BACKUP = 'BACKUP',
+  SSL_ISSUE = 'SSL_ISSUE',
+  SSL_RENEW = 'SSL_RENEW',
+  DNS_UPDATE = 'DNS_UPDATE',
+  MONITOR = 'MONITOR',
+  VOLUME_EXPORT = 'VOLUME_EXPORT',
+  VOLUME_IMPORT = 'VOLUME_IMPORT',
 }
 
 export enum TaskStatus {
-  QUEUED = 'queued',
-  RUNNING = 'running',
-  COMPLETED = 'completed',
-  FAILED = 'failed',
+  QUEUED = 'QUEUED',
+  RUNNING = 'RUNNING',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
 }
 
 export enum AlertChannel {
-  EMAIL = 'email',
-  DISCORD = 'discord',
-  SLACK = 'slack',
-  WEBHOOK = 'webhook',
+  EMAIL = 'EMAIL',
+  DISCORD = 'DISCORD',
+  SLACK = 'SLACK',
+  WEBHOOK = 'WEBHOOK',
 }
 
 export enum DNSRecordType {
@@ -136,6 +170,7 @@ export enum DNSRecordType {
   CNAME = 'CNAME',
   TXT = 'TXT',
   MX = 'MX',
+  NS = 'NS',
   CAA = 'CAA',
   SRV = 'SRV',
 }

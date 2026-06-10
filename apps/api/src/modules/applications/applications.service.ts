@@ -35,7 +35,7 @@ const APPS_DIR = path.join(DATA_DIR, 'apps');
 // ── helpers ──────────────────────────────────────────────────────────────
 
 // Identical to the agent's `sanitize()` — must stay byte-for-byte equivalent.
-function slugify(name: string) {
+export function slugify(name: string) {
   return name
     .toLowerCase()
     .normalize('NFKD')

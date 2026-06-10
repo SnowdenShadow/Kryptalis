@@ -17,7 +17,7 @@ import { ApplicationsService } from './applications.service';
 
 type RawRequest = Request & { rawBody?: Buffer };
 
-function timingSafeStrEq(a: string, b: string): boolean {
+export function timingSafeStrEq(a: string, b: string): boolean {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);
   if (ba.length !== bb.length) return false;

@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/kryptalis/agent/internal/config"
@@ -123,16 +122,8 @@ func (m *Monitor) collectMetrics() SystemMetrics {
 			}
 		}
 
-		// disk via statfs of /
-		var fs syscall.Statfs_t
-		if err := syscall.Statfs("/", &fs); err == nil {
-			total := fs.Blocks * uint64(fs.Bsize)
-			free := fs.Bavail * uint64(fs.Bsize)
-			metrics.DiskTotal = total
-			if total > free {
-				metrics.DiskUsed = total - free
-			}
-		}
+		// disk via statfs of / (linux-only syscall, see statfs_linux.go)
+		metrics.DiskTotal, metrics.DiskUsed = diskUsage("/")
 	}
 
 	return metrics
