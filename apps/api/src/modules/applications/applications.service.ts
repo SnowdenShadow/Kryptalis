@@ -1484,7 +1484,27 @@ export class ApplicationsService {
       let envFile: string | undefined;
       if (opts.envVars && Object.keys(opts.envVars).length) {
         envFile = path.join(appDir, '.kryptalis.env');
-        fs.writeFileSync(envFile, this.serializeEnv(opts.envVars));
+        const serialized = this.serializeEnv(opts.envVars);
+        fs.writeFileSync(envFile, serialized);
+        // Also overwrite the repo's `.env` files with the merged values.
+        // Critical for build-time inlining: Next.js / Vite / CRA read `.env`
+        // directly from the source tree during `npm run build`, NOT from
+        // the compose `env_file:` runtime variables. `docker compose
+        // --env-file .kryptalis.env` only substitutes ${VAR} in the YAML;
+        // it never replaces an `env_file: .env` declared INSIDE the
+        // compose. So we mirror the merged env into every common .env
+        // name the framework might consume. The repo's original .env
+        // values are already merged in `mergedEnv` (lowest priority) so
+        // we're not losing anything — we're just persisting the result.
+        for (const name of ['.env', '.env.local', '.env.production']) {
+          const target = path.join(appDir, name);
+          // Only overwrite when the file existed in the repo OR the user
+          // gave us something — don't create stray files in repos that
+          // never had a .env.
+          if (fs.existsSync(target) || Object.keys(opts.envVars).length) {
+            try { fs.writeFileSync(target, serialized); } catch {}
+          }
+        }
         log(`> merged env (${Object.keys(repoEnv).length} from repo, ${Object.keys(opts.envVars).length} total)`);
         // persist (encrypted) so redeploy keeps the merge
         await this.prisma.application.update({
@@ -1627,8 +1647,16 @@ export class ApplicationsService {
         // Defensive: nuke any container squatting the explicit names this
         // compose declares (leftovers from a failed deploy, etc).
         await removeCollidingContainers(content, log);
-        log('> docker compose up -d --build');
-        const r2 = await dockerCompose(appDir, ['up', '-d', '--build', '--remove-orphans'], envFile, 900_000);
+        // Force a fresh build so frameworks that inline env vars at build
+        // time (Next.js NEXT_PUBLIC_*, Vite VITE_*, Angular fileReplacements)
+        // pick up the latest values. Without --no-cache, Docker reuses
+        // cached layers based on COPY/RUN steps — which don't see env
+        // file changes — and the rebuilt image bakes in stale values.
+        log('> docker compose build --no-cache');
+        const rb = await dockerCompose(appDir, ['build', '--no-cache', '--pull'], envFile, 900_000).catch((e: any) => ({ stdout: '', stderr: e?.stderr || e?.message || '' }));
+        log(rb.stdout + rb.stderr);
+        log('> docker compose up -d --force-recreate');
+        const r2 = await dockerCompose(appDir, ['up', '-d', '--force-recreate', '--remove-orphans'], envFile, 900_000);
         log(r2.stdout + r2.stderr);
       } else if (hasDockerfile) {
         const img = imageName(slug);
