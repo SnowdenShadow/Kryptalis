@@ -279,13 +279,20 @@ export class MailServerService implements OnApplicationBootstrap {
     // cryptic "address already in use" and the operator would have no
     // actionable signal. Probe ALL the ports we're going to publish; if any
     // is taken, throw with the exact remediation command.
-    const portsToCheck = [
-      { port: ports.smtp, label: 'SMTP' },
-      { port: ports.submission, label: 'Submission' },
-      { port: ports.smtps, label: 'SMTPS' },
-      { port: ports.imap, label: 'IMAP' },
-      { port: ports.imaps, label: 'IMAPS' },
-    ];
+    //
+    // First deploy ONLY: on a re-deploy the probe would hit our own running
+    // container (allocatePorts returns the existing range) and 400 every
+    // time. runDeploy force-removes that container before `compose up`, so
+    // its ports are guaranteed to be released mid-pipeline.
+    const portsToCheck = existing
+      ? []
+      : [
+          { port: ports.smtp, label: 'SMTP' },
+          { port: ports.submission, label: 'Submission' },
+          { port: ports.smtps, label: 'SMTPS' },
+          { port: ports.imap, label: 'IMAP' },
+          { port: ports.imaps, label: 'IMAPS' },
+        ];
     const conflicts: { port: number; label: string }[] = [];
     for (const { port, label } of portsToCheck) {
       const occupied = await this.isHostPortOccupied(port);

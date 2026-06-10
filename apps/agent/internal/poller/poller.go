@@ -216,8 +216,17 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.tasks.Backup(tctx, task.ID, task.Payload)
 	case "RESTORE":
 		result, taskErr = p.tasks.Restore(tctx, task.Payload)
-	case "SSL_ISSUE", "SSL_RENEW", "DNS_UPDATE", "MONITOR":
-		result = map[string]interface{}{"status": "not_implemented"}
+	case "SSL_ISSUE", "SSL_RENEW":
+		// TLS termination for apps lives on the platform host's managed
+		// reverse proxy (Caddy) — agent servers have no managed proxy to
+		// issue or install certificates with. Report FAILED with an explicit
+		// error: the previous `not_implemented` result reported COMPLETED,
+		// which made the API/UI believe a certificate had been issued when
+		// nothing happened.
+		taskErr = fmt.Sprintf("%s requires the managed reverse proxy (Caddy), which is not available on agent servers — certificates are issued on the platform host", task.Type)
+	// DNS_UPDATE and MONITOR are never emitted by the API (DNS is managed
+	// API-side; metrics flow through heartbeats — internal/monitor). They
+	// fall through to default and report FAILED instead of a fake COMPLETED.
 	default:
 		taskErr = fmt.Sprintf("unknown task type: %s", task.Type)
 	}

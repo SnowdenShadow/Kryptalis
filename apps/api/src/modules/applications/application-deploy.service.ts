@@ -718,6 +718,11 @@ export class ApplicationDeployService {
     // move the previous appDir aside before rewriting it, and swap it back
     // on failure. rename (not cpSync) is used: it's atomic on the same
     // filesystem and costs zero disk/time even with a huge node_modules.
+    // LIMITATION: the snapshot restores the CONFIG (appDir: compose files,
+    // source, Dockerfile) only — docker volumes and databases are NOT
+    // snapshotted (`down` keeps them, see below). A failed deploy that
+    // already ran a DB schema migration is not un-migrated by this rollback;
+    // the old code comes back up against the new schema.
     const prevDir = `${appDir}.prev`;
     let hasPrevSnapshot = false;
 

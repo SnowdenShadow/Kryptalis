@@ -3,11 +3,14 @@ import {
   Logger,
   NotFoundException,
   ForbiddenException,
+  BadRequestException,
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
 import {
   assertProjectAccess,
   listAccessibleProjectIds,
@@ -16,8 +19,7 @@ import {
 /**
  * Expiry-warning window. Rows in ssl_certificates are NOT auto-renewed by
  * the platform: Caddy's auto-renew path only reconciles Domain.sslStatus /
- * sslExpiresAt (reverse-proxy.service), and the agent's SSL_ISSUE task is
- * still `not_implemented` — nothing in the codebase refreshes
+ * sslExpiresAt (reverse-proxy.service) — nothing in the codebase refreshes
  * SSLCertificate.expiresAt. So a cert ≤14 days from expiry genuinely needs
  * operator action, and 14 days is the classic "renew now" lead time.
  * If these rows ever become Caddy-managed, drop this to 7 (renewal happens
@@ -47,6 +49,8 @@ export class SslService implements OnModuleInit, OnModuleDestroy {
     private prisma: PrismaService,
     // Injected from the @Global NotificationsModule (same as monitoring/backups).
     private notifications: NotificationsService,
+    // @Global ReverseProxyModule — Caddy is the actual cert issuer.
+    private proxy: ReverseProxyService,
   ) {}
 
   onModuleInit() {
@@ -129,6 +133,24 @@ export class SslService implements OnModuleInit, OnModuleDestroy {
     return { notified };
   }
 
+  /**
+   * Issue (or re-issue) a certificate for a domain.
+   *
+   * Certificates are issued by the managed reverse proxy (Caddy) running on
+   * the platform host — it terminates TLS for every domain, including apps
+   * deployed on remote agent servers (Caddy proxies to them). So "issue SSL"
+   * means: make sure the domain has a Caddyfile block and let Caddy run the
+   * ACME flow, then let the periodic syncSslStatuses() reconcile
+   * Domain.sslStatus once the cert lands.
+   *
+   * Historical note: this used to enqueue an SSL_ISSUE AgentTask when the
+   * domain's app lived on a remote server. The Go agent never implemented it
+   * (it answered `not_implemented` … with status COMPLETED, so the task
+   * silently "succeeded" while no cert was issued anywhere). Remote servers
+   * have no managed reverse proxy to install a cert into — issuance has
+   * always happened on the platform host's Caddy. The dead enqueue is gone;
+   * the agent now rejects SSL_ISSUE/SSL_RENEW with an explicit FAILED.
+   */
   async issue(userId: string, domainId: string) {
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) throw new NotFoundException('Domain not found');
@@ -142,19 +164,11 @@ export class SslService implements OnModuleInit, OnModuleDestroy {
       await assertProjectAccess(this.prisma, userId, domain.projectId, 'DEVELOPER');
     }
 
-    const app = await this.prisma.application.findFirst({
-      where: { id: domain.applicationId || '' },
-      include: { project: { include: { server: true } } },
-    });
-
-    if (app?.project?.server) {
-      await this.prisma.agentTask.create({
-        data: {
-          serverId: app.project.server.id,
-          type: 'SSL_ISSUE',
-          payload: { domainId, domain: domain.domain },
-        },
-      });
+    // *.local & friends are served plain-HTTP by Caddy (no ACME possible).
+    if (this.isLocalOnlyDomain(domain.domain)) {
+      throw new BadRequestException(
+        `'${domain.domain}' is a local hostname — Let's Encrypt cannot issue certificates for it.`,
+      );
     }
 
     await this.prisma.domain.update({
@@ -162,7 +176,29 @@ export class SslService implements OnModuleInit, OnModuleDestroy {
       data: { sslStatus: 'PENDING' },
     });
 
-    return { message: 'SSL issuance queued' };
+    // Rebuild the Caddyfile and reload Caddy: ensures the domain has a block
+    // (ACME kicks off immediately) and, for renewals, forces a config-load
+    // pass where Caddy re-checks cert lifetimes. regenerate() also schedules
+    // delayed syncSslStatuses() passes that flip sslStatus → ACTIVE once the
+    // cert is on disk.
+    await this.proxy.regenerate();
+
+    return { message: 'SSL issuance triggered — certificate is provisioned by the managed reverse proxy' };
+  }
+
+  /** Hostnames Caddy serves without TLS — mirrors reverse-proxy.service's
+   *  private isLocalHostname() heuristic exactly (plus the LOCAL_HOSTS set). */
+  private isLocalOnlyDomain(host: string): boolean {
+    const h = host.toLowerCase();
+    return (
+      h === 'localhost' ||
+      h.endsWith('.local') ||
+      h.endsWith('.localhost') ||
+      h.endsWith('.test') ||
+      h.endsWith('.invalid') ||
+      /^\d+\.\d+\.\d+\.\d+$/.test(h) ||
+      isLocalHost(h)
+    );
   }
 
   async renew(userId: string, certificateId: string) {

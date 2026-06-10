@@ -14,6 +14,7 @@ import {
   Lock,
   Unlock,
   ShieldCheck,
+  CalendarClock,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -61,6 +62,56 @@ const targetVariant: Record<string, 'default' | 'secondary' | 'outline'> = {
   B2: 'outline',
 };
 
+/**
+ * Schedule presets matching the API's supported subset (see
+ * apps/api/src/modules/backups/backup-schedule.util.ts): @hourly, @daily,
+ * @weekly, or a 5-field cron "<minute> <hour> * * *". 'custom' expands to
+ * the cron form from a time picker; '' means manual-only (no schedule sent).
+ */
+const SCHEDULE_PRESETS = ['', '@hourly', '@daily', '@weekly', 'custom'] as const;
+type SchedulePreset = (typeof SCHEDULE_PRESETS)[number];
+
+const PRESET_LABEL_KEY: Record<SchedulePreset, string> = {
+  '': 'backups.scheduleNone',
+  '@hourly': 'backups.scheduleHourly',
+  '@daily': 'backups.scheduleDaily',
+  '@weekly': 'backups.scheduleWeekly',
+  custom: 'backups.scheduleCustom',
+};
+
+/** "HH:MM" → "<minute> <hour> * * *", or null when not a valid time. */
+function timeToCron(time: string): string | null {
+  const m = time.match(/^(\d{1,2}):(\d{1,2})$/);
+  if (!m) return null;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  if (hour > 23 || minute > 59) return null;
+  return `${minute} ${hour} * * *`;
+}
+
+/**
+ * Human label for a stored schedule expression. Rows with schedule null are
+ * one-off dumps (incl. the "(YYYY-MM-DD HH:mm)" children the scheduler
+ * spawns) and render as "—" without a badge.
+ */
+function scheduleBadgeLabel(
+  schedule: string,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): string {
+  if (schedule === '@hourly') return t('backups.scheduleBadgeHourly');
+  if (schedule === '@daily') return t('backups.scheduleBadgeDaily');
+  if (schedule === '@weekly') return t('backups.scheduleBadgeWeekly');
+  const m = schedule.match(/^(\d{1,2})\s+(\*|\d{1,2})\s+\*\s+\*\s+\*$/);
+  if (m) {
+    const minute = String(Number(m[1])).padStart(2, '0');
+    if (m[2] === '*') return t('backups.scheduleBadgeHourlyAt', { minute });
+    const hour = String(Number(m[2])).padStart(2, '0');
+    return t('backups.scheduleBadgeDailyAt', { time: `${hour}:${minute}` });
+  }
+  // Legacy/unknown expression — show it raw rather than hide it.
+  return schedule;
+}
+
 function formatBytes(bytes: number | string | null): string {
   if (bytes === null || bytes === undefined) return '—';
   // Prisma BigInt serializes as string in JSON; normalize both shapes.
@@ -95,7 +146,8 @@ export default function BackupsPage() {
   const [includeApplications, setIncludeApplications] = useState(true);
   const [includeDatabases, setIncludeDatabases] = useState(true);
   const [includeVolumes, setIncludeVolumes] = useState(true);
-  const [schedule, setSchedule] = useState('');
+  const [schedulePreset, setSchedulePreset] = useState<SchedulePreset>('');
+  const [customTime, setCustomTime] = useState('03:00');
 
   const { data: server } = useQuery<any>({
     queryKey: ['server-local'],
@@ -166,12 +218,19 @@ export default function BackupsPage() {
     setIncludeApplications(true);
     setIncludeDatabases(true);
     setIncludeVolumes(true);
-    setSchedule('');
+    setSchedulePreset('');
+    setCustomTime('03:00');
   }
+
+  // Resolved schedule expression sent to the API ('' = manual only,
+  // null = custom preset with an invalid/empty time → block submit).
+  const resolvedSchedule: string | null =
+    schedulePreset === 'custom' ? timeToCron(customTime) : schedulePreset;
 
   function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim() || !serverId) return;
+    if (resolvedSchedule === null) return; // invalid custom time — input shows the error
     createMutation.mutate({
       name: name.trim(),
       serverId,
@@ -179,7 +238,7 @@ export default function BackupsPage() {
       includeApplications,
       includeDatabases,
       includeVolumes,
-      ...(schedule.trim() ? { schedule: schedule.trim() } : {}),
+      ...(resolvedSchedule ? { schedule: resolvedSchedule } : {}),
     });
   }
 
@@ -306,7 +365,14 @@ export default function BackupsPage() {
                         )}
                       </td>
                       <td className="px-6 py-4 text-sm text-muted-foreground">
-                        {backup.schedule || '—'}
+                        {backup.schedule ? (
+                          <Badge variant="outline" title={backup.schedule}>
+                            <CalendarClock size={12} className="mr-1" />
+                            {scheduleBadgeLabel(backup.schedule, t)}
+                          </Badge>
+                        ) : (
+                          <span className="text-muted-foreground/60">—</span>
+                        )}
                       </td>
                       <td className="px-6 py-4 text-sm text-muted-foreground">
                         <span className="flex items-center gap-1">
@@ -431,19 +497,48 @@ export default function BackupsPage() {
 
           <div className="space-y-2">
             <Label htmlFor="backup-schedule">{t('backups.schedule')}</Label>
-            <Input
+            <Select
               id="backup-schedule"
-              placeholder="0 2 * * * (cron format)"
-              value={schedule}
-              onChange={(e) => setSchedule(e.target.value)}
-            />
+              value={schedulePreset}
+              onChange={(e) => setSchedulePreset(e.target.value as SchedulePreset)}
+            >
+              {SCHEDULE_PRESETS.map((preset) => (
+                <option key={preset} value={preset}>
+                  {t(PRESET_LABEL_KEY[preset])}
+                </option>
+              ))}
+            </Select>
+            {schedulePreset === 'custom' && (
+              <div className="space-y-1">
+                <Label htmlFor="backup-schedule-time" className="text-xs text-muted-foreground">
+                  {t('backups.scheduleCustomTime')}
+                </Label>
+                <Input
+                  id="backup-schedule-time"
+                  type="time"
+                  value={customTime}
+                  onChange={(e) => setCustomTime(e.target.value)}
+                  required
+                  className="w-40"
+                />
+                {resolvedSchedule === null ? (
+                  <p className="text-xs text-destructive">
+                    {t('backups.scheduleCustomInvalid')}
+                  </p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    {t('backups.scheduleCustomHint', { cron: resolvedSchedule })}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={closeCreateDialog}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={createMutation.isPending}>
+            <Button type="submit" disabled={createMutation.isPending || resolvedSchedule === null}>
               {createMutation.isPending && <Loader2 size={16} className="animate-spin" />}
               {t('common.create')}
             </Button>

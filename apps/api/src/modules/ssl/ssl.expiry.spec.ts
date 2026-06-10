@@ -15,12 +15,22 @@ function makeService() {
       findMany: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue({}),
     },
+    domain: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      update: vi.fn().mockResolvedValue({}),
+    },
+    user: {
+      findUnique: vi.fn().mockResolvedValue({ role: 'SUPERADMIN' }),
+    },
   };
   const notifications = {
     sendSslExpiry: vi.fn().mockResolvedValue(undefined),
   };
-  const service = new SslService(prisma as any, notifications as any);
-  return { service, prisma, notifications };
+  const proxy = {
+    regenerate: vi.fn().mockResolvedValue({ domains: 1, caddyfile: '' }),
+  };
+  const service = new SslService(prisma as any, notifications as any, proxy as any);
+  return { service, prisma, notifications, proxy };
 }
 
 function cert(overrides: Record<string, unknown> = {}) {
@@ -132,5 +142,59 @@ describe('sweepExpiringCertificates', () => {
     await service.sweepExpiringCertificates();
 
     expect(order).toEqual(['stamp', 'notify']);
+  });
+});
+
+describe('issue', () => {
+  it('marks the domain PENDING and triggers a Caddy regenerate (no agent task)', async () => {
+    const { service, prisma, proxy } = makeService();
+    prisma.domain.findUnique.mockResolvedValue({
+      id: 'd1',
+      domain: 'shop.example.com',
+      projectId: null,
+      applicationId: 'app1',
+    });
+
+    const res = await service.issue('admin-user', 'd1');
+
+    expect(prisma.domain.update).toHaveBeenCalledWith({
+      where: { id: 'd1' },
+      data: { sslStatus: 'PENDING' },
+    });
+    expect(proxy.regenerate).toHaveBeenCalledTimes(1);
+    expect(res.message).toContain('reverse proxy');
+  });
+
+  it('rejects local-only hostnames (no ACME possible)', async () => {
+    const { service, prisma, proxy } = makeService();
+    prisma.domain.findUnique.mockResolvedValue({
+      id: 'd2',
+      domain: 'myapp.local',
+      projectId: null,
+      applicationId: null,
+    });
+
+    await expect(service.issue('admin-user', 'd2')).rejects.toThrow(/local hostname/);
+    expect(proxy.regenerate).not.toHaveBeenCalled();
+    expect(prisma.domain.update).not.toHaveBeenCalled();
+  });
+
+  it('404s on unknown domain', async () => {
+    const { service, prisma } = makeService();
+    prisma.domain.findUnique.mockResolvedValue(null);
+    await expect(service.issue('admin-user', 'nope')).rejects.toThrow('Domain not found');
+  });
+
+  it('forbids non-admins on orphan domains', async () => {
+    const { service, prisma, proxy } = makeService();
+    prisma.domain.findUnique.mockResolvedValue({
+      id: 'd3',
+      domain: 'orphan.example.com',
+      projectId: null,
+    });
+    prisma.user.findUnique.mockResolvedValue({ role: 'USER' });
+
+    await expect(service.issue('regular-user', 'd3')).rejects.toThrow(/platform ADMIN/);
+    expect(proxy.regenerate).not.toHaveBeenCalled();
   });
 });

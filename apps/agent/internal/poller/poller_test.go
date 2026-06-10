@@ -1,10 +1,18 @@
 package poller
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/kryptalis/agent/internal/config"
 )
 
 func TestSanitize(t *testing.T) {
@@ -187,6 +195,87 @@ func TestWriteProjectNetworkOverrideNoCompose(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "docker-compose.override.yml")); !os.IsNotExist(err) {
 		t.Error("override file must not be created when no compose file exists")
+	}
+}
+
+// reportCapture spins up a fake API that records what handleTask reports
+// for a given task and returns the parsed body.
+type reportedResult struct {
+	Status string                 `json:"status"`
+	Result map[string]interface{} `json:"result"`
+	Error  string                 `json:"error"`
+}
+
+func runHandleTask(t *testing.T, task Task) reportedResult {
+	t.Helper()
+	var (
+		mu  sync.Mutex
+		got reportedResult
+		hit bool
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/agent/tasks/") || !strings.HasSuffix(r.URL.Path, "/result") {
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decoding report body: %v", err)
+		}
+		hit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	p := New(&config.Config{
+		APIUrl:       srv.URL,
+		AgentToken:   "tok",
+		ServerID:     "srv",
+		PollInterval: time.Second,
+	})
+	p.handleTask(context.Background(), task)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !hit {
+		t.Fatal("handleTask never reported a result")
+	}
+	return got
+}
+
+func TestUnsupportedSslTasksReportFailed(t *testing.T) {
+	for _, typ := range []string{"SSL_ISSUE", "SSL_RENEW"} {
+		t.Run(typ, func(t *testing.T) {
+			got := runHandleTask(t, Task{ID: "t-" + typ, Type: typ, Payload: map[string]interface{}{
+				"domainId": "d1", "domain": "example.com",
+			}})
+			if got.Status != "FAILED" {
+				t.Errorf("status = %q, want FAILED (was previously a fake COMPLETED)", got.Status)
+			}
+			if !strings.Contains(got.Error, "managed reverse proxy") {
+				t.Errorf("error %q must explain the missing reverse proxy", got.Error)
+			}
+			if !strings.Contains(got.Error, typ) {
+				t.Errorf("error %q must name the task type %s", got.Error, typ)
+			}
+		})
+	}
+}
+
+func TestRemovedTaskTypesReportFailed(t *testing.T) {
+	// DNS_UPDATE and MONITOR are never enqueued by the API; the agent must
+	// reject them loudly rather than pretend they completed.
+	for _, typ := range []string{"DNS_UPDATE", "MONITOR", "SOMETHING_ELSE"} {
+		t.Run(typ, func(t *testing.T) {
+			got := runHandleTask(t, Task{ID: "t-" + typ, Type: typ})
+			if got.Status != "FAILED" {
+				t.Errorf("status = %q, want FAILED", got.Status)
+			}
+			if !strings.Contains(got.Error, "unknown task type") {
+				t.Errorf("error %q must say unknown task type", got.Error)
+			}
+		})
 	}
 }
 
