@@ -33,6 +33,7 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { Readable } from 'stream';
+import * as fs from 'fs';
 
 const execFileAsync = promisify(execFile);
 
@@ -283,18 +284,18 @@ export async function rename(target: DockerFsTarget, fromRel: string, toRel: str
 
 /**
  * Upload a file via `docker cp` — STDIN tar stream is the cheapest way
- * to push arbitrary bytes without polluting the host filesystem with a
- * temp file. We tar a single entry on the fly.
- *
- * Buffer overhead is acceptable for the 50 MiB upload cap we already
- * enforce. Larger streams would warrant a true streaming tar (tar-stream)
- * but for ergonomic editing in the browser this is plenty.
+ * to push arbitrary bytes without buffering them in process memory.
+ * We tar a single entry on the fly: the ustar header needs the payload
+ * size up-front, which the caller has from fs.stat on the temp file,
+ * so the content itself is STREAMED from disk into docker cp's stdin
+ * (header → file stream → padding → zero trailer). Peak memory is one
+ * 512-byte header + stream chunks, regardless of upload size.
  */
 export async function uploadFile(
   target: DockerFsTarget,
   relPath: string,
   filename: string,
-  buffer: Buffer,
+  sourceFilePath: string,
 ): Promise<void> {
   // Validate path INCLUDING the destination name so `joinAndValidate`
   // catches `../whatever` injected via filename.
@@ -310,34 +311,57 @@ export async function uploadFile(
   const parentAbs = targetAbs.replace(/\/[^/]+$/, '') || '/';
   // tar with --transform would also work, but POSIX shell doesn't have
   // it everywhere. Build the archive ourselves: a 512-byte header +
-  // padded payload + 1024 zero trailer.
-  const tarBuf = makeSingleFileTar(safeName, buffer);
+  // streamed payload + padding to 512 + 1024 zero trailer.
+  const st = await fs.promises.stat(sourceFilePath);
+  if (!st.isFile()) throw new Error('Upload source is not a regular file');
+  const size = st.size;
+  const header = makeTarHeader(safeName, size);
   return new Promise((resolve, reject) => {
     const child = execFile(
       'docker',
       ['cp', '-', `${target.containerName}:${parentAbs}`],
-      { timeout: 60_000, maxBuffer: tarBuf.length + 4096 },
+      { timeout: 10 * 60_000, maxBuffer: 4096 },
       (err) => (err ? reject(err) : resolve()),
     );
-    child.stdin!.end(tarBuf);
+    const stdin = child.stdin!;
+    // EPIPE from a dying docker process surfaces via the execFile
+    // callback; swallow the duplicate stdin error so it doesn't crash
+    // the process as an unhandled 'error' event.
+    stdin.on('error', () => {});
+    stdin.write(header);
+    const src = fs.createReadStream(sourceFilePath);
+    src.on('error', (err) => {
+      try { child.kill(); } catch {}
+      reject(err);
+    });
+    src.on('end', () => {
+      const pad = (512 - (size % 512)) % 512;
+      stdin.end(Buffer.alloc(pad + 1024));
+    });
+    // end:false — we still need to append padding + trailer after the
+    // payload before closing stdin.
+    src.pipe(stdin, { end: false });
   });
 }
 
 /**
- * Minimal POSIX (ustar) tar builder for a SINGLE regular file entry.
- * Skips fancy long-name support — uploads use the validated short
- * basename. Inlined here to avoid pulling in the `tar` package for one
- * call site.
+ * Minimal POSIX (ustar) tar header for a SINGLE regular file entry of
+ * `size` bytes. Skips fancy long-name support — uploads use the
+ * validated short basename. Inlined here to avoid pulling in the `tar`
+ * package for one call site. The caller streams the payload after this
+ * header, then pads to a 512-byte boundary and appends the two 512-byte
+ * zero blocks that terminate the archive.
  */
-function makeSingleFileTar(name: string, payload: Buffer): Buffer {
+export function makeTarHeader(name: string, size: number): Buffer {
   if (name.length > 100) throw new Error('Filename too long for tar');
+  if (!Number.isSafeInteger(size) || size < 0) throw new Error('Invalid tar entry size');
   const header = Buffer.alloc(512);
   header.write(name, 0, 100, 'utf-8');
   header.write('000644 \0', 100, 8, 'ascii'); // mode
   header.write('000000 \0', 108, 8, 'ascii'); // uid
   header.write('000000 \0', 116, 8, 'ascii'); // gid
   // size in octal, NUL-terminated.
-  const sizeOctal = payload.length.toString(8).padStart(11, '0');
+  const sizeOctal = size.toString(8).padStart(11, '0');
   header.write(sizeOctal + ' ', 124, 12, 'ascii');
   const mtimeOctal = Math.floor(Date.now() / 1000).toString(8).padStart(11, '0');
   header.write(mtimeOctal + ' ', 136, 12, 'ascii');
@@ -353,7 +377,5 @@ function makeSingleFileTar(name: string, payload: Buffer): Buffer {
   for (const b of header) sum += b;
   const checksumOctal = sum.toString(8).padStart(6, '0');
   header.write(checksumOctal + '\0 ', 148, 8, 'ascii');
-  // Pad payload to 512-byte boundary.
-  const pad = (512 - (payload.length % 512)) % 512;
-  return Buffer.concat([header, payload, Buffer.alloc(pad), Buffer.alloc(1024)]);
+  return header;
 }

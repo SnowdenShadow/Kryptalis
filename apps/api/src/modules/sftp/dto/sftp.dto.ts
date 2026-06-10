@@ -15,14 +15,17 @@ import { ApiProperty } from '@nestjs/swagger';
 import type { SftpPermission } from '@prisma/client';
 
 export class CreateSftpAccountDto {
-  // Only 'app' is supported for account creation — project-wide chroots
-  // don't exist yet, so we refuse the value at validation time instead of
-  // advertising a scope the service would 400 on anyway.
-  @ApiProperty({ enum: ['app'] })
-  @IsIn(['app'], { message: 'scope must be "app" — project-scope SFTP accounts are not supported' })
+  // 'app' chroots a single application's data at /home/<user>/app.
+  // 'project' exposes every application of the project, each
+  // bind-mounted at /home/<user>/<slug>-<id12> inside the same sterile
+  // chroot — never a shared parent dir (the on-disk apps dir is flat
+  // and shared across projects, so a parent chroot would leak other
+  // tenants' apps).
+  @ApiProperty({ enum: ['app', 'project'] })
+  @IsIn(['app', 'project'], { message: 'scope must be "app" or "project"' })
   scope: 'app' | 'project';
 
-  @ApiProperty({ description: 'Application id' })
+  @ApiProperty({ description: 'Application id (scope=app) or project id (scope=project)' })
   @IsString()
   scopeId: string;
 

@@ -20,6 +20,25 @@ import type { SftpAccount, SftpPermission } from '@prisma/client';
 const execFileAsync = promisify(execFile);
 
 /**
+ * One bind-mount inside an account's chroot. The chroot leaf itself is
+ * always the sterile root-owned /home/<user>; every piece of actual app
+ * data is exposed by bind-mounting `source` at /home/<user>/<dir>.
+ *
+ *   - app-scope accounts: a single { dir: 'app', source: <app data> }.
+ *   - project-scope accounts: one entry PER application of the project,
+ *     dir = '<slug>-<id12>' (mirrors the on-disk layout). The flat
+ *     .kryptalis/apps dir is shared across ALL projects, so a chroot on
+ *     it would leak other tenants' apps — per-app binds are the only
+ *     safe way to give project-wide access.
+ */
+interface ChrootBind {
+  /** Mount-point dir name directly under /home/<user>. */
+  dir: string;
+  /** Path (inside the SFTP container) to bind-mount there. */
+  source: string;
+}
+
+/**
  * SFTP account orchestrator.
  *
  * Talks to the `kryptalis-sftp` container over the host docker socket:
@@ -184,10 +203,10 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       passwordEnc = this.encryption.encrypt(plainPassword);
     }
 
-    // Resolve chroot BEFORE creating the row — if the app has never
-    // been deployed there's nothing to FTP into, and we don't want a
-    // phantom DB row blocking the username.
-    const chrootSource = await this.resolveChrootSource(scope, scopeId);
+    // Resolve chroot binds BEFORE creating the row — if the app has
+    // never been deployed there's nothing to FTP into, and we don't
+    // want a phantom DB row blocking the username.
+    const chrootBinds = await this.resolveChrootBinds(scope, scopeId);
 
     const account = await this.prisma.sftpAccount.create({
       data: {
@@ -209,7 +228,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
         username,
         plainPassword,
         publicKeys,
-        chrootSource,
+        chrootBinds,
         permission: account.permission,
         disabled: false,
         allowShell: account.allowShell,
@@ -311,7 +330,10 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       // Skipping this on a READ→WRITE upgrade would leave the user
       // unable to write despite the dropin no longer carrying `-R`.
       if (patch.permission !== undefined) {
-        await this.applyAclToBindTarget(acc.username, next.permission);
+        const binds = await this.resolveChrootBindsForAccount(acc).catch(() => null);
+        if (binds?.length) {
+          await this.applyAclToBindTargets(acc.username, binds, next.permission);
+        }
       }
       await this.reloadSshd();
     }
@@ -356,8 +378,8 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Resyncing ${rows.length} SFTP account(s) to container`);
     for (const row of rows) {
       try {
-        const chrootSource = await this.resolveChrootSourceForAccount(row).catch(() => null);
-        if (!chrootSource) {
+        const chrootBinds = await this.resolveChrootBindsForAccount(row).catch(() => null);
+        if (!chrootBinds || !chrootBinds.length) {
           this.logger.warn(`Skipping resync of ${row.username} — chroot source unresolved`);
           continue;
         }
@@ -368,7 +390,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
           username: row.username,
           plainPassword: plain,
           publicKeys: keys,
-          chrootSource,
+          chrootBinds,
           permission: row.permission,
           disabled: row.disabled || expired,
           allowShell: row.allowShell,
@@ -516,18 +538,20 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    *      mode 0755 (sshd's `safely_chroot` requires the chroot leaf
    *      and every ancestor to be root-owned with no group/other
    *      write bit).
-   *   2. Bind-mount the app's actual data dir under /home/<user>/app
-   *      — this is where the user can read/write. sshd doesn't inspect
-   *      the bind target (it only walks ancestors of ChrootDirectory),
-   *      so we're free to layer POSIX ACLs on /home/<user>/app without
-   *      tripping sshd. We can't put the ACL on the chroot leaf
-   *      directly because the kernel surfaces the ACL mask in
-   *      stat()'s group bits, and sshd reads that as a write bit and
-   *      refuses.
+   *   2. Bind-mount the actual data dir(s) under /home/<user>/<dir>
+   *      — this is where the user can read/write. App-scope accounts
+   *      get a single /home/<user>/app bind; project-scope accounts
+   *      get one bind PER application of the project (named
+   *      <slug>-<id12>). sshd doesn't inspect the bind targets (it
+   *      only walks ancestors of ChrootDirectory), so we're free to
+   *      layer POSIX ACLs on the bind targets without tripping sshd.
+   *      We can't put the ACL on the chroot leaf directly because the
+   *      kernel surfaces the ACL mask in stat()'s group bits, and
+   *      sshd reads that as a write bit and refuses.
    *   3. Write the per-user sshd_config drop-in (chroot=/home/<user>,
    *      sftp-lock, RO flag for READ permission, blanket disable when
    *      locked).
-   *   4. ACL on the bind target so the user can actually write.
+   *   4. ACL on the bind targets so the user can actually write.
    *   5. Set the password (chpasswd over stdin).
    *   6. Write authorized_keys.
    *   7. SIGHUP sshd so the new dropin is loaded mid-flight.
@@ -536,15 +560,21 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     username: string;
     plainPassword: string | null;
     publicKeys: string[];
-    chrootSource: string;
+    chrootBinds: ChrootBind[];
     permission: SftpPermission;
     disabled: boolean;
     allowShell: boolean;
   }): Promise<void> {
-    const { username, plainPassword, publicKeys, chrootSource, permission, disabled, allowShell } = opts;
+    const { username, plainPassword, publicKeys, chrootBinds, permission, disabled, allowShell } = opts;
 
     this.assertUsernameValid(username);
-    this.assertChrootPathSafe(chrootSource);
+    if (!chrootBinds.length) {
+      throw new BadRequestException('No filesystem target to expose over SFTP');
+    }
+    for (const b of chrootBinds) {
+      this.assertChrootPathSafe(b.source);
+      this.assertBindDirValid(b.dir);
+    }
 
     const home = `/home/${username}`;
     const chrootLeaf = home;
@@ -571,22 +601,22 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    // 2. Sterile chroot leaf + bind-mount the writable app data under
-    //    /home/<user>/app. When allowShell is on, also bind-mount
-    //    /bin /lib /usr… RO so the user's bash actually has commands
-    //    to run inside the chroot. The bind mount points FROM
-    //    chrootSource INTO our container's /home — Docker daemon
+    // 2. Sterile chroot leaf + bind-mount the writable data dir(s)
+    //    under /home/<user>/<dir>. When allowShell is on, also
+    //    bind-mount /bin /lib /usr… RO so the user's bash actually has
+    //    commands to run inside the chroot. The bind mounts point FROM
+    //    the sources INTO our container's /home — Docker daemon
     //    doesn't manage /home in this container, so there's no
     //    daemon race like the old design had against Docker-managed
     //    volume paths.
-    await this.prepareChrootLeafAndBind(username, chrootSource, allowShell);
+    await this.prepareChrootLeafAndBind(username, chrootBinds, allowShell);
 
     // 3. Per-user sshd_config drop-in.
     await this.writeUserDropin(username, chrootLeaf, permission, disabled, allowShell);
 
-    // 4. ACL on the bind target (/home/<user>/app), not the chroot
+    // 4. ACL on the bind targets (/home/<user>/<dir>), not the chroot
     //    leaf — see prepareChrootLeafAndBind for the why.
-    await this.applyAclToBindTarget(username, permission);
+    await this.applyAclToBindTargets(username, chrootBinds, permission);
 
     // 5. Password.
     if (plainPassword) await this.execChpasswd(username, plainPassword);
@@ -611,12 +641,17 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     // last fd closes. Without -l, deleting a user with a live session
     // would block here and leave the bind mount stuck.
     //
-    // We umount the app bind AND every potential shell chroot dir
-    // (the dropin might be missing/corrupted but the mounts could
-    // still be there). All best-effort.
-    const allBinds = ['app', ...SftpService.SHELL_CHROOT_BIND_DIRS]
-      .map((d) => `umount -l /home/${username}/${d} 2>/dev/null || true`)
-      .join(' ; ');
+    // We umount EVERY top-level dir of the home that is a mountpoint —
+    // covers the app bind, project-scope per-app binds (dynamic names),
+    // and the shell chroot binds — even if the dropin is missing or
+    // corrupted but the mounts are still there. All best-effort.
+    // username passed assertUsernameValid above, so the glob is safe.
+    // (No `.*` in the glob — it would match `..` and could lazy-umount
+    // /home itself. Bind dirs are never dotfiles by construction.)
+    const allBinds =
+      `for d in /home/${username}/* ; do ` +
+      `mountpoint -q "$d" 2>/dev/null && umount -l "$d" 2>/dev/null ; ` +
+      `done ; true`;
     await this.dockerExec(
       ['sh', '-c', allBinds],
       { allowFailure: true, timeoutMs: 10_000 },
@@ -740,24 +775,34 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
 
   private async prepareChrootLeafAndBind(
     username: string,
-    chrootSource: string,
+    binds: ChrootBind[],
     allowShell: boolean,
   ): Promise<void> {
     this.assertUsernameValid(username);
-    this.assertChrootPathSafe(chrootSource);
+    for (const b of binds) {
+      this.assertChrootPathSafe(b.source);
+      this.assertBindDirValid(b.dir);
+    }
     const home = `/home/${username}`;
-    const bindTarget = `${home}/app`;
-    // App data bind. Always re-mount so resyncs after a redeploy
-    // point at the FRESH source (Docker volume names change on
-    // marketplace re-install).
+    // Data binds. Always re-mount so resyncs after a redeploy point at
+    // the FRESH source (Docker volume names change on marketplace
+    // re-install). App-scope: a single `app` dir. Project-scope: one
+    // dir per application of the project.
     const appMount =
-      `chown root:root ${home} && chmod 0755 ${home} && ` +
-      `mkdir -p ${bindTarget} && ` +
-      // Source may not exist yet on a freshly-provisioned shell-only
-      // account (no deploy yet) — make it.
-      `mkdir -p ${chrootSource} && ` +
-      `umount -l ${bindTarget} 2>/dev/null || true ; ` +
-      `mount --bind ${chrootSource} ${bindTarget}`;
+      `chown root:root ${home} && chmod 0755 ${home}` +
+      binds
+        .map((b) => {
+          const bindTarget = `${home}/${b.dir}`;
+          return (
+            ` && mkdir -p ${bindTarget}` +
+            // Source may not exist yet on a freshly-provisioned
+            // shell-only account (no deploy yet) — make it.
+            ` && mkdir -p ${b.source}` +
+            ` && { umount -l ${bindTarget} 2>/dev/null || true ; }` +
+            ` && mount --bind ${b.source} ${bindTarget}`
+          );
+        })
+        .join('');
 
     // When shell is enabled we bind-mount the SFTP container's own
     // /bin /sbin /usr /lib /lib64 /etc into the chroot so bash + its
@@ -791,11 +836,12 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Apply the per-user ACL to /home/<user>/app (the bind target). The
-   * ACL grants rwx (or rx for READ) directly on the dir + default
-   * ACL so newly-created files/dirs inherit. Capital `X` = execute
-   * only on dirs, never on plain files — chrooted SFTP users
-   * shouldn't gain exec on uploaded content. READ accounts get
+   * Apply the per-user ACL to every data bind target under
+   * /home/<user> (app-scope: just `app`; project-scope: one dir per
+   * application). The ACL grants rwx (or rx for READ) directly on the
+   * dir + default ACL so newly-created files/dirs inherit. Capital
+   * `X` = execute only on dirs, never on plain files — chrooted SFTP
+   * users shouldn't gain exec on uploaded content. READ accounts get
    * `-R rX` as defence in depth on top of `internal-sftp -R`.
    *
    * Recursive ACL on a large codebase (~80k files for PrestaShop)
@@ -803,8 +849,9 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    * creation alive if a partial application happens — next update
    * call will repair the stragglers.
    */
-  private async applyAclToBindTarget(
+  private async applyAclToBindTargets(
     username: string,
+    binds: ChrootBind[],
     permission: SftpPermission,
   ): Promise<void> {
     this.assertUsernameValid(username);
@@ -813,17 +860,20 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     if (!/^\d+$/.test(uid)) {
       throw new BadRequestException(`Could not resolve uid for ${username}`);
     }
-    const bindTarget = `/home/${username}/app`;
     const aclLeaf = permission === 'READ' ? `u:${uid}:rx` : `u:${uid}:rwx`;
     const aclTree = permission === 'READ' ? `u:${uid}:rX` : `u:${uid}:rwX`;
-    await this.dockerExec(
-      ['sh', '-c',
-        `setfacl -m ${aclLeaf} ${bindTarget} && ` +
-        `setfacl -d -m ${aclLeaf} ${bindTarget} && ` +
-        `setfacl -R -m ${aclTree} ${bindTarget}/ 2>/dev/null || true`,
-      ],
-      { timeoutMs: 60_000, allowFailure: true },
-    );
+    for (const b of binds) {
+      this.assertBindDirValid(b.dir);
+      const bindTarget = `/home/${username}/${b.dir}`;
+      await this.dockerExec(
+        ['sh', '-c',
+          `setfacl -m ${aclLeaf} ${bindTarget} && ` +
+          `setfacl -d -m ${aclLeaf} ${bindTarget} && ` +
+          `setfacl -R -m ${aclTree} ${bindTarget}/ 2>/dev/null || true`,
+        ],
+        { timeoutMs: 60_000, allowFailure: true },
+      );
+    }
   }
 
   private async reloadSshd(): Promise<void> {
@@ -867,8 +917,8 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   // ── Chroot resolution ────────────────────────────────────────────
 
   /**
-   * Resolve the host-side path we'll point ChrootDirectory at. Two
-   * cases mirror FilesService.resolveDockerTarget:
+   * Resolve the bind-mount set for an account's chroot. Sources mirror
+   * FilesService.resolveDockerTarget:
    *
    *   - Git deploys / Compose Empty / Dockerfile Empty: appDir on the
    *     host holds real source code → mount it as-is.
@@ -877,33 +927,61 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    *     plumbing; real app code lives in a Docker-managed named volume
    *     (PrestaShop's /var/www/html, etc.) → resolve that volume's
    *     host mountpoint instead so SFTP users see the live app files.
+   *
+   * App scope → single bind at /home/<user>/app.
+   *
+   * Project scope → one bind per application of the project, each at
+   * /home/<user>/<slug>-<id12>. The on-disk layout (.kryptalis/apps)
+   * is a FLAT directory shared by every project, so a single chroot
+   * over it would expose other tenants' apps — per-app bind mounts
+   * are the only containment-preserving way to grant project-wide
+   * access. The chroot leaf stays the sterile root-owned /home/<user>
+   * either way.
    */
-  private async resolveChrootSource(scope: 'app' | 'project', scopeId: string): Promise<string> {
-    if (scope !== 'app') {
+  private async resolveChrootBinds(scope: 'app' | 'project', scopeId: string): Promise<ChrootBind[]> {
+    if (scope === 'app') {
+      const app = await this.prisma.application.findUnique({
+        where: { id: scopeId },
+        select: { name: true, id: true, dockerImage: true, containerName: true },
+      });
+      if (!app) throw new NotFoundException('Application not found');
+      return [{ dir: 'app', source: await this.computeChrootSourceForApp(app) }];
+    }
+    const project = await this.prisma.project.findUnique({
+      where: { id: scopeId },
+      select: {
+        applications: {
+          select: { name: true, id: true, dockerImage: true, containerName: true },
+        },
+      },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+    if (!project.applications.length) {
       throw new BadRequestException(
-        'Project-scope SFTP accounts are not supported — create the account for a specific application.',
+        'Project has no applications — nothing to expose over SFTP.',
       );
     }
-    const app = await this.prisma.application.findUnique({
-      where: { id: scopeId },
-      select: { name: true, id: true, dockerImage: true, containerName: true },
-    });
-    if (!app) throw new NotFoundException('Application not found');
-    return this.computeChrootSourceForApp(app);
+    const binds: ChrootBind[] = [];
+    for (const app of project.applications) {
+      const source = await this.computeChrootSourceForApp(app);
+      binds.push({ dir: `${this.slugify(app.name)}-${app.id.slice(0, 12)}`, source });
+    }
+    // Defensive: dir names are slug-id12 and ids are unique, but a
+    // duplicate mount-point would silently shadow an app — fail closed.
+    const seen = new Set<string>();
+    for (const b of binds) {
+      if (seen.has(b.dir)) {
+        throw new BadRequestException(`Duplicate SFTP mount dir '${b.dir}'`);
+      }
+      seen.add(b.dir);
+    }
+    return binds;
   }
 
-  private async resolveChrootSourceForAccount(acc: SftpAccount): Promise<string> {
-    if (!acc.applicationId) {
-      throw new BadRequestException(
-        'This SFTP account is not bound to an application — project-scope accounts are not supported.',
-      );
-    }
-    const app = await this.prisma.application.findUnique({
-      where: { id: acc.applicationId },
-      select: { name: true, id: true, dockerImage: true, containerName: true },
-    });
-    if (!app) throw new NotFoundException('Application not found');
-    return this.computeChrootSourceForApp(app);
+  private async resolveChrootBindsForAccount(acc: SftpAccount): Promise<ChrootBind[]> {
+    if (acc.applicationId) return this.resolveChrootBinds('app', acc.applicationId);
+    if (acc.projectId) return this.resolveChrootBinds('project', acc.projectId);
+    throw new BadRequestException('This SFTP account is bound to neither an application nor a project.');
   }
 
   private async computeChrootSourceForApp(
@@ -992,6 +1070,23 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   private assertChrootPathSafe(p: string): void {
     if (!SftpService.CHROOT_PATH_RE.test(p) || p.includes('..')) {
       throw new BadRequestException(`Refusing unsafe chroot source: ${p}`);
+    }
+  }
+
+  /**
+   * Mount-point dir name under /home/<user>. Built from slugify() +
+   * id12 (or the literal 'app'), so this should never fire — it's a
+   * fail-closed guard for the value that ends up unquoted in a
+   * `sh -c mount …` command line. No slashes, no dots, no shell
+   * metachars; must not collide with the RO shell-chroot system dirs
+   * or .ssh.
+   */
+  private assertBindDirValid(dir: string): void {
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(dir)) {
+      throw new BadRequestException(`Refusing unsafe SFTP mount dir: ${dir}`);
+    }
+    if (SftpService.SHELL_CHROOT_BIND_DIRS.includes(dir)) {
+      throw new BadRequestException(`SFTP mount dir '${dir}' collides with a system dir`);
     }
   }
 

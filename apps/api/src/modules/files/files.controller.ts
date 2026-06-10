@@ -15,6 +15,7 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
+import * as fs from 'fs';
 import { FilesService } from './files.service';
 import { MkdirDto } from './dto/mkdir.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -137,29 +138,45 @@ export class FilesController {
     // Per-request idle timeout so a half-open stream can't hold a worker
     // forever (slowloris-style).
     try { (req as any).setTimeout?.(60_000); } catch {}
-    const chunks: Buffer[] = [];
-    let size = 0;
-    return new Promise<{ path: string; size: number }>((resolve, reject) => {
-      req.on('data', (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > max) {
-          req.destroy();
-          reject(new BadRequestException('Upload exceeds 50MB limit'));
-          return;
-        }
-        chunks.push(chunk);
+    // Stream the body to a temp file on disk — the full payload is
+    // NEVER held in memory. A running byte counter aborts the request
+    // as soon as the 50MB cap is crossed; the service then checks quota
+    // against the temp file's on-disk size before moving it into place.
+    const tempPath = this.svc.createUploadTempPath();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const out = fs.createWriteStream(tempPath, { flags: 'wx', mode: 0o600 });
+        let size = 0;
+        let settled = false;
+        const fail = (err: unknown) => {
+          if (settled) return;
+          settled = true;
+          try { out.destroy(); } catch {}
+          reject(err);
+        };
+        req.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > max) {
+            req.destroy();
+            fail(new BadRequestException('Upload exceeds 50MB limit'));
+          }
+        });
+        req.on('error', fail);
+        out.on('error', fail);
+        out.on('finish', () => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        });
+        req.pipe(out);
       });
-      req.on('end', async () => {
-        try {
-          const buf = Buffer.concat(chunks);
-          const result = await this.svc.uploadFile(userId, parseScope(scope), scopeId, p || '', name, buf);
-          resolve(result);
-        } catch (e) {
-          reject(e);
-        }
-      });
-      req.on('error', reject);
-    });
+      return await this.svc.uploadFile(userId, parseScope(scope), scopeId, p || '', name, tempPath);
+    } finally {
+      // Best-effort cleanup — on the local success path the temp was
+      // already rename()d away and unlink is a harmless ENOENT.
+      await fs.promises.unlink(tempPath).catch(() => {});
+    }
   }
 
   @Get(':scope/:scopeId/download')

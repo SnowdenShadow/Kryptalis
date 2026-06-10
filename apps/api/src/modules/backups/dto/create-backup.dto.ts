@@ -1,5 +1,9 @@
-import { IsString, IsOptional, IsBoolean, IsIn } from 'class-validator';
+import { IsString, IsOptional, IsBoolean, IsIn, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import {
+  BACKUP_SCHEDULE_PATTERN,
+  BACKUP_SCHEDULE_MESSAGE,
+} from '../backup-schedule.util';
 
 export class CreateBackupDto {
   @ApiProperty()
@@ -29,8 +33,13 @@ export class CreateBackupDto {
   @IsBoolean()
   includeVolumes?: boolean;
 
-  @ApiProperty({ required: false })
+  @ApiProperty({
+    required: false,
+    description:
+      'Recurring schedule: @hourly, @daily, @weekly, or "<minute> <hour> * * *".',
+  })
   @IsOptional()
   @IsString()
+  @Matches(BACKUP_SCHEDULE_PATTERN, { message: BACKUP_SCHEDULE_MESSAGE })
   schedule?: string;
 }

@@ -49,6 +49,9 @@ jobs:
       - name: Test API
         run: pnpm --filter @kryptalis/api exec vitest run
 
+      - name: Test Dashboard
+        run: pnpm --filter @kryptalis/dashboard exec vitest run
+
       # Full production builds — a compile-clean tree can still fail
       # `next build` (prerender errors) or `nest build`; with auto-update
       # deploying main everywhere, a broken build must never reach main.

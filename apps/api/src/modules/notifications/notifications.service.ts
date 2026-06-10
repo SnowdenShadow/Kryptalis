@@ -6,6 +6,22 @@ import { SystemConfigService } from '../system/system-config.service';
 import { renderEmail, escapeHtml } from './email-templates';
 
 /**
+ * Shape of User.notificationPrefs (Json column) — written by
+ * UsersService.updateNotificationPrefs against the event/channel
+ * whitelists (deployOk/deployFail/serverOff/sslExpire/backupOk/backupFail
+ * × email/discord/slack/webhook).
+ */
+type NotificationPrefs = Record<string, Record<string, boolean>>;
+
+type NotifEvent =
+  | 'deployOk'
+  | 'deployFail'
+  | 'serverOff'
+  | 'sslExpire'
+  | 'backupOk'
+  | 'backupFail';
+
+/**
  * Centralised outbound notification dispatcher.
  *
  * Two transports:
@@ -231,6 +247,8 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  // Project invitations are transactional (the recipient may not even have
+  // an account yet) — intentionally NOT gated on notificationPrefs.
   async sendUserInvited(
     email: string,
     projectName: string,
@@ -273,13 +291,15 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     // path keeps callers from having to look it up themselves.
     let email: string | null = null;
     let name = 'there';
+    let prefs: unknown = null;
     try {
       const u = await this.prisma.user.findUnique({
         where: { id: userId },
-        select: { email: true, name: true },
+        select: { email: true, name: true, notificationPrefs: true },
       });
       email = u?.email ?? null;
       name = u?.name ?? 'there';
+      prefs = u?.notificationPrefs ?? null;
     } catch (err) {
       this.logger.error(
         `sendDeploymentResult: failed to resolve user ${userId}: ${(err as Error).message}`,
@@ -305,6 +325,13 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
 
     if (!email) {
       this.logger.warn(`sendDeploymentResult: no email on user ${userId}; skipping.`);
+      return;
+    }
+    // Honour the user's notification toggles (deployOk / deployFail).
+    if (!this.allows(prefs, ok ? 'deployOk' : 'deployFail', 'email')) {
+      this.logger.debug(
+        `sendDeploymentResult: user ${userId} opted out of ${ok ? 'deployOk' : 'deployFail'} email; skipping.`,
+      );
       return;
     }
     if (!this.smtpReady) {
@@ -394,6 +421,11 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // notificationPrefs mapping note: alert rules only cover cpu/memory/disk
+    // threshold breaches today — none of the whitelist events (serverOff,
+    // sslExpire, …) corresponds, so these emails are deliberately NOT
+    // pref-filtered. If an "offline" metric/alert appears later, gate it on
+    // this.allows(prefs, 'serverOff', 'email') here.
     let recipients: string[] = [];
     try {
       const admins = await this.prisma.user.findMany({
@@ -439,6 +471,97 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       subject: `[Kryptalis] Alert: ${rule.name}`,
       html,
     });
+  }
+
+  /**
+   * Backup job outcome — called fire-and-forget from the backups job
+   * runner. Mirrors sendDeploymentResult: in-app feed entry for every
+   * active admin (always — the feed is not a prefs channel), then one
+   * email per admin honouring their backupOk / backupFail toggles.
+   * Never throws: any failure is caught and logged here.
+   */
+  async sendBackupResult(input: {
+    backupId: string;
+    name: string;
+    serverId: string;
+    status: 'COMPLETED' | 'FAILED';
+    error?: string;
+  }): Promise<void> {
+    try {
+      const ok = input.status === 'COMPLETED';
+      const event: NotifEvent = ok ? 'backupOk' : 'backupFail';
+      const title = ok
+        ? `Backup completed: ${input.name}`
+        : `Backup failed: ${input.name}`;
+
+      await this.notifyAdmins({
+        type: ok ? 'backup.completed' : 'backup.failed',
+        title,
+        body: ok
+          ? `Backup ${input.backupId} on server ${input.serverId} completed.`
+          : input.error ?? `Backup ${input.backupId} on server ${input.serverId} failed.`,
+        link: '/dashboard/backups',
+      });
+
+      if (!this.smtpReady) {
+        this.logger.warn(`Skipping backup email for ${input.backupId} — SMTP not configured.`);
+        return;
+      }
+
+      let admins: Array<{ email: string; notificationPrefs: unknown }> = [];
+      try {
+        admins = await this.prisma.user.findMany({
+          where: { role: { in: ['ADMIN', 'SUPERADMIN'] }, status: 'ACTIVE' },
+          select: { email: true, notificationPrefs: true },
+        });
+      } catch (err) {
+        this.logger.error(
+          `sendBackupResult: failed to resolve recipients for backup ${input.backupId}: ${(err as Error).message}`,
+        );
+        return;
+      }
+      const recipients = admins
+        .filter((a) => a.email && this.allows(a.notificationPrefs, event, 'email'))
+        .map((a) => a.email);
+      if (recipients.length === 0) {
+        this.logger.debug(
+          `sendBackupResult: no opted-in recipients for backup ${input.backupId}.`,
+        );
+        return;
+      }
+
+      const errorBlock = !ok && input.error
+        ? `<p style="margin:12px 0 0 0;font-family:ui-monospace,Menlo,Consolas,monospace;
+                    font-size:13px;background:#f5f5fa;border:1px solid #e5e5ec;
+                    border-radius:8px;padding:10px 12px;white-space:pre-wrap;
+                    word-break:break-word;">${escapeHtml(input.error)}</p>`
+        : '';
+      const html = renderEmail({
+        title,
+        preheader: ok
+          ? `Backup "${input.name}" finished successfully.`
+          : `Backup "${input.name}" failed.`,
+        body: `
+          <p style="margin:0 0 12px 0;">
+            Backup <strong>${escapeHtml(input.name)}</strong> on server
+            <strong>${escapeHtml(input.serverId)}</strong>
+            ${ok ? 'completed successfully.' : 'failed.'}
+          </p>
+          ${errorBlock}`,
+        ctaLabel: 'Open backups',
+        ctaUrl: this.buildDashboardUrl('/dashboard/backups'),
+      });
+
+      await this.sendMail({
+        to: recipients.join(', '),
+        subject: `[Kryptalis] ${title}`,
+        html,
+      });
+    } catch (err) {
+      // Fire-and-forget contract — never let a notification failure
+      // bubble into the backup job.
+      this.logger.error(`sendBackupResult failed: ${(err as Error).message}`);
+    }
   }
 
   // ── in-app notification feed ──────────────────────────────────────
@@ -542,6 +665,23 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   }
 
   // ── internal helpers ──────────────────────────────────────────────
+
+  /**
+   * Per-user notification-preference gate. Opt-out model: the dashboard
+   * toggles default to "on", so a missing prefs object, missing event or
+   * missing channel entry all mean "send". Only an explicit `false`
+   * blocks. Unknown events/channels therefore pass through unfiltered.
+   */
+  private allows(
+    prefs: unknown,
+    event: NotifEvent,
+    channel: 'email' | 'discord' | 'slack' | 'webhook',
+  ): boolean {
+    if (!prefs || typeof prefs !== 'object') return true;
+    const eventPrefs = (prefs as NotificationPrefs)[event];
+    if (!eventPrefs || typeof eventPrefs !== 'object') return true;
+    return eventPrefs[channel] !== false;
+  }
 
   private async sendMail(opts: { to: string; subject: string; html: string }): Promise<void> {
     if (!this.transporter || !this.smtpFrom) return;

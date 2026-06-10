@@ -61,6 +61,9 @@ import { pickRootForImage, type DockerFsTarget } from './docker-fs';
 const ROOT_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const APPS_DIR = path.join(ROOT_DIR, 'apps');
 const DBS_DIR = path.join(ROOT_DIR, 'databases');
+// Upload staging area — same volume as APPS_DIR/DBS_DIR so the final
+// move into place is an atomic rename() instead of a second full copy.
+const TMP_DIR = path.join(ROOT_DIR, 'tmp');
 
 interface ResolvedPath {
   scope: 'app' | 'db';
@@ -152,6 +155,7 @@ export class FilesService {
     if (!fs.existsSync(ROOT_DIR)) fs.mkdirSync(ROOT_DIR, { recursive: true });
     if (!fs.existsSync(APPS_DIR)) fs.mkdirSync(APPS_DIR, { recursive: true });
     if (!fs.existsSync(DBS_DIR)) fs.mkdirSync(DBS_DIR, { recursive: true });
+    if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 
     // Periodic refresh — every 5 minutes drop stale entries so we don't
     // hold incorrect numbers indefinitely after a deletion outside the
@@ -906,15 +910,39 @@ export class FilesService {
 
   // ── upload ────────────────────────────────────────────────────────
 
+  /**
+   * Mint a unique staging path under <DATA_DIR>/tmp for the controller
+   * to stream the request body into. Same volume as the app/db sandboxes
+   * so the final move is an atomic rename() rather than a second copy.
+   */
+  createUploadTempPath(): string {
+    if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
+    return path.join(TMP_DIR, `upload-${crypto.randomBytes(12).toString('hex')}.tmp`);
+  }
+
+  /**
+   * Finalize an upload whose body was already streamed to `tempFilePath`
+   * on disk by the controller. The file content is NEVER buffered in
+   * memory here — quota is checked against fs.stat of the temp file,
+   * the local path moves it into place (rename, copy-fallback across
+   * volumes), and the docker path streams it into `docker cp -`.
+   *
+   * The temp file is consumed on the local success path (rename);
+   * callers unlink it in a finally either way — unlink of a moved file
+   * is a harmless ENOENT.
+   */
   async uploadFile(
     userId: string,
     scope: 'app' | 'db',
     scopeId: string,
     relPath: string,
     filename: string,
-    buffer: Buffer,
+    tempFilePath: string,
   ) {
-    if (buffer.length > MAX_UPLOAD_BYTES) {
+    const tempStat = await fs.promises.stat(tempFilePath);
+    if (!tempStat.isFile()) throw new BadRequestException('Invalid upload payload');
+    const uploadSize = tempStat.size;
+    if (uploadSize > MAX_UPLOAD_BYTES) {
       throw new BadRequestException('Upload exceeds 50MB limit');
     }
     const safeName = this.sanitizeBasename(filename);
@@ -922,17 +950,17 @@ export class FilesService {
     const resolved = await this.resolvePath(userId, scope, scopeId, targetRel, 'DEVELOPER');
     this.assertNotManaged(resolved.relPath);
 
-    // Docker-fs path.
+    // Docker-fs path — stream the temp file into `docker cp -`.
     if (scope === 'app') {
       const target = await this.resolveDockerTarget(scopeId);
       if (target) {
-        await dockerFs.uploadFile(target, relPath || '', safeName, buffer);
+        await dockerFs.uploadFile(target, relPath || '', safeName, tempFilePath);
         await this.audit(userId, scope, scopeId, 'upload', resolved.relPath);
-        return { path: resolved.relPath, size: buffer.length };
+        return { path: resolved.relPath, size: uploadSize };
       }
     }
 
-    // Quota: charge buffer.length minus any prior size if we're
+    // Quota: charge the on-disk size minus any prior size if we're
     // overwriting. New uploads to fresh paths charge the full size.
     let priorUploadSize = 0;
     try {
@@ -940,13 +968,71 @@ export class FilesService {
       if (st.isFile()) priorUploadSize = st.size;
     } catch {}
     const uploadProjectId = await this.projectIdForScope(scope, scopeId);
-    await this.checkQuota(uploadProjectId, Math.max(0, buffer.length - priorUploadSize));
+    await this.checkQuota(uploadProjectId, Math.max(0, uploadSize - priorUploadSize));
     fs.mkdirSync(path.dirname(resolved.absPath), { recursive: true });
     this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
-    this.writeFileNoFollow(resolved.absPath, buffer);
+    await this.moveUploadIntoPlace(tempFilePath, resolved.absPath);
     await this.audit(userId, scope, scopeId, 'upload', resolved.relPath);
     const stat = fs.statSync(resolved.absPath);
     return { path: resolved.relPath, size: stat.size };
+  }
+
+  /**
+   * Move the staged temp file to its final location. Mirrors the old
+   * writeFileNoFollow semantics:
+   *   - mode 0644 on the result (chmod the temp before the move);
+   *   - refuse to write THROUGH a symlink leaf. rename() itself never
+   *     follows a leaf symlink (it would replace the link inode), but
+   *     the old O_NOFOLLOW behaviour was to REFUSE, so we lstat-check
+   *     and keep that contract;
+   *   - same-volume → atomic rename; cross-volume (EXDEV — e.g. tmp on
+   *     another mount) → streamed copy into an O_NOFOLLOW-opened fd,
+   *     never loading the content in memory.
+   */
+  private async moveUploadIntoPlace(tempFilePath: string, absPath: string): Promise<void> {
+    try {
+      fs.chmodSync(tempFilePath, 0o644);
+    } catch {}
+    try {
+      const leaf = fs.lstatSync(absPath);
+      if (leaf.isSymbolicLink()) {
+        throw new ForbiddenException('Refusing to write through a symlink.');
+      }
+    } catch (e: any) {
+      if (e instanceof ForbiddenException) throw e;
+      // ENOENT — fresh path, fine.
+    }
+    try {
+      await fs.promises.rename(tempFilePath, absPath);
+      return;
+    } catch (e: any) {
+      if (e?.code !== 'EXDEV') throw e;
+    }
+    // Cross-device fallback: stream copy through an O_NOFOLLOW fd so a
+    // TOCTOU symlink swap at the leaf still fails closed.
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(
+        absPath,
+        this.O_WRONLY | this.O_CREAT | this.O_TRUNC | this.O_NOFOLLOW,
+        0o644,
+      );
+      const src = fs.createReadStream(tempFilePath);
+      const dst = fs.createWriteStream(null as any, { fd, autoClose: false });
+      await new Promise<void>((resolve, reject) => {
+        src.on('error', reject);
+        dst.on('error', reject);
+        dst.on('finish', resolve);
+        src.pipe(dst);
+      });
+    } catch (e: any) {
+      if (e?.code === 'ELOOP' || e?.code === 'EMLINK') {
+        throw new ForbiddenException('Refusing to write through a symlink.');
+      }
+      throw e;
+    } finally {
+      if (fd != null) try { fs.closeSync(fd); } catch {}
+    }
   }
 
   // ── download ──────────────────────────────────────────────────────

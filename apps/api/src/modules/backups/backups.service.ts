@@ -4,6 +4,8 @@ import {
   ForbiddenException,
   BadRequestException,
   Logger,
+  OnModuleInit,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import {
   S3Client,
@@ -15,7 +17,9 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { SystemConfigService } from '../system/system-config.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreateBackupDto } from './dto/create-backup.dto';
+import { previousOccurrence, scheduledRunName } from './backup-schedule.util';
 import {
   S3BackupConfig,
   backupS3Prefix,
@@ -114,16 +118,39 @@ interface BackupManifest {
  *   - Delete removes remote objects best-effort — a dead bucket never blocks
  *     deleting the row.
  */
+/** Scheduler tick cadence — checking due occurrences once a minute is plenty
+ *  for a minute-granularity cron subset. */
+const SCHEDULE_TICK_INTERVAL_MS = 60_000;
+
 @Injectable()
-export class BackupsService {
+export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BackupsService.name);
+  private scheduleTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private prisma: PrismaService,
     private systemConfig: SystemConfigService,
     private encryption: EncryptionService,
+    // Injected from the @Global NotificationsModule (same as monitoring/auth).
+    private notifications: NotificationsService,
   ) {
     if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+  }
+
+  onModuleInit() {
+    // Same convention as MonitoringService: no live interval in test runs.
+    if (process.env.NODE_ENV === 'test') return;
+    this.scheduleTimer = setInterval(
+      () => void this.runScheduledBackups().catch((e) =>
+        this.logger.error(`Backup schedule tick crashed: ${(e as Error).message}`),
+      ),
+      SCHEDULE_TICK_INTERVAL_MS,
+    );
+    this.scheduleTimer.unref?.();
+  }
+
+  onModuleDestroy() {
+    if (this.scheduleTimer) clearInterval(this.scheduleTimer);
   }
 
   // ── access helpers ─────────────────────────────────────────────────
@@ -156,6 +183,87 @@ export class BackupsService {
       throw new ForbiddenException('You do not have access to this backup.');
     }
     return backup;
+  }
+
+  // ── scheduler ──────────────────────────────────────────────────────
+  //
+  // A Backup row with a non-null `schedule` acts as a TEMPLATE. One row ==
+  // one dump (sha256/filename/status), so re-running the job on the template
+  // itself would overwrite its history — instead every due occurrence spawns
+  // a NEW child row (same serverId/target/include*, schedule null, name
+  // suffixed with the occurrence time) and runs the dump engine on that.
+  // The template's lastRunAt records the occurrence that was honoured.
+
+  /** One scheduler pass — called every SCHEDULE_TICK_INTERVAL_MS. */
+  async runScheduledBackups(now: Date = new Date()): Promise<void> {
+    const templates = await this.prisma.backup.findMany({
+      where: { schedule: { not: null } },
+      include: { server: { select: { host: true } } },
+    });
+
+    for (const tpl of templates) {
+      // Per-template isolation: one bad template never stops the loop.
+      try {
+        const occurrence = previousOccurrence(tpl.schedule as string, now);
+        if (!occurrence) continue; // legacy/unsupported expression
+
+        // Due when the latest occurrence hasn't been honoured yet. Fall back
+        // to createdAt so a fresh template (whose initial dump may still be
+        // running or have failed) doesn't fire immediately.
+        const last = tpl.lastRunAt ?? tpl.createdAt;
+        if (last.getTime() >= occurrence.getTime()) continue;
+
+        // The dump engine is local-only — same gate as runBackupJob.
+        if (!isLocalHost(tpl.server.host)) {
+          this.logger.warn(
+            `Scheduled backup "${tpl.name}" skipped — remote (agent-managed) servers are not supported.`,
+          );
+          continue;
+        }
+
+        // Double-run guard: skip while the template's own initial dump or a
+        // previously spawned child is still PENDING / IN_PROGRESS.
+        const running = await this.prisma.backup.findFirst({
+          where: {
+            serverId: tpl.serverId,
+            status: { in: ['PENDING', 'IN_PROGRESS'] },
+            OR: [{ id: tpl.id }, { schedule: null, name: { startsWith: `${tpl.name} (` } }],
+          },
+          select: { id: true },
+        });
+        if (running) continue;
+
+        // Mark the occurrence as honoured BEFORE launching the job so a
+        // slow dump can't be re-triggered by the next tick.
+        await this.prisma.backup.update({
+          where: { id: tpl.id },
+          data: { lastRunAt: occurrence },
+        });
+
+        const child = await this.prisma.backup.create({
+          data: {
+            name: scheduledRunName(tpl.name, occurrence),
+            serverId: tpl.serverId,
+            target: tpl.target,
+            includeApplications: tpl.includeApplications,
+            includeDatabases: tpl.includeDatabases,
+            includeVolumes: tpl.includeVolumes,
+            schedule: null,
+            encryptedAt: false,
+          },
+        });
+        this.logger.log(
+          `Scheduled backup "${tpl.name}" due (${tpl.schedule}) — spawned run ${child.id}.`,
+        );
+        void this.runBackupJob(child.id).catch((err) => {
+          this.logger.error(`Scheduled backup job ${child.id} crashed: ${(err as Error).message}`);
+        });
+      } catch (err) {
+        this.logger.error(
+          `Scheduled backup "${tpl.name}" (${tpl.id}) failed to launch: ${(err as Error).message}`,
+        );
+      }
+    }
   }
 
   // ── integrity / crypto helpers ─────────────────────────────────────
@@ -705,12 +813,30 @@ export class BackupsService {
       this.logger.log(
         `Backup ${backupId} completed (${stat.size} bytes, target=${backup.target}, encrypted=${encrypted})`,
       );
+      // Fire-and-forget — a broken SMTP/webhook must never fail the job.
+      this.notifications
+        .sendBackupResult({
+          backupId,
+          name: backup.name,
+          serverId: backup.serverId,
+          status: 'COMPLETED',
+        })
+        .catch(() => {});
     } catch (err) {
       await fs.promises.unlink(archivePath).catch(() => undefined);
       await this.prisma.backup
         .update({ where: { id: backupId }, data: { status: 'FAILED' } })
         .catch(() => undefined);
       this.logger.error(`Backup ${backupId} failed: ${(err as Error).message}`);
+      this.notifications
+        .sendBackupResult({
+          backupId,
+          name: backup.name,
+          serverId: backup.serverId,
+          status: 'FAILED',
+          error: (err as Error).message,
+        })
+        .catch(() => {});
     } finally {
       await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
     }
