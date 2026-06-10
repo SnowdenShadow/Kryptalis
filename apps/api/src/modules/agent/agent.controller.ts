@@ -5,11 +5,14 @@ import {
   Param,
   Body,
   Query,
+  Req,
   Res,
   UseGuards,
   Header,
+  BadRequestException,
+  NotFoundException,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { AgentService } from './agent.service';
@@ -118,6 +121,100 @@ export class AgentController {
   @ApiOperation({ summary: 'Report task result (requires server id + agent token)' })
   taskResult(@Param('id') id: string, @Body() dto: TaskResultDto) {
     return this.svc.taskResult(id, dto.serverId, dto.token, dto.status, dto.result, dto.error);
+  }
+
+  // ─── file transfers (token-authed, raw binary streams) ────────────
+  //
+  // Used by agents to move large blobs (volume tars, backup archives)
+  // through the API: VOLUME_EXPORT/BACKUP upload under their own taskId,
+  // VOLUME_IMPORT/RESTORE download from payload.sourceTaskId. The upload
+  // body is a raw octet stream (NO multipart, NO json) — main.ts excludes
+  // /api/agent/transfers/*/upload from the json body-parser the same way
+  // it does for /api/files/*/upload.
+
+  @Post('transfers/:taskId/upload')
+  @ApiOperation({ summary: 'Agent uploads a transfer file (raw octet-stream body)' })
+  async transferUpload(
+    @Param('taskId') taskId: string,
+    @Query('name') name: string,
+    @Query('serverId') serverId: string,
+    @Query('token') token: string,
+    @Req() req: Request,
+  ) {
+    const filePath = await this.svc.resolveTransferPath(taskId, serverId, token, name, 'upload');
+    const max = this.svc.transferMaxBytes;
+
+    // Fail fast on an honest Content-Length before reading anything.
+    const declared = parseInt(String(req.headers['content-length'] ?? ''), 10);
+    if (Number.isFinite(declared) && declared > max) {
+      throw new BadRequestException(`Upload exceeds the ${max} byte transfer limit`);
+    }
+    // Idle timeout so a half-open stream can't pin a worker (volume tars can
+    // legitimately trickle for a while — keep it generous).
+    try { (req as any).setTimeout?.(15 * 60_000); } catch {}
+
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+
+    // Stream straight to disk — the payload is NEVER buffered in memory. A
+    // running byte counter aborts as soon as the cap is crossed (same pattern
+    // as files.controller upload).
+    let size = 0;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const out = fs.createWriteStream(filePath, { mode: 0o600 });
+        let settled = false;
+        const fail = (err: unknown) => {
+          if (settled) return;
+          settled = true;
+          try { out.destroy(); } catch {}
+          reject(err);
+        };
+        req.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > max) {
+            req.destroy();
+            fail(new BadRequestException(`Upload exceeds the ${max} byte transfer limit`));
+          }
+        });
+        req.on('error', fail);
+        out.on('error', fail);
+        out.on('finish', () => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        });
+        req.pipe(out);
+      });
+    } catch (err) {
+      // Never leave a partial file behind — a later download must not see it.
+      await fs.promises.unlink(filePath).catch(() => {});
+      throw err;
+    }
+    return { ok: true, name: path.basename(filePath), size };
+  }
+
+  @Get('transfers/:taskId/download')
+  @ApiOperation({ summary: 'Agent downloads a transfer file (raw octet-stream)' })
+  async transferDownload(
+    @Param('taskId') taskId: string,
+    @Query('name') name: string,
+    @Query('serverId') serverId: string,
+    @Query('token') token: string,
+    @Res() res: Response,
+  ) {
+    const filePath = await this.svc.resolveTransferPath(taskId, serverId, token, name, 'download');
+    const stat = await fs.promises.stat(filePath).catch(() => null);
+    if (!stat || !stat.isFile()) {
+      throw new NotFoundException('Transfer file not found');
+    }
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', String(stat.size));
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', (err: Error) => {
+      try { res.destroy(err); } catch {}
+    });
+    stream.pipe(res);
   }
 
   // ─── operator routes (JWT) ────────────────────────────────────────

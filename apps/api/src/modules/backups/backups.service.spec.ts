@@ -19,6 +19,7 @@ vi.mock('fs', () => {
     mkdtemp: vi.fn().mockResolvedValue('/tmp/kryptalis-test'),
     writeFile: vi.fn().mockResolvedValue(undefined),
     readFile: vi.fn().mockResolvedValue('{}'),
+    copyFile: vi.fn().mockResolvedValue(undefined),
     stat: vi.fn().mockResolvedValue({ size: 123 }),
     open: vi.fn(),
   };
@@ -33,6 +34,7 @@ vi.mock('fs', () => {
 });
 
 import * as fs from 'fs';
+import { execFile } from 'child_process';
 import { BackupsService } from './backups.service';
 import { previousOccurrence, scheduledRunName, BACKUP_SCHEDULE_PATTERN } from './backup-schedule.util';
 
@@ -52,7 +54,7 @@ function makePrisma() {
       delete: vi.fn(),
     },
     user: { findUnique: vi.fn() },
-    server: { findMany: vi.fn() },
+    server: { findMany: vi.fn(), findUnique: vi.fn() },
     projectMember: { findMany: vi.fn() },
     database: { findMany: vi.fn(), findUnique: vi.fn() },
     application: { findMany: vi.fn() },
@@ -64,13 +66,21 @@ function makeService() {
   const systemConfig = { get: vi.fn().mockReturnValue(undefined) };
   const encryption = { decrypt: vi.fn().mockReturnValue('pw') };
   const notifications = { sendBackupResult: vi.fn().mockResolvedValue(undefined) };
+  const agent = {
+    enqueueTask: vi.fn().mockResolvedValue({ id: 'task1' }),
+    registerTaskCompletionHandler: vi.fn(),
+    transferDir: vi.fn((id: string) => `/data/transfers/${id}`),
+    newLocalTransferId: vi.fn().mockReturnValue('local-xfer-1'),
+    cleanupTransfers: vi.fn().mockResolvedValue(undefined),
+  };
   const service = new BackupsService(
     prisma as any,
     systemConfig as any,
     encryption as any,
     notifications as any,
+    agent as any,
   );
-  return { service, prisma, systemConfig, encryption, notifications };
+  return { service, prisma, systemConfig, encryption, notifications, agent };
 }
 
 /** Non-admin user with access to exactly `serverIds`. */
@@ -379,7 +389,7 @@ describe('runScheduledBackups', () => {
     expect(job).not.toHaveBeenCalled();
   });
 
-  it('skips remote (agent-managed) servers — the engine is local-only', async () => {
+  it('skips remote (agent-managed) servers — schedules stay local-only', async () => {
     const { service, prisma } = makeService();
     prisma.backup.findMany.mockResolvedValue([
       template({ server: { host: '10.0.0.5' } }),
@@ -417,5 +427,213 @@ describe('runScheduledBackups', () => {
     // tplB still launched despite tplA's failure
     expect(prisma.backup.create).toHaveBeenCalledTimes(1);
     expect(job).toHaveBeenCalledWith('childB');
+  });
+});
+
+// ── remote (agent-managed) backups ───────────────────────────────────
+
+describe('remote backups', () => {
+  function remoteBackupRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'b1',
+      name: 'remote backup',
+      serverId: 's1',
+      target: 'LOCAL',
+      status: 'PENDING',
+      includeApplications: true,
+      includeDatabases: true,
+      includeVolumes: true,
+      server: { host: '10.0.0.5' },
+      ...overrides,
+    };
+  }
+
+  it('runBackupJob on a remote server enqueues a BACKUP task with resolved creds + deterministic volumes', async () => {
+    const { service, prisma, agent, encryption } = makeService();
+    prisma.backup.findUnique.mockResolvedValue(remoteBackupRow());
+    prisma.backup.update.mockResolvedValue({});
+    prisma.database.findMany.mockResolvedValue([
+      {
+        id: 'd1', name: 'maindb', type: 'POSTGRESQL', host: 'x',
+        username: 'admin', password: 'enc:pw', autoImported: false,
+      },
+    ]);
+    prisma.application.findMany.mockResolvedValue([{ id: 'app123456789012', name: 'Web App' }]);
+    encryption.decrypt.mockReturnValue('decrypted-pw');
+
+    await (service as any).runBackupJob('b1');
+
+    // Row flipped to IN_PROGRESS and stays there — the task result finalizes.
+    expect(prisma.backup.update).toHaveBeenCalledWith({
+      where: { id: 'b1' },
+      data: { status: 'IN_PROGRESS' },
+    });
+    expect(agent.enqueueTask).toHaveBeenCalledTimes(1);
+    const [serverId, type, payload] = agent.enqueueTask.mock.calls[0];
+    expect(serverId).toBe('s1');
+    expect(type).toBe('BACKUP');
+    expect(payload.backupId).toBe('b1');
+    expect(payload.uploadName).toBe('b1.tar.gz');
+    expect(payload.databases).toEqual([
+      expect.objectContaining({
+        id: 'd1',
+        type: 'POSTGRESQL',
+        container: 'kryptalis-db-maindb', // manually provisioned naming scheme
+        username: 'admin',
+        password: 'decrypted-pw', // decrypted, same as dumpDatabases
+        name: 'maindb',
+        dumpAll: false,
+      }),
+    ]);
+    // Deterministic <composeProject>_data names — no docker volume ls remotely.
+    expect(payload.volumes).toContain('maindb_data');
+    expect(payload.volumes.some((v: string) => v.startsWith('web-app-'))).toBe(true);
+  });
+
+  it('runBackupJob fails the row when the enqueue fails', async () => {
+    const { service, prisma, agent, notifications } = makeService();
+    prisma.backup.findUnique.mockResolvedValue(remoteBackupRow());
+    prisma.backup.update.mockResolvedValue({});
+    prisma.database.findMany.mockResolvedValue([]);
+    prisma.application.findMany.mockResolvedValue([]);
+    agent.enqueueTask.mockRejectedValue(new Error('agent unreachable'));
+
+    await (service as any).runBackupJob('b1');
+
+    expect(prisma.backup.update).toHaveBeenCalledWith({
+      where: { id: 'b1' },
+      data: { status: 'FAILED' },
+    });
+    expect(notifications.sendBackupResult).toHaveBeenCalledWith(
+      expect.objectContaining({ backupId: 'b1', status: 'FAILED' }),
+    );
+  });
+
+  it('BACKUP completion handler moves the uploaded archive and replays the finalize flow', async () => {
+    const { service, prisma, notifications } = makeService();
+    prisma.backup.findUnique.mockResolvedValue(remoteBackupRow({ status: 'IN_PROGRESS' }));
+    prisma.backup.update.mockResolvedValue({});
+    const sha = vi.spyOn(service as any, 'sha256File').mockResolvedValue('deadbeef');
+
+    await service.onRemoteBackupTaskResult({
+      id: 'task1',
+      serverId: 's1',
+      type: 'BACKUP',
+      status: 'COMPLETED',
+      payload: { backupId: 'b1', uploadName: 'b1.tar.gz' },
+    } as any);
+
+    // transfers/<taskId>/<uploadName> → BACKUPS_DIR/<backupId>.tar.gz
+    expect(mockFs.promises.rename).toHaveBeenCalledWith(
+      expect.stringContaining('task1'),
+      expect.stringContaining('b1.tar.gz'),
+    );
+    // encrypt(no key)→sha256→COMPLETED — same tail as the local engine.
+    expect(sha).toHaveBeenCalled();
+    expect(prisma.backup.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'b1' },
+        data: expect.objectContaining({
+          status: 'COMPLETED',
+          sha256: 'deadbeef',
+          filename: 'b1.tar.gz',
+        }),
+      }),
+    );
+    expect(notifications.sendBackupResult).toHaveBeenCalledWith(
+      expect.objectContaining({ backupId: 'b1', status: 'COMPLETED' }),
+    );
+  });
+
+  it('BACKUP completion handler fails the row on a FAILED task', async () => {
+    const { service, prisma, notifications } = makeService();
+    prisma.backup.findUnique.mockResolvedValue(remoteBackupRow({ status: 'IN_PROGRESS' }));
+    prisma.backup.update.mockResolvedValue({});
+
+    await service.onRemoteBackupTaskResult({
+      id: 'task1',
+      serverId: 's1',
+      type: 'BACKUP',
+      status: 'FAILED',
+      payload: { backupId: 'b1' },
+      error: 'disk full on remote host',
+    } as any);
+
+    expect(prisma.backup.update).toHaveBeenCalledWith({
+      where: { id: 'b1' },
+      data: { status: 'FAILED' },
+    });
+    expect(notifications.sendBackupResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        backupId: 'b1',
+        status: 'FAILED',
+        error: 'disk full on remote host',
+      }),
+    );
+  });
+
+  it('BACKUP completion handler ignores tasks without a backupId and already-final rows', async () => {
+    const { service, prisma } = makeService();
+
+    await service.onRemoteBackupTaskResult({
+      id: 'task1', serverId: 's1', type: 'BACKUP', status: 'COMPLETED', payload: {},
+    } as any);
+    expect(prisma.backup.findUnique).not.toHaveBeenCalled();
+
+    prisma.backup.findUnique.mockResolvedValue(remoteBackupRow({ status: 'COMPLETED' }));
+    await service.onRemoteBackupTaskResult({
+      id: 'task1', serverId: 's1', type: 'BACKUP', status: 'COMPLETED',
+      payload: { backupId: 'b1' },
+    } as any);
+    expect(prisma.backup.update).not.toHaveBeenCalled();
+  });
+
+  it('restore on a remote server stages the archive and queues a RESTORE task', async () => {
+    const { service, prisma, agent } = makeService();
+    grantAccess(prisma, ['s1']);
+    // The shared verify/extract gate runs before the remote branch — let the
+    // promisified `tar -xzf` succeed.
+    vi.mocked(execFile).mockImplementation(((...args: any[]) => {
+      const cb = args[args.length - 1];
+      if (typeof cb === 'function') cb(null, { stdout: '', stderr: '' });
+    }) as any);
+    prisma.backup.findUnique.mockResolvedValue({
+      id: 'b1',
+      serverId: 's1',
+      target: 'LOCAL',
+      status: 'COMPLETED',
+      filename: 'b1.tar.gz',
+      sha256: null,
+      encryptedAt: false,
+    });
+    prisma.server.findUnique.mockResolvedValue({ host: '10.0.0.5' });
+    prisma.database.findUnique.mockResolvedValue({
+      id: 'd1', name: 'maindb', type: 'POSTGRESQL', host: 'x',
+      username: 'admin', password: 'enc', autoImported: false,
+    });
+    mockFs.promises.readFile.mockResolvedValue(
+      JSON.stringify({
+        version: 1,
+        databases: [{ id: 'd1', name: 'maindb', type: 'POSTGRESQL', container: 'c', file: 'databases/d1.sql', dumpAll: false }],
+        volumes: ['maindb_data'],
+      }),
+    );
+
+    const res = await service.restore('u1', 'b1');
+
+    // Archive staged under a local transfer id the agent can download from.
+    expect(mockFs.promises.copyFile).toHaveBeenCalledWith(
+      expect.stringContaining('b1.tar.gz'),
+      expect.stringContaining('local-xfer-1'),
+    );
+    expect(agent.enqueueTask).toHaveBeenCalledWith('s1', 'RESTORE',
+      expect.objectContaining({
+        downloadName: 'b1.tar.gz',
+        sourceTaskId: 'local-xfer-1',
+        volumes: ['maindb_data'],
+        databases: [expect.objectContaining({ id: 'd1', container: 'kryptalis-db-maindb', password: 'pw' })],
+      }),
+    );
+    expect(res.message).toContain('queued on remote server');
   });
 });

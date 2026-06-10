@@ -30,6 +30,8 @@ import {
 } from './backup-storage.util';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { slugify, resolveAppDir } from '../applications/applications.helpers';
+import { AgentService, AgentTaskCompletion } from '../agent/agent.service';
+import { deterministicVolumeNames } from '../agent/volume-naming.util';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as crypto from 'crypto';
@@ -90,6 +92,33 @@ interface BackupManifest {
  *      Previously every authenticated user could enumerate / restore / delete
  *      every backup on the platform.
  *
+ * Remote (agent-managed) servers:
+ *   - create() on a remote server enqueues a BACKUP agent task instead of
+ *     running the dump engine locally. The task payload carries the resolved
+ *     database credentials (same container names / decrypted passwords as
+ *     dumpDatabases), the deterministic volume list, an uploadName and the
+ *     backupId — the agent dumps everything host-side, tars it and streams
+ *     the archive back through POST /agent/transfers/<taskId>/upload. The
+ *     row stays IN_PROGRESS until the task result arrives; the BACKUP
+ *     completion handler (registered with AgentService) then moves the
+ *     archive from transfers/ into BACKUPS_DIR and replays the exact local
+ *     finalize flow (encrypt → sha256 → S3 upload for remote targets →
+ *     COMPLETED + notification). A FAILED task fails the row.
+ *     Volume coverage note: the API cannot run `docker volume ls` on a
+ *     remote host, so the volume list is built deterministically from the
+ *     compose-project naming convention (<appDir>_data / <dbName>_data via
+ *     volume-naming.util). Stacks declaring differently-named volumes are
+ *     NOT covered by remote dumps. Application metadata (applications.json)
+ *     is also not included in remote dumps — it lives in the API DB anyway.
+ *   - restore() of a backup whose server is remote stages the verified (and
+ *     decrypted, if applicable) archive under transfers/<local-id>/ and
+ *     enqueues a RESTORE task ({downloadName, sourceTaskId, databases,
+ *     volumes}) on that server, returning "queued" immediately. The async
+ *     task result is only logged (RESTORE completion handler) — the row is
+ *     not mutated; the generic transfer cleanup removes the staged archive
+ *     when the task terminates.
+ *   - The scheduler still skips remote servers (template gate unchanged).
+ *
  * Integrity / at-rest encryption:
  *   - Every COMPLETED row carries sha256 of the final on-disk file (post-
  *     encryption if encrypted) plus sizeBytes. Restore re-hashes the file and
@@ -133,11 +162,27 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     private encryption: EncryptionService,
     // Injected from the @Global NotificationsModule (same as monitoring/auth).
     private notifications: NotificationsService,
+    private agent: AgentService,
   ) {
     if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
   }
 
   onModuleInit() {
+    // Remote-backup finalizer + remote-restore logger — must be registered
+    // even in test runs (specs exercise the handlers directly).
+    this.agent.registerTaskCompletionHandler('BACKUP', (task) =>
+      this.onRemoteBackupTaskResult(task),
+    );
+    this.agent.registerTaskCompletionHandler('RESTORE', async (task) => {
+      // Remote restores are fire-and-forget: nothing to mutate, just log the
+      // outcome so operators can correlate (documented in restore()).
+      if (task.status === 'COMPLETED') {
+        this.logger.log(`Remote restore task ${task.id} completed.`);
+      } else {
+        this.logger.error(`Remote restore task ${task.id} failed: ${task.error ?? 'unknown error'}`);
+      }
+    });
+
     // Same convention as MonitoringService: no live interval in test runs.
     if (process.env.NODE_ENV === 'test') return;
     this.scheduleTimer = setInterval(
@@ -213,10 +258,12 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         const last = tpl.lastRunAt ?? tpl.createdAt;
         if (last.getTime() >= occurrence.getTime()) continue;
 
-        // The dump engine is local-only — same gate as runBackupJob.
+        // Scheduled runs stay local-only for now: remote dumps are async
+        // agent tasks and the double-run guard below can't see an agent
+        // task still in flight. On-demand remote backups work (runBackupJob).
         if (!isLocalHost(tpl.server.host)) {
           this.logger.warn(
-            `Scheduled backup "${tpl.name}" skipped — remote (agent-managed) servers are not supported.`,
+            `Scheduled backup "${tpl.name}" skipped — schedules on remote (agent-managed) servers are not supported yet.`,
           );
           continue;
         }
@@ -734,16 +781,23 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       data: { status: 'IN_PROGRESS' },
     });
 
+    // Remote (agent-managed) server → delegate the whole dump to the agent.
+    // The row stays IN_PROGRESS until the BACKUP task result arrives (see
+    // onRemoteBackupTaskResult). Enqueue failures fail the row immediately.
+    if (!isLocalHost(backup.server.host)) {
+      try {
+        await this.enqueueRemoteBackup(backup);
+        this.logger.log(`Backup ${backupId} delegated to remote agent on server ${backup.serverId}.`);
+      } catch (err) {
+        await this.failBackup(backup, (err as Error).message);
+      }
+      return;
+    }
+
     const filename = `${backupId}.tar.gz`;
     const archivePath = path.join(BACKUPS_DIR, filename);
     const stagingDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'kryptalis-backup-'));
     try {
-      if (!isLocalHost(backup.server.host)) {
-        throw new Error(
-          'Backups for remote (agent-managed) servers are not supported yet — only the local server can be backed up.',
-        );
-      }
-
       const manifest: BackupManifest = {
         version: 1,
         backupId,
@@ -779,67 +833,286 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         maxBuffer: 8 * 1024 * 1024,
       });
 
-      const masterKey = this.backupEncryptionKey();
-      let encrypted = false;
-      if (masterKey) {
-        await this.encryptFileInPlace(archivePath, masterKey);
-        encrypted = true;
-      }
-      // sha256 + sizeBytes are computed AFTER any encryption so restore can
-      // verify the bytes that actually live on disk — and, for remote
-      // targets, the bytes that get uploaded.
-      const sha256 = await this.sha256File(archivePath);
-      const stat = await fs.promises.stat(archivePath);
-
-      if (isRemoteTarget(backup.target)) {
-        // Upload, then drop the local copy — the bucket is the only home
-        // of a remote-target dump.
-        await this.uploadBackupToS3(backupId, archivePath);
-        await fs.promises.unlink(archivePath).catch(() => undefined);
-      }
-
-      await this.prisma.backup.update({
-        where: { id: backupId },
-        data: {
-          sha256,
-          sizeBytes: BigInt(stat.size),
-          size: BigInt(stat.size),
-          encryptedAt: encrypted,
-          filename,
-          status: 'COMPLETED',
-          lastRunAt: new Date(),
-        },
-      });
-      this.logger.log(
-        `Backup ${backupId} completed (${stat.size} bytes, target=${backup.target}, encrypted=${encrypted})`,
-      );
-      // Fire-and-forget — a broken SMTP/webhook must never fail the job.
-      this.notifications
-        .sendBackupResult({
-          backupId,
-          name: backup.name,
-          serverId: backup.serverId,
-          status: 'COMPLETED',
-        })
-        .catch(() => {});
+      await this.finalizeBackupArchive(backup, archivePath, filename);
     } catch (err) {
       await fs.promises.unlink(archivePath).catch(() => undefined);
-      await this.prisma.backup
-        .update({ where: { id: backupId }, data: { status: 'FAILED' } })
-        .catch(() => undefined);
-      this.logger.error(`Backup ${backupId} failed: ${(err as Error).message}`);
-      this.notifications
-        .sendBackupResult({
-          backupId,
-          name: backup.name,
-          serverId: backup.serverId,
-          status: 'FAILED',
-          error: (err as Error).message,
-        })
-        .catch(() => {});
+      await this.failBackup(backup, (err as Error).message);
     } finally {
       await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  /**
+   * Shared tail of every backup job (local dump OR remote agent dump): the
+   * raw archive already sits at `archivePath` inside BACKUPS_DIR — encrypt
+   * in place when a key is configured, hash + stat the final bytes, upload
+   * to S3 for remote targets (dropping the local copy), then flip the row
+   * to COMPLETED and notify.
+   */
+  private async finalizeBackupArchive(
+    backup: { id: string; name: string; serverId: string; target: string },
+    archivePath: string,
+    filename: string,
+  ): Promise<void> {
+    const backupId = backup.id;
+    const masterKey = this.backupEncryptionKey();
+    let encrypted = false;
+    if (masterKey) {
+      await this.encryptFileInPlace(archivePath, masterKey);
+      encrypted = true;
+    }
+    // sha256 + sizeBytes are computed AFTER any encryption so restore can
+    // verify the bytes that actually live on disk — and, for remote
+    // targets, the bytes that get uploaded.
+    const sha256 = await this.sha256File(archivePath);
+    const stat = await fs.promises.stat(archivePath);
+
+    if (isRemoteTarget(backup.target)) {
+      // Upload, then drop the local copy — the bucket is the only home
+      // of a remote-target dump.
+      await this.uploadBackupToS3(backupId, archivePath);
+      await fs.promises.unlink(archivePath).catch(() => undefined);
+    }
+
+    await this.prisma.backup.update({
+      where: { id: backupId },
+      data: {
+        sha256,
+        sizeBytes: BigInt(stat.size),
+        size: BigInt(stat.size),
+        encryptedAt: encrypted,
+        filename,
+        status: 'COMPLETED',
+        lastRunAt: new Date(),
+      },
+    });
+    this.logger.log(
+      `Backup ${backupId} completed (${stat.size} bytes, target=${backup.target}, encrypted=${encrypted})`,
+    );
+    // Fire-and-forget — a broken SMTP/webhook must never fail the job.
+    this.notifications
+      .sendBackupResult({
+        backupId,
+        name: backup.name,
+        serverId: backup.serverId,
+        status: 'COMPLETED',
+      })
+      .catch(() => {});
+  }
+
+  /** Flip the row to FAILED + notify — shared by local and remote paths. */
+  private async failBackup(
+    backup: { id: string; name: string; serverId: string },
+    message: string,
+  ): Promise<void> {
+    await this.prisma.backup
+      .update({ where: { id: backup.id }, data: { status: 'FAILED' } })
+      .catch(() => undefined);
+    this.logger.error(`Backup ${backup.id} failed: ${message}`);
+    this.notifications
+      .sendBackupResult({
+        backupId: backup.id,
+        name: backup.name,
+        serverId: backup.serverId,
+        status: 'FAILED',
+        error: message,
+      })
+      .catch(() => {});
+  }
+
+  // ── remote (agent-managed) servers ─────────────────────────────────
+
+  /**
+   * Resolve the database-dump descriptors for a remote BACKUP task — the
+   * same container names / decrypted credentials / dumpAll semantics
+   * dumpDatabases derives, but handed to the agent instead of executed via
+   * local `docker exec`.
+   */
+  private async remoteBackupDatabases(serverId: string) {
+    const dbs = await this.prisma.database.findMany({ where: { serverId } });
+    return dbs.map((db) => ({
+      id: db.id,
+      type: db.type,
+      container: this.dbContainerName(db),
+      username: db.username,
+      password: this.encryption.decrypt(db.password),
+      name: db.name,
+      dumpAll: db.autoImported,
+    }));
+  }
+
+  /**
+   * Deterministic volume list for a remote server. We can't `docker volume
+   * ls` over there, so derive `<composeProject>_data` names from the same
+   * resolveAppDir/DBS_DIR conventions the deploy paths use. DOCUMENTED
+   * LIMITATION: volumes that don't follow the `_data` naming (multi-volume
+   * stacks, marketplace instance-suffixed keys, user compose files) are not
+   * enumerated and therefore not covered by remote dumps.
+   */
+  private async remoteBackupVolumes(serverId: string): Promise<string[]> {
+    const [apps, dbs] = await Promise.all([
+      this.prisma.application.findMany({
+        where: { project: { serverId } },
+        select: { id: true, name: true },
+      }),
+      this.prisma.database.findMany({
+        where: { serverId },
+        select: { name: true, autoImported: true },
+      }),
+    ]);
+    return deterministicVolumeNames(apps, dbs);
+  }
+
+  /**
+   * Enqueue a BACKUP task on the remote agent. The agent dumps the listed
+   * databases + volumes, builds `<uploadName>` (tar.gz with the same
+   * manifest layout as the local engine) and uploads it under its own
+   * taskId via /agent/transfers. backupId rides in the payload so the
+   * completion handler can find the row — no schema change needed.
+   */
+  private async enqueueRemoteBackup(backup: {
+    id: string;
+    serverId: string;
+    includeDatabases: boolean;
+    includeVolumes: boolean;
+  }): Promise<void> {
+    const databases = backup.includeDatabases
+      ? await this.remoteBackupDatabases(backup.serverId)
+      : [];
+    const volumes = backup.includeVolumes
+      ? await this.remoteBackupVolumes(backup.serverId)
+      : [];
+    await this.agent.enqueueTask(backup.serverId, 'BACKUP', {
+      backupId: backup.id,
+      databases,
+      volumes,
+      uploadName: `${backup.id}.tar.gz`,
+    });
+  }
+
+  /**
+   * BACKUP agent-task completion handler (registered in onModuleInit).
+   * COMPLETED → move the uploaded archive from transfers/<taskId>/ into
+   * BACKUPS_DIR/<backupId>.tar.gz and replay the local finalize flow
+   * (encrypt → sha256 → S3 → COMPLETED + notification). FAILED → row FAILED.
+   * The transfers dir itself is cleaned up by the agent service's generic
+   * post-terminal sweep.
+   */
+  async onRemoteBackupTaskResult(task: AgentTaskCompletion): Promise<void> {
+    const backupId = task.payload?.backupId;
+    if (typeof backupId !== 'string' || !backupId) return; // not ours
+    const backup = await this.prisma.backup.findUnique({ where: { id: backupId } });
+    if (!backup) {
+      this.logger.warn(`BACKUP task ${task.id} completed but backup row ${backupId} is gone.`);
+      return;
+    }
+    if (backup.status !== 'IN_PROGRESS' && backup.status !== 'PENDING') {
+      return; // already finalized (duplicate/stale report)
+    }
+
+    if (task.status === 'FAILED') {
+      await this.failBackup(backup, task.error || 'Remote agent backup task failed');
+      return;
+    }
+
+    const uploadName = path.basename(String(task.payload?.uploadName || `${backupId}.tar.gz`));
+    const uploadedPath = path.join(this.agent.transferDir(task.id), uploadName);
+    const filename = `${backupId}.tar.gz`;
+    const archivePath = path.join(BACKUPS_DIR, filename);
+    try {
+      if (!fs.existsSync(uploadedPath)) {
+        throw new Error('Agent reported success but the uploaded archive is missing from transfers/.');
+      }
+      // rename() fails across devices/volumes — fall back to copy+unlink.
+      try {
+        await fs.promises.rename(uploadedPath, archivePath);
+      } catch {
+        await fs.promises.copyFile(uploadedPath, archivePath);
+        await fs.promises.unlink(uploadedPath).catch(() => undefined);
+      }
+      await this.finalizeBackupArchive(backup, archivePath, filename);
+    } catch (err) {
+      await fs.promises.unlink(archivePath).catch(() => undefined);
+      await this.failBackup(backup, (err as Error).message);
+    }
+  }
+
+  /**
+   * Remote restore: stage the verified (and already-decrypted) archive under
+   * transfers/<local-id>/, then enqueue a RESTORE task carrying the manifest's
+   * database descriptors (re-resolved against live rows for fresh container
+   * names + decrypted credentials) and volume list. The agent downloads the
+   * archive via /agent/transfers (sourceTaskId) and replays it host-side.
+   */
+  private async queueRemoteRestore(
+    backup: { id: string; serverId: string },
+    archivePath: string,
+    manifest: BackupManifest,
+  ) {
+    const databases: Array<{
+      id: string;
+      type: string;
+      container: string;
+      username: string;
+      password: string;
+      name: string;
+      dumpAll: boolean;
+      file: string;
+    }> = [];
+    for (const entry of manifest.databases ?? []) {
+      const db = await this.prisma.database.findUnique({ where: { id: entry.id } });
+      if (!db) {
+        throw new BadRequestException(
+          `Restore failed: database "${entry.name}" no longer exists in the registry — recreate it first, then restore.`,
+        );
+      }
+      databases.push({
+        id: db.id,
+        type: db.type,
+        container: this.dbContainerName(db),
+        username: db.username,
+        password: this.encryption.decrypt(db.password),
+        name: db.name,
+        dumpAll: entry.dumpAll,
+        file: entry.file,
+      });
+    }
+
+    // Stage the plaintext archive where the agent can download it. The id is
+    // a local transfer id (no AgentTask row) — the RESTORE task's
+    // payload.sourceTaskId authorizes the agent's cross-id download.
+    const sourceTaskId = this.agent.newLocalTransferId();
+    const downloadName = `${backup.id}.tar.gz`;
+    const stagedDir = this.agent.transferDir(sourceTaskId);
+    await fs.promises.mkdir(stagedDir, { recursive: true });
+    await fs.promises.copyFile(archivePath, path.join(stagedDir, downloadName));
+
+    let task;
+    try {
+      task = await this.agent.enqueueTask(backup.serverId, 'RESTORE', {
+        downloadName,
+        sourceTaskId,
+        databases,
+        volumes: manifest.volumes ?? [],
+      });
+    } catch (err) {
+      // No consumer will ever pull the staged copy — drop it now.
+      await this.agent.cleanupTransfers(sourceTaskId);
+      throw new BadRequestException(
+        `Failed to queue remote restore: ${(err as Error).message}`,
+      );
+    }
+
+    this.logger.log(
+      `Backup ${backup.id} restore queued on remote server ${backup.serverId} (task ${task.id}).`,
+    );
+    return {
+      message: 'Restore queued on remote server — the agent will apply it asynchronously.',
+      backupId: backup.id,
+      taskId: task.id,
+      databasesQueued: databases.length,
+      volumesQueued: (manifest.volumes ?? []).length,
+    };
   }
 
   // ── restore engine ─────────────────────────────────────────────────
@@ -997,6 +1270,10 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         `Only COMPLETED backups can be restored. This backup is ${backup.status}.`,
       );
     }
+    const server = await this.prisma.server.findUnique({
+      where: { id: backup.serverId },
+      select: { host: true },
+    });
 
     // Integrity + decryption gate. Anything that throws here MUST prevent the
     // engine from touching live data — that's the whole point of recording
@@ -1060,6 +1337,17 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         throw new BadRequestException(
           `Backup manifest is unreadable: ${(err as Error).message}`,
         );
+      }
+
+      // Remote (agent-managed) server → the verified/decrypted archive is
+      // staged under transfers/<local-id>/ and a RESTORE task is enqueued;
+      // the agent downloads it and replays the dumps host-side. We return
+      // immediately ("queued") — the async task result is only logged (see
+      // the RESTORE completion handler in onModuleInit); the row is not
+      // mutated. The staged archive is removed by the generic transfer
+      // cleanup when the task terminates.
+      if (server && !isLocalHost(server.host)) {
+        return await this.queueRemoteRestore(backup, archivePath, manifest);
       }
 
       let databasesRestored = 0;

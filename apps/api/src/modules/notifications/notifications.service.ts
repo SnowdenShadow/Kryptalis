@@ -564,6 +564,180 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * Server went offline (heartbeat stopped) — called fire-and-forget from
+   * the ServersService offline sweep, only on the ONLINE→OFFLINE
+   * transition (the status flip is the dedupe). Mirrors sendBackupResult:
+   * in-app feed entry for every active admin, then one email per admin
+   * honouring their `serverOff` toggle. Never throws.
+   */
+  async sendServerOffline(input: {
+    serverId: string;
+    name: string;
+    host: string;
+    lastSeenAt: Date | null;
+  }): Promise<void> {
+    try {
+      const title = `Server offline: ${input.name}`;
+      const lastSeen = input.lastSeenAt
+        ? input.lastSeenAt.toISOString()
+        : 'never';
+
+      await this.notifyAdmins({
+        type: 'server.offline',
+        title,
+        body: `Server ${input.name} (${input.host}) stopped sending heartbeats. Last seen: ${lastSeen}.`,
+        link: '/dashboard/servers',
+      });
+
+      if (!this.smtpReady) {
+        this.logger.warn(
+          `Skipping server-offline email for ${input.serverId} — SMTP not configured.`,
+        );
+        return;
+      }
+
+      let admins: Array<{ email: string; notificationPrefs: unknown }> = [];
+      try {
+        admins = await this.prisma.user.findMany({
+          where: { role: { in: ['ADMIN', 'SUPERADMIN'] }, status: 'ACTIVE' },
+          select: { email: true, notificationPrefs: true },
+        });
+      } catch (err) {
+        this.logger.error(
+          `sendServerOffline: failed to resolve recipients for server ${input.serverId}: ${(err as Error).message}`,
+        );
+        return;
+      }
+      const recipients = admins
+        .filter((a) => a.email && this.allows(a.notificationPrefs, 'serverOff', 'email'))
+        .map((a) => a.email);
+      if (recipients.length === 0) {
+        this.logger.debug(
+          `sendServerOffline: no opted-in recipients for server ${input.serverId}.`,
+        );
+        return;
+      }
+
+      const html = renderEmail({
+        title,
+        preheader: `${input.name} stopped sending heartbeats.`,
+        body: `
+          <p style="margin:0 0 12px 0;">
+            Server <strong>${escapeHtml(input.name)}</strong>
+            (<strong>${escapeHtml(input.host)}</strong>) has stopped sending
+            heartbeats and was marked <strong>OFFLINE</strong>.
+          </p>
+          <p style="margin:0;">
+            Last seen: ${escapeHtml(lastSeen)}. Check the agent process and
+            network connectivity on the machine.
+          </p>`,
+        ctaLabel: 'Open servers',
+        ctaUrl: this.buildDashboardUrl('/dashboard/servers'),
+      });
+
+      await this.sendMail({
+        to: recipients.join(', '),
+        subject: `[Kryptalis] ${title}`,
+        html,
+      });
+    } catch (err) {
+      // Fire-and-forget contract — never let a notification failure
+      // bubble into the offline sweep.
+      this.logger.error(`sendServerOffline failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * SSL certificate approaching expiry — called fire-and-forget from the
+   * SslService daily expiry sweep (dedupe lives there via
+   * SSLCertificate.expiryNotifiedAt). In-app feed entry for every active
+   * admin, then one email per admin honouring their `sslExpire` toggle.
+   * Never throws.
+   */
+  async sendSslExpiry(input: {
+    domain: string;
+    expiresAt: Date;
+    daysLeft: number;
+  }): Promise<void> {
+    try {
+      const title =
+        input.daysLeft > 0
+          ? `SSL certificate expiring: ${input.domain}`
+          : `SSL certificate expired: ${input.domain}`;
+      const when = input.expiresAt.toISOString().slice(0, 10);
+      const summary =
+        input.daysLeft > 0
+          ? `Certificate for ${input.domain} expires in ${input.daysLeft} day(s) (${when}).`
+          : `Certificate for ${input.domain} expired on ${when}.`;
+
+      await this.notifyAdmins({
+        type: 'ssl.expiring',
+        title,
+        body: summary,
+        link: '/dashboard/domains',
+      });
+
+      if (!this.smtpReady) {
+        this.logger.warn(
+          `Skipping SSL-expiry email for ${input.domain} — SMTP not configured.`,
+        );
+        return;
+      }
+
+      let admins: Array<{ email: string; notificationPrefs: unknown }> = [];
+      try {
+        admins = await this.prisma.user.findMany({
+          where: { role: { in: ['ADMIN', 'SUPERADMIN'] }, status: 'ACTIVE' },
+          select: { email: true, notificationPrefs: true },
+        });
+      } catch (err) {
+        this.logger.error(
+          `sendSslExpiry: failed to resolve recipients for ${input.domain}: ${(err as Error).message}`,
+        );
+        return;
+      }
+      const recipients = admins
+        .filter((a) => a.email && this.allows(a.notificationPrefs, 'sslExpire', 'email'))
+        .map((a) => a.email);
+      if (recipients.length === 0) {
+        this.logger.debug(
+          `sendSslExpiry: no opted-in recipients for ${input.domain}.`,
+        );
+        return;
+      }
+
+      const html = renderEmail({
+        title,
+        preheader: summary,
+        body: `
+          <p style="margin:0 0 12px 0;">
+            The SSL certificate for <strong>${escapeHtml(input.domain)}</strong>
+            ${
+              input.daysLeft > 0
+                ? `expires in <strong>${input.daysLeft} day(s)</strong> (${escapeHtml(when)}).`
+                : `expired on <strong>${escapeHtml(when)}</strong>.`
+            }
+          </p>
+          <p style="margin:0;">
+            Certificates tracked here are not auto-renewed by the platform —
+            renew it from the Domains page (or re-issue via your CA) before
+            visitors start seeing browser warnings.
+          </p>`,
+        ctaLabel: 'Open domains',
+        ctaUrl: this.buildDashboardUrl('/dashboard/domains'),
+      });
+
+      await this.sendMail({
+        to: recipients.join(', '),
+        subject: `[Kryptalis] ${title}`,
+        html,
+      });
+    } catch (err) {
+      this.logger.error(`sendSslExpiry failed: ${(err as Error).message}`);
+    }
+  }
+
   // ── in-app notification feed ──────────────────────────────────────
 
   /**

@@ -901,7 +901,12 @@ export const PORT_MAP: Record<string, number> = {
   roundcube: 8083,
   snappymail: 8084,
   rainloop: 8085,
-  mailpit: 8086,
+  // 8092: was 8086, which collided with plausible (both in the active
+  // catalog) — installing the second one always failed with a 409
+  // "Default port taken". Keep every ACTIVE catalog app on a unique
+  // default. (rainloop/postal/mailu duplicates below are fine — those
+  // apps are no longer in catalog.json.)
+  mailpit: 8092,
   postal: 8087,
   mailu: 8088,
 };

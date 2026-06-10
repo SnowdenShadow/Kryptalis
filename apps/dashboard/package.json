@@ -8,6 +8,8 @@
     "start": "next start",
     "lint": "eslint src",
     "test": "vitest run",
+    "e2e": "playwright test",
+    "e2e:ui": "playwright test --ui",
     "type-check": "tsc --noEmit",
     "clean": "node -e \"fs.rmSync('.next',{recursive:true,force:true})\""
   },
@@ -27,6 +29,7 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@tailwindcss/postcss": "^4.0.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",

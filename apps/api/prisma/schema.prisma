@@ -584,6 +584,10 @@ model SSLCertificate {
   chain       String?
   issuedAt    DateTime
   expiresAt   DateTime
+  // Set when an "expiring soon" notification was dispatched for the current
+  // expiry window. The notifier compares it against the window start, so a
+  // renewal (expiresAt pushed forward) re-arms the alert automatically.
+  expiryNotifiedAt DateTime?
   createdAt   DateTime @default(now())
 
   domain Domain @relation(fields: [domainId], references: [id], onDelete: Cascade)
@@ -879,6 +883,7 @@ enum TaskType {
   MONITOR
   VOLUME_EXPORT
   VOLUME_IMPORT
+  RESTORE
 }
 
 enum TaskStatus {

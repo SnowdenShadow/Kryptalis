@@ -48,7 +48,13 @@ function makePrisma() {
 function makeService() {
   const prisma = makePrisma();
   const admin = { getDeploymentMode: vi.fn() };
-  const agent = { enqueueTask: vi.fn() };
+  const agent = {
+    enqueueTask: vi.fn(),
+    registerTaskCompletionHandler: vi.fn(),
+    transferDir: vi.fn((id: string) => `/data/transfers/${id}`),
+    newLocalTransferId: vi.fn().mockReturnValue('local-xfer-1'),
+    cleanupTransfers: vi.fn().mockResolvedValue(undefined),
+  };
   const proxy = { regenerate: vi.fn().mockResolvedValue(undefined) };
   const mailServer = { removeForDomain: vi.fn() };
   const notifications = { sendUserInvited: vi.fn() };
@@ -387,9 +393,11 @@ describe('migrate', () => {
       serverId: 'old',
       server: { id: 'old', host: '10.0.0.1', name: 'old-node' },
       applications: [{ id: 'a1', name: 'Web App', status: 'RUNNING' }],
-      databases: [{ id: 'd1', name: 'maindb' }],
+      databases: [{ id: 'd1', name: 'maindb', autoImported: false }],
     });
-    ctx.prisma.server.findUnique.mockResolvedValue({ id: 'new', name: 'new-node', status: 'ONLINE' });
+    ctx.prisma.server.findUnique.mockResolvedValue({
+      id: 'new', name: 'new-node', host: '10.0.0.2', status: 'ONLINE',
+    });
     return ctx;
   }
 
@@ -414,7 +422,7 @@ describe('migrate', () => {
     );
   });
 
-  it('tears down with purgeVolumes:false and re-deploys on the target', async () => {
+  it('remote→remote: tears down with purgeVolumes:false and chains EXPORT → IMPORT → DEPLOYs', async () => {
     const { service, prisma, agent } = setupMigrate();
     agent.enqueueTask.mockResolvedValue({});
     prisma.project.update.mockResolvedValue({});
@@ -423,15 +431,126 @@ describe('migrate', () => {
 
     expect(agent.enqueueTask).toHaveBeenCalledWith('old', 'REMOVE',
       expect.objectContaining({ purgeVolumes: false }));
-    expect(agent.enqueueTask).toHaveBeenCalledWith('new', 'DEPLOY',
-      expect.objectContaining({ applicationId: 'a1' }));
     expect(prisma.project.update).toHaveBeenCalledWith({
       where: { id: 'p1' },
       data: { serverId: 'new' },
     });
+
+    // VOLUME_EXPORT on the source, carrying the generic onComplete chain:
+    // VOLUME_IMPORT on the target first, then every DEPLOY.
+    const exportCall = agent.enqueueTask.mock.calls.find(([, type]) => type === 'VOLUME_EXPORT');
+    expect(exportCall).toBeDefined();
+    const [exportServer, , exportPayload] = exportCall!;
+    expect(exportServer).toBe('old');
+    // Deterministic compose-prefix volume list (db `<name>_data` + app dir prefix).
+    expect(exportPayload.volumes).toContain('maindb_data');
+    expect(exportPayload.volumes.some((v: string) => v.startsWith('web-app-'))).toBe(true);
+    expect(exportPayload.onComplete[0]).toEqual(
+      expect.objectContaining({
+        serverId: 'new',
+        type: 'VOLUME_IMPORT',
+        payload: expect.objectContaining({ volumes: exportPayload.volumes }),
+      }),
+    );
+    expect(exportPayload.onComplete).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          serverId: 'new', type: 'DEPLOY',
+          payload: expect.objectContaining({ applicationId: 'a1' }),
+        }),
+        expect.objectContaining({
+          serverId: 'new', type: 'DEPLOY',
+          payload: expect.objectContaining({ databaseId: 'd1' }),
+        }),
+      ]),
+    );
+    // DEPLOYs ride the chain — NOT enqueued directly.
+    expect(agent.enqueueTask).not.toHaveBeenCalledWith('new', 'DEPLOY', expect.anything());
+
     expect(res.status).toBe('ok');
     expect(res.queued).toContain('Web App');
     expect(res.queued).toContain('db:maindb');
+    expect(res.message).toContain('transferred asynchronously');
+    expect(res.message).not.toContain('start empty');
+  });
+
+  it('falls back to direct (empty-volume) deploys with a warning when the export enqueue fails', async () => {
+    const { service, prisma, agent } = setupMigrate();
+    agent.enqueueTask.mockImplementation(async (_s: string, type: string) => {
+      if (type === 'VOLUME_EXPORT') throw new Error('agent queue down');
+      return {};
+    });
+    prisma.project.update.mockResolvedValue({});
+
+    const res = await service.migrate('p1', 'u1', 'new');
+
+    // Previous behavior preserved: DEPLOYs enqueued directly on the target.
+    expect(agent.enqueueTask).toHaveBeenCalledWith('new', 'DEPLOY',
+      expect.objectContaining({ applicationId: 'a1' }));
+    expect(agent.enqueueTask).toHaveBeenCalledWith('new', 'DEPLOY',
+      expect.objectContaining({ databaseId: 'd1' }));
+    expect(res.warnings.some((w: string) => w.startsWith('volume transfer:'))).toBe(true);
+    expect(res.message).toContain('start empty');
+  });
+
+  it('remote→local: enqueues VOLUME_EXPORT with the migrateLocalImport marker (deploys deferred)', async () => {
+    const { service, prisma, agent } = setupMigrate();
+    agent.enqueueTask.mockResolvedValue({});
+    prisma.project.update.mockResolvedValue({});
+    prisma.server.findUnique.mockResolvedValue({
+      id: 'new', name: 'local-node', host: '127.0.0.1', status: 'ONLINE',
+    });
+
+    const res = await service.migrate('p1', 'u1', 'new');
+
+    const exportCall = agent.enqueueTask.mock.calls.find(([, type]) => type === 'VOLUME_EXPORT');
+    expect(exportCall).toBeDefined();
+    const [, , payload] = exportCall!;
+    expect(payload.migrateLocalImport).toEqual(
+      expect.objectContaining({
+        volumes: payload.volumes,
+        deploys: expect.arrayContaining([
+          expect.objectContaining({ type: 'DEPLOY' }),
+        ]),
+      }),
+    );
+    expect(payload.onComplete).toBeUndefined();
+    expect(agent.enqueueTask).not.toHaveBeenCalledWith('new', 'DEPLOY', expect.anything());
+    expect(res.message).toContain('transferred asynchronously');
+  });
+
+  it('local→remote: exports volumes locally then enqueues VOLUME_IMPORT with the deploy chain', async () => {
+    const { service, prisma, agent } = setupMigrate();
+    agent.enqueueTask.mockResolvedValue({});
+    prisma.project.update.mockResolvedValue({});
+    prisma.project.findUnique.mockResolvedValue({
+      id: 'p1',
+      serverId: 'old',
+      server: { id: 'old', host: '127.0.0.1', name: 'local-node' },
+      applications: [{ id: 'a1', name: 'Web App', status: 'RUNNING' }],
+      databases: [],
+    });
+    // The local docker plumbing is exercised elsewhere — stub the two
+    // host-touching helpers.
+    vi.spyOn(service as any, 'listLocalProjectVolumes').mockResolvedValue(['web-app-a1_data']);
+    const exp = vi.spyOn(service as any, 'exportLocalVolumes').mockResolvedValue('local-xfer-1');
+
+    const res = await service.migrate('p1', 'u1', 'new');
+
+    expect(exp).toHaveBeenCalledWith(['web-app-a1_data']);
+    expect(agent.enqueueTask).toHaveBeenCalledWith('new', 'VOLUME_IMPORT',
+      expect.objectContaining({
+        volumes: ['web-app-a1_data'],
+        sourceTaskId: 'local-xfer-1',
+        onComplete: [
+          expect.objectContaining({
+            serverId: 'new', type: 'DEPLOY',
+            payload: expect.objectContaining({ applicationId: 'a1' }),
+          }),
+        ],
+      }),
+    );
+    expect(res.message).toContain('transferred asynchronously');
   });
 
   it('keeps migrating when the old server is unreachable, reporting warnings', async () => {
@@ -450,7 +569,7 @@ describe('migrate', () => {
   it('reports partial status when re-deploy enqueue fails', async () => {
     const { service, prisma, agent } = setupMigrate();
     agent.enqueueTask.mockImplementation(async (serverId: string, type: string) => {
-      if (type === 'DEPLOY') throw new Error('queue full');
+      if (type === 'VOLUME_EXPORT' || type === 'DEPLOY') throw new Error('queue full');
       return {};
     });
     prisma.project.update.mockResolvedValue({});

@@ -63,6 +63,46 @@ jobs:
         env:
           NEXT_PUBLIC_API_URL: http://localhost:4000
 
+  e2e:
+    name: E2E (Dashboard, Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The dashboard imports @kryptalis/types from dist/ — the dev server
+      # needs it built before it can compile any page.
+      - name: Build shared types
+        run: pnpm --filter @kryptalis/types build
+
+      - name: Install Playwright browser
+        working-directory: apps/dashboard
+        run: npx playwright install --with-deps chromium
+
+      # All API traffic is mocked via page.route() — no backend required.
+      - name: Run e2e tests
+        continue-on-error: false
+        run: pnpm --filter @kryptalis/dashboard e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/dashboard/playwright-report/
+          retention-days: 7
+
   go:
     name: Go (Agent)
     runs-on: ubuntu-latest

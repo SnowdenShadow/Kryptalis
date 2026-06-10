@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kryptalis/agent/internal/config"
+	"github.com/kryptalis/agent/internal/tasks"
 )
 
 type Task struct {
@@ -31,6 +32,7 @@ type PollResponse struct {
 type Poller struct {
 	cfg    *config.Config
 	client *http.Client
+	tasks  *tasks.Runner
 	sem    chan struct{}
 	wg     sync.WaitGroup
 }
@@ -52,6 +54,12 @@ var taskTimeouts = map[string]time.Duration{
 	"STATUS":     1 * time.Minute,
 	"FILE_READ":  30 * time.Second,
 	"FILE_WRITE": 30 * time.Second,
+	// Data-transfer tasks move whole volumes / database dumps over the
+	// network — generous deadlines by design.
+	"VOLUME_EXPORT": 30 * time.Minute,
+	"VOLUME_IMPORT": 30 * time.Minute,
+	"BACKUP":        30 * time.Minute,
+	"RESTORE":       30 * time.Minute,
 }
 
 const defaultTaskTimeout = 5 * time.Minute
@@ -62,7 +70,8 @@ func New(cfg *config.Config) *Poller {
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
-		sem: make(chan struct{}, maxConcurrentTasks),
+		tasks: tasks.NewRunner(tasks.NewClient(cfg.APIUrl, cfg.ServerID, cfg.AgentToken)),
+		sem:   make(chan struct{}, maxConcurrentTasks),
 	}
 }
 
@@ -199,7 +208,15 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.runFileRead(task)
 	case "FILE_WRITE":
 		result, taskErr = p.runFileWrite(task)
-	case "BACKUP", "SSL_ISSUE", "SSL_RENEW", "DNS_UPDATE", "MONITOR":
+	case "VOLUME_EXPORT":
+		result, taskErr = p.tasks.VolumeExport(tctx, task.ID, task.Payload)
+	case "VOLUME_IMPORT":
+		result, taskErr = p.tasks.VolumeImport(tctx, task.Payload)
+	case "BACKUP":
+		result, taskErr = p.tasks.Backup(tctx, task.ID, task.Payload)
+	case "RESTORE":
+		result, taskErr = p.tasks.Restore(tctx, task.Payload)
+	case "SSL_ISSUE", "SSL_RENEW", "DNS_UPDATE", "MONITOR":
 		result = map[string]interface{}{"status": "not_implemented"}
 	default:
 		taskErr = fmt.Sprintf("unknown task type: %s", task.Type)

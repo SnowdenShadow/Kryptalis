@@ -234,6 +234,15 @@ export class DatabasesService {
     return isLocalHost(server.host);
   }
 
+  /**
+   * Host to advertise in connection strings: the server's address when the
+   * DB lives on a remote host, 'localhost' otherwise. Previously hardcoded
+   * to localhost — connection strings for remote-server DBs were unusable.
+   */
+  private connHost(server: { host: string } | null | undefined): string {
+    return server && !isLocalHost(server.host) ? server.host : 'localhost';
+  }
+
   // ── access ─────────────────────────────────────────────────────────
 
   private async assertDbAccess(
@@ -360,7 +369,7 @@ export class DatabasesService {
       });
     }
 
-    return { ...db, status: 'deploying', connectionString: this.getConnectionString(dto.type, username, password, hostPort, dto.name) };
+    return { ...db, status: 'deploying', connectionString: this.getConnectionString(dto.type, username, password, hostPort, dto.name, this.connHost(server)) };
   }
 
   // ── read ───────────────────────────────────────────────────────────
@@ -392,6 +401,9 @@ export class DatabasesService {
       include: {
         project: { select: { id: true, name: true } },
         application: { select: { id: true, name: true } },
+        // server.host feeds the connection string for remote DBs — loaded
+        // via include so we don't N+1 a server query per row.
+        server: { select: { host: true } },
       },
     });
 
@@ -403,7 +415,7 @@ export class DatabasesService {
         (db as any).autoImported ? db.host : db.name,
         (db as any).autoImported,
       );
-      const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name);
+      const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name, this.connHost((db as any).server));
       return { ...db, status, connectionString };
     }));
   }
@@ -415,6 +427,7 @@ export class DatabasesService {
       include: {
         project: { select: { id: true, name: true } },
         application: { select: { id: true, name: true } },
+        server: { select: { host: true } },
       },
     });
     if (!db) throw new NotFoundException('Database not found');
@@ -422,7 +435,7 @@ export class DatabasesService {
       (db as any).autoImported ? db.host : db.name,
       (db as any).autoImported,
     );
-    const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name);
+    const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name, this.connHost((db as any).server));
     return { ...db, status, connectionString };
   }
 
@@ -490,11 +503,19 @@ export class DatabasesService {
       }
       try { await execFileAsync('docker', ['rm', '-f', containerName], { timeout: 10000 }); } catch {}
     } else if (server) {
-      await this.agent.enqueueTask(server.id, 'REMOVE', {
-        slug,
-        containerName,
-        purgeVolumes: true,
-      });
+      // Best-effort, same contract as the local path (which swallows compose
+      // down / docker rm failures): an unreachable agent must not keep a
+      // zombie registry row alive — the row is deleted regardless.
+      try {
+        await this.agent.enqueueTask(server.id, 'REMOVE', {
+          slug,
+          containerName,
+          purgeVolumes: true,
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[databases] failed to enqueue remote REMOVE for "${db.name}":`, err);
+      }
     }
 
     await this.prisma.database.delete({ where: { id } });
@@ -713,19 +734,19 @@ export class DatabasesService {
     return r.count;
   }
 
-  private getConnectionString(type: string, user: string, pass: string, port: number, name: string): string {
+  private getConnectionString(type: string, user: string, pass: string, port: number, name: string, host = 'localhost'): string {
     switch (type) {
-      case 'POSTGRESQL': return `postgresql://${user}:${pass}@localhost:${port}/${name}`;
+      case 'POSTGRESQL': return `postgresql://${user}:${pass}@${host}:${port}/${name}`;
       case 'MYSQL':
-      case 'MARIADB': return `mysql://${user}:${pass}@localhost:${port}/${name}`;
+      case 'MARIADB': return `mysql://${user}:${pass}@${host}:${port}/${name}`;
       // KeyDB + Dragonfly are wire-compatible with Redis → same scheme.
       case 'REDIS':
       case 'KEYDB':
-      case 'DRAGONFLY': return `redis://${pass ? `:${pass}@` : ''}localhost:${port}`;
-      case 'MONGODB': return `mongodb://${user}:${pass}@localhost:${port}/${name}`;
+      case 'DRAGONFLY': return `redis://${pass ? `:${pass}@` : ''}${host}:${port}`;
+      case 'MONGODB': return `mongodb://${user}:${pass}@${host}:${port}/${name}`;
       // ClickHouse: HTTP scheme so libs like clickhouse-js Just Work.
-      case 'CLICKHOUSE': return `http://${user}:${pass}@localhost:${port}/?database=${name}`;
-      default: return `localhost:${port}`;
+      case 'CLICKHOUSE': return `http://${user}:${pass}@${host}:${port}/?database=${name}`;
+      default: return `${host}:${port}`;
     }
   }
 }

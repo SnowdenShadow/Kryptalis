@@ -35,12 +35,17 @@ async function bootstrap() {
   app.use(helmet({ contentSecurityPolicy: false }));
 
   // Body parsing rules:
-  //   - /api/files/.../upload  → raw stream (no parser)
-  //   - /api/webhooks/...      → JSON, but raw bytes preserved for HMAC
-  //   - everything else        → JSON
+  //   - /api/files/.../upload           → raw stream (no parser)
+  //   - /api/agent/transfers/.../upload → raw stream (no parser)
+  //   - /api/webhooks/...               → JSON, but raw bytes preserved for HMAC
+  //   - everything else                 → JSON
   const express = await import('express');
   app.use((req: any, res: any, next: any) => {
     if (req.path.startsWith('/api/files/') && req.path.endsWith('/upload')) {
+      next();
+      return;
+    }
+    if (req.path.startsWith('/api/agent/transfers/') && req.path.endsWith('/upload')) {
       next();
       return;
     }

@@ -222,7 +222,7 @@ export class MarketplaceService {
     const customPort = !!data.port;
     if (data.port) {
       if (!(await this.isPortFree(data.port))) {
-        throw new ConflictException(`Port ${data.port} is already in use on the host. Pick another.`);
+        throw new ConflictException(`Port ${data.port} is already used by another container. Pick another.`);
       }
       realPort = data.port;
     } else if (isWebmail || isMultiInstall) {
@@ -446,14 +446,25 @@ export class MarketplaceService {
     };
   }
 
-  async uninstall(appSlug: string) {
-    const appDir = path.join(APPS_DIR, appSlug);
-    if (fs.existsSync(appDir)) {
-      try {
-        // --rmi local removes any custom-built image; pulled images
-        // (postgres, redis…) are shared and left alone.
-        await execAsync('docker compose down -v --rmi local --remove-orphans', { cwd: appDir });
-      } catch {}
+  async uninstall(appSlug: string, applicationId?: string) {
+    // Every install writes into a per-instance dir <slug>-<id12> (see
+    // runDockerCompose below) — looking up APPS_DIR/<slug> alone made this
+    // a no-op for all current installs. Mirror projects.service.remove's
+    // dual-lookup: per-instance dir first (via the application id), then
+    // the legacy <slug> dir for pre-migration installs.
+    const candidates: string[] = [];
+    if (applicationId) {
+      candidates.push(path.join(APPS_DIR, `${appSlug}-${applicationId.slice(0, 12)}`));
+    }
+    candidates.push(path.join(APPS_DIR, appSlug));
+    for (const appDir of candidates) {
+      if (fs.existsSync(appDir)) {
+        try {
+          // --rmi local removes any custom-built image; pulled images
+          // (postgres, redis…) are shared and left alone.
+          await execAsync('docker compose down -v --rmi local --remove-orphans', { cwd: appDir });
+        } catch {}
+      }
     }
   }
 
@@ -586,7 +597,7 @@ export class MarketplaceService {
     let hostPort: number;
     if (data.hostPort) {
       if (!(await this.isPortFree(data.hostPort))) {
-        throw new ConflictException(`Port ${data.hostPort} is already in use on the host`);
+        throw new ConflictException(`Port ${data.hostPort} is already used by another container`);
       }
       hostPort = data.hostPort;
     } else {

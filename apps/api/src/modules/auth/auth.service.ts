@@ -376,6 +376,26 @@ export class AuthService {
       where: { email },
     });
 
+    // Account-level lockout — checked BEFORE any password comparison so a
+    // locked account answers with the SAME message whether the password is
+    // right or wrong. Checking after bcrypt.compare was a password oracle:
+    // wrong password → "Invalid credentials", right password → "temporarily
+    // locked" let an attacker confirm credentials during the lock window.
+    // After 5 failed password OR TOTP attempts the account is frozen for
+    // 15 min — independent of the per-IP throttler so credential stuffing
+    // across rotated IPs is mitigated. Attempts during the lock do NOT
+    // bump the failed counter (the account is already frozen).
+    if (user?.lockedUntil && user.lockedUntil > new Date()) {
+      const minutes = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60000);
+      throw new UnauthorizedException(
+        `Account temporarily locked due to repeated failed attempts. Try again in ${minutes} minute(s).`,
+      );
+    }
+    // Lock expired (lockedUntil in the past)? The stale counter (≥5) must
+    // not survive — otherwise the very next failure instantly re-locks for
+    // another 15 min. The first attempt after expiry starts a fresh count.
+    const lockExpired = !!(user?.lockedUntil && user.lockedUntil <= new Date());
+
     // Run bcrypt EITHER WAY so timing doesn't distinguish missing-email
     // from wrong-password. The dummy hash is a valid bcrypt blob.
     const passwordOk = await bcrypt.compare(
@@ -386,7 +406,7 @@ export class AuthService {
     if (!user || !passwordOk) {
       // Increment the failed counter (no-op if user doesn't exist) so
       // credential-stuffing rotating IPs still hits the per-account lock.
-      if (user) await this.bumpFailedAttempt(user.id);
+      if (user) await this.bumpFailedAttempt(user.id, { freshAfterLockExpiry: lockExpired });
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -405,15 +425,8 @@ export class AuthService {
       );
     }
 
-    // Account-level lockout. After 5 failed password OR TOTP attempts the
-    // account is frozen for 15 min — independent of per-IP throttler so
-    // credential stuffing across rotated IPs is mitigated.
-    if (user.lockedUntil && user.lockedUntil > new Date()) {
-      const minutes = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60000);
-      throw new UnauthorizedException(
-        `Account temporarily locked due to repeated failed attempts. Try again in ${minutes} minute(s).`,
-      );
-    }
+    // (Account-level lockout is enforced ABOVE, before bcrypt.compare —
+    // see the password-oracle note there.)
 
     // Enforce 2FA when enabled — the totpCode (or backup code) is required.
     if (user.twoFactorEnabled) {
@@ -430,7 +443,7 @@ export class AuthService {
         forBackup: !!(dto as any).backupCode,
       });
       if (!ok) {
-        await this.bumpFailedAttempt(user.id);
+        await this.bumpFailedAttempt(user.id, { freshAfterLockExpiry: lockExpired });
         throw new UnauthorizedException('Invalid two-factor code');
       }
     }
@@ -699,13 +712,20 @@ export class AuthService {
    * Increment failed-login counter; lock the account at threshold. Used by
    * BOTH the password and TOTP branches of login so brute-force is
    * mitigated regardless of which factor the attacker is grinding.
+   *
+   * `freshAfterLockExpiry` — the caller observed an EXPIRED lockedUntil on
+   * this user. The stale counter (≥5 from the previous lock) must not carry
+   * over, or a single new failure would instantly re-lock for another
+   * 15 min. Restart the count at 1 and clear the expired lockedUntil.
    */
-  private async bumpFailedAttempt(userId: string) {
+  private async bumpFailedAttempt(userId: string, opts: { freshAfterLockExpiry?: boolean } = {}) {
     const THRESHOLD = 5;
     const LOCK_MINUTES = 15;
     const u = await this.prisma.user.update({
       where: { id: userId },
-      data: { failedLoginAttempts: { increment: 1 } },
+      data: opts.freshAfterLockExpiry
+        ? { failedLoginAttempts: 1, lockedUntil: null }
+        : { failedLoginAttempts: { increment: 1 } },
       select: { failedLoginAttempts: true },
     });
     if (u.failedLoginAttempts >= THRESHOLD) {

@@ -3,6 +3,8 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
+  Logger,
+  OnModuleInit,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateProjectDto } from './dto/create-project.dto';
@@ -14,12 +16,13 @@ import {
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
-import { AgentService } from '../agent/agent.service';
+import { AgentService, AgentTaskCompletion } from '../agent/agent.service';
+import { appVolumePrefix, dbVolumePrefix, deterministicVolumeNames } from '../agent/volume-naming.util';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -29,8 +32,65 @@ const PROJ_DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(),
 const PROJ_APPS_DIR = path.join(PROJ_DATA_DIR, 'apps');
 const PROJ_DBS_DIR = path.join(PROJ_DATA_DIR, 'databases');
 
+/** Stream a command's stdout to a file (no shell, never buffered in memory). */
+function runCommandToFile(cmd: string, args: string[], outPath: string, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const out = fs.createWriteStream(outPath);
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    let stderr = '';
+    child.stderr.on('data', (d: Buffer) => {
+      if (stderr.length < 8192) stderr += d.toString();
+    });
+    child.stdout.pipe(out);
+    child.once('error', (err) => {
+      clearTimeout(timer);
+      out.destroy();
+      reject(err);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      out.close(() => {
+        if (code === 0) resolve();
+        else reject(new Error(`${cmd} exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
+      });
+    });
+  });
+}
+
+/** Pipe a file into a command's stdin (no shell, streaming). */
+function runCommandWithInputFile(cmd: string, args: string[], inPath: string, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    let stderr = '';
+    child.stderr.on('data', (d: Buffer) => {
+      if (stderr.length < 8192) stderr += d.toString();
+    });
+    const src = fs.createReadStream(inPath);
+    src.once('error', (err) => {
+      child.kill('SIGKILL');
+      clearTimeout(timer);
+      reject(err);
+    });
+    src.pipe(child.stdin);
+    child.stdin.once('error', () => undefined);
+    child.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`${cmd} exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
+    });
+  });
+}
+
 @Injectable()
-export class ProjectsService {
+export class ProjectsService implements OnModuleInit {
+  private readonly logger = new Logger(ProjectsService.name);
+
   constructor(
     private prisma: PrismaService,
     private admin: AdminService,
@@ -39,6 +99,18 @@ export class ProjectsService {
     private mailServer: MailServerService,
     private notifications: NotificationsService,
   ) {}
+
+  onModuleInit() {
+    // Remote→LOCAL migration leg: a VOLUME_EXPORT whose payload carries
+    // `migrateLocalImport` means the target server is the local host (no
+    // agent task can import there) — the API imports the uploaded tars
+    // into local docker volumes itself, then enqueues the deferred DEPLOYs.
+    // Runs before the agent service's generic transfer cleanup (handlers
+    // are invoked first), so the uploaded files are still on disk.
+    this.agent.registerTaskCompletionHandler('VOLUME_EXPORT', (task) =>
+      this.onVolumeExportForLocalImport(task),
+    );
+  }
 
   async create(userId: string, dto: CreateProjectDto) {
     const mode = await this.admin.getDeploymentMode();
@@ -274,9 +346,29 @@ export class ProjectsService {
    * Flow per app: enqueue REMOVE on the *old* server (best-effort — failures
    * are logged not blocking, because the old server may be unreachable, which
    * is often why the user is migrating in the first place), then flip the
-   * project.serverId and enqueue DEPLOY on the new server. Caddy regenerates
-   * so domain routing follows. Mark each app status TRANSITIONING during the
-   * window so the UI shows progress.
+   * project.serverId, transfer the docker volumes and enqueue DEPLOY on the
+   * new server. Caddy regenerates so domain routing follows.
+   *
+   * Volume transfer (three source/target combinations — local→local doesn't
+   * exist in MULTI mode):
+   *   - remote → remote: enqueue VOLUME_EXPORT on the source with an
+   *     onComplete chain [VOLUME_IMPORT on the target, ...DEPLOY tasks].
+   *     The agent service's generic chaining sequences them and threads
+   *     sourceTaskId so the import downloads the export's uploaded tars.
+   *   - local → remote: the API exports each volume directly (`docker run
+   *     busybox tar`) into transfers/<local-id>/, then enqueues
+   *     VOLUME_IMPORT on the target ({sourceTaskId: <local-id>}) with the
+   *     DEPLOYs chained behind it.
+   *   - remote → local: enqueue VOLUME_EXPORT on the source with a
+   *     `migrateLocalImport` marker; the VOLUME_EXPORT completion handler
+   *     (onVolumeExportForLocalImport) untars the uploaded volumes into
+   *     local docker volumes and then enqueues the deferred DEPLOYs.
+   * Volume resolution is the deterministic compose-prefix convention (real
+   * `docker volume ls` prefix filtering when the source is local — full
+   * coverage; deterministic `<composeProject>_data` names when remote, which
+   * does NOT cover stacks with differently-named volumes). If the transfer
+   * can't be set up (enqueue/export failure), we fall back to the previous
+   * behavior — deploy immediately with empty volumes — and surface a warning.
    */
   async migrate(projectId: string, userId: string, targetServerId: string) {
     await assertProjectAccess(this.prisma, userId, projectId, 'ADMIN');
@@ -286,7 +378,7 @@ export class ProjectsService {
       include: {
         server: { select: { id: true, host: true, name: true } },
         applications: { select: { id: true, name: true, status: true } },
-        databases: { select: { id: true, name: true } },
+        databases: { select: { id: true, name: true, autoImported: true } },
       },
     });
     if (!project) throw new NotFoundException('Project not found');
@@ -302,13 +394,14 @@ export class ProjectsService {
     }
 
     const oldServerId = project.serverId;
+    const sourceLocal = isLocalHost(project.server?.host);
+    const targetLocal = isLocalHost(target.host);
     const slugify = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'app';
 
     // Best-effort tear down on old server. CRITICAL: purgeVolumes is FALSE
     // here so the source server stops the containers but KEEPS the named
-    // volumes intact. Until VOLUME_EXPORT/VOLUME_IMPORT lands, this is the
-    // safe default — the user can still recover the source state by
-    // flipping back, instead of losing every database/upload on migrate.
+    // volumes intact — the export below reads them, and the user can still
+    // recover the source state by flipping back.
     const teardownErrors: string[] = [];
     for (const app of project.applications) {
       try {
@@ -339,28 +432,89 @@ export class ProjectsService {
       data: { serverId: targetServerId },
     });
 
-    // Re-deploy each app on the new server (queued — agent picks them up).
+    // DEPLOY descriptors — either enqueued directly (no volume transfer) or
+    // chained behind the volume import so containers come up on real data.
+    const deploys: Array<{ serverId: string; type: 'DEPLOY'; payload: any; label: string }> = [
+      ...project.applications.map((app) => ({
+        serverId: targetServerId,
+        type: 'DEPLOY' as const,
+        payload: { applicationId: app.id, slug: slugify(app.name) },
+        label: app.name,
+      })),
+      ...project.databases.map((db) => ({
+        serverId: targetServerId,
+        type: 'DEPLOY' as const,
+        payload: { databaseId: db.id, slug: slugify(db.name) },
+        label: `db:${db.name}`,
+      })),
+    ];
+
+    // ── volume transfer ───────────────────────────────────────────────
+    let volumesInFlight = false;
+    let volumes: string[] = [];
+    try {
+      volumes = sourceLocal
+        ? await this.listLocalProjectVolumes(project.applications, project.databases)
+        : deterministicVolumeNames(project.applications, project.databases);
+    } catch (e: any) {
+      teardownErrors.push(`volume discovery: ${e?.message || e}`);
+    }
+
     const queued: string[] = [];
-    for (const app of project.applications) {
+    if (volumes.length > 0) {
       try {
-        await this.agent.enqueueTask(targetServerId, 'DEPLOY', {
-          applicationId: app.id,
-          slug: slugify(app.name),
-        });
-        queued.push(app.name);
+        const chainEntries = deploys.map((d) => ({
+          serverId: d.serverId,
+          type: d.type,
+          payload: d.payload,
+        }));
+        if (sourceLocal && !targetLocal) {
+          // Export locally into transfers/<local-id>/, agent pulls from there.
+          const sourceTaskId = await this.exportLocalVolumes(volumes);
+          await this.agent.enqueueTask(targetServerId, 'VOLUME_IMPORT', {
+            volumes,
+            sourceTaskId,
+            onComplete: chainEntries,
+          });
+        } else if (!sourceLocal && !targetLocal) {
+          // Full agent chain: export on source → import on target → deploys.
+          await this.agent.enqueueTask(oldServerId, 'VOLUME_EXPORT', {
+            volumes,
+            onComplete: [
+              { serverId: targetServerId, type: 'VOLUME_IMPORT', payload: { volumes } },
+              ...chainEntries,
+            ],
+          });
+        } else {
+          // remote → local: the export's uploads land on this host already;
+          // the VOLUME_EXPORT completion handler imports them + enqueues
+          // the deferred deploys.
+          await this.agent.enqueueTask(oldServerId, 'VOLUME_EXPORT', {
+            volumes,
+            migrateLocalImport: { volumes, deploys: chainEntries },
+          });
+        }
+        volumesInFlight = true;
+        // Deploys ride the chain — report them as queued.
+        queued.push(...deploys.map((d) => d.label));
       } catch (e: any) {
-        teardownErrors.push(`redeploy ${app.name}: ${e?.message || e}`);
+        teardownErrors.push(`volume transfer: ${e?.message || e} — falling back to empty volumes`);
+        this.logger.warn(
+          `Project ${projectId} migrate: volume transfer setup failed (${e?.message || e}) — deploying with empty volumes.`,
+        );
       }
     }
-    for (const db of project.databases) {
-      try {
-        await this.agent.enqueueTask(targetServerId, 'DEPLOY', {
-          databaseId: db.id,
-          slug: slugify(db.name),
-        });
-        queued.push(`db:${db.name}`);
-      } catch (e: any) {
-        teardownErrors.push(`redeploy db ${db.name}: ${e?.message || e}`);
+
+    // No transfer in flight (no volumes, or setup failed) → previous
+    // behavior: deploy immediately, volumes start empty.
+    if (!volumesInFlight) {
+      for (const d of deploys) {
+        try {
+          await this.agent.enqueueTask(d.serverId, d.type, d.payload);
+          queued.push(d.label);
+        } catch (e: any) {
+          teardownErrors.push(`redeploy ${d.label.replace(/^db:/, 'db ')}: ${e?.message || e}`);
+        }
       }
     }
 
@@ -369,11 +523,114 @@ export class ProjectsService {
 
     const hasRedeployErrors = teardownErrors.some((e) => e.startsWith('redeploy '));
     const status = hasRedeployErrors ? 'partial' : 'ok';
-    const message =
-      status === 'partial'
-        ? `Project migration started with errors — check warnings. Source volumes are KEPT on the old server for recovery.`
-        : `Project migrated from ${project.server?.name || oldServerId} → ${target.name}. NOTE: Docker volumes were not copied; databases and uploads will start empty on the target until VOLUME_EXPORT/IMPORT is implemented. Source volumes are preserved on the old server for recovery.`;
+    let message: string;
+    if (status === 'partial') {
+      message = `Project migration started with errors — check warnings. Source volumes are KEPT on the old server for recovery.`;
+    } else if (volumesInFlight) {
+      message = `Project migrated from ${project.server?.name || oldServerId} → ${target.name}. Docker volumes are being transferred asynchronously — apps and databases will deploy on the target once the data arrives. Source volumes are preserved on the old server for recovery.`;
+    } else {
+      message = `Project migrated from ${project.server?.name || oldServerId} → ${target.name}. NOTE: no Docker volumes were transferred; databases and uploads will start empty on the target. Source volumes are preserved on the old server for recovery.`;
+    }
     return { status, message, queued, warnings: teardownErrors };
+  }
+
+  /**
+   * Volumes belonging to this project's compose stacks on the LOCAL host —
+   * real `docker volume ls` filtered by the deterministic compose-project
+   * prefixes (covers every volume of a stack, unlike the name-guessing used
+   * for remote hosts).
+   */
+  private async listLocalProjectVolumes(
+    apps: Array<{ id: string; name: string }>,
+    databases: Array<{ name: string; autoImported?: boolean }>,
+  ): Promise<string[]> {
+    if (apps.length === 0 && databases.length === 0) return [];
+    const prefixes = [
+      ...apps.map((a) => appVolumePrefix(a.name, a.id)),
+      ...databases.filter((d) => !d.autoImported).map((d) => dbVolumePrefix(d.name)),
+    ];
+    if (prefixes.length === 0) return [];
+    const { stdout } = await execFileAsync(
+      'docker',
+      ['volume', 'ls', '--format', '{{.Name}}'],
+      { timeout: 15_000 },
+    );
+    return stdout
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .filter((v) => prefixes.some((p) => v.startsWith(p)));
+  }
+
+  /**
+   * Export local docker volumes into transfers/<local-id>/<volume>.tar.gz
+   * (streaming `docker run busybox tar`, no agent task) and return the
+   * transfer id a remote VOLUME_IMPORT can download from.
+   */
+  private async exportLocalVolumes(volumes: string[]): Promise<string> {
+    const transferId = this.agent.newLocalTransferId();
+    const dir = this.agent.transferDir(transferId);
+    await fs.promises.mkdir(dir, { recursive: true });
+    try {
+      for (const vol of volumes) {
+        await runCommandToFile(
+          'docker',
+          ['run', '--rm', '-v', `${vol}:/data:ro`, 'busybox', 'tar', '-czf', '-', '-C', '/data', '.'],
+          path.join(dir, `${path.basename(vol)}.tar.gz`),
+          1_800_000,
+        );
+      }
+    } catch (err) {
+      await this.agent.cleanupTransfers(transferId);
+      throw err;
+    }
+    return transferId;
+  }
+
+  /**
+   * VOLUME_EXPORT completion handler for the remote→local migration leg.
+   * The agent uploaded each <volume>.tar.gz under its taskId; untar them
+   * into local docker volumes, then enqueue the deferred DEPLOY tasks.
+   * FAILED export → deploys are dropped (data-less deploys on a migration
+   * the user expects to carry data would be worse) and logged.
+   */
+  async onVolumeExportForLocalImport(task: AgentTaskCompletion): Promise<void> {
+    const marker = task.payload?.migrateLocalImport;
+    if (!marker) return; // ordinary VOLUME_EXPORT, not ours
+    if (task.status === 'FAILED') {
+      this.logger.error(
+        `Migration volume export ${task.id} FAILED (${task.error ?? 'unknown error'}) — deferred deploys dropped; re-run the migration.`,
+      );
+      return;
+    }
+
+    const dir = this.agent.transferDir(task.id);
+    for (const vol of marker.volumes ?? []) {
+      const file = path.join(dir, `${path.basename(String(vol))}.tar.gz`);
+      try {
+        if (!fs.existsSync(file)) {
+          throw new Error('tar missing from the export upload');
+        }
+        // Idempotent — succeeds when the volume already exists.
+        await execFileAsync('docker', ['volume', 'create', String(vol)], { timeout: 15_000 });
+        await runCommandWithInputFile(
+          'docker',
+          ['run', '--rm', '-i', '-v', `${vol}:/data`, 'busybox', 'tar', '-xzf', '-', '-C', '/data'],
+          file,
+          1_800_000,
+        );
+      } catch (e: any) {
+        this.logger.error(`Migration: importing volume "${vol}" locally failed: ${e?.message || e}`);
+      }
+    }
+
+    for (const d of marker.deploys ?? []) {
+      try {
+        await this.agent.enqueueTask(d.serverId, d.type, d.payload);
+      } catch (e: any) {
+        this.logger.error(`Migration: deferred deploy enqueue failed: ${e?.message || e}`);
+      }
+    }
   }
 
   /**

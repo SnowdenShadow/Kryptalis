@@ -137,9 +137,6 @@ export class ApplicationDeployService {
       fs.mkdirSync(appDir, { recursive: true });
 
       const env = opts.envVars || {};
-      const envBlock = Object.keys(env).length
-        ? `    environment:\n${Object.entries(env).map(([k, v]) => `      ${k}: ${JSON.stringify(v)}`).join('\n')}\n`
-        : '';
       // ports: publish host:container when the user picked a host port
       // (no-domain access path). With a domain, Caddy reaches the
       // container over the bridge — no publish needed.
@@ -715,6 +712,15 @@ export class ApplicationDeployService {
       }
     }
 
+    // Rollback snapshot of the previous appDir. The old "rollback" re-ran
+    // `up -d` on the appDir ALREADY rewritten by the failed deploy — i.e. it
+    // redeployed the broken config and only the healthcheck decided. We now
+    // move the previous appDir aside before rewriting it, and swap it back
+    // on failure. rename (not cpSync) is used: it's atomic on the same
+    // filesystem and costs zero disk/time even with a huge node_modules.
+    const prevDir = `${appDir}.prev`;
+    let hasPrevSnapshot = false;
+
     try {
       // 1. clean previous stack BEFORE wiping. `down` without -v keeps
       // user volumes (DB, uploads) intact across redeploys. The remove
@@ -723,7 +729,18 @@ export class ApplicationDeployService {
         try {
           await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000);
         } catch {}
-        fs.rmSync(appDir, { recursive: true, force: true });
+        // Snapshot the current (last-deployed) state. An orphan .prev left
+        // by a crash mid-deploy is overwritten here — it's older than the
+        // appDir we're about to snapshot.
+        try {
+          if (fs.existsSync(prevDir)) fs.rmSync(prevDir, { recursive: true, force: true });
+          fs.renameSync(appDir, prevDir);
+          hasPrevSnapshot = true;
+        } catch {
+          // rename failed (locked file, cross-device, …) — degrade to the
+          // historical wipe; rollback will be best-effort on the new dir.
+          fs.rmSync(appDir, { recursive: true, force: true });
+        }
       }
       fs.mkdirSync(appDir, { recursive: true });
 
@@ -939,6 +956,8 @@ export class ApplicationDeployService {
         if (projectNet) content = attachProjectNetwork(content, projectNet);
         fs.writeFileSync(composePath!, content);
 
+        // `pull` stays best-effort: a missing registry image is fine when the
+        // compose builds locally (or the image already exists on the host).
         log('> docker compose pull');
         const r1 = await dockerCompose(appDir, ['pull'], envFile, 600_000).catch((e: any) => ({ stdout: '', stderr: e?.stderr || e?.message || '' }));
         log(r1.stdout + r1.stderr);
@@ -950,9 +969,19 @@ export class ApplicationDeployService {
         // pick up the latest values. Without --no-cache, Docker reuses
         // cached layers based on COPY/RUN steps — which don't see env
         // file changes — and the rebuilt image bakes in stale values.
+        //
+        // Unlike `pull`, a BUILD failure is fatal. Swallowing it here used to
+        // let `up -d` relaunch a stale pre-existing image and mark the deploy
+        // RUNNING with the OLD code — a silent non-deploy.
         log('> docker compose build --no-cache');
-        const rb = await dockerCompose(appDir, ['build', '--no-cache', '--pull'], envFile, 900_000).catch((e: any) => ({ stdout: '', stderr: e?.stderr || e?.message || '' }));
-        log(rb.stdout + rb.stderr);
+        try {
+          const rb = await dockerCompose(appDir, ['build', '--no-cache', '--pull'], envFile, 900_000);
+          log(rb.stdout + rb.stderr);
+        } catch (e: any) {
+          const stderr = (e?.stderr || e?.message || 'compose build failed').toString();
+          log(stderr);
+          throw new Error(`docker compose build failed: ${stderr}`);
+        }
         log('> docker compose up -d --force-recreate');
         const r2 = await dockerCompose(appDir, ['up', '-d', '--force-recreate', '--remove-orphans'], envFile, 900_000);
         log(r2.stdout + r2.stderr);
@@ -1068,6 +1097,11 @@ export class ApplicationDeployService {
       const ok = await this.waitForHealthy(appDir, 30_000);
       if (!ok) throw new Error('Healthcheck failed — no container reached running state within 30s');
 
+      // Deploy succeeded — the snapshot is no longer needed.
+      if (hasPrevSnapshot) {
+        try { fs.rmSync(prevDir, { recursive: true, force: true }); } catch {}
+      }
+
       await this.prisma.application.update({
         where: { id: appId },
         data: { status: AppStatus.RUNNING },
@@ -1102,7 +1136,18 @@ export class ApplicationDeployService {
             where: { id: deploymentId },
             data: { status: 'ROLLING_BACK' as any },
           });
-          // try to bring the existing compose back up (volumes/images survived)
+          // Restore the pre-deploy appDir snapshot FIRST — without the swap
+          // we'd `up -d` the broken config the failed deploy just wrote.
+          if (hasPrevSnapshot && fs.existsSync(prevDir)) {
+            try {
+              fs.rmSync(appDir, { recursive: true, force: true });
+              fs.renameSync(prevDir, appDir);
+              log('↺ restored previous app directory for rollback');
+            } catch (swapErr: any) {
+              log(`✖ failed to restore previous app directory: ${swapErr?.message || swapErr}`);
+            }
+          }
+          // bring the previous compose back up (volumes/images survived)
           if (fs.existsSync(appDir) && findComposePath(appDir)) {
             await dockerCompose(appDir, ['up', '-d'], undefined, 120_000).catch(() => {});
             const ok = await this.waitForHealthy(appDir, 20_000);

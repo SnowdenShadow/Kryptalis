@@ -215,9 +215,9 @@
       "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/mailpit.png",
       "version": "1.20",
       "dockerImage": "axllent/mailpit:latest",
-      "ports": [8086, 1025],
+      "ports": [8092, 1025],
       "containerPort": 8025,
-      "defaultPort": 8086,
+      "defaultPort": 8092,
       "envVars": []
     },
     {

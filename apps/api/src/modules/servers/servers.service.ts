@@ -1,7 +1,8 @@
-import { Injectable, NotFoundException, BadRequestException, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { SystemConfigService } from '../system/system-config.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { UpdateServerDto } from './dto/update-server.dto';
 import { randomBytes } from 'crypto';
 import { exec } from 'child_process';
@@ -11,16 +12,35 @@ import * as fs from 'fs';
 
 const execAsync = promisify(exec);
 
+/**
+ * Offline sweep cadence + staleness threshold. Remote agents heartbeat
+ * every POLL_INTERVAL (default 5 s, monitor floor-corrects anything <5 s
+ * to 30 s) — 90 s therefore covers ≥3 missed beats even at the slowest
+ * built-in cadence (30 s × 3) while staying tolerant of operators who
+ * raise POLL_INTERVAL via env. Sweeping every 60 s bounds detection
+ * latency at ~2.5 min worst case.
+ */
+const OFFLINE_SWEEP_INTERVAL_MS = 60_000;
+const OFFLINE_THRESHOLD_MS = 90_000;
+
+/** Hosts that identify the built-in local server — it never heartbeats
+ *  via the agent (ServersService.collectMetrics touches it in-process). */
+const LOCAL_HOSTS = ['127.0.0.1', 'localhost', '::1'];
+
 @Injectable()
 export class ServersService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(ServersService.name);
   private collectInterval: ReturnType<typeof setInterval> | null = null;
   private retentionInterval: ReturnType<typeof setInterval> | null = null;
+  private offlineSweepInterval: ReturnType<typeof setInterval> | null = null;
   private prevNet: { rx: number; tx: number; ts: number } | null = null;
 
   constructor(
     private prisma: PrismaService,
     private encryption: EncryptionService,
     private systemConfig: SystemConfigService,
+    // Injected from the @Global NotificationsModule (same as monitoring/backups).
+    private notifications: NotificationsService,
   ) {}
 
   /** Generate a fresh install/agent token and return both raw + hash. */
@@ -39,6 +59,17 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
     // single-tenant install.
     this.retentionInterval = setInterval(() => this.pruneOldMetrics(), 60 * 60 * 1000);
     setTimeout(() => this.pruneOldMetrics(), 30_000);
+    // Heartbeat watchdog — same convention as MonitoringService/BackupsService:
+    // no live interval in test runs, unref'd so it never holds the process open.
+    if (process.env.NODE_ENV !== 'test') {
+      this.offlineSweepInterval = setInterval(
+        () => void this.sweepOfflineServers().catch((e) =>
+          this.logger.error(`Offline sweep crashed: ${(e as Error).message}`),
+        ),
+        OFFLINE_SWEEP_INTERVAL_MS,
+      );
+      this.offlineSweepInterval.unref?.();
+    }
   }
 
   async onModuleDestroy() {
@@ -50,6 +81,61 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
       clearInterval(this.retentionInterval);
       this.retentionInterval = null;
     }
+    if (this.offlineSweepInterval) {
+      clearInterval(this.offlineSweepInterval);
+      this.offlineSweepInterval = null;
+    }
+  }
+
+  /**
+   * Heartbeat watchdog. Remote agents touch `lastSeenAt` on every
+   * heartbeat/poll (AgentService) — a server that is ONLINE but hasn't
+   * been seen for OFFLINE_THRESHOLD_MS is flipped to OFFLINE and admins
+   * are notified (pref `serverOff`).
+   *
+   * Anti-spam: notification fires only on the ONLINE→OFFLINE transition —
+   * the status flip itself is the dedupe, a server already OFFLINE is not
+   * re-scanned. When the heartbeat returns, AgentService.heartbeat/poll
+   * set status back to ONLINE, re-arming the next transition.
+   *
+   * The built-in local server (host 127.0.0.1 / localhost) is excluded —
+   * it has no agent and is kept alive in-process by collectMetrics.
+   */
+  async sweepOfflineServers(): Promise<{ flipped: number }> {
+    const cutoff = new Date(Date.now() - OFFLINE_THRESHOLD_MS);
+    const stale = await this.prisma.server.findMany({
+      where: {
+        status: 'ONLINE',
+        host: { notIn: LOCAL_HOSTS },
+        // Servers that never heartbeat (lastSeenAt null) sit in
+        // PENDING_INSTALL, not ONLINE — but guard with `lt` anyway.
+        lastSeenAt: { lt: cutoff },
+      },
+      select: { id: true, name: true, host: true, lastSeenAt: true },
+    });
+
+    let flipped = 0;
+    for (const server of stale) {
+      // Guarded flip: only count the row if it was still ONLINE — a
+      // heartbeat racing the sweep wins and suppresses the notification.
+      const res = await this.prisma.server.updateMany({
+        where: { id: server.id, status: 'ONLINE' },
+        data: { status: 'OFFLINE' },
+      });
+      if (res.count === 0) continue;
+      flipped++;
+      this.logger.warn(
+        `Server ${server.name} (${server.host}) marked OFFLINE — last seen ${server.lastSeenAt?.toISOString() ?? 'never'}.`,
+      );
+      // Fire-and-forget — sendServerOffline never throws.
+      await this.notifications.sendServerOffline({
+        serverId: server.id,
+        name: server.name,
+        host: server.host,
+        lastSeenAt: server.lastSeenAt,
+      });
+    }
+    return { flipped };
   }
 
   /** Drop ServerMetric rows older than the configured window. */

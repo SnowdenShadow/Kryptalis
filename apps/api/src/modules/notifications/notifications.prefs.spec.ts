@@ -203,3 +203,149 @@ describe('sendBackupResult', () => {
     expect(sendMail).not.toHaveBeenCalled();
   });
 });
+
+describe('sendServerOffline', () => {
+  const input = {
+    serverId: 's1',
+    name: 'vps-1',
+    host: '10.0.0.5',
+    lastSeenAt: new Date('2026-06-10T10:00:00Z'),
+  };
+
+  it('emails admins who have not opted out of serverOff', async () => {
+    const { service, prisma, sendMail } = makeService();
+    // First findMany: getActiveAdminIds (select id); second: recipients.
+    prisma.user.findMany
+      .mockResolvedValueOnce([{ id: 'a1' }, { id: 'a2' }])
+      .mockResolvedValueOnce([
+        { email: 'a1@test', notificationPrefs: null },
+        { email: 'a2@test', notificationPrefs: { serverOff: { email: false } } },
+      ]);
+
+    await service.sendServerOffline(input);
+
+    expect(prisma.notification.createMany).toHaveBeenCalled();
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect(sendMail.mock.calls[0][0].to).toBe('a1@test');
+    expect(sendMail.mock.calls[0][0].subject).toContain('Server offline');
+  });
+
+  it('sends no email when every admin opted out, feed still written', async () => {
+    const { service, prisma, sendMail } = makeService();
+    prisma.user.findMany
+      .mockResolvedValueOnce([{ id: 'a1' }])
+      .mockResolvedValueOnce([
+        { email: 'a1@test', notificationPrefs: { serverOff: { email: false } } },
+      ]);
+
+    await service.sendServerOffline(input);
+
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(prisma.notification.createMany).toHaveBeenCalled();
+  });
+
+  it('unrelated toggles (sslExpire) do not block serverOff emails', async () => {
+    const { service, prisma, sendMail } = makeService();
+    prisma.user.findMany
+      .mockResolvedValueOnce([{ id: 'a1' }])
+      .mockResolvedValueOnce([
+        { email: 'a1@test', notificationPrefs: { sslExpire: { email: false } } },
+      ]);
+
+    await service.sendServerOffline(input);
+
+    expect(sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  it('handles lastSeenAt null without throwing', async () => {
+    const { service, prisma, sendMail } = makeService();
+    prisma.user.findMany
+      .mockResolvedValueOnce([{ id: 'a1' }])
+      .mockResolvedValueOnce([{ email: 'a1@test', notificationPrefs: null }]);
+
+    await expect(
+      service.sendServerOffline({ ...input, lastSeenAt: null }),
+    ).resolves.toBeUndefined();
+    expect(sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  it('never throws — DB failure is swallowed and logged', async () => {
+    const { service, prisma, sendMail } = makeService();
+    prisma.user.findMany.mockRejectedValue(new Error('db down'));
+
+    await expect(service.sendServerOffline(input)).resolves.toBeUndefined();
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+});
+
+describe('sendSslExpiry', () => {
+  const input = {
+    domain: 'shop.example.com',
+    expiresAt: new Date('2026-06-20T00:00:00Z'),
+    daysLeft: 10,
+  };
+
+  it('emails admins who have not opted out of sslExpire', async () => {
+    const { service, prisma, sendMail } = makeService();
+    prisma.user.findMany
+      .mockResolvedValueOnce([{ id: 'a1' }, { id: 'a2' }])
+      .mockResolvedValueOnce([
+        { email: 'a1@test', notificationPrefs: null },
+        { email: 'a2@test', notificationPrefs: { sslExpire: { email: false } } },
+      ]);
+
+    await service.sendSslExpiry(input);
+
+    expect(prisma.notification.createMany).toHaveBeenCalled();
+    expect(sendMail).toHaveBeenCalledTimes(1);
+    expect(sendMail.mock.calls[0][0].to).toBe('a1@test');
+    expect(sendMail.mock.calls[0][0].subject).toContain('SSL certificate expiring');
+    expect(sendMail.mock.calls[0][0].subject).toContain('shop.example.com');
+  });
+
+  it('daysLeft <= 0 uses the "expired" wording', async () => {
+    const { service, prisma, sendMail } = makeService();
+    prisma.user.findMany
+      .mockResolvedValueOnce([{ id: 'a1' }])
+      .mockResolvedValueOnce([{ email: 'a1@test', notificationPrefs: null }]);
+
+    await service.sendSslExpiry({ ...input, daysLeft: 0 });
+
+    expect(sendMail.mock.calls[0][0].subject).toContain('SSL certificate expired');
+  });
+
+  it('sends no email when every admin opted out, feed still written', async () => {
+    const { service, prisma, sendMail } = makeService();
+    prisma.user.findMany
+      .mockResolvedValueOnce([{ id: 'a1' }])
+      .mockResolvedValueOnce([
+        { email: 'a1@test', notificationPrefs: { sslExpire: { email: false } } },
+      ]);
+
+    await service.sendSslExpiry(input);
+
+    expect(sendMail).not.toHaveBeenCalled();
+    expect(prisma.notification.createMany).toHaveBeenCalled();
+  });
+
+  it('unrelated toggles (serverOff) do not block sslExpire emails', async () => {
+    const { service, prisma, sendMail } = makeService();
+    prisma.user.findMany
+      .mockResolvedValueOnce([{ id: 'a1' }])
+      .mockResolvedValueOnce([
+        { email: 'a1@test', notificationPrefs: { serverOff: { email: false } } },
+      ]);
+
+    await service.sendSslExpiry(input);
+
+    expect(sendMail).toHaveBeenCalledTimes(1);
+  });
+
+  it('never throws — DB failure is swallowed and logged', async () => {
+    const { service, prisma, sendMail } = makeService();
+    prisma.user.findMany.mockRejectedValue(new Error('db down'));
+
+    await expect(service.sendSslExpiry(input)).resolves.toBeUndefined();
+    expect(sendMail).not.toHaveBeenCalled();
+  });
+});

@@ -10,10 +10,40 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import { TaskType } from '@prisma/client';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export type AgentTaskType = keyof typeof TaskType;
+
+/** Terminal task snapshot handed to registered completion handlers. */
+export interface AgentTaskCompletion {
+  id: string;
+  serverId: string;
+  type: string;
+  payload: any;
+  status: 'COMPLETED' | 'FAILED';
+  result?: any;
+  error?: string | null;
+}
+
+export type AgentTaskCompletionHandler = (task: AgentTaskCompletion) => Promise<void>;
+
+// Same runtime-dir convention as backups/databases/files services. Transfer
+// staging lives in .kryptalis/transfers/<taskId>/<fileName> — written by the
+// authenticated agent upload endpoint (or staged locally by the API for
+// downloads) and removed when the task chain terminates.
+const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const TRANSFERS_DIR = path.join(DATA_DIR, 'transfers');
+
+/** Per-file transfer size cap. Generous by default (10 GB) — volume tars and
+ *  full-server backup archives flow through here. Override with
+ *  AGENT_TRANSFER_MAX_BYTES. */
+const TRANSFER_MAX_BYTES = (() => {
+  const raw = Number(process.env.AGENT_TRANSFER_MAX_BYTES);
+  return Number.isFinite(raw) && raw > 0 ? raw : 10 * 1024 * 1024 * 1024;
+})();
 
 /**
  * Agent service. Two security invariants enforced here:
@@ -27,6 +57,26 @@ export type AgentTaskType = keyof typeof TaskType;
  *    HTTP client could overwrite any task's status/result/error. Now the
  *    agent must include its (serverId, token) pair and the task must
  *    belong to that server. This is checked in taskResult().
+ *
+ * It also implements the file-transfer plumbing + generic task chaining
+ * agents use to move data between servers:
+ *
+ *   - POST /agent/transfers/:taskId/upload streams a raw binary body into
+ *     .kryptalis/transfers/<taskId>/<name> (validated in
+ *     validateTransferUpload(); the controller does the actual streaming).
+ *   - GET /agent/transfers/:taskId/download streams it back out — to the
+ *     same server, or to a server holding a QUEUED/RUNNING task whose
+ *     payload.sourceTaskId references the transfer (cross-server moves:
+ *     VOLUME_IMPORT / RESTORE).
+ *   - When a task completes and its payload carries
+ *     `onComplete: [{serverId, type, payload}]`, those tasks are enqueued
+ *     (COMPLETED only — a FAILED task drops its chain and logs). Modules can
+ *     also register a per-type completion handler (registerTaskCompletionHandler)
+ *     to react to terminal results — e.g. backups finalizing a remote dump.
+ *   - Transfer dirs are cleaned up when the chain terminates: a terminal
+ *     task removes transfers/<payload.sourceTaskId> (its input, now
+ *     consumed/abandoned) and its own transfers/<taskId> unless a chained
+ *     task still needs it (COMPLETED with a non-empty onComplete).
  */
 @Injectable()
 export class AgentService implements OnModuleInit, OnModuleDestroy {
@@ -34,6 +84,10 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
   private staleTaskInterval: NodeJS.Timeout | null = null;
   private static readonly STALE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
   private static readonly STALE_TASK_THRESHOLD_MS = 30 * 60 * 1000;
+
+  /** Per-TaskType completion hooks (e.g. BACKUP → BackupsService finalizer).
+   *  One handler per type keeps the wiring simple and explicit. */
+  private completionHandlers = new Map<string, AgentTaskCompletionHandler>();
 
   constructor(
     private prisma: PrismaService,
@@ -60,22 +114,46 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
   /**
    * Mark any QUEUED or RUNNING task older than the threshold as FAILED.
    * Runs on a timer; assumes the agent crashed or disconnected mid-task.
+   * Each stale task is routed through the same termination hooks a real
+   * FAILED report triggers (completion handlers + transfer cleanup) so e.g.
+   * a remote BACKUP row doesn't hang in IN_PROGRESS forever when its agent
+   * dies. Chains are dropped, as for any FAILED task.
    */
   private async failStaleTasks() {
     const cutoff = new Date(Date.now() - AgentService.STALE_TASK_THRESHOLD_MS);
-    const res = await this.prisma.agentTask.updateMany({
+    const stale = await this.prisma.agentTask.findMany({
       where: {
         status: { in: ['QUEUED', 'RUNNING'] as any },
         createdAt: { lt: cutoff },
       },
+      select: { id: true, serverId: true, type: true, payload: true },
+    });
+    if (stale.length === 0) return;
+
+    const error = 'Task timed out — agent disconnected';
+    await this.prisma.agentTask.updateMany({
+      where: { id: { in: stale.map((t) => t.id) } },
       data: {
         status: 'FAILED' as any,
-        error: 'Task timed out — agent disconnected',
+        error,
         completedAt: new Date(),
       },
     });
-    if (res.count > 0) {
-      this.logger.warn(`Failed ${res.count} stale agent task(s) (>30m in QUEUED/RUNNING)`);
+    this.logger.warn(`Failed ${stale.length} stale agent task(s) (>30m in QUEUED/RUNNING)`);
+
+    for (const task of stale) {
+      await this.handleTaskTermination({
+        id: task.id,
+        serverId: task.serverId,
+        type: String(task.type),
+        payload: task.payload,
+        status: 'FAILED',
+        error,
+      }).catch((err) => {
+        this.logger.error(
+          `Stale-task termination handling for ${task.id} failed: ${(err as Error).message}`,
+        );
+      });
     }
   }
 
@@ -269,7 +347,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     // The task must belong to the server the agent claims to run on.
     const task = await this.prisma.agentTask.findUnique({
       where: { id: taskId },
-      select: { id: true, serverId: true, status: true },
+      select: { id: true, serverId: true, status: true, type: true, payload: true },
     });
     if (!task) throw new NotFoundException('Task not found');
     if (task.serverId !== serverId) {
@@ -302,6 +380,203 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
         completedAt: new Date(),
       },
     });
+
+    // Post-terminal hooks (chaining, completion handlers, transfer cleanup)
+    // never break the agent's ACK — failures are logged server-side instead.
+    await this.handleTaskTermination({
+      id: task.id,
+      serverId: task.serverId,
+      type: String(task.type),
+      payload: task.payload,
+      status: status as 'COMPLETED' | 'FAILED',
+      result: safeResult,
+      error: safeError,
+    }).catch((err) => {
+      this.logger.error(
+        `Post-completion handling for task ${taskId} failed: ${(err as Error).message}`,
+      );
+    });
+
     return { ok: true };
+  }
+
+  // ─── task chaining + completion hooks ──────────────────────────────
+
+  /**
+   * Register a completion hook for a TaskType — invoked after EVERY terminal
+   * (COMPLETED or FAILED) result of that type. Used by BackupsService to
+   * finalize remote BACKUP dumps without the agent module knowing anything
+   * about backups.
+   */
+  registerTaskCompletionHandler(type: AgentTaskType, handler: AgentTaskCompletionHandler) {
+    this.completionHandlers.set(type, handler);
+  }
+
+  /**
+   * Generic chaining: when a COMPLETED task's payload carries
+   * `onComplete: [{serverId, type, payload}]`, enqueue those tasks. The first
+   * chained payload is augmented with `sourceTaskId` (defaulting to the
+   * completed task's id) so download-style consumers (VOLUME_IMPORT, RESTORE)
+   * know where to pull from. FAILED tasks never chain — the failure is logged
+   * and the staged transfer dir is dropped.
+   */
+  private async handleTaskTermination(task: AgentTaskCompletion): Promise<void> {
+    const onComplete: any[] = Array.isArray(task.payload?.onComplete)
+      ? task.payload.onComplete
+      : [];
+
+    let chained = false;
+    if (task.status === 'COMPLETED' && onComplete.length > 0) {
+      const [next, ...rest] = onComplete;
+      if (next?.serverId && next?.type) {
+        // Transfer-consuming task types get the source pointer defaulted to
+        // the just-completed task's id (whose transfers/ dir holds the
+        // staged files); explicit values win. Other types (DEPLOY etc.) are
+        // chained verbatim.
+        const consumesTransfers = next.type === 'VOLUME_IMPORT' || next.type === 'RESTORE';
+        try {
+          await this.enqueueTask(next.serverId, next.type, {
+            ...(next.payload ?? {}),
+            ...(consumesTransfers
+              ? { sourceTaskId: next.payload?.sourceTaskId ?? task.id }
+              : {}),
+            // Propagate the remainder of the chain.
+            ...(rest.length > 0 ? { onComplete: rest } : {}),
+          });
+          chained = true;
+        } catch (err) {
+          this.logger.error(
+            `Task ${task.id} (${task.type}) completed but chaining ${next.type} on ` +
+              `${next.serverId} failed: ${(err as Error).message}`,
+          );
+        }
+      } else {
+        this.logger.warn(
+          `Task ${task.id} has a malformed onComplete entry — chain dropped.`,
+        );
+      }
+    } else if (task.status === 'FAILED' && onComplete.length > 0) {
+      this.logger.warn(
+        `Task ${task.id} (${task.type}) FAILED — dropping ${onComplete.length} chained task(s): ${task.error ?? 'no error reported'}`,
+      );
+    }
+
+    // Module-level completion hook (e.g. backups finalizer).
+    const handler = this.completionHandlers.get(task.type);
+    if (handler) {
+      try {
+        await handler(task);
+      } catch (err) {
+        this.logger.error(
+          `Completion handler for ${task.type} (task ${task.id}) failed: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Transfer cleanup. The chain owns two staging dirs at most:
+    //   - transfers/<payload.sourceTaskId>: this task's INPUT — consumed (or
+    //     abandoned on failure) the moment the task terminates.
+    //   - transfers/<task.id>: this task's OUTPUT — still needed if a chained
+    //     task will download from it; otherwise the chain ends here.
+    if (typeof task.payload?.sourceTaskId === 'string') {
+      await this.cleanupTransfers(task.payload.sourceTaskId);
+    }
+    if (!chained) {
+      await this.cleanupTransfers(task.id);
+    }
+  }
+
+  // ─── file transfers (.kryptalis/transfers/<taskId>/<name>) ─────────
+
+  /** Max bytes a single transfer upload may carry (configurable via env). */
+  get transferMaxBytes(): number {
+    return TRANSFER_MAX_BYTES;
+  }
+
+  /**
+   * Validate an agent transfer request (upload or download) and resolve the
+   * sanitized on-disk file path. Checks, in order:
+   *   1. (serverId, token) is a valid agent pair.
+   *   2. `name` survives path.basename() unchanged (no traversal/separators).
+   *   3. The task exists, and either belongs to the calling server, or — for
+   *      downloads — the calling server holds a live (QUEUED/RUNNING) task
+   *      whose payload.sourceTaskId references it (cross-server pulls:
+   *      VOLUME_IMPORT / RESTORE consuming another server's staged output).
+   */
+  async resolveTransferPath(
+    taskId: string,
+    serverId: string,
+    token: string,
+    name: string,
+    direction: 'upload' | 'download',
+  ): Promise<string> {
+    await this.validateToken(serverId, token);
+
+    if (!name || typeof name !== 'string') {
+      throw new BadRequestException('name query param required');
+    }
+    const safeName = path.basename(name);
+    if (safeName !== name || safeName === '.' || safeName === '..') {
+      throw new BadRequestException('Invalid file name');
+    }
+
+    const task = await this.prisma.agentTask.findUnique({
+      where: { id: taskId },
+      select: { id: true, serverId: true },
+    });
+    if (!task || task.serverId !== serverId) {
+      // Two legitimate non-owner cases, both download-only:
+      //   - cross-server pull: the transfer was staged under ANOTHER server's
+      //     task id (VOLUME_EXPORT output consumed by VOLUME_IMPORT);
+      //   - locally-staged dir: the API staged files under a `local-<uuid>`
+      //     id that has no AgentTask row at all (local-source export, remote
+      //     RESTORE archive).
+      // Either way the calling server must hold a live task that explicitly
+      // references the transfer as its payload.sourceTaskId.
+      if (!task && direction === 'upload') {
+        throw new NotFoundException('Task not found');
+      }
+      if (direction === 'upload') {
+        throw new UnauthorizedException('Task does not belong to this server.');
+      }
+      const consumer = await this.prisma.agentTask.findFirst({
+        where: {
+          serverId,
+          status: { in: ['QUEUED', 'RUNNING'] as any },
+          payload: { path: ['sourceTaskId'], equals: taskId },
+        },
+        select: { id: true },
+      });
+      if (!consumer) {
+        if (!task) throw new NotFoundException('Task not found');
+        throw new UnauthorizedException('Task does not belong to this server.');
+      }
+    }
+
+    // taskId was matched against a DB row or a payload.sourceTaskId above —
+    // basename() defensively in case either ever carries a separator.
+    return path.join(TRANSFERS_DIR, path.basename(taskId), safeName);
+  }
+
+  /** Staging dir for a task chain — used by API-side (local) export/import. */
+  transferDir(taskId: string): string {
+    return path.join(TRANSFERS_DIR, taskId);
+  }
+
+  /** Mint an id for a locally-staged transfer dir that has no AgentTask row
+   *  (e.g. local-source volume export). Prefixed so it can't collide with
+   *  cuid task ids. */
+  newLocalTransferId(): string {
+    return `local-${randomUUID()}`;
+  }
+
+  /** Remove transfers/<taskId>/ entirely. Idempotent, best-effort. */
+  async cleanupTransfers(taskId: string): Promise<void> {
+    // Defensive: never let a crafted id escape the transfers root.
+    const safe = path.basename(taskId);
+    if (!safe || safe !== taskId) return;
+    await fs.promises
+      .rm(path.join(TRANSFERS_DIR, safe), { recursive: true, force: true })
+      .catch(() => undefined);
   }
 }
