@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import {
   Rocket,
@@ -31,6 +31,7 @@ import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
+import { makeTimeAgo } from '@/lib/app-format';
 import Link from 'next/link';
 
 // ---------------------------------------------------------------------------
@@ -43,14 +44,6 @@ const statusVariant: Record<string, 'success' | 'destructive' | 'warning' | 'sec
   FAILED: 'destructive', ERROR: 'destructive', OFFLINE: 'destructive',
   STOPPED: 'secondary', CANCELLED: 'secondary',
 };
-
-function timeAgo(date: string) {
-  const s = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
 
 function fmtGB(bytes: number) {
   return `${(bytes / 1073741824).toFixed(1)}`;
@@ -73,6 +66,16 @@ const chartTooltipStyle = {
 
 export default function DashboardPage() {
   const { t } = useTranslation();
+  const timeAgo = useMemo(
+    () =>
+      makeTimeAgo(t, {
+        just: 'overview.timeJust',
+        min: 'overview.timeMin',
+        hour: 'overview.timeHour',
+        day: 'overview.timeDay',
+      }),
+    [t],
+  );
   const user = useAuthStore((s) => s.user);
   const isAdmin = user?.role === 'ADMIN' || user?.role === 'SUPERADMIN';
 
@@ -162,7 +165,7 @@ export default function DashboardPage() {
       {/* ================================================================= */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
+          <h1 className="text-2xl font-bold tracking-tight">{t('overview.dashboard')}</h1>
           {isAdmin && (
             <>
               <span className="text-sm text-muted-foreground font-mono">{hostname}</span>
@@ -198,7 +201,7 @@ export default function DashboardPage() {
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <Cpu size={13} /> CPU
             </div>
-            <span className="text-xs text-muted-foreground">{cpuCores} cores</span>
+            <span className="text-xs text-muted-foreground">{cpuCores} {t('monitoring.cores')}</span>
           </div>
           <p className={`text-3xl font-bold tabular-nums ${cpuPct > 90 ? 'text-red-500' : cpuPct > 70 ? 'text-orange-400' : ''}`}>
             {cpuPct}<span className="text-lg">%</span>
@@ -249,12 +252,12 @@ export default function DashboardPage() {
             <span className="h-2 w-2 rounded-full bg-green-500 inline-block" />
           </div>
           <p className="text-3xl font-bold tabular-nums">
-            {dockerContainers.length}<span className="text-sm font-normal text-muted-foreground"> containers</span>
+            {dockerContainers.length}<span className="text-sm font-normal text-muted-foreground"> {t('overview.containers')}</span>
           </p>
           <p className="mt-2 text-xs text-muted-foreground truncate">
             {dockerContainers.length > 0
               ? dockerContainers.map((c: any) => c.name).join(', ')
-              : 'No running containers'}
+              : t('overview.noRunningContainers')}
           </p>
         </Card>
       </div>
@@ -267,7 +270,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         {/* CPU History */}
         <Card className="p-4">
-          <p className="text-xs text-muted-foreground mb-2">CPU &mdash; Last 24h</p>
+          <p className="text-xs text-muted-foreground mb-2">{t('overview.cpuLast24h')}</p>
           <div className="h-32">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={cpuHistory}>
@@ -299,7 +302,7 @@ export default function DashboardPage() {
 
         {/* RAM History */}
         <Card className="p-4">
-          <p className="text-xs text-muted-foreground mb-2">Memory &mdash; Last 24h</p>
+          <p className="text-xs text-muted-foreground mb-2">{t('overview.memLast24h')}</p>
           <div className="h-32">
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={ramHistory}>
@@ -340,21 +343,21 @@ export default function DashboardPage() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <div>
-              <CardTitle className="text-base">Applications</CardTitle>
-              <CardDescription>{applications.length} deployed</CardDescription>
+              <CardTitle className="text-base">{t('overview.applications')}</CardTitle>
+              <CardDescription>{applications.length} {t('overview.deployed')}</CardDescription>
             </div>
             <Link href="/dashboard/applications">
-              <Button variant="outline" size="sm" className="h-7 text-xs">View all</Button>
+              <Button variant="outline" size="sm" className="h-7 text-xs">{t('overview.viewAll')}</Button>
             </Link>
           </CardHeader>
           <CardContent>
             {applications.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-8 text-center">
                 <Rocket size={28} className="mb-2 text-muted-foreground" />
-                <p className="text-sm text-muted-foreground mb-3">No applications deployed</p>
+                <p className="text-sm text-muted-foreground mb-3">{t('overview.noAppsDeployed')}</p>
                 <Link href="/dashboard/marketplace">
                   <Button size="sm">
-                    <Plus size={14} className="mr-1" /> Install from Marketplace
+                    <Plus size={14} className="mr-1" /> {t('quickDeploy.titleMarket')}
                   </Button>
                 </Link>
               </div>
@@ -395,11 +398,11 @@ export default function DashboardPage() {
           {/* Recent Deployments */}
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-base">Recent Deployments</CardTitle>
+              <CardTitle className="text-base">{t('overview.recentDeployments')}</CardTitle>
             </CardHeader>
             <CardContent>
               {recentDeploys.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-4 text-center">No recent deployments</p>
+                <p className="text-sm text-muted-foreground py-4 text-center">{t('overview.noRecentDeployments')}</p>
               ) : (
                 <div className="space-y-1.5">
                   {recentDeploys.map((d: any) => (
@@ -412,7 +415,7 @@ export default function DashboardPage() {
                         <AlertTriangle size={15} className="text-yellow-500 shrink-0" />
                       )}
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate">{d.application?.name || 'Deploy'}</p>
+                        <p className="text-sm font-medium truncate">{d.application?.name || t('apps.deploy')}</p>
                         <p className="text-[11px] text-muted-foreground truncate">
                           {timeAgo(d.createdAt)}
                           {d.commitMessage && ` - ${d.commitMessage}`}
@@ -432,12 +435,12 @@ export default function DashboardPage() {
           {isAdmin && (
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-base">Docker Containers</CardTitle>
-              <CardDescription>{dockerContainers.length} running</CardDescription>
+              <CardTitle className="text-base">{t('monitoring.dockerContainers')}</CardTitle>
+              <CardDescription>{dockerContainers.length} {t('overview.running')}</CardDescription>
             </CardHeader>
             <CardContent>
               {dockerContainers.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-4 text-center">No running containers</p>
+                <p className="text-sm text-muted-foreground py-4 text-center">{t('overview.noRunningContainers')}</p>
               ) : (
                 <div className="space-y-1.5">
                   {dockerContainers.slice(0, 6).map((c: any, i: number) => (
@@ -466,7 +469,7 @@ export default function DashboardPage() {
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Link href="/dashboard/marketplace">
           <Button variant="outline" className="w-full h-10 justify-start gap-2 text-sm">
-            <Zap size={15} className="text-violet-500" /> Install App
+            <Zap size={15} className="text-violet-500" /> {t('overview.installApp')}
           </Button>
         </Link>
         <Link href="/dashboard/applications">

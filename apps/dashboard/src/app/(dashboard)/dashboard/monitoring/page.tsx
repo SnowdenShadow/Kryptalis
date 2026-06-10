@@ -67,9 +67,18 @@ interface AlertRule {
   serverId: string;
   metric: string;
   threshold: number;
+  operator?: string;
   channel: string;
   webhookUrl?: string;
 }
+
+const operatorSymbols: Record<string, string> = {
+  GT: '>',
+  GTE: '>=',
+  LT: '<',
+  LTE: '<=',
+  EQ: '=',
+};
 
 interface ServerStats {
   hostname: string;
@@ -199,6 +208,7 @@ export default function MonitoringPage() {
     name: '',
     metric: 'cpu',
     threshold: 80,
+    operator: 'GTE',
     channel: 'EMAIL',
     webhookUrl: '',
   });
@@ -245,6 +255,7 @@ export default function MonitoringPage() {
       serverId: string;
       metric: string;
       threshold: number;
+      operator: string;
       channel: string;
       webhookUrl?: string;
     }) => api.post('/monitoring/alert-rules', data),
@@ -254,7 +265,7 @@ export default function MonitoringPage() {
         queryKey: ['monitoring', 'alert-rules', serverId],
       });
       setShowAlertDialog(false);
-      setAlertForm({ name: '', metric: 'cpu', threshold: 80, channel: 'EMAIL', webhookUrl: '' });
+      setAlertForm({ name: '', metric: 'cpu', threshold: 80, operator: 'GTE', channel: 'EMAIL', webhookUrl: '' });
     },
     onError: (error: Error) => toast.error(error.message),
   });
@@ -304,6 +315,7 @@ export default function MonitoringPage() {
       serverId,
       metric: alertForm.metric,
       threshold: alertForm.threshold,
+      operator: alertForm.operator,
       channel: alertForm.channel,
       ...(alertForm.channel === 'WEBHOOK' && alertForm.webhookUrl
         ? { webhookUrl: alertForm.webhookUrl }
@@ -797,7 +809,7 @@ export default function MonitoringPage() {
                             <td className="px-4 py-2">
                               <Badge variant="outline" className="text-[10px]">{rule.metric}</Badge>
                             </td>
-                            <td className="px-4 py-2 text-muted-foreground">{rule.threshold}%</td>
+                            <td className="px-4 py-2 text-muted-foreground">{operatorSymbols[rule.operator ?? 'GTE'] ?? '>='} {rule.threshold}%</td>
                             <td className="px-4 py-2">
                               <Badge variant="secondary" className="text-[10px]">{rule.channel}</Badge>
                             </td>
@@ -850,6 +862,20 @@ export default function MonitoringPage() {
                   <option value="cpu">CPU</option>
                   <option value="memory">Memory</option>
                   <option value="disk">Disk</option>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="alert-operator">Condition</Label>
+                <Select
+                  id="alert-operator"
+                  value={alertForm.operator}
+                  onChange={(e) => setAlertForm((f) => ({ ...f, operator: e.target.value }))}
+                >
+                  <option value="GT">&gt;</option>
+                  <option value="GTE">&gt;=</option>
+                  <option value="LT">&lt;</option>
+                  <option value="LTE">&lt;=</option>
+                  <option value="EQ">=</option>
                 </Select>
               </div>
               <div className="space-y-2">

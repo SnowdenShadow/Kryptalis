@@ -6,6 +6,7 @@ import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { ApplicationsService } from './applications.service';
 import { CreateApplicationDto } from './dto/create-application.dto';
 import { UpdateApplicationDto } from './dto/update-application.dto';
+import { ExecCommandDto } from './dto/exec-command.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Applications')
@@ -59,8 +60,8 @@ export class ApplicationsController {
 
   @Post(':id/exec')
   @ApiOperation({ summary: 'Execute command in container' })
-  exec(@CurrentUser('id') userId: string, @Param('id') id: string, @Body('command') command: string) {
-    return this.svc.execCommand(userId, id, command);
+  exec(@CurrentUser('id') userId: string, @Param('id') id: string, @Body() dto: ExecCommandDto) {
+    return this.svc.execCommand(userId, id, dto.command);
   }
 
   @Post(':id/start')

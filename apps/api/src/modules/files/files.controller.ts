@@ -16,6 +16,7 @@ import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { FilesService } from './files.service';
+import { MkdirDto } from './dto/mkdir.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 type Scope = 'app' | 'db';
@@ -88,9 +89,9 @@ export class FilesController {
     @CurrentUser('id') userId: string,
     @Param('scope') scope: string,
     @Param('scopeId') scopeId: string,
-    @Body('path') p: string,
+    @Body() dto: MkdirDto,
   ) {
-    return this.svc.mkdir(userId, parseScope(scope), scopeId, p);
+    return this.svc.mkdir(userId, parseScope(scope), scopeId, dto.path);
   }
 
   @Patch(':scope/:scopeId/rename')

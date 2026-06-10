@@ -58,7 +58,7 @@ export class MonitoringController {
   @ApiOperation({ summary: 'Update alert rule (admin only)' })
   updateRule(
     @Param('id') id: string,
-    @Body() dto: Partial<{ enabled: boolean; threshold: number; channel: string; webhookUrl: string | null }>,
+    @Body() dto: Partial<{ enabled: boolean; threshold: number; operator: string; channel: string; webhookUrl: string | null }>,
   ) {
     return this.svc.updateAlertRule(id, dto);
   }

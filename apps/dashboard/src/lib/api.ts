@@ -118,12 +118,18 @@ class ApiClient {
         return data.accessToken;
       } catch {
         return null;
-      } finally {
-        // Release the lock on the next microtask so concurrent callers all see
-        // the resolved value first.
-        setTimeout(() => { this.refreshPromise = null; }, 0);
       }
-    })();
+    })().finally(() => {
+      // Lock lifetime = promise lifetime: callers landing while a refresh is
+      // in flight share it; callers landing after it settled start a fresh
+      // attempt. The old setTimeout(…, 0) release left a macrotask window
+      // after settlement where a new 401 was handed the STALE settled
+      // promise — after a failed refresh that meant a spurious logout even
+      // though a fresh attempt (e.g. legacy-token path) might have
+      // succeeded. Callers keep their own reference, so clearing the field
+      // synchronously never hides the result from anyone already waiting.
+      this.refreshPromise = null;
+    });
     return this.refreshPromise;
   }
 

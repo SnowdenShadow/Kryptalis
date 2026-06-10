@@ -16,6 +16,8 @@ export const translations: Record<string, Record<string, string>> = {
 
     // ── overview ───────────────────────────────────────────────────
     'overview.title': 'Overview', 'overview.welcome': 'Welcome to your Kryptalis dashboard', 'overview.servers': 'Servers', 'overview.applications': 'Applications', 'overview.domains': 'Domains', 'overview.databases': 'Databases', 'overview.recentDeployments': 'Recent Deployments', 'overview.noDeployments': 'No deployments yet. Deploy your first application to get started.', 'overview.quickActions': 'Quick Actions', 'overview.addServer': 'Add Server', 'overview.deployApp': 'Deploy App', 'overview.addDomain': 'Add Domain', 'overview.createBackup': 'Create Backup', 'overview.running': 'running', 'overview.online': 'online', 'overview.configured': 'configured', 'overview.active': 'active',
+    'overview.dashboard': 'Dashboard', 'overview.containers': 'containers', 'overview.noRunningContainers': 'No running containers', 'overview.cpuLast24h': 'CPU — Last 24h', 'overview.memLast24h': 'Memory — Last 24h', 'overview.deployed': 'deployed', 'overview.viewAll': 'View all', 'overview.noAppsDeployed': 'No applications deployed', 'overview.noRecentDeployments': 'No recent deployments', 'overview.installApp': 'Install App',
+    'overview.timeJust': 'just now', 'overview.timeMin': '{n}m ago', 'overview.timeHour': '{n}h ago', 'overview.timeDay': '{n}d ago',
 
     // ── server ─────────────────────────────────────────────────────
     'server.title': 'Server', 'server.subtitle': 'Your Kryptalis server', 'server.details': 'Server Details', 'server.agentToken': 'Agent Token', 'server.agentStatus': 'Agent Status', 'server.agentNotInstalled': 'Agent not installed', 'server.os': 'OS', 'server.arch': 'Architecture', 'server.cpuCores': 'CPU Cores', 'server.lastSeen': 'Last Seen', 'server.never': 'Never', 'server.resetServer': 'Reset Server', 'server.metrics': 'Metrics', 'server.cpu': 'CPU', 'server.memory': 'Memory', 'server.disk': 'Disk',
@@ -28,6 +30,16 @@ export const translations: Record<string, Record<string, string>> = {
     'projects.dangerZone': 'Danger Zone', 'projects.dangerDesc': 'Irreversible actions',
     'projects.deleteThis': 'Delete this project', 'projects.deleteThisDesc': 'This will permanently delete the project and all associated data.', 'projects.deleteBtn': 'Delete Project',
     'projects.deleteTitle': 'Delete project', 'projects.deleteDesc': 'This will permanently remove the project. This cannot be undone.',
+    'projects.apps': 'Apps', 'projects.domainSingle': '{n} domain', 'projects.domainPlural': '{n} domains',
+    'projects.createDialogDesc': 'Create a project to group related applications',
+    'projects.descPlaceholder': 'Optional description...',
+    'projects.serverRequired': 'Server *',
+    'projects.serverAdminRequired': 'Picking a target server requires administrator access. Ask an administrator to create this project for you.',
+    'projects.noOnlineServerBefore': 'No ONLINE server available yet. Ask an administrator to add one in',
+    'projects.noOnlineServerLink': 'Servers',
+    'projects.serverDeployHint': 'Apps in this project will be deployed on the selected server.',
+    'projects.localModeHint': 'platform is in LOCAL mode',
+    'projects.deleteDialogDesc': 'Are you sure you want to delete "{name}"? This will permanently remove the project and all its data. This action cannot be undone.',
 
     // ── members ───────────────────────────────────────────────────
     'members.title': 'Members & Roles',
@@ -1096,6 +1108,8 @@ export const translations: Record<string, Record<string, string>> = {
 
     // ── overview ───────────────────────────────────────────────────
     'overview.title': "Vue d'ensemble", 'overview.welcome': 'Bienvenue sur votre tableau de bord Kryptalis', 'overview.servers': 'Serveurs', 'overview.applications': 'Applications', 'overview.domains': 'Domaines', 'overview.databases': 'Bases de données', 'overview.recentDeployments': 'Déploiements récents', 'overview.noDeployments': 'Aucun déploiement. Déployez votre première application.', 'overview.quickActions': 'Actions rapides', 'overview.addServer': 'Ajouter serveur', 'overview.deployApp': 'Déployer app', 'overview.addDomain': 'Ajouter domaine', 'overview.createBackup': 'Créer sauvegarde', 'overview.running': 'en cours', 'overview.online': 'en ligne', 'overview.configured': 'configurés', 'overview.active': 'actives',
+    'overview.dashboard': 'Tableau de bord', 'overview.containers': 'conteneurs', 'overview.noRunningContainers': 'Aucun conteneur en cours', 'overview.cpuLast24h': 'CPU — Dernières 24h', 'overview.memLast24h': 'Mémoire — Dernières 24h', 'overview.deployed': 'déployées', 'overview.viewAll': 'Tout voir', 'overview.noAppsDeployed': 'Aucune application déployée', 'overview.noRecentDeployments': 'Aucun déploiement récent', 'overview.installApp': 'Installer une app',
+    'overview.timeJust': "à l'instant", 'overview.timeMin': 'il y a {n} min', 'overview.timeHour': 'il y a {n} h', 'overview.timeDay': 'il y a {n} j',
 
     'server.title': 'Serveur', 'server.subtitle': 'Votre serveur Kryptalis', 'server.details': 'Détails du serveur', 'server.agentToken': "Jeton de l'agent", 'server.agentStatus': "Statut de l'agent", 'server.agentNotInstalled': 'Agent non installé', 'server.os': 'Système', 'server.arch': 'Architecture', 'server.cpuCores': 'Coeurs CPU', 'server.lastSeen': 'Dernière connexion', 'server.never': 'Jamais', 'server.resetServer': 'Réinitialiser le serveur', 'server.metrics': 'Métriques', 'server.cpu': 'CPU', 'server.memory': 'Mémoire', 'server.disk': 'Disque',
 
@@ -1107,6 +1121,16 @@ export const translations: Record<string, Record<string, string>> = {
     'projects.dangerZone': 'Zone de danger', 'projects.dangerDesc': 'Actions irréversibles',
     'projects.deleteThis': 'Supprimer ce projet', 'projects.deleteThisDesc': 'Cela supprimera définitivement le projet et toutes les données associées.', 'projects.deleteBtn': 'Supprimer le projet',
     'projects.deleteTitle': 'Supprimer le projet', 'projects.deleteDesc': 'Le projet sera supprimé définitivement. Action irréversible.',
+    'projects.apps': 'Apps', 'projects.domainSingle': '{n} domaine', 'projects.domainPlural': '{n} domaines',
+    'projects.createDialogDesc': 'Créez un projet pour regrouper des applications liées',
+    'projects.descPlaceholder': 'Description optionnelle...',
+    'projects.serverRequired': 'Serveur *',
+    'projects.serverAdminRequired': "Choisir un serveur cible nécessite un accès administrateur. Demandez à un administrateur de créer ce projet pour vous.",
+    'projects.noOnlineServerBefore': "Aucun serveur ONLINE disponible pour l'instant. Demandez à un administrateur d'en ajouter un dans",
+    'projects.noOnlineServerLink': 'Serveurs',
+    'projects.serverDeployHint': 'Les apps de ce projet seront déployées sur le serveur sélectionné.',
+    'projects.localModeHint': 'la plateforme est en mode LOCAL',
+    'projects.deleteDialogDesc': 'Êtes-vous sûr de vouloir supprimer « {name} » ? Cela supprimera définitivement le projet et toutes ses données. Cette action est irréversible.',
 
     // ── members ───────────────────────────────────────────────────
     'members.title': 'Membres & rôles',

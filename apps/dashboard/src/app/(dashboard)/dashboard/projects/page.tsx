@@ -58,7 +58,7 @@ interface LocalServer {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function relativeDate(dateStr: string): string {
+function relativeDate(dateStr: string, t: (k: string, v?: Record<string, string | number>) => string): string {
   const now = Date.now();
   const then = new Date(dateStr).getTime();
   const diffMs = now - then;
@@ -74,10 +74,10 @@ function relativeDate(dateStr: string): string {
       day: 'numeric',
     });
   }
-  if (diffDay > 0) return `${diffDay}d ago`;
-  if (diffHr > 0) return `${diffHr}h ago`;
-  if (diffMin > 0) return `${diffMin}m ago`;
-  return 'just now';
+  if (diffDay > 0) return t('projects.timeDay', { n: diffDay });
+  if (diffHr > 0) return t('projects.timeHour', { n: diffHr });
+  if (diffMin > 0) return t('projects.timeMin', { n: diffMin });
+  return t('projects.timeJust');
 }
 
 function statusDotColor(status: string): string {
@@ -289,15 +289,15 @@ export default function ProjectsPage() {
                       <div className="grid grid-cols-3 gap-3">
                         <div className="rounded-lg border border-border p-2 text-center">
                           <p className="text-xl font-bold">{apps.length}</p>
-                          <p className="text-xs text-muted-foreground">Apps</p>
+                          <p className="text-xs text-muted-foreground">{t('projects.apps')}</p>
                         </div>
                         <div className="rounded-lg border border-border p-2 text-center">
                           <p className="text-xl font-bold text-emerald-500">{running}</p>
-                          <p className="text-xs text-muted-foreground">Running</p>
+                          <p className="text-xs text-muted-foreground">{t('projects.running')}</p>
                         </div>
                         <div className="rounded-lg border border-border p-2 text-center">
                           <p className={`text-xl font-bold ${errors > 0 ? 'text-red-500' : stopped > 0 ? 'text-muted-foreground' : ''}`}>{stopped + errors}</p>
-                          <p className="text-xs text-muted-foreground">Stopped</p>
+                          <p className="text-xs text-muted-foreground">{t('projects.stopped')}</p>
                         </div>
                       </div>
 
@@ -325,9 +325,9 @@ export default function ProjectsPage() {
                       {/* Footer */}
                       <div className="flex items-center justify-between pt-2 border-t border-border">
                         <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                          <span>{relativeDate(project.createdAt)}</span>
+                          <span>{relativeDate(project.createdAt, t)}</span>
                           {totalDomains > 0 && (
-                            <span className="flex items-center gap-1"><Globe size={11} /> {totalDomains} domain{totalDomains !== 1 ? 's' : ''}</span>
+                            <span className="flex items-center gap-1"><Globe size={11} /> {t(totalDomains === 1 ? 'projects.domainSingle' : 'projects.domainPlural', { n: totalDomains })}</span>
                           )}
                         </div>
                         {project.server && (
@@ -350,7 +350,7 @@ export default function ProjectsPage() {
         <DialogHeader>
           <DialogTitle>{t('projects.new')}</DialogTitle>
           <DialogDescription>
-            Create a project to group related applications
+            {t('projects.createDialogDesc')}
           </DialogDescription>
         </DialogHeader>
 
@@ -371,7 +371,7 @@ export default function ProjectsPage() {
             <textarea
               id="proj-desc"
               rows={3}
-              placeholder="Optional description..."
+              placeholder={t('projects.descPlaceholder')}
               className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               value={createForm.description}
               onChange={(e) => setCreateForm((f) => ({ ...f, description: e.target.value }))}
@@ -381,21 +381,20 @@ export default function ProjectsPage() {
           {/* Server selector — auto in LOCAL mode, dropdown in MULTI */}
           {isMultiMode ? (
             <div className="space-y-2">
-              <Label htmlFor="proj-server">Server *</Label>
+              <Label htmlFor="proj-server">{t('projects.serverRequired')}</Label>
               {!isAdmin ? (
                 <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/5 p-3 text-xs">
                   <Server size={14} className="text-orange-500 shrink-0 mt-0.5" />
                   <p className="text-muted-foreground">
-                    Picking a target server requires administrator access. Ask an
-                    administrator to create this project for you.
+                    {t('projects.serverAdminRequired')}
                   </p>
                 </div>
               ) : onlineServers.length === 0 ? (
                 <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/5 p-3 text-xs">
                   <Server size={14} className="text-orange-500 shrink-0 mt-0.5" />
                   <p className="text-muted-foreground">
-                    No ONLINE server available yet. Ask an administrator to add one in{' '}
-                    <a href="/dashboard/servers" className="text-primary hover:underline">Servers</a>.
+                    {t('projects.noOnlineServerBefore')}{' '}
+                    <a href="/dashboard/servers" className="text-primary hover:underline">{t('projects.noOnlineServerLink')}</a>.
                   </p>
                 </div>
               ) : (
@@ -406,7 +405,7 @@ export default function ProjectsPage() {
                     onChange={(e) => setCreateForm(f => ({ ...f, serverId: e.target.value }))}
                     required
                   >
-                    <option value="">Select a server</option>
+                    <option value="">{t('projects.selectServer')}</option>
                     {onlineServers.map(s => (
                       <option key={s.id} value={s.id}>
                         {s.name} ({s.host})
@@ -414,18 +413,18 @@ export default function ProjectsPage() {
                     ))}
                   </Select>
                   <p className="text-xs text-muted-foreground">
-                    Apps in this project will be deployed on the selected server.
+                    {t('projects.serverDeployHint')}
                   </p>
                 </>
               )}
             </div>
           ) : (
             <div className="space-y-2">
-              <Label>Server</Label>
+              <Label>{t('projects.serverLabel')}</Label>
               <div className="flex items-center gap-2 rounded-md border border-input bg-muted/50 px-3 py-2 text-sm">
                 <Server size={14} className="text-muted-foreground" />
-                <span>{localServer?.name ?? 'Loading...'}</span>
-                <span className="text-xs text-muted-foreground ml-auto">platform is in LOCAL mode</span>
+                <span>{localServer?.name ?? t('common.loading')}</span>
+                <span className="text-xs text-muted-foreground ml-auto">{t('projects.localModeHint')}</span>
               </div>
             </div>
           )}
@@ -443,7 +442,7 @@ export default function ProjectsPage() {
               }
             >
               {createMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-              {createMutation.isPending ? 'Creating...' : t('common.create')}
+              {createMutation.isPending ? t('common.creating') : t('common.create')}
             </Button>
           </DialogFooter>
         </form>
@@ -454,8 +453,7 @@ export default function ProjectsPage() {
         <DialogHeader>
           <DialogTitle>{t('common.delete')}</DialogTitle>
           <DialogDescription>
-            Are you sure you want to delete &ldquo;{deleteTarget?.name}&rdquo;? This will
-            permanently remove the project and all its data. This action cannot be undone.
+            {t('projects.deleteDialogDesc', { name: deleteTarget?.name ?? '' })}
           </DialogDescription>
         </DialogHeader>
 
@@ -469,7 +467,7 @@ export default function ProjectsPage() {
             onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
           >
             {deleteMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-            {deleteMutation.isPending ? 'Deleting...' : t('common.delete')}
+            {deleteMutation.isPending ? t('common.deleting') : t('common.delete')}
           </Button>
         </DialogFooter>
       </Dialog>

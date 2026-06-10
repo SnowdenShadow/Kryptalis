@@ -4,6 +4,7 @@ import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { DomainsService } from './domains.service';
 import { CreateDomainDto } from './dto/create-domain.dto';
+import { TransferDomainDto } from './dto/transfer-domain.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Domains')
@@ -59,9 +60,9 @@ export class DomainsController {
   transfer(
     @CurrentUser('id') userId: string,
     @Param('id') id: string,
-    @Body('targetProjectId') targetProjectId: string,
+    @Body() dto: TransferDomainDto,
   ) {
-    return this.svc.transfer(userId, id, targetProjectId);
+    return this.svc.transfer(userId, id, dto.targetProjectId);
   }
 
   @Get(':id/health')

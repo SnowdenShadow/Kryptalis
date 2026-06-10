@@ -519,10 +519,12 @@ export class BackupsService {
         case 'REDIS':
         case 'KEYDB': {
           file = `${db.id}.rdb`;
-          const cliArgs = password ? ['-a', password] : [];
+          // REDISCLI_AUTH instead of -a so the password never shows up in
+          // the host's process list (same reason mysqldump gets MYSQL_PWD).
+          const envArgs = password ? ['-e', `REDISCLI_AUTH=${password}`] : [];
           await execFileAsync(
             'docker',
-            ['exec', container, 'redis-cli', ...cliArgs, 'SAVE'],
+            ['exec', ...envArgs, container, 'redis-cli', 'SAVE'],
             { timeout: 300_000 },
           );
           await this.runCommandToFile(

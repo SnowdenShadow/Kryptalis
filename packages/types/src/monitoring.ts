@@ -24,6 +24,7 @@ export interface CreateAlertRuleRequest {
   serverId: string;
   metric: 'cpu' | 'memory' | 'disk';
   threshold: number;
+  operator?: `${AlertOperator}`;
   channel: AlertChannel;
   webhookUrl?: string;
 }
@@ -34,7 +35,7 @@ export interface AlertRuleResponse {
   serverId: string;
   metric: string;
   threshold: number;
-  /** Comparison operator (schema default GTE). Not settable via the create DTO yet. */
+  /** Comparison operator (schema default GTE). */
   operator: `${AlertOperator}`;
   channel: AlertChannel;
   webhookUrl: string | null;

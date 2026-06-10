@@ -35,25 +35,18 @@ type Provider = 'GITHUB';
  * Public client_id:
  *   The GitHub-issued client_id IS public — see GitHub's own docs. It's
  *   just an identifier, not a credential. The credential equivalent (the
- *   client secret) is NOT used in device flow at all. So shipping the
- *   client_id in `KRYPTALIS_GITHUB_CLIENT_ID` (or hardcoded) is correct.
+ *   client secret) is NOT used in device flow at all.
  *
- *   Per-install override: set GITHUB_OAUTH_CLIENT_ID in env to use your
- *   own GitHub OAuth app instead of the platform default.
+ *   Configuration: set GITHUB_OAUTH_CLIENT_ID in env to the OAuth App you
+ *   registered on github.com/settings/developers. There is deliberately no
+ *   baked-in default: shipping a placeholder client_id would point every
+ *   install's GitHub login at an OAuth app the operator doesn't control.
+ *   When unset, /git-providers/oauth/github/status reports
+ *   configured:false and the device-flow endpoints refuse with a 400.
  */
 @Injectable()
 export class GitOAuthService {
   private readonly logger = new Logger(GitOAuthService.name);
-
-  // Default GitHub OAuth App client_id baked into the platform. Operators
-  // can override per-install with GITHUB_OAUTH_CLIENT_ID. We ship a default
-  // so out-of-the-box installs get one-click GitHub login without any
-  // operator setup.
-  //
-  // The client_id below is intentionally a placeholder — replace it with
-  // the OAuth App you registered on github.com/settings/developers when
-  // you cut a release. Until then, installs need their own GITHUB_OAUTH_CLIENT_ID.
-  private static readonly DEFAULT_GITHUB_CLIENT_ID = 'Ov23liGhrCZJ2hB4ILtX';
 
   constructor(
     private prisma: PrismaService,
@@ -66,7 +59,7 @@ export class GitOAuthService {
   }
 
   private githubClientId(): string {
-    return process.env.GITHUB_OAUTH_CLIENT_ID || GitOAuthService.DEFAULT_GITHUB_CLIENT_ID;
+    return process.env.GITHUB_OAUTH_CLIENT_ID || '';
   }
 
   /**
@@ -87,7 +80,7 @@ export class GitOAuthService {
   }> {
     const clientId = this.githubClientId();
     if (!clientId) {
-      throw new BadRequestException('GitHub OAuth is not configured (no client_id).');
+      throw new BadRequestException('GitHub OAuth is not configured — set GITHUB_OAUTH_CLIENT_ID');
     }
     const res = await fetch('https://github.com/login/device/code', {
       method: 'POST',
@@ -136,6 +129,9 @@ export class GitOAuthService {
       throw new BadRequestException('device_code is required');
     }
     const clientId = this.githubClientId();
+    if (!clientId) {
+      throw new BadRequestException('GitHub OAuth is not configured — set GITHUB_OAUTH_CLIENT_ID');
+    }
     const res = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST',
       headers: {

@@ -14,6 +14,10 @@ import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { Role, UserStatus } from '@prisma/client';
 import { AdminService } from './admin.service';
 import { ReaperService } from './reaper.service';
+import { UpdateSettingDto } from './dto/update-setting.dto';
+import { ChangeRoleDto } from './dto/change-role.dto';
+import { ChangeStatusDto } from './dto/change-status.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -59,9 +63,9 @@ export class AdminController {
   updateSetting(
     @CurrentUser('id') userId: string,
     @Param('key') key: string,
-    @Body('value') value: unknown,
+    @Body() dto: UpdateSettingDto,
   ) {
-    return this.svc.updateSetting(key, value, userId);
+    return this.svc.updateSetting(key, dto.value, userId);
   }
 
   // ── runtime config (Admin → System Config tab) ────────────────────
@@ -130,9 +134,9 @@ export class AdminController {
   changeRole(
     @CurrentUser() actor: { id: string; role: Role },
     @Param('id') id: string,
-    @Body('role') role: Role,
+    @Body() dto: ChangeRoleDto,
   ) {
-    return this.svc.updateUserRole(actor, id, role);
+    return this.svc.updateUserRole(actor, id, dto.role);
   }
 
   @Patch('users/:id/status')
@@ -140,9 +144,9 @@ export class AdminController {
   changeStatus(
     @CurrentUser() actor: { id: string; role: Role },
     @Param('id') id: string,
-    @Body('status') status: UserStatus,
+    @Body() dto: ChangeStatusDto,
   ) {
-    return this.svc.updateUserStatus(actor, id, status);
+    return this.svc.updateUserStatus(actor, id, dto.status);
   }
 
   @Post('users/:id/reset-password')
@@ -150,9 +154,9 @@ export class AdminController {
   resetPassword(
     @CurrentUser() actor: { id: string; role: Role },
     @Param('id') id: string,
-    @Body('password') password: string,
+    @Body() dto: ResetPasswordDto,
   ) {
-    return this.svc.resetUserPassword(actor, id, password);
+    return this.svc.resetUserPassword(actor, id, dto.password);
   }
 
   @Delete('users/:id')

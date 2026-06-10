@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
@@ -31,7 +31,14 @@ export default function LoginPage() {
   const [useBackup, setUseBackup] = useState(false);
   const [loading, setLoading] = useState(false);
   const { setAuth } = useAuthStore();
+  const isAuthed = useAuthStore((s) => !!s.accessToken);
   const router = useRouter();
+
+  // Already signed in (store hydrated with a token) — skip the form and go
+  // straight to the dashboard, same detection as the landing page router.
+  useEffect(() => {
+    if (isAuthed) router.replace('/dashboard');
+  }, [isAuthed, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -70,6 +77,8 @@ export default function LoginPage() {
       setLoading(false);
     }
   };
+
+  if (isAuthed) return null;
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">

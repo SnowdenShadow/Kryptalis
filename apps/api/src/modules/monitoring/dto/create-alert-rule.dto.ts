@@ -18,6 +18,11 @@ export class CreateAlertRuleDto {
   @IsNumber()
   threshold: number;
 
+  @ApiProperty({ enum: ['GT', 'GTE', 'LT', 'LTE', 'EQ'], default: 'GTE', required: false })
+  @IsOptional()
+  @IsIn(['GT', 'GTE', 'LT', 'LTE', 'EQ'])
+  operator?: string;
+
   @ApiProperty({ enum: ['EMAIL', 'DISCORD', 'SLACK', 'WEBHOOK'] })
   @IsIn(['EMAIL', 'DISCORD', 'SLACK', 'WEBHOOK'])
   channel: string;

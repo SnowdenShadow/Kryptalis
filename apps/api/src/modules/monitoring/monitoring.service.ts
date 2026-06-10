@@ -83,7 +83,7 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
       for (const rule of serverRules) {
         const value = this.metricValue(rule.metric, latest);
         if (value == null) continue;
-        if (this.compareThreshold(value, (rule as any).operator || 'GTE', rule.threshold)) {
+        if (this.compareThreshold(value, rule.operator, rule.threshold)) {
           // Fire-and-forget: notifications service swallows its own
           // errors so a misconfigured channel can't take down the loop.
           this.notifications.sendAlert(rule, value).catch((e) =>
@@ -289,7 +289,7 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
 
   async updateAlertRule(
     id: string,
-    dto: Partial<{ enabled: boolean; threshold: number; channel: string; webhookUrl: string | null }>,
+    dto: Partial<{ enabled: boolean; threshold: number; operator: string; channel: string; webhookUrl: string | null }>,
   ) {
     const rule = await this.prisma.alertRule.findUnique({ where: { id } });
     if (!rule) throw new NotFoundException('Alert rule not found');

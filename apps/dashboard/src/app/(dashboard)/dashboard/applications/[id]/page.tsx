@@ -55,7 +55,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import type { ApplicationResponse, DeploymentResponse } from '@kryptalis/types';
+import type { ApplicationResponse, DeploymentResponse, DomainResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -373,11 +373,11 @@ export default function ApplicationDetailPage() {
   });
 
   // Fetch all domains for linking
-  const { data: allDomains = [] } = useQuery<any[]>({
+  const { data: allDomains = [] } = useQuery<DomainResponse[]>({
     queryKey: ['domains'],
     queryFn: () => api.get('/domains'),
   });
-  const unlinkedDomains = allDomains.filter((d: any) => !d.applicationId);
+  const unlinkedDomains = allDomains.filter((d) => !d.applicationId);
 
   const linkDomainMutation = useMutation({
     mutationFn: (domainId: string) => api.patch(`/domains/${domainId}`, { applicationId: id }),
@@ -1642,7 +1642,7 @@ export default function ApplicationDetailPage() {
                       className="w-full mt-0.5 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
                     >
                       <option value="">{t('apps.bindingPickDomain')}</option>
-                      {(allDomains || []).map((d: any) => (
+                      {(allDomains || []).map((d) => (
                         <option key={d.id} value={d.id}>{d.domain}</option>
                       ))}
                     </select>
