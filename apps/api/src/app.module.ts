@@ -41,8 +41,11 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
         API_PORT: Joi.number().default(4000),
         JWT_SECRET: Joi.string().min(32).required(),
         JWT_REFRESH_SECRET: Joi.string().min(32).required(),
-        JWT_EXPIRATION: Joi.string().default('15m'),
-        JWT_REFRESH_EXPIRATION: Joi.string().default('7d'),
+        // .empty('') treats compose's `${VAR:-}` empty-string injection as
+        // absent so the default actually applies (plain .default() only
+        // covers missing keys and Joi rejects '' on a bare string()).
+        JWT_EXPIRATION: Joi.string().empty('').default('15m'),
+        JWT_REFRESH_EXPIRATION: Joi.string().empty('').default('7d'),
         ENCRYPTION_KEY: Joi.string().min(32).required(),
         // All these env vars are now ADMIN-MANAGED through the Admin UI's
         // System Config tab. docker-compose passes them as empty strings

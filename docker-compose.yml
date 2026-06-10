@@ -75,9 +75,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
-      # Optional token TTLs — API defaults apply when empty (15m / 7d).
-      JWT_EXPIRATION: ${JWT_EXPIRATION:-}
-      JWT_REFRESH_EXPIRATION: ${JWT_REFRESH_EXPIRATION:-}
+      # Optional token TTLs. Defaults inline: compose always injects the
+      # variable, so an empty value would bypass Joi's .default() (it only
+      # applies to ABSENT keys, not empty strings).
+      JWT_EXPIRATION: ${JWT_EXPIRATION:-15m}
+      JWT_REFRESH_EXPIRATION: ${JWT_REFRESH_EXPIRATION:-7d}
       # Optional comma-separated CORS allowlist; empty → derived from
       # PUBLIC_API_URL + local dev origins.
       CORS_ORIGINS: ${CORS_ORIGINS:-}
