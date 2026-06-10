@@ -1,4 +1,4 @@
-import { AlertChannel } from './enums';
+import { AlertChannel, AlertOperator } from './enums';
 
 export interface MetricsResponse {
   serverId: string;
@@ -34,6 +34,8 @@ export interface AlertRuleResponse {
   serverId: string;
   metric: string;
   threshold: number;
+  /** Comparison operator (schema default GTE). Not settable via the create DTO yet. */
+  operator: `${AlertOperator}`;
   channel: AlertChannel;
   webhookUrl: string | null;
   enabled: boolean;

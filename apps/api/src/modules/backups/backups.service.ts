@@ -14,6 +14,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SystemConfigService } from '../system/system-config.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { CreateBackupDto } from './dto/create-backup.dto';
 import {
   S3BackupConfig,
@@ -23,6 +24,10 @@ import {
   missingS3ConfigKeys,
   REMOTE_TARGETS,
 } from './backup-storage.util';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
+import { slugify, resolveAppDir } from '../applications/applications.helpers';
+import { execFile, spawn } from 'child_process';
+import { promisify } from 'util';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -30,12 +35,47 @@ import * as path from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 
+const execFileAsync = promisify(execFile);
+
+// Same runtime-dir convention as databases/applications/files services.
+const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
+
+/** Manifest written at the archive root — restore is driven entirely by it. */
+interface BackupManifest {
+  version: 1;
+  backupId: string;
+  serverId: string;
+  createdAt: string;
+  includes: { applications: boolean; databases: boolean; volumes: boolean };
+  databases: Array<{
+    id: string;
+    name: string;
+    type: string;
+    container: string;
+    file: string;
+    /** True when the dump covers the whole instance (auto-imported rows
+     *  whose logical database name isn't tracked) — restore targets the
+     *  admin database instead of a single one. */
+    dumpAll: boolean;
+  }>;
+  volumes: string[];
+  applicationsExported: boolean;
+}
+
 /**
- * Backups module — current state.
+ * Backups module.
  *
- * The actual backup engine (pg_dump/mysqldump/mongodump, volume snapshotting,
- * scheduler, restore executor) is not yet implemented. Until it ships, this
- * service:
+ * The backup engine is implemented here: create() produces a tar.gz dump of
+ * the targeted server (database dumps via `docker exec`, application volume
+ * tars via `docker run busybox tar`, application metadata as JSON) in the
+ * runtime dir (.kryptalis/backups/<id>.tar.gz), then runs the integrity /
+ * encryption / upload flow. The dump runs asynchronously — create() returns
+ * the row in PENDING and the job flips it to IN_PROGRESS → COMPLETED/FAILED.
+ * restore() downloads/verifies/decrypts, extracts the archive and replays
+ * database dumps + volume tars against the live containers.
+ *
+ * This service also:
  *   1. Supports LOCAL plus S3-compatible remote targets (S3/R2/B2 — also
  *      covers MinIO via a custom endpoint). Remote targets require the
  *      s3_* SystemSettings; an incomplete config is a 400 at create time.
@@ -66,16 +106,13 @@ import { pipeline } from 'stream/promises';
  *     encrypted at rest). Env fallbacks S3_* for headless installs.
  *   - After the local dump → (optional) encryption → sha256 flow, dumps for
  *     S3/R2/B2 targets are uploaded under `kryptalis-backups/<backupId>/
- *     <filename>` and the local file is deleted. The Backup model has no
- *     path column, so the object is re-resolved deterministically from the
- *     row id (ListObjectsV2 on the per-backup prefix) at restore/delete time.
+ *     <filename>` and the local file is deleted. The object key is also
+ *     re-resolvable deterministically from the row id (ListObjectsV2 on the
+ *     per-backup prefix) for rows predating the filename column.
  *   - Restore downloads the object to a local temp file, then runs the same
  *     sha256-verify / decrypt gate as local restores, and cleans up the temp.
  *   - Delete removes remote objects best-effort — a dead bucket never blocks
  *     deleting the row.
- *
- * When the engine is ready, swap the create body and call into a job runner;
- * the RBAC checks below stay valid.
  */
 @Injectable()
 export class BackupsService {
@@ -84,7 +121,10 @@ export class BackupsService {
   constructor(
     private prisma: PrismaService,
     private systemConfig: SystemConfigService,
-  ) {}
+    private encryption: EncryptionService,
+  ) {
+    if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+  }
 
   // ── access helpers ─────────────────────────────────────────────────
 
@@ -277,7 +317,7 @@ export class BackupsService {
 
   /**
    * Resolve the object key for a backup row by listing its deterministic
-   * prefix (the model has no path column — see header comment).
+   * prefix (works for rows predating the filename column too).
    */
   private async resolveRemoteKey(client: S3Client, bucket: string, backupId: string): Promise<string> {
     const res = await client.send(
@@ -347,6 +387,417 @@ export class BackupsService {
     }
   }
 
+  // ── docker plumbing ────────────────────────────────────────────────
+  //
+  // execFile / spawn with argv arrays (never a shell) — container names,
+  // usernames and database names come from the DB and must not be
+  // interpretable. Large dumps stream stdout straight to disk instead of
+  // buffering in memory.
+
+  private runCommandToFile(
+    cmd: string,
+    args: string[],
+    outPath: string,
+    timeoutMs: number,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const out = fs.createWriteStream(outPath);
+      const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+      let stderr = '';
+      child.stderr.on('data', (d: Buffer) => {
+        if (stderr.length < 8192) stderr += d.toString();
+      });
+      child.stdout.pipe(out);
+      child.once('error', (err) => {
+        clearTimeout(timer);
+        out.destroy();
+        reject(err);
+      });
+      child.once('close', (code) => {
+        clearTimeout(timer);
+        out.close(() => {
+          if (code === 0) resolve();
+          else reject(new Error(`${cmd} exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
+        });
+      });
+    });
+  }
+
+  private runCommandWithInputFile(
+    cmd: string,
+    args: string[],
+    inPath: string,
+    timeoutMs: number,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+      let stderr = '';
+      child.stderr.on('data', (d: Buffer) => {
+        if (stderr.length < 8192) stderr += d.toString();
+      });
+      const src = fs.createReadStream(inPath);
+      src.once('error', (err) => {
+        child.kill('SIGKILL');
+        clearTimeout(timer);
+        reject(err);
+      });
+      src.pipe(child.stdin);
+      // A container process that exits early (e.g. auth failure) closes its
+      // stdin — swallow the resulting EPIPE; the exit code carries the error.
+      child.stdin.once('error', () => undefined);
+      child.once('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+      child.once('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(`${cmd} exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
+      });
+    });
+  }
+
+  // ── backup job (dump engine) ───────────────────────────────────────
+
+  private dbContainerName(db: { name: string; host: string; autoImported: boolean }): string {
+    // Auto-imported rows store the real container_name in `host`; manually
+    // provisioned rows use the kryptalis-db-<name> scheme (databases.service).
+    return db.autoImported ? db.host : `kryptalis-db-${db.name}`;
+  }
+
+  private async dumpDatabases(
+    stagingDir: string,
+    serverId: string,
+    manifest: BackupManifest,
+  ): Promise<void> {
+    const dbs = await this.prisma.database.findMany({ where: { serverId } });
+    if (dbs.length === 0) return;
+    const dir = path.join(stagingDir, 'databases');
+    await fs.promises.mkdir(dir, { recursive: true });
+
+    for (const db of dbs) {
+      const container = this.dbContainerName(db);
+      const password = this.encryption.decrypt(db.password);
+      // Auto-imported rows don't track the logical database name (name is a
+      // display label) — dump the whole instance instead.
+      const dumpAll = db.autoImported;
+      let file: string;
+      switch (db.type) {
+        case 'POSTGRESQL': {
+          file = `${db.id}.sql`;
+          const args = dumpAll
+            ? ['exec', container, 'pg_dumpall', '-U', db.username, '--clean', '--if-exists']
+            : ['exec', container, 'pg_dump', '-U', db.username, '--clean', '--if-exists', '-d', db.name];
+          await this.runCommandToFile('docker', args, path.join(dir, file), 1_800_000);
+          break;
+        }
+        case 'MYSQL':
+        case 'MARIADB': {
+          file = `${db.id}.sql`;
+          const args = [
+            'exec', '-e', `MYSQL_PWD=${password}`, container,
+            'mysqldump', '-u', db.username,
+            ...(dumpAll ? ['--all-databases'] : ['--databases', db.name]),
+          ];
+          await this.runCommandToFile('docker', args, path.join(dir, file), 1_800_000);
+          break;
+        }
+        case 'MONGODB': {
+          file = `${db.id}.archive`;
+          const args = [
+            'exec', container,
+            'mongodump', '--archive', '--quiet',
+            '--username', db.username, '--password', password,
+            '--authenticationDatabase', 'admin',
+            ...(dumpAll ? [] : ['--db', db.name]),
+          ];
+          await this.runCommandToFile('docker', args, path.join(dir, file), 1_800_000);
+          break;
+        }
+        case 'REDIS':
+        case 'KEYDB': {
+          file = `${db.id}.rdb`;
+          const cliArgs = password ? ['-a', password] : [];
+          await execFileAsync(
+            'docker',
+            ['exec', container, 'redis-cli', ...cliArgs, 'SAVE'],
+            { timeout: 300_000 },
+          );
+          await this.runCommandToFile(
+            'docker',
+            ['exec', container, 'cat', '/data/dump.rdb'],
+            path.join(dir, file),
+            600_000,
+          );
+          break;
+        }
+        default:
+          // DRAGONFLY / CLICKHOUSE have no portable exec-based dump path yet;
+          // their data is still covered by includeVolumes.
+          this.logger.warn(
+            `Backup: skipping database "${db.name}" — no dump strategy for type ${db.type}.`,
+          );
+          continue;
+      }
+      manifest.databases.push({
+        id: db.id,
+        name: db.name,
+        type: db.type,
+        container,
+        file: `databases/${file}`,
+        dumpAll,
+      });
+    }
+  }
+
+  /**
+   * Volume names belonging to the server's application compose stacks.
+   * Compose names volumes `<project>_<volume>` where the project name is the
+   * compose dir basename (resolveAppDir handles per-instance vs legacy dirs).
+   */
+  private async listAppVolumes(serverId: string): Promise<string[]> {
+    const apps = await this.prisma.application.findMany({
+      where: { project: { serverId } },
+      select: { id: true, name: true },
+    });
+    if (apps.length === 0) return [];
+    const { stdout } = await execFileAsync(
+      'docker',
+      ['volume', 'ls', '--format', '{{.Name}}'],
+      { timeout: 15_000 },
+    );
+    const volumes = stdout.trim().split('\n').filter(Boolean);
+    const prefixes = apps.map(
+      (app) => `${path.basename(resolveAppDir(slugify(app.name), app.id))}_`,
+    );
+    return volumes.filter((v) => prefixes.some((p) => v.startsWith(p)));
+  }
+
+  private async dumpVolumes(
+    stagingDir: string,
+    serverId: string,
+    manifest: BackupManifest,
+  ): Promise<void> {
+    const volumes = await this.listAppVolumes(serverId);
+    if (volumes.length === 0) return;
+    const dir = path.join(stagingDir, 'volumes');
+    await fs.promises.mkdir(dir, { recursive: true });
+    for (const vol of volumes) {
+      await this.runCommandToFile(
+        'docker',
+        ['run', '--rm', '-v', `${vol}:/data:ro`, 'busybox', 'tar', '-czf', '-', '-C', '/data', '.'],
+        path.join(dir, `${vol}.tar.gz`),
+        1_800_000,
+      );
+      manifest.volumes.push(vol);
+    }
+  }
+
+  private async exportApplications(stagingDir: string, serverId: string): Promise<void> {
+    const apps = await this.prisma.application.findMany({
+      where: { project: { serverId } },
+      include: {
+        domains: true,
+        project: { select: { id: true, name: true } },
+      },
+    });
+    // envVars are exported in their encrypted-at-rest form — the archive must
+    // never hold plaintext app secrets (it may itself be unencrypted).
+    const json = JSON.stringify(
+      apps,
+      (_k, v) => (typeof v === 'bigint' ? v.toString() : v),
+      2,
+    );
+    await fs.promises.writeFile(path.join(stagingDir, 'applications.json'), json);
+  }
+
+  private async runBackupJob(backupId: string): Promise<void> {
+    const backup = await this.prisma.backup.findUnique({
+      where: { id: backupId },
+      include: { server: { select: { host: true } } },
+    });
+    if (!backup) return;
+    await this.prisma.backup.update({
+      where: { id: backupId },
+      data: { status: 'IN_PROGRESS' },
+    });
+
+    const filename = `${backupId}.tar.gz`;
+    const archivePath = path.join(BACKUPS_DIR, filename);
+    const stagingDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'kryptalis-backup-'));
+    try {
+      if (!isLocalHost(backup.server.host)) {
+        throw new Error(
+          'Backups for remote (agent-managed) servers are not supported yet — only the local server can be backed up.',
+        );
+      }
+
+      const manifest: BackupManifest = {
+        version: 1,
+        backupId,
+        serverId: backup.serverId,
+        createdAt: new Date().toISOString(),
+        includes: {
+          applications: backup.includeApplications,
+          databases: backup.includeDatabases,
+          volumes: backup.includeVolumes,
+        },
+        databases: [],
+        volumes: [],
+        applicationsExported: false,
+      };
+
+      if (backup.includeDatabases) {
+        await this.dumpDatabases(stagingDir, backup.serverId, manifest);
+      }
+      if (backup.includeVolumes) {
+        await this.dumpVolumes(stagingDir, backup.serverId, manifest);
+      }
+      if (backup.includeApplications) {
+        await this.exportApplications(stagingDir, backup.serverId);
+        manifest.applicationsExported = true;
+      }
+      await fs.promises.writeFile(
+        path.join(stagingDir, 'manifest.json'),
+        JSON.stringify(manifest, null, 2),
+      );
+
+      await execFileAsync('tar', ['-czf', archivePath, '-C', stagingDir, '.'], {
+        timeout: 1_800_000,
+        maxBuffer: 8 * 1024 * 1024,
+      });
+
+      const masterKey = this.backupEncryptionKey();
+      let encrypted = false;
+      if (masterKey) {
+        await this.encryptFileInPlace(archivePath, masterKey);
+        encrypted = true;
+      }
+      // sha256 + sizeBytes are computed AFTER any encryption so restore can
+      // verify the bytes that actually live on disk — and, for remote
+      // targets, the bytes that get uploaded.
+      const sha256 = await this.sha256File(archivePath);
+      const stat = await fs.promises.stat(archivePath);
+
+      if (isRemoteTarget(backup.target)) {
+        // Upload, then drop the local copy — the bucket is the only home
+        // of a remote-target dump.
+        await this.uploadBackupToS3(backupId, archivePath);
+        await fs.promises.unlink(archivePath).catch(() => undefined);
+      }
+
+      await this.prisma.backup.update({
+        where: { id: backupId },
+        data: {
+          sha256,
+          sizeBytes: BigInt(stat.size),
+          size: BigInt(stat.size),
+          encryptedAt: encrypted,
+          filename,
+          status: 'COMPLETED',
+          lastRunAt: new Date(),
+        },
+      });
+      this.logger.log(
+        `Backup ${backupId} completed (${stat.size} bytes, target=${backup.target}, encrypted=${encrypted})`,
+      );
+    } catch (err) {
+      await fs.promises.unlink(archivePath).catch(() => undefined);
+      await this.prisma.backup
+        .update({ where: { id: backupId }, data: { status: 'FAILED' } })
+        .catch(() => undefined);
+      this.logger.error(`Backup ${backupId} failed: ${(err as Error).message}`);
+    } finally {
+      await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  // ── restore engine ─────────────────────────────────────────────────
+
+  private async restoreDatabase(
+    extractDir: string,
+    entry: BackupManifest['databases'][number],
+  ): Promise<void> {
+    const db = await this.prisma.database.findUnique({ where: { id: entry.id } });
+    if (!db) {
+      throw new Error(
+        `database "${entry.name}" no longer exists in the registry — recreate it first, then restore.`,
+      );
+    }
+    const container = this.dbContainerName(db);
+    const password = this.encryption.decrypt(db.password);
+    const file = path.join(extractDir, 'databases', path.basename(entry.file));
+    if (!fs.existsSync(file)) {
+      throw new Error(`dump file for database "${entry.name}" is missing from the archive.`);
+    }
+
+    switch (db.type) {
+      case 'POSTGRESQL': {
+        const targetDb = entry.dumpAll ? 'postgres' : db.name;
+        await this.runCommandWithInputFile(
+          'docker',
+          ['exec', '-i', container, 'psql', '-U', db.username, '-d', targetDb],
+          file,
+          1_800_000,
+        );
+        break;
+      }
+      case 'MYSQL':
+      case 'MARIADB': {
+        await this.runCommandWithInputFile(
+          'docker',
+          ['exec', '-i', '-e', `MYSQL_PWD=${password}`, container, 'mysql', '-u', db.username],
+          file,
+          1_800_000,
+        );
+        break;
+      }
+      case 'MONGODB': {
+        await this.runCommandWithInputFile(
+          'docker',
+          [
+            'exec', '-i', container,
+            'mongorestore', '--archive', '--drop',
+            '--username', db.username, '--password', password,
+            '--authenticationDatabase', 'admin',
+          ],
+          file,
+          1_800_000,
+        );
+        break;
+      }
+      case 'REDIS':
+      case 'KEYDB': {
+        await execFileAsync(
+          'docker',
+          ['cp', file, `${container}:/data/dump.rdb`],
+          { timeout: 300_000 },
+        );
+        await execFileAsync('docker', ['restart', container], { timeout: 120_000 });
+        break;
+      }
+      default:
+        throw new Error(`no restore strategy for database type ${db.type}.`);
+    }
+  }
+
+  private async restoreVolume(extractDir: string, volumeName: string): Promise<void> {
+    const file = path.join(extractDir, 'volumes', `${path.basename(volumeName)}.tar.gz`);
+    if (!fs.existsSync(file)) {
+      throw new Error(`tar for volume "${volumeName}" is missing from the archive.`);
+    }
+    // Idempotent — succeeds when the volume already exists.
+    await execFileAsync('docker', ['volume', 'create', volumeName], { timeout: 15_000 });
+    await this.runCommandWithInputFile(
+      'docker',
+      ['run', '--rm', '-i', '-v', `${volumeName}:/data`, 'busybox', 'tar', '-xzf', '-', '-C', '/data'],
+      file,
+      1_800_000,
+    );
+  }
+
   // ── operations ─────────────────────────────────────────────────────
 
   /**
@@ -372,7 +823,6 @@ export class BackupsService {
       this.s3ClientOrThrow().client.destroy();
     }
 
-    // Create the row first so we have an id to anchor the on-disk filename.
     const row = await this.prisma.backup.create({
       data: {
         name: dto.name,
@@ -386,58 +836,14 @@ export class BackupsService {
       },
     });
 
-    // The dump engine itself isn't built yet. When it lands, replace the
-    // block below with the real writer — but keep the post-write integrity /
-    // encryption / sizeBytes recording, because that's what every restore
-    // relies on.
-    const dumpPath = (dto as any).filePath as string | undefined;
-    if (dumpPath && fs.existsSync(dumpPath)) {
-      try {
-        const masterKey = this.backupEncryptionKey();
-        let encrypted = false;
-        if (masterKey) {
-          await this.encryptFileInPlace(dumpPath, masterKey);
-          encrypted = true;
-        }
-        // sha256 + sizeBytes are computed AFTER any encryption so restore can
-        // verify the bytes that actually live on disk — and, for remote
-        // targets, the bytes that get uploaded.
-        const sha256 = await this.sha256File(dumpPath);
-        const stat = await fs.promises.stat(dumpPath);
+    // Dumps can take minutes — run the job in the background and return the
+    // PENDING row immediately. The job flips status to IN_PROGRESS →
+    // COMPLETED/FAILED; the dashboard polls the row.
+    void this.runBackupJob(row.id).catch((err) => {
+      this.logger.error(`Backup job ${row.id} crashed: ${(err as Error).message}`);
+    });
 
-        if (isRemoteTarget(target)) {
-          // Upload, then drop the local copy — the bucket is the only home
-          // of a remote-target dump. Resolved again at restore time via the
-          // deterministic kryptalis-backups/<id>/ prefix.
-          await this.uploadBackupToS3(row.id, dumpPath);
-          await fs.promises.unlink(dumpPath).catch(() => undefined);
-        }
-
-        await this.prisma.backup.update({
-          where: { id: row.id },
-          data: {
-            sha256,
-            sizeBytes: BigInt(stat.size),
-            encryptedAt: encrypted,
-            status: 'COMPLETED',
-          },
-        });
-      } catch (err) {
-        // Network/storage failures mark the row FAILED and surface a clean
-        // 400 — never an unhandled crash.
-        await this.prisma.backup.update({
-          where: { id: row.id },
-          data: { status: 'FAILED' },
-        });
-        this.logger.error(`Backup ${row.id} failed: ${(err as Error).message}`);
-        if (err instanceof BadRequestException) throw err;
-        throw new BadRequestException(
-          `Backup failed (${target}): ${(err as Error).message}`,
-        );
-      }
-    }
-
-    return this.prisma.backup.findUnique({ where: { id: row.id } });
+    return row;
   }
 
   async findAll(userId: string, serverId?: string) {
@@ -468,53 +874,112 @@ export class BackupsService {
     // engine from touching live data — that's the whole point of recording
     // sha256 at write time. Remote-target dumps are first downloaded to a
     // local temp file so the exact same gate applies, then cleaned up.
-    let dumpPath = (backup as any).filePath as string | undefined;
+    let dumpPath: string;
     let tmpDownload: string | undefined;
+    let plainPath: string | undefined;
+    let extractDir: string | undefined;
     try {
       if (isRemoteTarget(backup.target)) {
         tmpDownload = await this.downloadBackupFromS3(backup.id);
         dumpPath = tmpDownload;
+      } else {
+        if (!backup.filename) {
+          throw new BadRequestException(
+            'This backup row has no archive on record (created before the dump engine existed) — it cannot be restored.',
+          );
+        }
+        dumpPath = path.join(BACKUPS_DIR, path.basename(backup.filename));
       }
-      if (dumpPath) {
-        if (!fs.existsSync(dumpPath)) {
-          throw new BadRequestException('Backup file is missing from disk — refusing to restore.');
-        }
-        if (backup.sha256) {
-          const actual = await this.sha256File(dumpPath);
-          if (actual !== backup.sha256) {
-            throw new BadRequestException(
-              'Backup file appears corrupted or tampered with — refusing to restore.',
-            );
-          }
-        }
-        if (backup.encryptedAt) {
-          const masterKey = this.backupEncryptionKey();
-          if (!masterKey) {
-            throw new BadRequestException(
-              'Backup is encrypted but BACKUP_ENCRYPTION_KEY is not configured — cannot decrypt.',
-            );
-          }
-          const plainPath = await this.decryptFileToTemp(dumpPath, masterKey);
-          // Engine not implemented yet — clean up the temp plaintext immediately
-          // so it doesn't linger on disk. When the engine ships, hand plainPath
-          // to it and unlink after the restore command exits.
-          await fs.promises.unlink(plainPath).catch(() => undefined);
+      if (!fs.existsSync(dumpPath)) {
+        throw new BadRequestException('Backup file is missing from disk — refusing to restore.');
+      }
+      if (backup.sha256) {
+        const actual = await this.sha256File(dumpPath);
+        if (actual !== backup.sha256) {
+          throw new BadRequestException(
+            'Backup file appears corrupted or tampered with — refusing to restore.',
+          );
         }
       }
+      let archivePath = dumpPath;
+      if (backup.encryptedAt) {
+        const masterKey = this.backupEncryptionKey();
+        if (!masterKey) {
+          throw new BadRequestException(
+            'Backup is encrypted but BACKUP_ENCRYPTION_KEY is not configured — cannot decrypt.',
+          );
+        }
+        plainPath = await this.decryptFileToTemp(dumpPath, masterKey);
+        archivePath = plainPath;
+      }
+
+      extractDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'kryptalis-restore-'));
+      await execFileAsync('tar', ['-xzf', archivePath, '-C', extractDir], {
+        timeout: 1_800_000,
+        maxBuffer: 8 * 1024 * 1024,
+      });
+
+      const manifestPath = path.join(extractDir, 'manifest.json');
+      if (!fs.existsSync(manifestPath)) {
+        throw new BadRequestException(
+          'Backup archive has no manifest.json — not a Kryptalis backup archive.',
+        );
+      }
+      let manifest: BackupManifest;
+      try {
+        manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+      } catch (err) {
+        throw new BadRequestException(
+          `Backup manifest is unreadable: ${(err as Error).message}`,
+        );
+      }
+
+      let databasesRestored = 0;
+      for (const entry of manifest.databases ?? []) {
+        try {
+          await this.restoreDatabase(extractDir, entry);
+          databasesRestored++;
+        } catch (err) {
+          throw new BadRequestException(
+            `Restore failed at database "${entry.name}": ${(err as Error).message}`,
+          );
+        }
+      }
+
+      let volumesRestored = 0;
+      for (const vol of manifest.volumes ?? []) {
+        try {
+          await this.restoreVolume(extractDir, vol);
+          volumesRestored++;
+        } catch (err) {
+          throw new BadRequestException(
+            `Restore failed at volume "${vol}" (after ${databasesRestored} database(s) restored): ${(err as Error).message}`,
+          );
+        }
+      }
+
+      this.logger.log(
+        `Backup ${id} restored: ${databasesRestored} database(s), ${volumesRestored} volume(s).`,
+      );
+      return {
+        message: 'Restore completed.',
+        backupId: id,
+        databasesRestored,
+        volumesRestored,
+      };
     } finally {
-      // Remote dumps were downloaded only for this restore — never leave the
-      // temp copy (possibly plaintext-adjacent) behind, success or failure.
+      if (extractDir) {
+        await fs.promises.rm(extractDir, { recursive: true, force: true }).catch(() => undefined);
+      }
+      // The decrypted plaintext and any downloaded temp copy must never
+      // outlive the restore — success or failure.
+      if (plainPath) {
+        await fs.promises.unlink(plainPath).catch(() => undefined);
+      }
       if (tmpDownload) {
         await fs.promises.unlink(tmpDownload).catch(() => undefined);
       }
     }
-
-    // Engine not implemented yet — leave the row alone so we don't clobber the
-    // status. When the engine ships, replace this with a real enqueue.
-    return {
-      message: 'Restore queued — engine implementation pending.',
-      backupId: id,
-    };
   }
 
   async remove(userId: string, id: string) {
@@ -522,6 +987,10 @@ export class BackupsService {
     if (isRemoteTarget(backup.target)) {
       // Best-effort — never blocks row deletion (see deleteRemoteObjects).
       await this.deleteRemoteObjects(id);
+    } else if (backup.filename) {
+      await fs.promises
+        .unlink(path.join(BACKUPS_DIR, path.basename(backup.filename)))
+        .catch(() => undefined);
     }
     await this.prisma.backup.delete({ where: { id } });
     return { message: 'Backup deleted' };

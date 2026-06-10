@@ -18,7 +18,8 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import type { ProjectResponse } from '@kryptalis/types';
-import { api } from '@/lib/api';
+import { api, ApiError } from '@/lib/api';
+import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import {
@@ -117,17 +118,27 @@ export default function ProjectDetailPage() {
     enabled: isMulti,
   });
 
-  const { data: project, isLoading } = useQuery<Project>({
+  const {
+    data: project,
+    isLoading,
+    isError: projectError,
+    error: projectErrorObj,
+    refetch: refetchProject,
+  } = useQuery<Project>({
     queryKey: ['project', id],
     queryFn: () => api.get(`/projects/${id}`),
     enabled: !!id,
+    retry: (failureCount, err) =>
+      !(err instanceof ApiError && err.status === 404) && failureCount < 2,
   });
   const myRole = project?.currentRole;
 
+  // Always fetched (it's a light list) so the members badge count is right
+  // even before the tab is opened.
   const { data: members = [] } = useQuery<Member[]>({
     queryKey: ['project-members', id],
     queryFn: () => api.get(`/projects/${id}/members`),
-    enabled: !!id && activeTab === 'members',
+    enabled: !!id,
   });
 
   const TABS: { id: Tab; label: string }[] = [
@@ -138,19 +149,50 @@ export default function ProjectDetailPage() {
     { id: 'settings', label: t('projects.tab.settings') },
   ];
 
-  const { data: mesh } = useQuery<ServiceMesh>({
+  const {
+    data: mesh,
+    isLoading: meshLoading,
+    isError: meshError,
+    refetch: refetchMesh,
+  } = useQuery<ServiceMesh>({
     queryKey: ['project-mesh', id],
     queryFn: () => api.get(`/projects/${id}/mesh`),
     enabled: !!id && activeTab === 'mesh',
   });
 
+  // navigator.clipboard rejects on non-secure (plain HTTP) origins — fall
+  // back to the hidden-textarea trick so copy still works on LAN installs.
+  async function copyText(text: string): Promise<boolean> {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch {
+        return false;
+      }
+    }
+  }
+
   const [copiedMesh, setCopiedMesh] = useState('');
-  function copyMesh(text: string, key: string) {
-    navigator.clipboard.writeText(text).then(() => {
+  async function copyMesh(text: string, key: string) {
+    const ok = await copyText(text);
+    if (ok) {
       setCopiedMesh(key);
       toast.success(t('toast.copied'));
       setTimeout(() => setCopiedMesh(''), 1200);
-    });
+    } else {
+      toast.error(t('toast.failedToCopy'));
+    }
   }
 
   const deleteMutation = useMutation({
@@ -201,6 +243,8 @@ export default function ProjectDetailPage() {
     onSuccess: () => {
       toast.success(t('toast.roleUpdated'));
       queryClient.invalidateQueries({ queryKey: ['project-members', id] });
+      queryClient.invalidateQueries({ queryKey: ['project', id] });
+      setRoleChangeTarget(null);
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -229,12 +273,43 @@ export default function ProjectDetailPage() {
   // Confirmation dialogs (replace the old native confirm() calls).
   const [transferTarget, setTransferTarget] = useState<Member | null>(null);
   const [removeTarget, setRemoveTarget] = useState<Member | null>(null);
+  // Changing YOUR OWN role is confirmed first — an OWNER demoting themselves
+  // would otherwise lose control of the project with a single mis-click.
+  const [roleChangeTarget, setRoleChangeTarget] = useState<{ member: Member; role: Role } | null>(null);
+  const currentUserId = useAuthStore((s) => s.user?.id);
+
+  function requestRoleChange(member: Member, role: Role) {
+    if (role === member.role) return;
+    if (member.user.id === currentUserId) {
+      setRoleChangeTarget({ member, role });
+    } else {
+      changeRoleMutation.mutate({ memberId: member.id, role });
+    }
+  }
 
   if (isLoading) {
     return (
       <div className="space-y-6">
         <div className="h-8 w-48 animate-pulse rounded bg-muted" />
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">{[1, 2, 3, 4].map(i => <div key={i} className="h-20 animate-pulse rounded-lg bg-muted" />)}</div>
+      </div>
+    );
+  }
+
+  if (projectError && !(projectErrorObj instanceof ApiError && projectErrorObj.status === 404)) {
+    return (
+      <div className="space-y-6">
+        <Button variant="ghost" onClick={() => router.push('/dashboard/projects')}><ArrowLeft size={16} /> {t('common.back')}</Button>
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-12 gap-3">
+            <AlertTriangle size={32} className="text-destructive" />
+            <p className="font-medium">{t('projects.loadError')}</p>
+            <p className="text-sm text-muted-foreground">
+              {projectErrorObj instanceof Error ? projectErrorObj.message : t('projects.loadErrorDesc')}
+            </p>
+            <Button variant="outline" onClick={() => refetchProject()}>{t('common.retry')}</Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }
@@ -439,7 +514,7 @@ export default function ProjectDetailPage() {
                           <div className="grid grid-cols-2 gap-3 text-sm">
                             <div className="rounded-lg border border-border p-2">
                               <p className="text-xs text-muted-foreground">{t('projects.port')}</p>
-                              <p className="font-mono font-bold">{app.port || 'N/A'}</p>
+                              <p className="font-mono font-bold">{app.port || t('common.na')}</p>
                             </div>
                             <div className="rounded-lg border border-border p-2">
                               <p className="text-xs text-muted-foreground">{t('common.status')}</p>
@@ -481,6 +556,18 @@ export default function ProjectDetailPage() {
               <CardDescription>{t('projects.mesh.desc')}</CardDescription>
             </CardHeader>
             <CardContent>
+              {meshLoading && (
+                <div className="flex items-center justify-center py-10 text-muted-foreground">
+                  <Loader2 size={20} className="animate-spin" />
+                </div>
+              )}
+              {meshError && (
+                <div className="flex flex-col items-center justify-center py-10 gap-3">
+                  <AlertTriangle size={24} className="text-destructive" />
+                  <p className="text-sm text-muted-foreground">{t('projects.mesh.loadError')}</p>
+                  <Button size="sm" variant="outline" onClick={() => refetchMesh()}>{t('common.retry')}</Button>
+                </div>
+              )}
               {mesh && (
                 <div className="space-y-4">
                   <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2 text-xs">
@@ -633,9 +720,8 @@ export default function ProjectDetailPage() {
                         <>
                           <Select
                             value={m.role}
-                            onChange={(e) =>
-                              changeRoleMutation.mutate({ memberId: m.id, role: e.target.value as Role })
-                            }
+                            disabled={changeRoleMutation.isPending}
+                            onChange={(e) => requestRoleChange(m, e.target.value as Role)}
                             className="w-36 h-8 text-xs"
                           >
                             {(['VIEWER', 'DEVELOPER', 'ADMIN', ...(myRole === 'OWNER' ? ['OWNER'] : [])] as Role[]).map(r => (
@@ -879,6 +965,37 @@ export default function ProjectDetailPage() {
           >
             {removeMemberMutation.isPending && <Loader2 size={12} className="animate-spin" />}
             {t('common.remove')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* Change Own Role Dialog — confirm before self-demotion */}
+      <Dialog open={!!roleChangeTarget} onClose={() => setRoleChangeTarget(null)}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <AlertTriangle size={16} className="text-orange-500" /> {t('members.changeOwnRoleTitle')}
+          </DialogTitle>
+          <DialogDescription>
+            {t('members.changeOwnRoleDesc', { role: roleChangeTarget?.role ?? '' })}
+            {roleChangeTarget?.member.role === 'OWNER' && (
+              <span className="block mt-2 font-semibold text-orange-600">
+                {t('members.changeOwnRoleOwnerWarn')}
+              </span>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setRoleChangeTarget(null)}>{t('common.cancel')}</Button>
+          <Button
+            variant="destructive"
+            disabled={changeRoleMutation.isPending}
+            onClick={() =>
+              roleChangeTarget &&
+              changeRoleMutation.mutate({ memberId: roleChangeTarget.member.id, role: roleChangeTarget.role })
+            }
+          >
+            {changeRoleMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+            {t('members.changeOwnRoleBtn')}
           </Button>
         </DialogFooter>
       </Dialog>

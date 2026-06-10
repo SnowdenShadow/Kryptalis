@@ -17,7 +17,7 @@ You do **not** need Docker, Node, Postgres, Redis, or Caddy installed beforehand
 Run as root on the VPS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/main/install.sh | sudo sh
 ```
 
 The script:
@@ -27,8 +27,8 @@ The script:
 3. Detects the public IP via `api.ipify.org` (override with `PUBLIC_API_URL`).
 4. Generates `/opt/kryptalis/.env` with cryptographically random values for `POSTGRES_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ENCRYPTION_KEY` (mode `0600`).
 5. Seeds bind-mount targets (`docker-compose.override.yml`, `.kryptalis/reverse-proxy/Caddyfile`) so Docker doesn't materialise them as empty directories.
-6. Runs `docker compose up -d --build`, waits up to 180 s for `/api/health` to come up.
-7. Installs `kryptalis-update.timer` (systemd) for auto-updates every 5 min (`KRYPTALIS_UPDATE_INTERVAL` to override) — see [Updating](#updating-kryptalis).
+6. Runs `docker compose up -d --build`, waits up to 180 s for `/api/settings/public` to answer.
+7. Removes the legacy `kryptalis-update.timer` if a previous install created one — auto-update now runs **inside the API** (see [Updating](#updating-kryptalis)).
 
 The installer asks for **nothing interactively**. Everything is taken from env vars or sensible defaults. Useful overrides:
 
@@ -38,8 +38,7 @@ The installer asks for **nothing interactively**. Everything is taken from env v
 | `KRYPTALIS_REPO` | `https://github.com/SnowdenShadow/Kryptalis.git` | Source repo. |
 | `KRYPTALIS_BRANCH` | `main` | Branch to track. |
 | `PUBLIC_API_URL` | autodetected | Forces the public API URL baked into the dashboard build. |
-| `KRYPTALIS_RESET=1` | off | **Destructive.** Wipes `.env`, Postgres + Redis volumes, reinstalls fresh. |
-| `KRYPTALIS_NO_AUTOUPDATE=1` | off | Skip the systemd auto-update timer. |
+| `KRYPTALIS_RESET=1` | off | **Destructive.** Wipes `.env` + all Docker volumes, reinstalls fresh. |
 
 Re-running the installer is safe — it preserves `.env`, the Postgres volume, and only rebuilds the dashboard when `PUBLIC_API_URL` changes (Next inlines `NEXT_PUBLIC_*` at build time, so a stale image would call the wrong origin and trigger CORS errors).
 
@@ -78,10 +77,8 @@ Custom-port HTTPS (e.g. `https://app.example.com:5000`) is handled by an auto-ma
 
 Two ways:
 
-- **Automatic** (default). The installer installs `kryptalis-update.timer` which fires every 5 min (override with `KRYPTALIS_UPDATE_INTERVAL` at install time). `update.sh` calls the GitHub API with an `If-None-Match` ETag — when the upstream SHA is unchanged the response is `304 Not Modified` and costs nothing against the 60 req/h anonymous quota. When a new commit is detected: `git fetch && git reset --hard origin/<branch> && docker compose pull && docker compose up -d --build`. Status is written to `.kryptalis/update-status.json` so the dashboard can show progress.
-- **Manual**. Hit **/admin/updates** in the dashboard and click "Check now" or "Update now". Or on the VPS: `sudo /opt/kryptalis/update.sh` (apply), `--check` (don't apply), `--force` (rebuild even if no new commit).
-
-To pause auto-updates without stopping the timer, toggle off in the dashboard — `update.sh` honours the `auto-update.pref` file and no-ops politely.
+- **Automatic** (default). The **API itself** polls the GitHub API every 60 s for the latest commit on the tracked branch (`KRYPTALIS_BRANCH`, default `main`). When a new commit is detected it spawns `update.sh` in a one-off `docker:cli` container — `git fetch && git reset --hard origin/<branch> && docker compose pull && docker compose up -d --build` — guarded by a marker-file mutex so two runs can never overlap. Progress and the `update.log` tail are exposed at **/admin/updates** in the dashboard (`GET /api/system/updates`, `GET /api/system/updates/log`).
+- **Manual**. Hit **/admin/updates** in the dashboard and click "Check now" or "Update now". Or on the VPS: `sudo KRYPTALIS_DIR=/opt/kryptalis /opt/kryptalis/update.sh` (apply), `--check` (report only, exit 0 if up to date / 1 if behind), `--force` (same as apply).
 
 ## Troubleshooting
 
@@ -101,8 +98,7 @@ Logs live in two places:
 
   ```
   .kryptalis/
-    update.log              # last 500 lines of update.sh runs
-    update-status.json      # current update state (read by dashboard)
+    update.log              # log of the most recent update.sh run (reset each run)
     apps/<slug-shortid>/    # generated docker-compose stacks per app
     databases/<slug>/       # database stacks (Postgres, MySQL, …)
     mail/                   # mail server configs (docker-mailserver: Postfix+Dovecot+rspamd)

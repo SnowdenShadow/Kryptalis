@@ -1,6 +1,7 @@
 'use client';
 
-import { useQuery } from '@tanstack/react-query';
+import { useEffect } from 'react';
+import { useQuery, useMutation } from '@tanstack/react-query';
 import {
   Rocket,
   Globe,
@@ -28,6 +29,7 @@ import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
+import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import Link from 'next/link';
 
@@ -71,33 +73,40 @@ const chartTooltipStyle = {
 
 export default function DashboardPage() {
   const { t } = useTranslation();
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = user?.role === 'ADMIN' || user?.role === 'SUPERADMIN';
 
-  // --- server info (id, status, etc.) ---
+  // --- server info (id, status, etc.) — admin-only endpoint ---
   const { data: server } = useQuery<any>({
     queryKey: ['server-local'],
     queryFn: () => api.get('/servers/local'),
-  });
-
-  // --- trigger a background refresh of system info ---
-  useQuery({
-    queryKey: ['server-setup'],
-    queryFn: () => api.post('/servers/local/setup'),
-    staleTime: 30000,
+    enabled: isAdmin,
     retry: false,
   });
+
+  // --- trigger a background refresh of system info (once, admin only) ---
+  const setupMutation = useMutation({
+    mutationFn: () => api.post('/servers/local/setup'),
+  });
+  const triggerSetup = setupMutation.mutate;
+  useEffect(() => {
+    if (isAdmin) triggerSetup();
+  }, [isAdmin, triggerSetup]);
 
   // --- live stats (cpu, mem, disk, docker, processes, uptime) ---
   const { data: stats } = useQuery<any>({
     queryKey: ['server-local-stats'],
     queryFn: () => api.get('/servers/local/stats'),
     refetchInterval: 10000,
+    enabled: isAdmin,
+    retry: false,
   });
 
   // --- historical metrics for charts ---
   const { data: metrics = [] } = useQuery<any[]>({
     queryKey: ['overview-metrics', server?.id],
     queryFn: () => api.get(`/monitoring/servers/${server!.id}/metrics?period=24h`),
-    enabled: !!server?.id,
+    enabled: isAdmin && !!server?.id,
     refetchInterval: 15000,
   });
 
@@ -132,6 +141,7 @@ export default function DashboardPage() {
   const dockerContainers: any[] = stats?.dockerContainers ?? [];
   const hostname = stats?.hostname ?? server?.name ?? 'Server';
   const uptimeStr = stats?.uptime?.formatted ?? '--';
+  const serverStatus: string | undefined = server?.status;
 
   // chart data
   const cpuHistory = metrics.map((m: any, i: number) => ({ i, v: m.cpuPercent ?? 0 }));
@@ -153,21 +163,33 @@ export default function DashboardPage() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-          <span className="text-sm text-muted-foreground font-mono">{hostname}</span>
-          <Badge variant="success" className="text-[11px] px-2 py-0.5 gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse inline-block" />
-            ONLINE
-          </Badge>
+          {isAdmin && (
+            <>
+              <span className="text-sm text-muted-foreground font-mono">{hostname}</span>
+              {serverStatus && (
+                <Badge variant={statusVariant[serverStatus] || 'secondary'} className="text-[11px] px-2 py-0.5 gap-1.5">
+                  <span className={`h-1.5 w-1.5 rounded-full inline-block ${
+                    serverStatus === 'ONLINE' ? 'bg-green-400 animate-pulse' :
+                    serverStatus === 'OFFLINE' ? 'bg-red-400' : 'bg-zinc-400'
+                  }`} />
+                  {serverStatus}
+                </Badge>
+              )}
+            </>
+          )}
         </div>
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Clock size={14} />
-          <span className="font-mono">{uptimeStr}</span>
-        </div>
+        {isAdmin && (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Clock size={14} />
+            <span className="font-mono">{uptimeStr}</span>
+          </div>
+        )}
       </div>
 
       {/* ================================================================= */}
-      {/* SERVER HEALTH STRIP (4 compact cards)                             */}
+      {/* SERVER HEALTH STRIP (4 compact cards) — admin only                */}
       {/* ================================================================= */}
+      {isAdmin && (
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
 
         {/* CPU */}
@@ -236,10 +258,12 @@ export default function DashboardPage() {
           </p>
         </Card>
       </div>
+      )}
 
       {/* ================================================================= */}
-      {/* MINI CHARTS ROW                                                   */}
+      {/* MINI CHARTS ROW — admin only                                      */}
       {/* ================================================================= */}
+      {isAdmin && (
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         {/* CPU History */}
         <Card className="p-4">
@@ -305,6 +329,7 @@ export default function DashboardPage() {
           </div>
         </Card>
       </div>
+      )}
 
       {/* ================================================================= */}
       {/* TWO COLUMNS: Applications | Activity & Docker                     */}
@@ -403,7 +428,8 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
 
-          {/* Docker Containers */}
+          {/* Docker Containers — admin only (data comes from /servers/local/stats) */}
+          {isAdmin && (
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Docker Containers</CardTitle>
@@ -430,6 +456,7 @@ export default function DashboardPage() {
               )}
             </CardContent>
           </Card>
+          )}
         </div>
       </div>
 

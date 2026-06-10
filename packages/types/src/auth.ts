@@ -4,6 +4,8 @@ export interface LoginRequest {
   email: string;
   password: string;
   totpCode?: string;
+  /** Single-use backup code (used if TOTP device is lost). */
+  backupCode?: string;
 }
 
 export interface RegisterRequest {

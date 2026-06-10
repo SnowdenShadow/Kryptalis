@@ -75,6 +75,16 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+      # Optional token TTLs — API defaults apply when empty (15m / 7d).
+      JWT_EXPIRATION: ${JWT_EXPIRATION:-}
+      JWT_REFRESH_EXPIRATION: ${JWT_REFRESH_EXPIRATION:-}
+      # Optional comma-separated CORS allowlist; empty → derived from
+      # PUBLIC_API_URL + local dev origins.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Optional — expose Swagger (/api/docs) in production. Off by default.
+      SWAGGER_PUBLIC: ${SWAGGER_PUBLIC:-}
+      # Optional — GitHub OAuth app client id (git provider connect flow).
+      GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
       # Optional — enables AES-256-GCM at-rest encryption of backup dumps.
       # Kept separate from ENCRYPTION_KEY so backup access is siloed from app
       # secrets. Unset → backups remain plaintext on disk (sha256 still
@@ -292,8 +302,9 @@ services:
     # how a fresh install lets you reach the UI before any domain is wired.
     # Once you have a public domain + Caddy in front, set DASHBOARD_BIND=127.0.0.1
     # in .env so direct :3000 traffic no longer bypasses TLS.
+    # DASHBOARD_PORT changes the published host port (container stays 3000).
     ports:
-      - "${DASHBOARD_BIND:-0.0.0.0}:3000:3000"
+      - "${DASHBOARD_BIND:-0.0.0.0}:${DASHBOARD_PORT:-3000}:3000"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:3000/"]
       interval: 15s

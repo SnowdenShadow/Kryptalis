@@ -7,7 +7,7 @@
 };
 
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
@@ -16,6 +16,12 @@ import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+
+  // The API sits behind the Docker reverse proxy (Caddy) — trust exactly one
+  // hop so req.ip resolves to the real client IP from X-Forwarded-For. The
+  // ThrottlerGuard keys on req.ip; without this every request would share
+  // the proxy's IP and rate limits would apply globally instead of per client.
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
 
   // Express doesn't parse cookies by default. Needed since the refresh
   // token now travels in the httpOnly `kryptalis_rt` cookie (path-scoped
@@ -84,8 +90,7 @@ async function bootstrap() {
       }
     }
   } catch {}
-  // eslint-disable-next-line no-console
-  console.log('[cors] allowlist:', allowlist);
+  Logger.debug(`[cors] allowlist: ${allowlist.join(', ')}`, 'Bootstrap');
   app.enableCors({
     origin: (origin: string | undefined, cb: (err: Error | null, ok?: boolean) => void) => {
       // No origin → same-origin / curl / native — always allow.

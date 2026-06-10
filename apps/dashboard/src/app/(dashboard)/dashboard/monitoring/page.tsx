@@ -15,6 +15,7 @@ import {
   Container,
   Activity,
   Network,
+  ShieldAlert,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -45,6 +46,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { api } from '@/lib/api';
+import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
@@ -201,17 +203,24 @@ export default function MonitoringPage() {
     webhookUrl: '',
   });
   const queryClient = useQueryClient();
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = user?.role === 'ADMIN' || user?.role === 'SUPERADMIN';
+  const accessDenied = !!user && !isAdmin;
 
-  // --- Data fetching ---
+  // --- Data fetching (admin-only endpoints) ---
   const { data: stats } = useQuery<ServerStats>({
     queryKey: ['server-stats'],
     queryFn: () => api.get('/servers/local/stats'),
     refetchInterval: 10000,
+    enabled: isAdmin,
+    retry: false,
   });
 
   const { data: server } = useQuery<any>({
     queryKey: ['server-local'],
     queryFn: () => api.get('/servers/local'),
+    enabled: isAdmin,
+    retry: false,
   });
   const serverId = server?.id || '';
 
@@ -219,14 +228,14 @@ export default function MonitoringPage() {
     queryKey: ['metrics', serverId, period],
     queryFn: () =>
       api.get(`/monitoring/servers/${serverId}/metrics?period=${period}`),
-    enabled: !!serverId,
+    enabled: isAdmin && !!serverId,
     refetchInterval: 10000,
   });
 
   const { data: alertRules = [] } = useQuery<AlertRule[]>({
     queryKey: ['monitoring', 'alert-rules', serverId],
     queryFn: () => api.get(`/monitoring/alert-rules?serverId=${serverId}`),
-    enabled: !!serverId,
+    enabled: isAdmin && !!serverId,
   });
 
   // --- Mutations ---
@@ -300,6 +309,20 @@ export default function MonitoringPage() {
         ? { webhookUrl: alertForm.webhookUrl }
         : {}),
     });
+  }
+
+  if (accessDenied) {
+    return (
+      <div className="space-y-4">
+        <h1 className="text-2xl font-bold">{t('monitoring.title')}</h1>
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-16">
+            <ShieldAlert size={48} className="mb-4 text-muted-foreground" />
+            <p className="text-sm text-muted-foreground">{t('admin.restricted')}</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
   }
 
   return (

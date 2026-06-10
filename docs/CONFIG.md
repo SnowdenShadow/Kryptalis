@@ -40,6 +40,23 @@ Two more `.env` keys are optional but commonly set:
 | `BACKUP_ENCRYPTION_KEY` | unset | When set, backup dumps are AES-256-GCM encrypted on disk. Separate from `ENCRYPTION_KEY` so backup access can be siloed. Can also be set via `SystemSetting.backup_encryption_key`. |
 | `ACME_EMAIL` | derived from `PUBLIC_API_URL` | Let's Encrypt contact email for expiry notices. Bare-IP installs fall back to anonymous registration. |
 | `DASHBOARD_BIND` | `0.0.0.0` | Set to `127.0.0.1` once a public domain fronts the dashboard so direct `:3000` traffic stops bypassing TLS. |
+| `API_BIND` | `0.0.0.0` | Same idea for the API: set to `127.0.0.1` once Caddy fronts it so direct `:4000` traffic stops bypassing TLS. |
+| `DASHBOARD_PORT` | `3000` | Host port the dashboard container is published on (container side stays 3000). |
+| `SFTP_PORT` | `2222` | Host port the bundled SFTP container is published on (container side stays 22). |
+| `PUBLIC_DASHBOARD_URL` | `http://localhost:3000` | Dashboard public origin, used for CTA links in emails. Also editable live as `public_dashboard_url` (see below). |
+| `JWT_EXPIRATION` | `15m` | Access-token TTL. |
+| `JWT_REFRESH_EXPIRATION` | `7d` | Refresh-token TTL. |
+| `CORS_ORIGINS` | derived | Comma-separated explicit browser-origin allowlist. Unset → derived from `PUBLIC_API_URL` + local dev origins. |
+| `SWAGGER_PUBLIC` | unset | Set truthy to expose Swagger (`/api/docs`) in production. |
+| `GITHUB_OAUTH_CLIENT_ID` | baked-in default | GitHub OAuth app client id for the "connect GitHub" flow; set to use your own OAuth app. |
+
+Advanced env-only knobs (rarely needed):
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `CADDY_DATA_VOLUME` | autodetected | Explicit name of the Caddy data volume (mail-server certificate lookups). |
+| `KRYPTALIS_PROTECTED_CONTAINERS` | built-in list | Extra comma-separated container names the API refuses to stop/remove. |
+| `KRYPTALIS_COMPOSE_OVERRIDE` | `/app/install-root/docker-compose.override.yml` | Path of the override file the reverse-proxy writes for extra published Caddy ports. |
 
 ## `SystemSetting` keys
 

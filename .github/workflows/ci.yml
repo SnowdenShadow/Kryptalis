@@ -47,7 +47,7 @@ jobs:
         run: pnpm --filter @kryptalis/dashboard lint
 
       - name: Test API
-        run: pnpm --filter @kryptalis/api exec vitest run --passWithNoTests
+        run: pnpm --filter @kryptalis/api exec vitest run
 
       # Full production builds — a compile-clean tree can still fail
       # `next build` (prerender errors) or `nest build`; with auto-update

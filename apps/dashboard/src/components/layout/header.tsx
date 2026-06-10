@@ -230,7 +230,7 @@ export function Header() {
           <span className="text-sm">{user?.name || 'User'}</span>
         </div>
 
-        <Button variant="ghost" size="icon" onClick={handleLogout} title={t('common.logout') || 'Log out'}>
+        <Button variant="ghost" size="icon" onClick={handleLogout} title={t('common.logout')}>
           <LogOut size={18} />
         </Button>
       </div>

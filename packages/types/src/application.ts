@@ -1,6 +1,7 @@
 import { ApplicationStatus, AppFramework, GitProvider } from './enums';
 import { DomainSummary } from './domain';
 
+/** Mirrors apps/api applications/dto/create-application.dto.ts. */
 export interface CreateApplicationRequest {
   name: string;
   projectId: string;
@@ -9,11 +10,32 @@ export interface CreateApplicationRequest {
   gitBranch?: string;
   gitProvider?: GitProvider;
   dockerImage?: string;
-  dockerComposeFile?: string;
   buildCommand?: string;
   startCommand?: string;
   port?: number;
   envVars?: Record<string, string>;
+  /** ID of a connected git provider (private repo via OAuth). */
+  gitProviderId?: string;
+  /** One-shot personal access token for a private git URL (not stored). */
+  gitToken?: string;
+  /** Override docker-compose.yml content for first deploy. */
+  composeOverride?: string;
+  /** Override Dockerfile content for first deploy. */
+  dockerfileOverride?: string;
+  /** Raw docker-compose.yml — deploys a compose stack without a git repo. */
+  composeContent?: string;
+  /** Raw Dockerfile — builds & deploys an image without a git repo. */
+  dockerfileContent?: string;
+  /** Build context files keyed by relative path (Dockerfile-only mode). */
+  contextFiles?: Record<string, string>;
+  /** Host port mapping override { "containerPort": hostPort }. */
+  portMapping?: Record<string, number>;
+  /** Existing domain to attach the app to once created. */
+  domainId?: string;
+  /** New domain to create + attach in one go (e.g. "app.acme.com"). */
+  domain?: string;
+  /** Host port to publish on for direct IP access (no-domain case). */
+  hostPort?: number;
 }
 
 /** One `<domain, port>` binding (apps co-hosted on a shared hostname). */

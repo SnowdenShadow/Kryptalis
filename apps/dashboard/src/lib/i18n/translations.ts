@@ -4,7 +4,7 @@ export const translations: Record<string, Record<string, string>> = {
     'nav.overview': 'Overview', 'nav.server': 'Server', 'nav.projects': 'Projects', 'nav.applications': 'Applications', 'nav.domains': 'Domains', 'nav.docker': 'Docker', 'nav.databases': 'Databases', 'nav.monitoring': 'Monitoring', 'nav.backups': 'Backups', 'nav.marketplace': 'Marketplace', 'nav.emails': 'Emails', 'nav.files': 'Files', 'nav.sftp': 'SFTP', 'nav.settings': 'Settings', 'nav.admin': 'Admin', 'nav.toggleTheme': 'Toggle theme',
 
     // ── common ─────────────────────────────────────────────────────
-    'common.loading': 'Loading...', 'common.save': 'Save', 'common.saving': 'Saving...', 'common.cancel': 'Cancel', 'common.delete': 'Delete', 'common.deleting': 'Deleting...', 'common.edit': 'Edit', 'common.create': 'Create', 'common.creating': 'Creating...', 'common.search': 'Search...', 'common.noResults': 'No results found', 'common.confirm': 'Confirm', 'common.back': 'Back', 'common.next': 'Next', 'common.close': 'Close', 'common.install': 'Install', 'common.actions': 'Actions', 'common.name': 'Name', 'common.email': 'Email', 'common.status': 'Status', 'common.role': 'Role', 'common.created': 'Created', 'common.description': 'Description', 'common.comingSoon': 'Coming Soon', 'common.online': 'Online', 'common.offline': 'Offline', 'common.copy': 'Copy', 'common.copied': 'Copied!', 'common.reset': 'Reset', 'common.never': 'never', 'common.enabled': 'Enabled', 'common.disabled': 'Disabled', 'common.add': 'Add', 'common.remove': 'Remove', 'common.update': 'Update', 'common.refresh': 'Refresh', 'common.optional': 'optional', 'common.required': 'required',
+    'common.loading': 'Loading...', 'common.save': 'Save', 'common.saving': 'Saving...', 'common.cancel': 'Cancel', 'common.delete': 'Delete', 'common.deleting': 'Deleting...', 'common.edit': 'Edit', 'common.create': 'Create', 'common.creating': 'Creating...', 'common.search': 'Search...', 'common.noResults': 'No results found', 'common.confirm': 'Confirm', 'common.back': 'Back', 'common.next': 'Next', 'common.close': 'Close', 'common.install': 'Install', 'common.actions': 'Actions', 'common.name': 'Name', 'common.email': 'Email', 'common.status': 'Status', 'common.role': 'Role', 'common.created': 'Created', 'common.description': 'Description', 'common.comingSoon': 'Coming Soon', 'common.online': 'Online', 'common.offline': 'Offline', 'common.copy': 'Copy', 'common.copied': 'Copied!', 'common.reset': 'Reset', 'common.never': 'never', 'common.enabled': 'Enabled', 'common.disabled': 'Disabled', 'common.add': 'Add', 'common.remove': 'Remove', 'common.update': 'Update', 'common.refresh': 'Refresh', 'common.optional': 'optional', 'common.required': 'required', 'common.retry': 'Retry', 'common.logout': 'Log out', 'common.na': 'N/A',
 
     // ── auth ───────────────────────────────────────────────────────
     'auth.login': 'Sign in', 'auth.register': 'Create account', 'auth.email': 'Email', 'auth.password': 'Password', 'auth.name': 'Name', 'auth.loginTitle': 'Welcome back', 'auth.loginDesc': 'Sign in to your Kryptalis account', 'auth.registerTitle': 'Create account', 'auth.registerDesc': 'Get started with Kryptalis', 'auth.noAccount': "Don't have an account?", 'auth.hasAccount': 'Already have an account?', 'auth.signingIn': 'Signing in...', 'auth.creatingAccount': 'Creating account...', 'auth.signUp': 'Sign up', 'auth.signIn': 'Sign in', 'auth.regDisabled': 'Registration disabled', 'auth.regDisabledDesc': 'This platform is currently invitation-only. Ask an administrator for an account.', 'auth.confirmPassword': 'Confirm password', 'auth.passwordsDontMatch': "Passwords don't match", 'auth.passwordStrength.weak': 'Weak', 'auth.passwordStrength.fair': 'Fair', 'auth.passwordStrength.good': 'Good', 'auth.passwordStrength.strong': 'Strong',
@@ -503,6 +503,7 @@ export const translations: Record<string, Record<string, string>> = {
     'settings.notifEv.sslExpire': 'SSL certificate expiring',
     'settings.notifEv.backupOk': 'Backup completed',
     'settings.notifEv.backupFail': 'Backup failed',
+    'settings.notifToastSaved': 'Notification preferences saved',
     'settings.sessions': 'Active sessions',
     'settings.sessionsDesc': 'Every device currently signed into your account. Revoke any you don’t recognize.',
     'settings.sessionsLogoutAll': 'Log out everywhere else',
@@ -962,6 +963,8 @@ export const translations: Record<string, Record<string, string>> = {
     'projects.timeHour': '{n}h ago',
     'projects.timeDay': '{n}d ago',
     'projects.notFound': 'Project not found.',
+    'projects.loadError': 'Failed to load this project.',
+    'projects.loadErrorDesc': 'Something went wrong while fetching the project.',
     'projects.serverLabel': 'Server',
     'projects.unknown': 'Unknown',
     'projects.noDescription': 'No description',
@@ -986,6 +989,7 @@ export const translations: Record<string, Record<string, string>> = {
     'projects.mesh.scopeDesc': 'These hostnames work {bold}, on the same Docker host. To reach a service in a different project (or on a different server), use its public HTTPS URL via its attached domain instead.',
     'projects.mesh.scopeBold': 'only between services inside this project',
     'projects.mesh.empty': 'No apps or databases yet. Add some to see the mesh.',
+    'projects.mesh.loadError': 'Failed to load the service mesh.',
     'projects.mesh.apps': 'Applications ({n})',
     'projects.mesh.databases': 'Databases ({n})',
     'projects.mesh.envSuggestions': 'Suggested env vars',
@@ -997,6 +1001,10 @@ export const translations: Record<string, Record<string, string>> = {
     'members.transferDesc': 'Transfer project ownership to {email}? You will be downgraded to ADMIN.',
     'members.transferBtn': 'Transfer',
     'members.removeTitle': 'Remove member',
+    'members.changeOwnRoleTitle': 'Change your own role',
+    'members.changeOwnRoleDesc': 'You are about to change your own role to {role}. You may lose access to features your current role grants.',
+    'members.changeOwnRoleOwnerWarn': 'You are the OWNER — demoting yourself means you will no longer control this project.',
+    'members.changeOwnRoleBtn': 'Change my role',
 
     // ── servers page ───────────────────────────────────────────────
     'server.timeJust': 'just now',
@@ -1076,7 +1084,7 @@ export const translations: Record<string, Record<string, string>> = {
     'nav.overview': "Vue d'ensemble", 'nav.server': 'Serveur', 'nav.projects': 'Projets', 'nav.applications': 'Applications', 'nav.domains': 'Domaines', 'nav.docker': 'Docker', 'nav.databases': 'Bases de données', 'nav.monitoring': 'Monitoring', 'nav.backups': 'Sauvegardes', 'nav.marketplace': 'Marketplace', 'nav.emails': 'Emails', 'nav.files': 'Fichiers', 'nav.sftp': 'SFTP', 'nav.settings': 'Paramètres', 'nav.admin': 'Admin', 'nav.toggleTheme': 'Changer le thème',
 
     // ── common ─────────────────────────────────────────────────────
-    'common.loading': 'Chargement...', 'common.save': 'Enregistrer', 'common.saving': 'Enregistrement...', 'common.cancel': 'Annuler', 'common.delete': 'Supprimer', 'common.deleting': 'Suppression...', 'common.edit': 'Modifier', 'common.create': 'Créer', 'common.creating': 'Création...', 'common.search': 'Rechercher...', 'common.noResults': 'Aucun résultat', 'common.confirm': 'Confirmer', 'common.back': 'Retour', 'common.next': 'Suivant', 'common.close': 'Fermer', 'common.install': 'Installer', 'common.actions': 'Actions', 'common.name': 'Nom', 'common.email': 'Email', 'common.status': 'Statut', 'common.role': 'Rôle', 'common.created': 'Créé le', 'common.description': 'Description', 'common.comingSoon': 'Bientôt disponible', 'common.online': 'En ligne', 'common.offline': 'Hors ligne', 'common.copy': 'Copier', 'common.copied': 'Copié !', 'common.reset': 'Réinitialiser', 'common.never': 'jamais', 'common.enabled': 'Activé', 'common.disabled': 'Désactivé', 'common.add': 'Ajouter', 'common.remove': 'Retirer', 'common.update': 'Mettre à jour', 'common.refresh': 'Actualiser', 'common.optional': 'optionnel', 'common.required': 'requis',
+    'common.loading': 'Chargement...', 'common.save': 'Enregistrer', 'common.saving': 'Enregistrement...', 'common.cancel': 'Annuler', 'common.delete': 'Supprimer', 'common.deleting': 'Suppression...', 'common.edit': 'Modifier', 'common.create': 'Créer', 'common.creating': 'Création...', 'common.search': 'Rechercher...', 'common.noResults': 'Aucun résultat', 'common.confirm': 'Confirmer', 'common.back': 'Retour', 'common.next': 'Suivant', 'common.close': 'Fermer', 'common.install': 'Installer', 'common.actions': 'Actions', 'common.name': 'Nom', 'common.email': 'Email', 'common.status': 'Statut', 'common.role': 'Rôle', 'common.created': 'Créé le', 'common.description': 'Description', 'common.comingSoon': 'Bientôt disponible', 'common.online': 'En ligne', 'common.offline': 'Hors ligne', 'common.copy': 'Copier', 'common.copied': 'Copié !', 'common.reset': 'Réinitialiser', 'common.never': 'jamais', 'common.enabled': 'Activé', 'common.disabled': 'Désactivé', 'common.add': 'Ajouter', 'common.remove': 'Retirer', 'common.update': 'Mettre à jour', 'common.refresh': 'Actualiser', 'common.optional': 'optionnel', 'common.required': 'requis', 'common.retry': 'Réessayer', 'common.logout': 'Se déconnecter', 'common.na': 'N/D',
 
     // ── auth ───────────────────────────────────────────────────────
     'auth.login': 'Se connecter', 'auth.register': 'Créer un compte', 'auth.email': 'Email', 'auth.password': 'Mot de passe', 'auth.name': 'Nom', 'auth.loginTitle': 'Bon retour', 'auth.loginDesc': 'Connectez-vous à votre compte Kryptalis', 'auth.registerTitle': 'Créer un compte', 'auth.registerDesc': 'Commencez avec Kryptalis', 'auth.noAccount': "Pas encore de compte ?", 'auth.hasAccount': 'Déjà un compte ?', 'auth.signingIn': 'Connexion...', 'auth.creatingAccount': 'Création du compte...', 'auth.signUp': "S'inscrire", 'auth.signIn': 'Se connecter', 'auth.regDisabled': 'Inscriptions désactivées', 'auth.regDisabledDesc': "Cette plateforme est actuellement sur invitation. Demande un compte à un administrateur.", 'auth.confirmPassword': 'Confirmer le mot de passe', 'auth.passwordsDontMatch': 'Les mots de passe ne correspondent pas', 'auth.passwordStrength.weak': 'Faible', 'auth.passwordStrength.fair': 'Moyen', 'auth.passwordStrength.good': 'Bon', 'auth.passwordStrength.strong': 'Fort',
@@ -1574,6 +1582,7 @@ export const translations: Record<string, Record<string, string>> = {
     'settings.notifEv.sslExpire': 'Certificat SSL bientôt expiré',
     'settings.notifEv.backupOk': 'Sauvegarde terminée',
     'settings.notifEv.backupFail': 'Sauvegarde en échec',
+    'settings.notifToastSaved': 'Préférences de notification enregistrées',
     'settings.sessions': 'Sessions actives',
     'settings.sessionsDesc': "Tous les appareils connectés à ton compte. Révoque ceux que tu ne reconnais pas.",
     'settings.sessionsLogoutAll': 'Déconnecter partout ailleurs',
@@ -2033,6 +2042,8 @@ export const translations: Record<string, Record<string, string>> = {
     'projects.timeHour': 'il y a {n} h',
     'projects.timeDay': 'il y a {n} j',
     'projects.notFound': 'Projet introuvable.',
+    'projects.loadError': 'Échec du chargement de ce projet.',
+    'projects.loadErrorDesc': 'Une erreur est survenue lors de la récupération du projet.',
     'projects.serverLabel': 'Serveur',
     'projects.unknown': 'Inconnu',
     'projects.noDescription': 'Aucune description',
@@ -2057,6 +2068,7 @@ export const translations: Record<string, Record<string, string>> = {
     'projects.mesh.scopeDesc': "Ces noms d'hôte fonctionnent {bold}, sur le même hôte Docker. Pour joindre un service d'un autre projet (ou sur un autre serveur), utilisez plutôt son URL HTTPS publique via son domaine attaché.",
     'projects.mesh.scopeBold': "uniquement entre services à l'intérieur de ce projet",
     'projects.mesh.empty': 'Aucune app ni base de données pour le moment. Ajoutez-en pour voir le maillage.',
+    'projects.mesh.loadError': 'Échec du chargement du maillage de services.',
     'projects.mesh.apps': 'Applications ({n})',
     'projects.mesh.databases': 'Bases de données ({n})',
     'projects.mesh.envSuggestions': "Variables d'env suggérées",
@@ -2068,6 +2080,10 @@ export const translations: Record<string, Record<string, string>> = {
     'members.transferDesc': 'Transférer la propriété du projet à {email} ? Vous serez rétrogradé en ADMIN.',
     'members.transferBtn': 'Transférer',
     'members.removeTitle': 'Retirer le membre',
+    'members.changeOwnRoleTitle': 'Modifier votre propre rôle',
+    'members.changeOwnRoleDesc': 'Vous êtes sur le point de changer votre propre rôle en {role}. Vous pourriez perdre l’accès à des fonctionnalités liées à votre rôle actuel.',
+    'members.changeOwnRoleOwnerWarn': 'Vous êtes le OWNER — vous rétrograder signifie que vous ne contrôlerez plus ce projet.',
+    'members.changeOwnRoleBtn': 'Changer mon rôle',
 
     // ── page serveurs ──────────────────────────────────────────────
     'server.timeJust': "à l'instant",

@@ -35,21 +35,23 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import type { ProjectResponse, ProjectApplicationSummary } from '@kryptalis/types';
+import type { ProjectResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
+import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-// Shared API resource types — local aliases keep the diff/readability small.
-type ProjectApplication = ProjectApplicationSummary;
+// Shared API resource types — local alias keeps the diff/readability small.
 type Project = ProjectResponse;
 
 interface LocalServer {
   id: string;
   name: string;
+  status?: string;
+  host?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,22 +96,6 @@ function statusDotColor(status: string): string {
   }
 }
 
-function appStatusSummary(apps: ProjectApplication[]): string {
-  if (apps.length === 0) return '0 apps';
-  const running = apps.filter((a) => a.status === 'RUNNING').length;
-  const stopped = apps.filter((a) => a.status === 'STOPPED').length;
-  const error = apps.filter((a) => a.status === 'ERROR').length;
-  const other = apps.length - running - stopped - error;
-
-  const parts: string[] = [];
-  if (running > 0) parts.push(`${running} running`);
-  if (stopped > 0) parts.push(`${stopped} stopped`);
-  if (error > 0) parts.push(`${error} error`);
-  if (other > 0) parts.push(`${other} other`);
-
-  return `${apps.length} app${apps.length !== 1 ? 's' : ''} (${parts.join(', ')})`;
-}
-
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -117,6 +103,8 @@ function appStatusSummary(apps: ProjectApplication[]): string {
 export default function ProjectsPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = user?.role === 'ADMIN' || user?.role === 'SUPERADMIN';
 
   // --- List ---
   const { data: projects = [], isLoading } = useQuery<Project[]>({
@@ -140,12 +128,14 @@ export default function ProjectsPage() {
   });
   const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
 
+  // /servers is admin-only — a USER would just get a 403 here.
   const { data: allServers = [] } = useQuery<LocalServer[]>({
     queryKey: ['servers'],
     queryFn: () => api.get('/servers'),
-    enabled: isMultiMode,
+    enabled: isMultiMode && isAdmin,
+    retry: false,
   });
-  const onlineServers = allServers.filter(s => (s as any).status === 'ONLINE');
+  const onlineServers = allServers.filter(s => s.status === 'ONLINE');
 
   // --- Create dialog ---
   const [showCreate, setShowCreate] = useState(false);
@@ -392,7 +382,15 @@ export default function ProjectsPage() {
           {isMultiMode ? (
             <div className="space-y-2">
               <Label htmlFor="proj-server">Server *</Label>
-              {onlineServers.length === 0 ? (
+              {!isAdmin ? (
+                <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/5 p-3 text-xs">
+                  <Server size={14} className="text-orange-500 shrink-0 mt-0.5" />
+                  <p className="text-muted-foreground">
+                    Picking a target server requires administrator access. Ask an
+                    administrator to create this project for you.
+                  </p>
+                </div>
+              ) : onlineServers.length === 0 ? (
                 <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/5 p-3 text-xs">
                   <Server size={14} className="text-orange-500 shrink-0 mt-0.5" />
                   <p className="text-muted-foreground">
@@ -411,7 +409,7 @@ export default function ProjectsPage() {
                     <option value="">Select a server</option>
                     {onlineServers.map(s => (
                       <option key={s.id} value={s.id}>
-                        {s.name} ({(s as any).host})
+                        {s.name} ({s.host})
                       </option>
                     ))}
                   </Select>

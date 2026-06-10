@@ -24,12 +24,9 @@ out/
 .DS_Store
 Thumbs.db
 
-# Prisma — pre-1.0 we skip the migration workflow entirely. schema.prisma
-# is the single source of truth; the API boots with `prisma db push` which
-# syncs the schema to the DB whether it's empty or already populated.
-# Migration files generated locally by `prisma migrate dev` are noise that
-# would drift from the runtime behaviour, so we drop them here.
-apps/api/prisma/migrations/
+# Prisma — migrations are tracked: the API image runs `prisma migrate deploy`
+# (with a `migrate resolve --applied 0_init` fallback for pre-migration DBs),
+# so a fresh clone must contain apps/api/prisma/migrations/.
 
 # Go
 apps/agent/bin/

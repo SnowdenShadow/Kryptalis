@@ -34,16 +34,19 @@ const navigation: Array<{
   href: string;
   icon: typeof LayoutDashboard;
   multiOnly?: boolean;
+  adminOnly?: boolean;
   badge?: NavBadge;
 }> = [
   { key: 'nav.overview', href: '/dashboard', icon: LayoutDashboard },
-  { key: 'nav.server', href: '/dashboard/servers', icon: Server, multiOnly: true, badge: 'servers' },
+  { key: 'nav.server', href: '/dashboard/servers', icon: Server, multiOnly: true, adminOnly: true, badge: 'servers' },
   { key: 'nav.projects', href: '/dashboard/projects', icon: FolderKanban },
   { key: 'nav.applications', href: '/dashboard/applications', icon: Rocket, badge: 'applications' },
   { key: 'nav.domains', href: '/dashboard/domains', icon: Globe },
-  { key: 'nav.docker', href: '/dashboard/docker', icon: Container },
+  // Docker (@Roles on /docker) and Monitoring (/servers/local*) are
+  // admin-only API surfaces — hide them from regular users.
+  { key: 'nav.docker', href: '/dashboard/docker', icon: Container, adminOnly: true },
   { key: 'nav.databases', href: '/dashboard/databases', icon: Database },
-  { key: 'nav.monitoring', href: '/dashboard/monitoring', icon: Activity },
+  { key: 'nav.monitoring', href: '/dashboard/monitoring', icon: Activity, adminOnly: true },
   { key: 'nav.backups', href: '/dashboard/backups', icon: Archive },
   { key: 'nav.marketplace', href: '/dashboard/marketplace', icon: Store },
   { key: 'nav.emails', href: '/dashboard/emails', icon: Mail },
@@ -128,6 +131,7 @@ export function Sidebar() {
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
         {navigation.map((item) => {
           if (item.multiOnly && !isMulti) return null;
+          if (item.adminOnly && !isAdmin) return null;
           const isActive =
             item.href === '/dashboard'
               ? pathname === '/dashboard'
@@ -136,7 +140,7 @@ export function Sidebar() {
 
           return (
             <Link
-              key={t(item.key)}
+              key={item.key}
               href={item.href}
               className={cn(
                 'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',

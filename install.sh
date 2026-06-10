@@ -125,10 +125,6 @@ if [ ! -f .env ]; then
     if [ "${KRYPTALIS_RESET:-0}" = "1" ]; then
       warn "KRYPTALIS_RESET=1 — wiping stale Postgres volume (ALL DATA LOST)"
       docker volume rm "$STALE_PG_VOLUME" 2>/dev/null || true
-      STALE_REDIS_VOLUME=$(docker volume ls --quiet --filter "name=kryptalis_redis_data" 2>/dev/null)
-      if [ -n "$STALE_REDIS_VOLUME" ]; then
-        docker volume rm "$STALE_REDIS_VOLUME" 2>/dev/null || true
-      fi
     else
       die "Found a Postgres data volume but no .env. If the old .env is recoverable, restore it to $INSTALL_DIR/.env and re-run. To start FRESH and DELETE ALL DATA, re-run with KRYPTALIS_RESET=1."
     fi
@@ -221,78 +217,31 @@ fi
 
 docker compose up -d --build --remove-orphans
 
-# ─── 8b. install auto-update systemd timer ──────────────────────────
-# Runs update.sh every 5 MINUTES by default (KRYPTALIS_UPDATE_INTERVAL to
-# override) — checks origin/main via the GitHub API (no auth required;
-# the If-None-Match ETag means an unchanged upstream is a free 304),
-# rebuilds only if the upstream SHA changed.
-#
-# Push→deploy latency averages under 10 min. No webhook, no third-party
-# service, no per-install configuration.
-#
-# Toggleable from the dashboard (writes `auto-update.pref` which update.sh
-# honours) or via KRYPTALIS_NO_AUTOUPDATE=1.
+# ─── 8b. auto-update ─────────────────────────────────────────────────
+# Auto-update is handled BY THE API ITSELF (system-updates.service.ts):
+# it polls GitHub every 60s for a new commit on the tracked branch and,
+# when one lands, spawns update.sh in a one-off docker:cli container
+# (with a marker-file mutex so concurrent runs are impossible). No timer,
+# no cron, no extra moving parts on the host.
 UPDATE_SCRIPT="$INSTALL_DIR/update.sh"
 if [ -f "$UPDATE_SCRIPT" ]; then
   chmod +x "$UPDATE_SCRIPT"
 fi
 
-if [ "${KRYPTALIS_NO_AUTOUPDATE:-0}" = "1" ]; then
-  warn "KRYPTALIS_NO_AUTOUPDATE=1 — skipping auto-update timer install"
-elif [ ! -f "$UPDATE_SCRIPT" ]; then
-  warn "update.sh missing — auto-update will be installed on the next sync"
-elif ! command -v systemctl >/dev/null 2>&1; then
-  warn "systemd not detected — auto-update timer skipped (use cron manually)"
-else
-  # Resolve the interval HERE — systemd does no shell expansion, so the
-  # ${VAR:-default} syntax must never reach the unit file (it would be
-  # written literally and the timer would fail to load).
-  UPDATE_INTERVAL="${KRYPTALIS_UPDATE_INTERVAL:-5min}"
-  say "Installing kryptalis-update.timer (checks every $UPDATE_INTERVAL)"
-  cat > /etc/systemd/system/kryptalis-update.service <<EOF
-[Unit]
-Description=Kryptalis self-update (pull latest from origin/$BRANCH, rebuild if changed)
-After=network-online.target docker.service
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-Environment=KRYPTALIS_DIR=$INSTALL_DIR
-Environment=KRYPTALIS_BRANCH=$BRANCH
-ExecStart=$UPDATE_SCRIPT
-# Don't fail the unit if the script logs an error — it writes status to JSON
-SuccessExitStatus=0 1
-EOF
-
-  cat > /etc/systemd/system/kryptalis-update.timer <<EOF
-[Unit]
-Description=Run Kryptalis self-update poll
-Requires=kryptalis-update.service
-
-[Timer]
-# Update.sh polls the GitHub API with If-None-Match — when the upstream
-# SHA is unchanged, GitHub returns 304 Not Modified WITHOUT consuming the
-# 60/h anonymous quota. So the request itself is free in steady state.
-# However at 30s cadence ANY rate-limit-skewed hour can cascade rebuilds
-# while you're still mid-edit; the 5-min default is conservative for prod
-# and still gives push→deploy latency under 10 min average.
-# Power users can override at install time: KRYPTALIS_UPDATE_INTERVAL=30s
-OnBootSec=1min
-OnUnitActiveSec=$UPDATE_INTERVAL
-Unit=kryptalis-update.service
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable --now kryptalis-update.timer >/dev/null 2>&1 && \
-    ok "Auto-update enabled (kryptalis-update.timer)" || \
-    warn "Could not enable auto-update timer (continuing)"
+# Older installs shipped a kryptalis-update systemd timer that ran
+# update.sh unconditionally every 5 min, racing the in-API updater.
+# Remove it if present.
+if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/kryptalis-update.timer ]; then
+  say "Removing legacy kryptalis-update.timer (auto-update now runs inside the API)"
+  systemctl disable --now kryptalis-update.timer >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/kryptalis-update.timer /etc/systemd/system/kryptalis-update.service
+  systemctl daemon-reload || true
+  ok "Legacy auto-update timer removed"
 fi
 
 # ─── 9. wait for the API ────────────────────────────────────────────
+# Polls /api/settings/public (an unauthenticated endpoint) until it
+# answers 200/401 or the 180s deadline passes.
 say "Waiting for the API to come up (up to 180s)..."
 DEADLINE=$((`date +%s` + 180))
 LAST_TICK=$(date +%s)

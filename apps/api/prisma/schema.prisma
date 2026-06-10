@@ -26,6 +26,10 @@ model User {
   // TOTP space.
   failedLoginAttempts Int @default(0)
   lockedUntil         DateTime?
+  // Per-user notification channel preferences, keyed event → channel → bool
+  // (e.g. { deployFail: { email: true, slack: false } }). Edited via
+  // PUT /users/me/notification-preferences.
+  notificationPrefs Json?
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
 
@@ -749,6 +753,10 @@ model Backup {
   // Final on-disk size in bytes (matches whatever sha256 was computed over).
   // Surfaced in the UI alongside the existing legacy `size` field.
   sizeBytes           BigInt?
+  // Basename of the dump archive (e.g. "<id>.tar.gz"). LOCAL targets resolve
+  // the full path as <DATA_DIR>/backups/<filename>; remote targets use it as
+  // the object key suffix under kryptalis-backups/<id>/.
+  filename            String?
   includeApplications Boolean      @default(true)
   includeDatabases    Boolean      @default(true)
   includeVolumes      Boolean      @default(true)

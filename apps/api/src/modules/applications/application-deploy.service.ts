@@ -793,7 +793,14 @@ export class ApplicationDeployService {
           // gave us something — don't create stray files in repos that
           // never had a .env.
           if (fs.existsSync(target) || Object.keys(opts.envVars).length) {
-            try { fs.writeFileSync(target, serialized); } catch {}
+            // Build-time inlining depends on these files (Next/Vite/CRA read
+            // them during `npm run build`) — a failed write means the image
+            // would bake stale/missing env, so fail the deploy loudly.
+            try {
+              fs.writeFileSync(target, serialized);
+            } catch (err: any) {
+              throw new Error(`failed to write env file ${name}: ${err?.message || err}`);
+            }
           }
         }
         log(`> merged env (${Object.keys(repoEnv).length} from repo, ${Object.keys(opts.envVars).length} total)`);

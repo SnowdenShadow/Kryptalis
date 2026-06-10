@@ -880,7 +880,9 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    */
   private async resolveChrootSource(scope: 'app' | 'project', scopeId: string): Promise<string> {
     if (scope !== 'app') {
-      throw new BadRequestException('Project-scope SFTP not implemented yet — pick a specific app.');
+      throw new BadRequestException(
+        'Project-scope SFTP accounts are not supported — create the account for a specific application.',
+      );
     }
     const app = await this.prisma.application.findUnique({
       where: { id: scopeId },
@@ -892,7 +894,9 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
 
   private async resolveChrootSourceForAccount(acc: SftpAccount): Promise<string> {
     if (!acc.applicationId) {
-      throw new BadRequestException('Project-scope SFTP not implemented yet');
+      throw new BadRequestException(
+        'This SFTP account is not bound to an application — project-scope accounts are not supported.',
+      );
     }
     const app = await this.prisma.application.findUnique({
       where: { id: acc.applicationId },

@@ -19,20 +19,8 @@ services:
       timeout: 5s
       retries: 5
 
-  redis:
-    image: redis:7.4-alpine
-    container_name: kryptalis-redis
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+  # redis was removed: the API has no redis client (no ioredis/redis dep,
+  # REDIS_URL never read) — mirror of the prod compose decision.
 
 volumes:
   postgres_data:
-  redis_data:

@@ -15,11 +15,14 @@ import { ApiProperty } from '@nestjs/swagger';
 import type { SftpPermission } from '@prisma/client';
 
 export class CreateSftpAccountDto {
-  @ApiProperty({ enum: ['app', 'project'] })
-  @IsIn(['app', 'project'])
+  // Only 'app' is supported for account creation — project-wide chroots
+  // don't exist yet, so we refuse the value at validation time instead of
+  // advertising a scope the service would 400 on anyway.
+  @ApiProperty({ enum: ['app'] })
+  @IsIn(['app'], { message: 'scope must be "app" — project-scope SFTP accounts are not supported' })
   scope: 'app' | 'project';
 
-  @ApiProperty({ description: 'Application id or Project id' })
+  @ApiProperty({ description: 'Application id' })
   @IsString()
   scopeId: string;
 

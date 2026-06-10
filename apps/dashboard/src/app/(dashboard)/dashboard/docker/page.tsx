@@ -11,6 +11,7 @@ import {
   Square,
   RotateCcw,
   Trash2,
+  ShieldAlert,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -22,6 +23,7 @@ import {
 } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { api } from '@/lib/api';
+import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import type {
@@ -65,35 +67,40 @@ export default function DockerPage() {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<Tab>('containers');
   const queryClient = useQueryClient();
+  const user = useAuthStore((s) => s.user);
+  const isAdmin = user?.role === 'ADMIN' || user?.role === 'SUPERADMIN';
+  const accessDenied = !!user && !isAdmin;
 
   const { data: server } = useQuery<any>({
     queryKey: ['server-local'],
     queryFn: () => api.get('/servers/local'),
+    enabled: isAdmin,
+    retry: false,
   });
   const serverId = server?.id || '';
 
   const { data: containers = [], isLoading: containersLoading } = useQuery<DockerContainer[]>({
     queryKey: ['docker', 'containers', serverId],
     queryFn: () => api.get(`/docker/servers/${serverId}/containers`),
-    enabled: !!serverId && activeTab === 'containers',
+    enabled: isAdmin && !!serverId && activeTab === 'containers',
   });
 
   const { data: images = [], isLoading: imagesLoading } = useQuery<DockerImage[]>({
     queryKey: ['docker', 'images', serverId],
     queryFn: () => api.get(`/docker/servers/${serverId}/images`),
-    enabled: !!serverId && activeTab === 'images',
+    enabled: isAdmin && !!serverId && activeTab === 'images',
   });
 
   const { data: networks = [], isLoading: networksLoading } = useQuery<DockerNetwork[]>({
     queryKey: ['docker', 'networks', serverId],
     queryFn: () => api.get(`/docker/servers/${serverId}/networks`),
-    enabled: !!serverId && activeTab === 'networks',
+    enabled: isAdmin && !!serverId && activeTab === 'networks',
   });
 
   const { data: volumes = [], isLoading: volumesLoading } = useQuery<DockerVolume[]>({
     queryKey: ['docker', 'volumes', serverId],
     queryFn: () => api.get(`/docker/servers/${serverId}/volumes`),
-    enabled: !!serverId && activeTab === 'volumes',
+    enabled: isAdmin && !!serverId && activeTab === 'volumes',
   });
 
   const containerAction = useMutation({
@@ -108,6 +115,25 @@ export default function DockerPage() {
       toast.error(error.message);
     },
   });
+
+  if (accessDenied) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-3xl font-bold">{t('docker.title')}</h1>
+          <p className="text-muted-foreground">
+            {t('docker.subtitle')}
+          </p>
+        </div>
+        <Card>
+          <CardContent className="flex flex-col items-center justify-center py-16">
+            <ShieldAlert size={48} className="mb-4 text-muted-foreground" />
+            <p className="text-sm text-muted-foreground">{t('admin.restricted')}</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

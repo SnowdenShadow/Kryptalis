@@ -16,6 +16,20 @@ const USER_SELECT = {
   updatedAt: true,
 } as const;
 
+// Whitelists for the notificationPrefs Json column — anything outside is
+// silently dropped so a crafted payload can't bloat the row.
+const NOTIF_EVENTS = [
+  'deployOk',
+  'deployFail',
+  'serverOff',
+  'sslExpire',
+  'backupOk',
+  'backupFail',
+] as const;
+const NOTIF_CHANNELS = ['email', 'discord', 'slack', 'webhook'] as const;
+
+export type NotificationPrefs = Record<string, Record<string, boolean>>;
+
 @Injectable()
 export class UsersService {
   constructor(private prisma: PrismaService) {}
@@ -70,6 +84,39 @@ export class UsersService {
   async removeAsAdmin(actorId: string, targetId: string) {
     await this.assertCanModifyTarget(actorId, targetId);
     return this.remove(targetId);
+  }
+
+  // ── notification preferences ─────────────────────────────────────
+
+  async getNotificationPrefs(userId: string): Promise<{ prefs: NotificationPrefs }> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { notificationPrefs: true },
+    });
+    if (!user) throw new NotFoundException('User not found');
+    return { prefs: (user.notificationPrefs as NotificationPrefs | null) ?? {} };
+  }
+
+  async updateNotificationPrefs(
+    userId: string,
+    prefs: NotificationPrefs,
+  ): Promise<{ prefs: NotificationPrefs }> {
+    const sanitized: NotificationPrefs = {};
+    for (const event of NOTIF_EVENTS) {
+      const channels = prefs?.[event];
+      if (!channels || typeof channels !== 'object') continue;
+      const row: Record<string, boolean> = {};
+      for (const channel of NOTIF_CHANNELS) {
+        if (typeof channels[channel] === 'boolean') row[channel] = channels[channel];
+      }
+      if (Object.keys(row).length > 0) sanitized[event] = row;
+    }
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: { notificationPrefs: sanitized },
+      select: { notificationPrefs: true },
+    });
+    return { prefs: (updated.notificationPrefs as NotificationPrefs | null) ?? {} };
   }
 
   // ── role hierarchy ────────────────────────────────────────────────

@@ -45,10 +45,9 @@ The API persists everything operational under `.kryptalis/` at the install root 
       docker-compose.yml
   reverse-proxy/
     Caddyfile                    # regenerated on every domain change
-  update.log                     # last 500 lines of update.sh
-  update-status.json             # current update state (read by the dashboard)
-  auto-update.pref               # "disabled" string when operator turned auto-update off
-  api-etag, api-cached-sha       # GitHub API caching state for update.sh
+  update.log                     # log of the most recent update.sh run (reset each run;
+                                 # the API tails it for the dashboard updates page)
+  .update-running                # marker-file mutex the API holds while update.sh runs
 ```
 
 Every project also gets a dedicated user-defined bridge network `kryptalis_proj_<slug>`. All apps in the same project join it via `networks: { kryptalis_project: { external: true, name: kryptalis_proj_<slug> } }`, so service-to-service DNS just works (`http://api/`, `http://worker/`, …) without exposing ports.

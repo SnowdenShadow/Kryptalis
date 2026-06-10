@@ -6,6 +6,10 @@ export interface CreateDatabaseRequest {
   serverId: string;
   username?: string;
   password?: string;
+  /** Attach the database to a project (recommended). */
+  projectId?: string;
+  /** Attach the database to a specific application. */
+  applicationId?: string;
 }
 
 /**

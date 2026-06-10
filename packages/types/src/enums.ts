@@ -37,9 +37,11 @@ export enum ApplicationStatus {
 // Docker container states (docker inspect .State.Status) — these ARE
 // lowercase on the wire, that's Docker's format, not Prisma's.
 export enum ContainerStatus {
+  CREATED = 'created',
   RUNNING = 'running',
   STOPPED = 'stopped',
   RESTARTING = 'restarting',
+  REMOVING = 'removing',
   PAUSED = 'paused',
   EXITED = 'exited',
   DEAD = 'dead',
@@ -120,6 +122,8 @@ export enum UserStatus {
   SUSPENDED = 'SUSPENDED',
   BANNED = 'BANNED',
   PENDING_VERIFICATION = 'PENDING_VERIFICATION',
+  /** Set at registration when `require_admin_approval` is on — login is 403 until an admin activates. */
+  PENDING_APPROVAL = 'PENDING_APPROVAL',
 }
 
 export enum ProjectRole {
@@ -155,6 +159,15 @@ export enum TaskStatus {
   RUNNING = 'RUNNING',
   COMPLETED = 'COMPLETED',
   FAILED = 'FAILED',
+}
+
+// AlertRule comparison operator (schema.prisma AlertOperator, default GTE).
+export enum AlertOperator {
+  GT = 'GT',
+  GTE = 'GTE',
+  LT = 'LT',
+  LTE = 'LTE',
+  EQ = 'EQ',
 }
 
 export enum AlertChannel {

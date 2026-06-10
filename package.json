@@ -18,7 +18,8 @@
     "db:studio": "pnpm --filter @kryptalis/api db:studio",
     "docker:up": "docker compose -f docker/docker-compose.dev.yml up -d",
     "docker:down": "docker compose -f docker/docker-compose.dev.yml down",
-    "clean": "turbo clean && rm -rf node_modules"
+    "test": "turbo test",
+    "clean": "turbo clean && node -e \"fs.rmSync('node_modules',{recursive:true,force:true})\""
   },
   "packageManager": "pnpm@9.15.4",
   "engines": {

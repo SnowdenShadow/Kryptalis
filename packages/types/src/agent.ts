@@ -17,9 +17,16 @@ export interface AgentPollResponse {
   tasks: AgentTask[];
 }
 
+/**
+ * Body of POST /agent/tasks/:id/result (task id travels in the URL).
+ * Mirrors apps/api agent/dto/task-result.dto.ts.
+ */
 export interface AgentTaskResultRequest {
-  taskId: string;
-  status: TaskStatus;
+  /** Reporting agent server id. */
+  serverId: string;
+  /** Reporting agent token. */
+  token: string;
+  status: 'COMPLETED' | 'FAILED';
   result?: Record<string, unknown>;
   error?: string;
 }

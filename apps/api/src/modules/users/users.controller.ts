@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Put,
   Patch,
   Delete,
   Param,
@@ -12,6 +13,7 @@ import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { UsersService } from './users.service';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { UpdateNotificationPrefsDto } from './dto/update-notification-prefs.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -44,6 +46,21 @@ export class UsersController {
   @ApiOperation({ summary: 'Update own profile' })
   updateMe(@CurrentUser('id') userId: string, @Body() dto: UpdateUserDto) {
     return this.usersService.update(userId, dto);
+  }
+
+  @Get('me/notification-preferences')
+  @ApiOperation({ summary: 'Get own notification preferences' })
+  getNotificationPrefs(@CurrentUser('id') userId: string) {
+    return this.usersService.getNotificationPrefs(userId);
+  }
+
+  @Put('me/notification-preferences')
+  @ApiOperation({ summary: 'Replace own notification preferences' })
+  updateNotificationPrefs(
+    @CurrentUser('id') userId: string,
+    @Body() dto: UpdateNotificationPrefsDto,
+  ) {
+    return this.usersService.updateNotificationPrefs(userId, dto.prefs);
   }
 
   @Get()

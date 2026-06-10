@@ -1,15 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from '@/lib/i18n';
-import { useAuthStore } from '@/lib/store';
 import {
   User,
   Shield,
-  Users,
   Bell,
   Palette,
   Save,
@@ -22,18 +19,9 @@ import {
   Moon,
   Globe,
   Check,
-  HardDrive,
-  Share2,
-  Server,
   GitBranch,
   Trash2,
   Loader2,
-  RefreshCw,
-  Download,
-  AlertCircle,
-  CheckCircle2,
-  GitCommit,
-  Power,
   Monitor,
   LogOut,
 } from 'lucide-react';
@@ -68,24 +56,6 @@ const tabDefs: { key: Tab; labelKey: string; icon: React.ElementType }[] = [
   { key: 'notifications', labelKey: 'settings.notifications', icon: Bell },
   { key: 'appearance', labelKey: 'settings.appearance', icon: Palette },
 ];
-
-interface UpdateStatus {
-  state: 'UP_TO_DATE' | 'UPDATE_AVAILABLE' | 'UPDATING' | 'ERROR' | 'UNKNOWN';
-  message: string;
-  currentSha: string | null;
-  latestSha: string | null;
-  branch: string | null;
-  updatedAt: string | null;
-  autoUpdateEnabled: boolean | null;
-  manualTriggerAvailable: boolean;
-  hasUpdateLog: boolean;
-  webhook: {
-    url: string;
-    secret: string;
-    fired: boolean;
-    lastFiredAt: string | null;
-  };
-}
 
 // Tiny UA → "Browser on OS" parser. Heuristic, falls back to raw UA.
 function parseUA(ua: string | null | undefined, fallback: string): string {
@@ -123,14 +93,16 @@ function formatRelative(iso: string, t: (k: string, v?: Record<string, string | 
   return new Date(iso).toLocaleDateString();
 }
 
-const NOTIF_EVENT_KEYS = [
-  'settings.notifEv.deployOk',
-  'settings.notifEv.deployFail',
-  'settings.notifEv.serverOff',
-  'settings.notifEv.sslExpire',
-  'settings.notifEv.backupOk',
-  'settings.notifEv.backupFail',
+const NOTIF_EVENTS = [
+  { key: 'deployOk', labelKey: 'settings.notifEv.deployOk' },
+  { key: 'deployFail', labelKey: 'settings.notifEv.deployFail' },
+  { key: 'serverOff', labelKey: 'settings.notifEv.serverOff' },
+  { key: 'sslExpire', labelKey: 'settings.notifEv.sslExpire' },
+  { key: 'backupOk', labelKey: 'settings.notifEv.backupOk' },
+  { key: 'backupFail', labelKey: 'settings.notifEv.backupFail' },
 ];
+
+type NotificationPrefs = Record<string, Record<string, boolean>>;
 
 const notificationChannels = [
   { key: 'email', label: 'Email', icon: Mail },
@@ -139,208 +111,7 @@ const notificationChannels = [
   { key: 'webhook', label: 'Webhook', icon: Webhook },
 ];
 
-// ── Infrastructure tab — local/multi mode switch + servers summary ────
-function InfrastructureTab({
-  serverMode,
-  onModeChange,
-  t,
-}: {
-  serverMode: 'local' | 'multi';
-  onModeChange: (m: 'local' | 'multi') => void;
-  t: (key: string, vars?: Record<string, string | number>) => string;
-}) {
-  const qc = useQueryClient();
-  const router = useRouter();
-  const me = useAuthStore((s) => s.user);
-  const isAdmin = me?.role === 'ADMIN' || me?.role === 'SUPERADMIN';
-
-  const [showConfirm, setShowConfirm] = useState<null | 'to-multi' | 'to-local'>(null);
-
-  const { data: servers = [] } = useQuery<any[]>({
-    queryKey: ['servers'],
-    queryFn: () => api.get('/servers'),
-  });
-  const { data: apps = [] } = useQuery<any[]>({
-    queryKey: ['applications'],
-    queryFn: () => api.get('/applications'),
-  });
-
-  const remoteServers = servers.filter((s) => s.host !== '127.0.0.1');
-  const appsOnRemote = apps.filter((a: any) => a.project?.server && a.project.server.host !== '127.0.0.1');
-
-  const switchModeMutation = useMutation({
-    mutationFn: (next: 'LOCAL' | 'MULTI') =>
-      api.patch('/admin/settings/deployment_mode', { value: next }),
-    onSuccess: (_, next) => {
-      toast.success(t('settings.deployToastSet', { mode: next }));
-      qc.invalidateQueries({ queryKey: ['public-settings'] });
-      qc.invalidateQueries({ queryKey: ['servers'] });
-      setShowConfirm(null);
-      onModeChange(next === 'MULTI' ? 'multi' : 'local');
-      if (next === 'MULTI' && remoteServers.length === 0) {
-        setTimeout(() => router.push('/dashboard/servers'), 400);
-      }
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
-
-  function attemptSwitch(target: 'local' | 'multi') {
-    if (target === serverMode) return;
-    setShowConfirm(target === 'multi' ? 'to-multi' : 'to-local');
-  }
-
-  function withLink(key: string, label: string) {
-    const raw = t(key, { link: '__LINK__' });
-    const [before, after = ''] = raw.split('__LINK__');
-    return (
-      <>
-        {before}
-        <Link href="/dashboard/servers" className="text-primary hover:underline">{label}</Link>
-        {after}
-      </>
-    );
-  }
-
-  return (
-    <div className="space-y-5">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Share2 size={18} /> {t('settings.deployMode')}
-          </CardTitle>
-          <CardDescription>{t('settings.deployModeDesc')}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <button
-            onClick={() => isAdmin && attemptSwitch('local')}
-            disabled={!isAdmin}
-            className={cn(
-              'w-full text-left rounded-lg border p-4 transition-colors',
-              serverMode === 'local' ? 'border-primary bg-primary/5' : 'border-border hover:bg-accent/40',
-              !isAdmin && 'opacity-60 cursor-not-allowed',
-            )}
-          >
-            <div className="flex items-start gap-3">
-              <HardDrive size={20} className="text-primary mt-0.5 shrink-0" />
-              <div className="flex-1">
-                <p className="font-medium text-sm">{t('settings.deployLocal')}</p>
-                <p className="text-xs text-muted-foreground mt-0.5">{t('settings.deployLocalDesc')}</p>
-              </div>
-              {serverMode === 'local' && <Check size={16} className="text-primary shrink-0" />}
-            </div>
-          </button>
-
-          <button
-            onClick={() => isAdmin && attemptSwitch('multi')}
-            disabled={!isAdmin}
-            className={cn(
-              'w-full text-left rounded-lg border p-4 transition-colors',
-              serverMode === 'multi' ? 'border-primary bg-primary/5' : 'border-border hover:bg-accent/40',
-              !isAdmin && 'opacity-60 cursor-not-allowed',
-            )}
-          >
-            <div className="flex items-start gap-3">
-              <Share2 size={20} className="text-primary mt-0.5 shrink-0" />
-              <div className="flex-1">
-                <p className="font-medium text-sm">{t('settings.deployMulti')}</p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {t('settings.deployMultiDesc')}{' '}
-                  {withLink('settings.deployMultiAddHint', '/dashboard/servers')}
-                </p>
-              </div>
-              {serverMode === 'multi' && <Check size={16} className="text-primary shrink-0" />}
-            </div>
-          </button>
-
-          {!isAdmin && (
-            <p className="text-xs text-muted-foreground italic">{t('settings.deployAdminOnly')}</p>
-          )}
-        </CardContent>
-      </Card>
-
-      {serverMode === 'multi' && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              <Server size={16} /> {t('settings.deployServersTitle', { n: servers.length })}
-            </CardTitle>
-            <CardDescription>
-              {withLink('settings.deployServersManageHint', t('settings.deployServersManage'))}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-1">
-              {servers.map((s: any) => (
-                <div key={s.id} className="flex items-center justify-between text-xs rounded-md border border-border p-2">
-                  <div className="flex items-center gap-2">
-                    <span className={cn(
-                      'h-2 w-2 rounded-full',
-                      s.status === 'ONLINE' ? 'bg-emerald-500' :
-                      s.status === 'PENDING_INSTALL' ? 'bg-orange-500' : 'bg-zinc-500',
-                    )} />
-                    <span className="font-mono">{s.name}</span>
-                    <span className="text-muted-foreground">{s.host}</span>
-                    {s.host === '127.0.0.1' && <Badge variant="outline" className="text-[10px]">{t('settings.deployServerLocal')}</Badge>}
-                  </div>
-                  <Badge variant="outline" className="text-[10px]">{s.status}</Badge>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      <Dialog open={!!showConfirm} onClose={() => setShowConfirm(null)}>
-        <DialogHeader>
-          <DialogTitle>
-            {showConfirm === 'to-multi' ? t('settings.deploySwitchTitleMulti') : t('settings.deploySwitchTitleLocal')}
-          </DialogTitle>
-          <DialogDescription>
-            {showConfirm === 'to-multi'
-              ? t('settings.deploySwitchDescMulti')
-              : t('settings.deploySwitchDescLocal')}
-          </DialogDescription>
-        </DialogHeader>
-
-        {showConfirm === 'to-local' && appsOnRemote.length > 0 && (
-          <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 space-y-2">
-            <p className="text-xs font-semibold text-orange-500 flex items-center gap-1">
-              <AlertCircle size={12} /> {t('settings.deployAppsOnRemote', { n: appsOnRemote.length })}
-            </p>
-            <ul className="text-xs text-muted-foreground list-disc list-inside">
-              {appsOnRemote.slice(0, 5).map((a: any) => (
-                <li key={a.id}><span className="font-mono">{a.name}</span> · {a.project?.server?.name}</li>
-              ))}
-              {appsOnRemote.length > 5 && <li>{t('settings.deployMoreApps', { n: appsOnRemote.length - 5 })}</li>}
-            </ul>
-            <p className="text-[10px] text-muted-foreground">{t('settings.deployAppsOnRemoteHint')}</p>
-          </div>
-        )}
-
-        {showConfirm === 'to-multi' && remoteServers.length === 0 && (
-          <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-            {withLink('settings.deployFirstRemoteHint', '/dashboard/servers')}
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setShowConfirm(null)}>{t('common.cancel')}</Button>
-          <Button
-            disabled={switchModeMutation.isPending}
-            onClick={() => switchModeMutation.mutate(showConfirm === 'to-multi' ? 'MULTI' : 'LOCAL')}
-          >
-            {switchModeMutation.isPending && <Loader2 size={12} className="animate-spin" />}
-            {t('settings.deployConfirmBtn')}
-          </Button>
-        </DialogFooter>
-      </Dialog>
-    </div>
-  );
-}
-
 export default function SettingsPage() {
-  const authMe = useAuthStore((s) => s.user);
-  const isAdmin = authMe?.role === 'ADMIN' || authMe?.role === 'SUPERADMIN';
   const searchParams = useSearchParams();
   const initialTab = (searchParams?.get('tab') as Tab | null) || 'profile';
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
@@ -351,8 +122,6 @@ export default function SettingsPage() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const { locale, setLocale, t } = useTranslation();
   const [mounted, setMounted] = useState(false);
-  const [serverMode, setServerModeState] = useState<'local' | 'multi'>('local');
-  const [notifications, setNotifications] = useState<Record<string, Record<string, boolean>>>({});
   const queryClient = useQueryClient();
 
   // Settings is user-scoped only now; platform-wide tabs moved to /admin.
@@ -466,44 +235,6 @@ export default function SettingsPage() {
     onError: (err: Error) => toast.error(err.message),
   });
 
-  // ── system updates ───────────────────────────────────────────────
-  const {
-    data: updateStatus,
-    refetch: refetchUpdate,
-    isFetching: updateFetching,
-  } = useQuery<UpdateStatus>({
-    queryKey: ['system-updates'],
-    queryFn: () => api.get('/system/updates'),
-    enabled: false,
-    // poll faster while an update is running so the UI flips to "done" quickly
-    refetchInterval: (q) => {
-      const s = (q.state.data as UpdateStatus | undefined)?.state;
-      return s === 'UPDATING' ? 3000 : false;
-    },
-  });
-  const [updateLog, setUpdateLog] = useState('');
-  const fetchLog = useMutation({
-    mutationFn: () => api.get('/system/updates/log') as Promise<{ log: string }>,
-    onSuccess: (d) => setUpdateLog(d.log || '(empty)'),
-    onError: (e: Error) => toast.error(e.message),
-  });
-  const checkUpdate = useMutation({
-    mutationFn: () => api.post('/system/updates/check'),
-    onSuccess: () => { toast.success('Check complete'); refetchUpdate(); },
-    onError: (e: Error) => toast.error(e.message),
-  });
-  const applyUpdate = useMutation({
-    mutationFn: () => api.post('/system/updates/apply') as Promise<{ message: string }>,
-    onSuccess: (d) => { toast.success(d.message); refetchUpdate(); },
-    onError: (e: Error) => toast.error(e.message),
-  });
-  const toggleAuto = useMutation({
-    mutationFn: (enabled: boolean) =>
-      api.post('/system/updates/auto', { enabled }) as Promise<{ enabled: boolean; message: string }>,
-    onSuccess: (d) => { toast.success(d.message); refetchUpdate(); },
-    onError: (e: Error) => toast.error(e.message),
-  });
-
   useEffect(() => {
     setMounted(true);
   }, []);
@@ -604,17 +335,6 @@ export default function SettingsPage() {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [device, queryClient, t]);
 
-  // Read deployment mode from public-settings (single source of truth, platform-wide)
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
-  });
-  useEffect(() => {
-    if (publicSettings?.deployment_mode) {
-      setServerModeState(publicSettings.deployment_mode === 'MULTI' ? 'multi' : 'local');
-    }
-  }, [publicSettings]);
-
   const saveProfile = useMutation({
     mutationFn: () => api.patch('/auth/profile', { name: profileName }),
     onSuccess: () => toast.success(t('settings.profileToastSaved')),
@@ -636,14 +356,43 @@ export default function SettingsPage() {
     onError: (error: Error) => toast.error(error.message),
   });
 
+  // ── notification preferences (persisted server-side) ─────────────
+  const [notifications, setNotifications] = useState<NotificationPrefs>({});
+  const { data: notifPrefs, isLoading: notifLoading } = useQuery<{ prefs: NotificationPrefs }>({
+    queryKey: ['notification-prefs'],
+    queryFn: () => api.get('/users/me/notification-preferences'),
+    enabled: activeTab === 'notifications',
+  });
+  useEffect(() => {
+    if (notifPrefs) setNotifications(notifPrefs.prefs || {});
+  }, [notifPrefs]);
+
+  const saveNotifPrefs = useMutation({
+    mutationFn: (prefs: NotificationPrefs) =>
+      api.request<{ prefs: NotificationPrefs }>('/users/me/notification-preferences', {
+        method: 'PUT',
+        body: { prefs },
+      }),
+    onSuccess: (d) => {
+      queryClient.setQueryData(['notification-prefs'], d);
+      toast.success(t('settings.notifToastSaved'));
+    },
+    onError: (e: Error) => {
+      toast.error(e.message);
+      queryClient.invalidateQueries({ queryKey: ['notification-prefs'] });
+    },
+  });
+
   const toggleNotification = (event: string, channel: string) => {
-    setNotifications((prev) => ({
-      ...prev,
+    const next: NotificationPrefs = {
+      ...notifications,
       [event]: {
-        ...prev[event],
-        [channel]: !prev[event]?.[channel],
+        ...notifications[event],
+        [channel]: !notifications[event]?.[channel],
       },
-    }));
+    };
+    setNotifications(next);
+    saveNotifPrefs.mutate(next);
   };
 
   return (
@@ -881,60 +630,68 @@ export default function SettingsPage() {
             <CardDescription>{t('settings.notifPrefsDesc')}</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-border text-left text-sm text-muted-foreground">
-                    <th className="px-4 py-3 font-medium">{t('settings.notifColEvent')}</th>
-                    {notificationChannels.map((channel) => (
-                      <th
-                        key={channel.key}
-                        className="px-4 py-3 text-center font-medium"
-                      >
-                        <div className="flex items-center justify-center gap-1">
-                          <channel.icon size={14} />
-                          {channel.label}
-                        </div>
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {NOTIF_EVENT_KEYS.map((evKey) => (
-                    <tr
-                      key={evKey}
-                      className="border-b border-border last:border-0"
-                    >
-                      <td className="px-4 py-3 text-sm font-medium">{t(evKey)}</td>
+            {notifLoading ? (
+              <div className="flex items-center justify-center py-10 text-muted-foreground">
+                <Loader2 size={20} className="animate-spin" />
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-border text-left text-sm text-muted-foreground">
+                      <th className="px-4 py-3 font-medium">{t('settings.notifColEvent')}</th>
                       {notificationChannels.map((channel) => (
-                        <td key={channel.key} className="px-4 py-3 text-center">
-                          <button
-                            onClick={() =>
-                              toggleNotification(evKey, channel.key)
-                            }
-                            className={cn(
-                              'h-5 w-9 rounded-full transition-colors',
-                              notifications[evKey]?.[channel.key]
-                                ? 'bg-primary'
-                                : 'bg-muted'
-                            )}
-                          >
-                            <div
-                              className={cn(
-                                'h-4 w-4 rounded-full bg-white transition-transform',
-                                notifications[evKey]?.[channel.key]
-                                  ? 'translate-x-4'
-                                  : 'translate-x-0.5'
-                              )}
-                            />
-                          </button>
-                        </td>
+                        <th
+                          key={channel.key}
+                          className="px-4 py-3 text-center font-medium"
+                        >
+                          <div className="flex items-center justify-center gap-1">
+                            <channel.icon size={14} />
+                            {channel.label}
+                          </div>
+                        </th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {NOTIF_EVENTS.map((ev) => (
+                      <tr
+                        key={ev.key}
+                        className="border-b border-border last:border-0"
+                      >
+                        <td className="px-4 py-3 text-sm font-medium">{t(ev.labelKey)}</td>
+                        {notificationChannels.map((channel) => (
+                          <td key={channel.key} className="px-4 py-3 text-center">
+                            <button
+                              disabled={saveNotifPrefs.isPending}
+                              onClick={() =>
+                                toggleNotification(ev.key, channel.key)
+                              }
+                              className={cn(
+                                'h-5 w-9 rounded-full transition-colors',
+                                notifications[ev.key]?.[channel.key]
+                                  ? 'bg-primary'
+                                  : 'bg-muted',
+                                saveNotifPrefs.isPending && 'opacity-60'
+                              )}
+                            >
+                              <div
+                                className={cn(
+                                  'h-4 w-4 rounded-full bg-white transition-transform',
+                                  notifications[ev.key]?.[channel.key]
+                                    ? 'translate-x-4'
+                                    : 'translate-x-0.5'
+                                )}
+                              />
+                            </button>
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
