@@ -42,12 +42,13 @@ export default function LoginPage() {
         if (useBackup) body.backupCode = totpCode.replace(/\s+/g, '');
         else body.totpCode = totpCode.replace(/\s+/g, '');
       }
+      // The server also returns refreshToken in the body (legacy-client
+      // compat) but we never store it — it lives in the httpOnly cookie.
       const res = await api.post<{
         user: { id: string; name: string; email: string; role: string };
         accessToken: string;
-        refreshToken: string;
       }>('/auth/login', body);
-      setAuth(res.user, res.accessToken, res.refreshToken);
+      setAuth(res.user, res.accessToken);
       router.push('/dashboard');
       toast.success(t('auth.welcomeBack') || 'Welcome back!');
     } catch (err) {

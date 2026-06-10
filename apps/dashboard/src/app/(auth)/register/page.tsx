@@ -95,14 +95,12 @@ function RegisterPageInner() {
       const res = await api.post<{
         user: { id: string; name: string; email: string; role?: string };
         accessToken?: string;
-        refreshToken?: string;
         message?: string;
       }>('/auth/register', { name, email, password });
-      if (res.accessToken && res.refreshToken && res.user.role) {
+      if (res.accessToken && res.user.role) {
         setAuth(
           { id: res.user.id, name: res.user.name, email: res.user.email, role: res.user.role },
           res.accessToken,
-          res.refreshToken,
         );
         router.push('/dashboard');
         toast.success('Account created!');

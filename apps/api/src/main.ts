@@ -11,10 +11,16 @@ import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+
+  // Express doesn't parse cookies by default. Needed since the refresh
+  // token now travels in the httpOnly `kryptalis_rt` cookie (path-scoped
+  // to /api/auth) — auth.controller reads req.cookies on refresh/logout.
+  app.use(cookieParser());
 
   // ── security headers ────────────────────────────────────────────────
   // Helmet sets sane defaults (Content-Type-Options, Frame-Options,

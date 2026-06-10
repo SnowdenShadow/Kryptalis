@@ -49,9 +49,8 @@ function VerifyEmailInner() {
         const res = await api.post<{
           user: { id: string; name: string; email: string; role: string };
           accessToken: string;
-          refreshToken: string;
         }>('/auth/verify-email', { token });
-        setAuth(res.user, res.accessToken, res.refreshToken);
+        setAuth(res.user, res.accessToken);
         setState('success');
         toast.success('Email verified!');
         setTimeout(() => router.push('/dashboard'), 800);

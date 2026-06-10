@@ -55,6 +55,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
+import type { ApplicationResponse, DeploymentResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -72,48 +73,9 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-interface ApplicationDetail {
-  id: string;
-  name: string;
-  projectId: string;
-  framework: string;
-  status: string;
-  gitUrl: string | null;
-  gitBranch: string | null;
-  dockerImage?: string | null;
-  port: number | null;
-  // Host port published on the server when the app has no domain
-  // (no-DNS access path). When set the public URL is
-  // http://<server-ip>:<hostPort>, not :<port> (port = internal).
-  hostPort?: number | null;
-  customPort?: boolean;
-  buildCommand?: string | null;
-  startCommand?: string | null;
-  createdAt: string;
-  project?: {
-    id: string;
-    name: string;
-    server?: { id: string; name: string };
-  };
-  domains?: { id: string; domain: string; sslStatus: string }[];
-  portBindings?: {
-    id: string;
-    port: number;
-    domain: { id: string; domain: string; sslStatus: string };
-  }[];
-}
-
-interface Deployment {
-  id: string;
-  status: string;
-  commitSha?: string | null;
-  commitMessage?: string | null;
-  buildLogs?: string | null;
-  deployLogs?: string | null;
-  duration?: number | null;
-  triggeredBy?: string | null;
-  createdAt: string;
-}
+// Shared API resource types — local aliases keep the diff/readability small.
+type ApplicationDetail = ApplicationResponse;
+type Deployment = DeploymentResponse;
 
 interface TerminalEntry {
   cmd: string;

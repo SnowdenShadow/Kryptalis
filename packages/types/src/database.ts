@@ -8,15 +8,33 @@ export interface CreateDatabaseRequest {
   password?: string;
 }
 
+/**
+ * Database as returned by GET /databases and GET /databases/:id.
+ * Both endpoints append the live container `status` and a computed
+ * `connectionString`. `size` is a BigInt column → decimal string.
+ */
 export interface DatabaseResponse {
   id: string;
   name: string;
-  type: DatabaseType;
+  type: `${DatabaseType}`;
   serverId: string;
+  projectId: string | null;
+  applicationId: string | null;
   host: string;
   port: number;
   username: string;
-  size: number | null;
+  password: string;
+  size: string | null;
+  /** True when created by the compose/marketplace auto-importer. */
+  autoImported: boolean;
+  /** Compose service name for auto-imported rows. */
+  serviceName: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Live container status (docker-style string), appended by the API. */
+  status: string;
+  /** Ready-to-paste connection URI, appended by the API. */
+  connectionString: string;
+  project?: { id: string; name: string } | null;
+  application?: { id: string; name: string } | null;
 }

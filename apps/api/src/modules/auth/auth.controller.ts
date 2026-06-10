@@ -10,22 +10,65 @@ import {
   HttpStatus,
   UseGuards,
   Req,
+  Res,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
 import { Throttle } from '@nestjs/throttler';
-import type { Request } from 'express';
+import { ConfigService } from '@nestjs/config';
+import type { Request, Response } from 'express';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import {
+  REFRESH_COOKIE_NAME,
+  refreshCookieOptions,
+  extractRefreshToken,
+  isSecureContext,
+  parseTtlMs,
+} from './auth-cookie';
 
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private authService: AuthService) {}
+  constructor(
+    private authService: AuthService,
+    private config: ConfigService,
+  ) {}
+
+  // ── refresh-token cookie plumbing ──────────────────────────────────
+  //
+  // Every endpoint that returns a token pair ALSO sets the refresh token
+  // as an httpOnly cookie scoped to /api/auth. The JSON body keeps the
+  // refreshToken field for backward compatibility — new dashboard builds
+  // simply never store it. See auth-cookie.ts for the policy itself.
+
+  private setRefreshCookie(req: Request, res: Response, refreshToken?: string) {
+    if (!refreshToken) return;
+    const isHttps = isSecureContext(req, this.config.get<string>('PUBLIC_API_URL', ''));
+    const maxAge = parseTtlMs(this.config.get<string>('JWT_REFRESH_EXPIRATION', '7d'));
+    res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions(isHttps, maxAge));
+  }
+
+  private clearRefreshCookie(req: Request, res: Response) {
+    const isHttps = isSecureContext(req, this.config.get<string>('PUBLIC_API_URL', ''));
+    // clearCookie must repeat the same path/flags or the browser keeps the
+    // original cookie alive. maxAge is irrelevant for deletion.
+    const opts = refreshCookieOptions(isHttps);
+    delete opts.maxAge;
+    res.clearCookie(REFRESH_COOKIE_NAME, opts);
+  }
+
+  /** Cookie-first, body-fallback refresh-token lookup. */
+  private refreshTokenFrom(req: Request, dto?: { refreshToken?: string }): string | undefined {
+    return extractRefreshToken(
+      (req.cookies as Record<string, string> | undefined)?.[REFRESH_COOKIE_NAME],
+      dto?.refreshToken,
+    );
+  }
 
   /**
    * Public endpoint — tells the dashboard whether this install needs to
@@ -47,52 +90,86 @@ export class AuthController {
   @Post('register')
   @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @ApiOperation({ summary: 'Register a new account' })
-  register(@Body() dto: RegisterDto, @Req() req: Request) {
-    return this.authService.register(dto, {
+  async register(
+    @Body() dto: RegisterDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.register(dto, {
       ip: req.ip,
       userAgent: req.headers['user-agent'],
     });
+    // Bootstrap (first-install) path returns tokens immediately — cookie
+    // it like a login so the fresh SUPERADMIN session can refresh.
+    this.setRefreshCookie(req, res, (result as { refreshToken?: string }).refreshToken);
+    return result;
   }
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @ApiOperation({ summary: 'Login (TOTP code required when 2FA is enabled)' })
-  login(@Body() dto: LoginDto, @Req() req: Request) {
-    return this.authService.login(dto, {
+  async login(
+    @Body() dto: LoginDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.login(dto, {
       ip: req.ip,
       userAgent: req.headers['user-agent'],
     });
+    this.setRefreshCookie(req, res, result.refreshToken);
+    return result;
   }
 
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { ttl: 60_000, limit: 30 } })
-  @ApiOperation({ summary: 'Refresh tokens' })
-  refresh(@Body() dto: RefreshTokenDto, @Req() req: Request) {
-    return this.authService.refreshTokens(dto.refreshToken, {
+  @ApiOperation({ summary: 'Refresh tokens (httpOnly cookie preferred, body fallback)' })
+  async refresh(
+    @Body() dto: RefreshTokenDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const token = this.refreshTokenFrom(req, dto);
+    const result = await this.authService.refreshTokens(token ?? '', {
       ip: req.ip,
       userAgent: req.headers['user-agent'],
     });
+    this.setRefreshCookie(req, res, result.refreshToken);
+    return result;
   }
 
   @Post('logout')
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { ttl: 60_000, limit: 10 } })
   @ApiOperation({ summary: 'Logout (revokes the refresh-token family)' })
-  logout(@Body() dto: RefreshTokenDto) {
-    return this.authService.logout(dto.refreshToken);
+  async logout(
+    @Body() dto: RefreshTokenDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const token = this.refreshTokenFrom(req, dto);
+    const result = await this.authService.logout(token ?? '');
+    this.clearRefreshCookie(req, res);
+    return result;
   }
 
   @Post('verify-email')
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { ttl: 60_000, limit: 10 } })
   @ApiOperation({ summary: 'Verify email with a one-time token and receive a token pair' })
-  verifyEmail(@Body() dto: VerifyEmailDto, @Req() req: Request) {
-    return this.authService.verifyEmail(dto.token, {
+  async verifyEmail(
+    @Body() dto: VerifyEmailDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.verifyEmail(dto.token, {
       ip: req.ip,
       userAgent: req.headers['user-agent'],
     });
+    this.setRefreshCookie(req, res, result.refreshToken);
+    return result;
   }
 
   // 3/hour per IP — the throttler is the real anti-enumeration / anti-spam

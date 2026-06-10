@@ -35,6 +35,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
+import type { ProjectResponse, ProjectApplicationSummary } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 
@@ -42,30 +43,9 @@ import { useTranslation } from '@/lib/i18n';
 // Types
 // ---------------------------------------------------------------------------
 
-interface ProjectApplication {
-  id: string;
-  name: string;
-  status: string;
-  framework: string;
-  port: number | null;
-  domains?: { id: string; domain: string; sslStatus: string }[];
-}
-
-interface ProjectServer {
-  id: string;
-  name: string;
-  host?: string;
-}
-
-interface Project {
-  id: string;
-  name: string;
-  description: string | null;
-  serverId: string;
-  createdAt: string;
-  server?: ProjectServer;
-  applications?: ProjectApplication[];
-}
+// Shared API resource types — local aliases keep the diff/readability small.
+type ProjectApplication = ProjectApplicationSummary;
+type Project = ProjectResponse;
 
 interface LocalServer {
   id: string;

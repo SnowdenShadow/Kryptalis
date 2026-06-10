@@ -17,6 +17,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import type { ProjectResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -41,17 +42,8 @@ const ROLE_BADGE: Record<Role, { variant: 'success' | 'warning' | 'secondary' | 
   VIEWER: { variant: 'outline', icon: Users },
 };
 
-interface ProjectApp {
-  id: string; name: string; status: string; framework: string; port: number | null;
-  domains?: { id: string; domain: string; sslStatus: string }[];
-}
-
-interface Project {
-  id: string; name: string; description: string | null; serverId: string; createdAt: string;
-  server?: { id: string; name: string; host?: string };
-  applications?: ProjectApp[];
-  currentRole?: Role;
-}
+// Shared API resource type — local alias keeps the diff/readability small.
+type Project = ProjectResponse;
 
 interface Member {
   id: string; role: Role; createdAt: string;

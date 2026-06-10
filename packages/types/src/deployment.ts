@@ -6,24 +6,24 @@ export interface TriggerDeploymentRequest {
   force?: boolean;
 }
 
+/**
+ * Deployment as returned by GET /deployments (list, take 50) and
+ * GET /deployments/:id. The list endpoint includes `application` ({id, name});
+ * the detail endpoint additionally includes `triggeredBy` ({id, name}).
+ */
 export interface DeploymentResponse {
   id: string;
   applicationId: string;
-  status: DeploymentStatus;
+  status: `${DeploymentStatus}`;
   commitSha: string | null;
   commitMessage: string | null;
   buildLogs: string | null;
   deployLogs: string | null;
   duration: number | null;
-  triggeredBy: string;
+  triggeredById: string;
   startedAt: string | null;
   finishedAt: string | null;
   createdAt: string;
-}
-
-export interface DeploymentListResponse {
-  deployments: DeploymentResponse[];
-  total: number;
-  page: number;
-  limit: number;
+  application?: { id: string; name: string };
+  triggeredBy?: { id: string; name: string };
 }

@@ -1,0 +1,1150 @@
+import { Injectable } from '@nestjs/common';
+import { PrismaService } from '../../prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { AppStatus, DeploymentStatus } from '@prisma/client';
+import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
+import { AgentService } from '../agent/agent.service';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
+import { detectStack, FRAMEWORK_DOCKERFILES, FRAMEWORK_INTERNAL_PORT } from './dockerfile-templates';
+import { DatabasesService } from '../databases/databases.service';
+import { ApplicationEnvService } from './application-env.service';
+import {
+  execFileAsync,
+  slugify,
+  containerName,
+  imageName,
+  resolveAppDir,
+  parseDockerfileExposed,
+  remapComposePorts,
+  injectComposeEnv,
+  attachProjectNetwork,
+  projectNetworkName,
+  ensureSharedAppsNetwork,
+  attachSharedAppsNetwork,
+  stripComposePorts,
+  readComposeContainerInfo,
+  dockerCompose,
+  removeCollidingContainers,
+  findComposePath,
+} from './applications.helpers';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as yaml from 'js-yaml';
+
+/**
+ * Deployment pipeline for applications: git-clone deploys, docker-image
+ * deploys, raw compose / raw Dockerfile deploys, healthchecks, rollback
+ * and terminal-outcome notifications. Split out of ApplicationsService.
+ */
+@Injectable()
+export class ApplicationDeployService {
+  constructor(
+    private prisma: PrismaService,
+    private proxy: ReverseProxyService,
+    private agent: AgentService,
+    private notifications: NotificationsService,
+    private databases: DatabasesService,
+    private env: ApplicationEnvService,
+  ) {}
+
+  /**
+   * Notify the user who triggered a deployment of its terminal outcome.
+   * Reads triggeredById from the Deployment row so callers don't need to
+   * thread it down. Never throws — notification failures shouldn't break
+   * the deploy.
+   */
+  private async notifyDeploymentOutcome(
+    deploymentId: string,
+    appName: string,
+    status: 'success' | 'failed',
+    error?: string,
+  ) {
+    try {
+      const dep = await this.prisma.deployment.findUnique({
+        where: { id: deploymentId },
+        select: { triggeredById: true },
+      });
+      if (dep?.triggeredById) {
+        await this.notifications.sendDeploymentResult(dep.triggeredById, appName, status, error);
+      }
+    } catch {}
+  }
+
+  /**
+   * Pull-and-run path for "I just want this Docker image" deploys. Writes a
+   * synthesized docker-compose.yml into the app dir so the agent + dashboard
+   * treat it like any other compose stack — start/stop/restart all keep
+   * working, and a redeploy means "re-pull + recreate".
+   */
+  async runDockerImageDeploy(
+    deploymentId: string,
+    appId: string,
+    name: string,
+    image: string,
+    opts: { port?: number; envVars?: Record<string, string>; hostPort?: number },
+  ) {
+    const slug = slugify(name);
+    const containerNm = containerName(slug);
+    const appDir = resolveAppDir(slug, appId);
+    const started = Date.now();
+    const buildLogs: string[] = [];
+    // Scrubs git bearer tokens and basic-auth blobs from any log line before
+    // persisting. Defense in depth on top of the redacted log() in clone
+    // paths — any future codepath that calls log() with a stderr blob from
+    // git (e.g. clone failure echoing the auth header) is also protected.
+    const scrub = (line: string): string =>
+      line
+        .replace(/(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9_\-+/.=]+/gi, '$1<redacted>')
+        .replace(/(http\.extraheader=)[^\s'"]+/g, '$1<redacted>')
+        .replace(/(x-access-token:)[^@\s]+/gi, '$1<redacted>');
+    const log = (line: string) => {
+      buildLogs.push(scrub(line));
+    };
+
+    try {
+      await ensureSharedAppsNetwork();
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { status: 'DEPLOYING', startedAt: new Date() },
+      });
+      log(`> deploying docker image ${image}`);
+
+      // Resolve project network to attach the container — same multi-app
+      // discovery story as a normal compose deploy.
+      const appRow = await this.prisma.application.findUnique({
+        where: { id: appId },
+        select: { projectId: true, project: { select: { server: { select: { host: true } } } } },
+      });
+      const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
+      if (projectNet) {
+        try {
+          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5000 });
+        } catch {
+          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
+        }
+      }
+
+      // Fresh dir + minimal compose. If the user supplied a port, publish it
+      // on host; otherwise Caddy proxies over the project network.
+      if (fs.existsSync(appDir)) {
+        // REDEPLOY path — `down` WITHOUT `-v` so user data (DB volumes,
+        // upload dirs declared in the compose) survives. Using `-v` here
+        // was wiping PrestaShop/WordPress databases on every redeploy.
+        // Remove path handles -v + --rmi separately below.
+        try { await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000); } catch {}
+        fs.rmSync(appDir, { recursive: true, force: true });
+      }
+      fs.mkdirSync(appDir, { recursive: true });
+
+      const env = opts.envVars || {};
+      const envBlock = Object.keys(env).length
+        ? `    environment:\n${Object.entries(env).map(([k, v]) => `      ${k}: ${JSON.stringify(v)}`).join('\n')}\n`
+        : '';
+      // ports: publish host:container when the user picked a host port
+      // (no-domain access path). With a domain, Caddy reaches the
+      // container over the bridge — no publish needed.
+      const publishHost = opts.hostPort;
+      const publishContainer = opts.port ?? opts.hostPort ?? null;
+
+      // Build compose via yaml.dump so the image string can't break out
+      // of its quoted form into the parent compose document. An
+      // attacker who controls the dockerImage field (auth'd user) could
+      // otherwise inject \\n  privileged: true or a sibling service.
+      // Attach to BOTH the per-project network (so sibling apps in the
+      // same project can resolve each other by container_name) AND the
+      // shared kryptalis-apps bridge (so Caddy can resolve us by name
+      // for HTTPS routing). Missing the second one → Caddy hits ENOTFOUND
+      // on every request → 502. Same pattern as the compose-only and
+      // marketplace install paths.
+      const networks = ['kryptalis_apps'];
+      if (projectNet) networks.unshift('kryptalis_project');
+      const composeDoc: any = {
+        services: {
+          app: {
+            image,
+            container_name: containerNm,
+            restart: 'unless-stopped',
+            pull_policy: 'always',
+            ...(Object.keys(env).length ? { environment: { ...env } } : {}),
+            ...(publishHost && publishContainer
+              ? { ports: [`${publishHost}:${publishContainer}`] }
+              : {}),
+            networks,
+          },
+        },
+        networks: {
+          ...(projectNet ? { kryptalis_project: { external: true, name: projectNet } } : {}),
+          kryptalis_apps: { external: true, name: 'kryptalis-apps' },
+        },
+      };
+      const compose = yaml.dump(composeDoc, { lineWidth: 200 });
+      fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), compose);
+      log('> wrote docker-compose.yml');
+
+      log(`> docker compose pull`);
+      await dockerCompose(appDir, ['pull'], undefined, 300_000);
+      await removeCollidingContainers(compose, log);
+      log(`> docker compose up -d`);
+      await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], undefined, 180_000);
+
+      // If the user didn't pick an explicit port, ask docker what the
+      // image actually exposes. Without this, Caddy has no idea where
+      // to proxy and the domain stays in 'reserved' mode.
+      let detectedPort = opts.port ?? null;
+      if (!detectedPort) {
+        try {
+          const insp = await execFileAsync(
+            'docker',
+            ['inspect', '--format', '{{json .Config.ExposedPorts}}', containerNm],
+            { timeout: 10_000 },
+          );
+          const exposed = JSON.parse(insp.stdout || '{}') as Record<string, unknown>;
+          for (const key of Object.keys(exposed)) {
+            const n = parseInt(key.split('/')[0], 10);
+            if (Number.isFinite(n)) {
+              detectedPort = n;
+              break;
+            }
+          }
+        } catch {}
+      }
+
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: {
+          status: AppStatus.RUNNING,
+          containerName: containerNm,
+          containerPort: detectedPort,
+          port: detectedPort,
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.RUNNING,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.notifyDeploymentOutcome(deploymentId, name, 'success');
+    } catch (err: any) {
+      const msg = err?.message || 'docker image deploy failed';
+      log(`✖ ${msg}`);
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: AppStatus.ERROR },
+      });
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.FAILED,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          deployLogs: msg.slice(0, 10_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      // Refresh Caddy so any stale block from a prior successful deploy
+      // (we just failed a new one) no longer points at a dead container.
+      this.proxy.regenerate().catch(() => {});
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+    }
+  }
+
+  /**
+   * Raw docker-compose.yml deploy. No git, no Docker image — the user
+   * pasted the entire stack as YAML. We write it to appDir and call
+   * `docker compose up -d`. From there every lifecycle op (start, stop,
+   * logs, restart) behaves identically to a git-cloned compose project.
+   */
+  async runComposeOnlyDeploy(
+    deploymentId: string,
+    appId: string,
+    name: string,
+    composeYaml: string,
+    opts: { envVars?: Record<string, string> | null; hostPort?: number },
+  ) {
+    const slug = slugify(name);
+    const appDir = resolveAppDir(slug, appId);
+    const started = Date.now();
+    const buildLogs: string[] = [];
+    const log = (line: string) => buildLogs.push(line);
+
+    try {
+      await ensureSharedAppsNetwork();
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { status: 'DEPLOYING', startedAt: new Date() },
+      });
+
+      const appRow = await this.prisma.application.findUnique({
+        where: { id: appId },
+        select: { projectId: true },
+      });
+      const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
+      if (projectNet) {
+        try {
+          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5_000 });
+        } catch {
+          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
+        }
+      }
+
+      if (fs.existsSync(appDir)) {
+        // REDEPLOY path — `down` WITHOUT `-v` so user data (DB volumes,
+        // upload dirs declared in the compose) survives. Using `-v` here
+        // was wiping PrestaShop/WordPress databases on every redeploy.
+        // Remove path handles -v + --rmi separately below.
+        try { await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000); } catch {}
+        fs.rmSync(appDir, { recursive: true, force: true });
+      }
+      fs.mkdirSync(appDir, { recursive: true });
+
+      // Attach the user's compose to the per-project + shared networks
+      // so Caddy + sibling apps can reach the services by container_name.
+      let finalCompose = composeYaml;
+      if (projectNet) finalCompose = attachProjectNetwork(finalCompose, projectNet);
+      finalCompose = attachSharedAppsNetwork(finalCompose);
+      fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), finalCompose);
+      log('> wrote docker-compose.yml');
+
+      // Persist + write .env so secrets aren't inlined in the compose.
+      let envFile: string | undefined;
+      if (opts.envVars && Object.keys(opts.envVars).length) {
+        envFile = path.join(appDir, '.kryptalis.env');
+        fs.writeFileSync(envFile, this.env.serializeEnv(opts.envVars));
+      }
+
+      log('> docker compose pull');
+      try { await dockerCompose(appDir, ['pull'], envFile, 300_000); } catch {}
+      await removeCollidingContainers(finalCompose, log);
+      log('> docker compose up -d');
+      await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], envFile, 300_000);
+
+      // Pull container name + port from the first service so Caddy has a
+      // reverse-proxy target. The user's compose already declared them.
+      const info = readComposeContainerInfo(finalCompose, containerName(slug));
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: {
+          status: AppStatus.RUNNING,
+          containerName: info.containerName,
+          containerPort: info.containerPort,
+          port: info.containerPort,
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.RUNNING,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.notifyDeploymentOutcome(deploymentId, name, 'success');
+
+      // Post-deploy: auto-import any DB services declared in the user's
+      // compose so they show up in /dashboard/databases with the same RBAC
+      // (inherited via projectId). Idempotent on redeploy via the
+      // @@unique([applicationId, serviceName]) constraint. Errors here
+      // are swallowed — the stack is already running by this point and
+      // a registry-import failure must not flip the deploy red.
+      try {
+        const appRowForImport = await this.prisma.application.findUnique({
+          where: { id: appId },
+          select: { projectId: true, project: { select: { serverId: true } } },
+        });
+        if (appRowForImport?.project?.serverId) {
+          await this.databases.importFromAppCompose({
+            applicationId: appId,
+            projectId: appRowForImport.projectId,
+            serverId: appRowForImport.project.serverId,
+            composeYaml: finalCompose,
+          });
+        }
+      } catch {}
+    } catch (err: any) {
+      const msg = err?.message || 'compose deploy failed';
+      log(`✖ ${msg}`);
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: AppStatus.ERROR },
+      });
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.FAILED,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          deployLogs: msg.slice(0, 10_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+    }
+  }
+
+  /**
+   * Raw Dockerfile deploy. No git clone — the user pasted the Dockerfile
+   * (and optional context files) directly. We write them to appDir and
+   * build via a synthesized one-service docker-compose.yml so every
+   * lifecycle path stays identical to git/image deploys.
+   */
+  async runDockerfileOnlyDeploy(
+    deploymentId: string,
+    appId: string,
+    name: string,
+    dockerfile: string,
+    opts: {
+      port?: number;
+      envVars?: Record<string, string> | null;
+      hostPort?: number;
+      contextFiles?: Record<string, string>;
+    },
+  ) {
+    const slug = slugify(name);
+    const containerNm = containerName(slug);
+    const appDir = resolveAppDir(slug, appId);
+    const started = Date.now();
+    const buildLogs: string[] = [];
+    const log = (line: string) => buildLogs.push(line);
+
+    try {
+      await ensureSharedAppsNetwork();
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { status: 'BUILDING', startedAt: new Date() },
+      });
+
+      const appRow = await this.prisma.application.findUnique({
+        where: { id: appId },
+        select: { projectId: true },
+      });
+      const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
+      if (projectNet) {
+        try {
+          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5_000 });
+        } catch {
+          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
+        }
+      }
+
+      if (fs.existsSync(appDir)) {
+        // REDEPLOY path — `down` WITHOUT `-v` so user data (DB volumes,
+        // upload dirs declared in the compose) survives. Using `-v` here
+        // was wiping PrestaShop/WordPress databases on every redeploy.
+        // Remove path handles -v + --rmi separately below.
+        try { await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000); } catch {}
+        fs.rmSync(appDir, { recursive: true, force: true });
+      }
+      fs.mkdirSync(appDir, { recursive: true });
+
+      // Dockerfile + any sibling context files (already path-validated
+      // in the DTO check). Write them all then point compose `build: .`.
+      fs.writeFileSync(path.join(appDir, 'Dockerfile'), dockerfile);
+      if (opts.contextFiles) {
+        for (const [rel, content] of Object.entries(opts.contextFiles)) {
+          const dst = path.join(appDir, rel);
+          fs.mkdirSync(path.dirname(dst), { recursive: true });
+          fs.writeFileSync(dst, content);
+        }
+      }
+      log(`> wrote Dockerfile (${Object.keys(opts.contextFiles || {}).length} context files)`);
+
+      const env = opts.envVars || {};
+      const publishContainer = opts.port ?? null;
+      const publishHost = opts.hostPort;
+
+      const composeDoc: any = {
+        services: {
+          app: {
+            build: { context: '.' },
+            container_name: containerNm,
+            restart: 'unless-stopped',
+            ...(Object.keys(env).length ? { environment: { ...env } } : {}),
+            ...(publishHost && publishContainer
+              ? { ports: [`${publishHost}:${publishContainer}`] }
+              : {}),
+            ...(projectNet ? { networks: ['kryptalis_project', 'kryptalis_apps'] } : { networks: ['kryptalis_apps'] }),
+          },
+        },
+        networks: {
+          ...(projectNet ? { kryptalis_project: { external: true, name: projectNet } } : {}),
+          kryptalis_apps: { external: true, name: 'kryptalis-apps' },
+        },
+      };
+      const composeStr = yaml.dump(composeDoc, { lineWidth: 200 });
+      fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), composeStr);
+      log('> wrote docker-compose.yml');
+
+      log('> docker compose build');
+      await dockerCompose(appDir, ['build'], undefined, 900_000);
+      await removeCollidingContainers(composeStr, log);
+      log('> docker compose up -d');
+      await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], undefined, 180_000);
+
+      // If user didn't pin a port, ask docker what the built image exposes.
+      let detectedPort = opts.port ?? null;
+      if (!detectedPort) {
+        try {
+          const insp = await execFileAsync(
+            'docker',
+            ['inspect', '--format', '{{json .Config.ExposedPorts}}', containerNm],
+            { timeout: 10_000 },
+          );
+          const exposed = JSON.parse(insp.stdout || '{}') as Record<string, unknown>;
+          for (const key of Object.keys(exposed)) {
+            const n = parseInt(key.split('/')[0], 10);
+            if (Number.isFinite(n)) { detectedPort = n; break; }
+          }
+        } catch {}
+      }
+
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: {
+          status: AppStatus.RUNNING,
+          containerName: containerNm,
+          containerPort: detectedPort,
+          port: detectedPort,
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.RUNNING,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.notifyDeploymentOutcome(deploymentId, name, 'success');
+    } catch (err: any) {
+      const msg = err?.message || 'Dockerfile build failed';
+      log(`✖ ${msg}`);
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: AppStatus.ERROR },
+      });
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.FAILED,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          deployLogs: msg.slice(0, 10_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+    }
+  }
+
+  buildAuthHeader(provider: string, token: string): string {
+    // header injected via `git -c http.extraheader=...` — never lands in .git/config
+    if (provider === 'GITHUB') {
+      const b = Buffer.from(`x-access-token:${token}`).toString('base64');
+      return `Authorization: Basic ${b}`;
+    }
+    if (provider === 'GITLAB') {
+      return `Authorization: Bearer ${token}`;
+    }
+    if (provider === 'BITBUCKET') {
+      const b = Buffer.from(`x-token-auth:${token}`).toString('base64');
+      return `Authorization: Basic ${b}`;
+    }
+    const b = Buffer.from(`token:${token}`).toString('base64');
+    return `Authorization: Basic ${b}`;
+  }
+
+  async runDeploy(
+    deploymentId: string,
+    appId: string,
+    name: string,
+    gitUrl: string,
+    branch: string,
+    opts: {
+      port?: number | null;
+      envVars?: Record<string, string> | null;
+      buildCommand?: string | null;
+      startCommand?: string | null;
+      cloneHeader?: string;
+      composeOverride?: string;
+      dockerfileOverride?: string;
+      portMapping?: Record<string, number>;
+      hostPort?: number;
+    },
+  ) {
+    const slug = slugify(name);
+    // Use the per-instance app dir (slug + applicationId prefix), same
+    // helper every other touchpoint uses. Without this two apps whose
+    // names slugify identically (e.g. "blog" and "Blog") would share an
+    // appDir and clobber each other's compose stack and clone sources.
+    const appDir = resolveAppDir(slug, appId);
+    const started = Date.now();
+    const buildLogs: string[] = [];
+    // Same scrub as runDockerImageDeploy — strips git bearer tokens and
+    // basic-auth blobs from any log line before persistence.
+    const scrub = (line: string): string =>
+      line
+        .replace(/(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9_\-+/.=]+/gi, '$1<redacted>')
+        .replace(/(http\.extraheader=)[^\s'"]+/g, '$1<redacted>')
+        .replace(/(x-access-token:)[^@\s]+/gi, '$1<redacted>');
+    let flushPending = false;
+    const flush = async () => {
+      if (flushPending) return;
+      flushPending = true;
+      try {
+        await this.prisma.deployment.update({
+          where: { id: deploymentId },
+          data: { buildLogs: buildLogs.join('\n').slice(-50_000) },
+        });
+      } catch {}
+      flushPending = false;
+    };
+    const log = (s: string) => {
+      buildLogs.push(scrub(s));
+      void flush();
+    };
+
+    await this.prisma.deployment.update({
+      where: { id: deploymentId },
+      data: { status: 'BUILDING', startedAt: new Date() },
+    });
+    await ensureSharedAppsNetwork();
+
+    // Resolve the project scope so we can attach this app to the per-project
+    // docker network — enables service-name DNS between apps of the same project.
+    const appRow = await this.prisma.application.findUnique({
+      where: { id: appId },
+      select: {
+        projectId: true,
+        project: { select: { server: { select: { id: true, host: true } } } },
+      },
+    });
+    const remoteServer = appRow?.project?.server && !isLocalHost(appRow.project.server.host)
+      ? appRow.project.server
+      : null;
+
+    // Remote server → delegate the entire deploy to the agent.
+    if (remoteServer) {
+      try {
+        log(`> dispatching deploy to remote server ${remoteServer.host}`);
+        const task = await this.agent.enqueueAndWait(
+          remoteServer.id,
+          'DEPLOY',
+          {
+            slug,
+            appName: name,
+            gitUrl,
+            branch,
+            cloneHeader: opts.cloneHeader,
+            envVars: opts.envVars,
+            buildCommand: opts.buildCommand,
+            startCommand: opts.startCommand,
+            composeOverride: opts.composeOverride,
+            dockerfileOverride: opts.dockerfileOverride,
+            portMapping: opts.portMapping,
+            port: opts.port,
+            projectNetwork: appRow ? projectNetworkName(appRow.projectId) : null,
+          },
+          15 * 60_000,
+        );
+        const r: any = task.result || {};
+        if (r.logs) log(r.logs);
+        if (task.status === 'FAILED') throw new Error(task.error || 'agent deploy failed');
+        await this.prisma.application.update({
+          where: { id: appId },
+          data: { status: AppStatus.RUNNING },
+        });
+        this.proxy.regenerate().catch(() => {});
+        await this.prisma.deployment.update({
+          where: { id: deploymentId },
+          data: {
+            status: DeploymentStatus.RUNNING,
+            buildLogs: buildLogs.join('\n').slice(0, 50_000),
+            commitSha: r.commitSha || undefined,
+            commitMessage: r.commitMessage || undefined,
+            duration: Date.now() - started,
+            finishedAt: new Date(),
+          },
+        });
+        this.notifyDeploymentOutcome(deploymentId, name, 'success');
+      } catch (err: any) {
+        const msg = err?.message || 'deploy failed';
+        log(`✖ ${msg}`);
+        await this.prisma.application.update({
+          where: { id: appId },
+          data: { status: AppStatus.ERROR },
+        });
+        await this.prisma.deployment.update({
+          where: { id: deploymentId },
+          data: {
+            status: DeploymentStatus.FAILED,
+            buildLogs: buildLogs.join('\n').slice(0, 50_000),
+            deployLogs: msg.slice(0, 10_000),
+            duration: Date.now() - started,
+            finishedAt: new Date(),
+          },
+        });
+        this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+      }
+      return;
+    }
+
+    const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
+    if (projectNet) {
+      try {
+        await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5000 });
+      } catch {
+        log(`> docker network create ${projectNet}`);
+        try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
+      }
+    }
+
+    try {
+      // 1. clean previous stack BEFORE wiping. `down` without -v keeps
+      // user volumes (DB, uploads) intact across redeploys. The remove
+      // path elsewhere uses -v + --rmi to actually purge.
+      if (fs.existsSync(appDir)) {
+        try {
+          await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000);
+        } catch {}
+        fs.rmSync(appDir, { recursive: true, force: true });
+      }
+      fs.mkdirSync(appDir, { recursive: true });
+
+      // 2. clone with header (token not persisted)
+      const cloneArgs = ['clone', '--depth', '1', '--branch', branch];
+      if (opts.cloneHeader) {
+        cloneArgs.unshift('-c', `http.extraheader=${opts.cloneHeader}`);
+      }
+      cloneArgs.push(gitUrl, appDir);
+      // Never echo the cloneArgs verbatim — the http.extraheader contains
+      // the git provider's bearer token. Log a redacted form.
+      const redactedArgs = cloneArgs.map((a) =>
+        a.startsWith('http.extraheader=') ? 'http.extraheader=<redacted>' : a,
+      );
+      log(`> git ${redactedArgs.join(' ')}`);
+      await execFileAsync('git', cloneArgs, { timeout: 180_000 });
+
+      // 3. defensive: strip any token from .git/config
+      try {
+        await execFileAsync(
+          'git',
+          ['-C', appDir, 'remote', 'set-url', 'origin', gitUrl],
+          { timeout: 5_000 },
+        );
+        await execFileAsync(
+          'git',
+          ['-C', appDir, 'config', '--unset', 'http.extraheader'],
+          { timeout: 5_000 },
+        ).catch(() => {});
+      } catch {}
+
+      // 4. merge repo .env* files (lowest priority) with user-supplied envVars (highest)
+      const repoEnv = this.env.loadRepoEnvFiles(appDir);
+      const mergedEnv: Record<string, string> = { ...repoEnv, ...(opts.envVars || {}) };
+      if (Object.keys(mergedEnv).length) opts.envVars = mergedEnv;
+      let envFile: string | undefined;
+      if (opts.envVars && Object.keys(opts.envVars).length) {
+        envFile = path.join(appDir, '.kryptalis.env');
+        const serialized = this.env.serializeEnv(opts.envVars);
+        fs.writeFileSync(envFile, serialized);
+        // Also overwrite the repo's `.env` files with the merged values.
+        // Critical for build-time inlining: Next.js / Vite / CRA read `.env`
+        // directly from the source tree during `npm run build`, NOT from
+        // the compose `env_file:` runtime variables. `docker compose
+        // --env-file .kryptalis.env` only substitutes ${VAR} in the YAML;
+        // it never replaces an `env_file: .env` declared INSIDE the
+        // compose. So we mirror the merged env into every common .env
+        // name the framework might consume. The repo's original .env
+        // values are already merged in `mergedEnv` (lowest priority) so
+        // we're not losing anything — we're just persisting the result.
+        for (const name of ['.env', '.env.local', '.env.production']) {
+          const target = path.join(appDir, name);
+          // Only overwrite when the file existed in the repo OR the user
+          // gave us something — don't create stray files in repos that
+          // never had a .env.
+          if (fs.existsSync(target) || Object.keys(opts.envVars).length) {
+            try { fs.writeFileSync(target, serialized); } catch {}
+          }
+        }
+        log(`> merged env (${Object.keys(repoEnv).length} from repo, ${Object.keys(opts.envVars).length} total)`);
+        // persist (encrypted) so redeploy keeps the merge
+        await this.prisma.application.update({
+          where: { id: appId },
+          data: { envVars: this.env.encryptEnvVars(opts.envVars) as any },
+        });
+      }
+
+      // 5. capture commit info
+      let commitSha = '';
+      let commitMessage = '';
+      try {
+        commitSha = (await execFileAsync('git', ['-C', appDir, 'rev-parse', 'HEAD'])).stdout.trim();
+        commitMessage = (
+          await execFileAsync('git', ['-C', appDir, 'log', '-1', '--pretty=%B'])
+        ).stdout.trim();
+      } catch {}
+
+      // 6. apply optional overrides BEFORE detection
+      if (opts.composeOverride) {
+        fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), opts.composeOverride);
+      }
+      if (opts.dockerfileOverride) {
+        fs.writeFileSync(path.join(appDir, 'Dockerfile'), opts.dockerfileOverride);
+      }
+
+      // Auto-detect the framework and generate a production Dockerfile
+      // when the user didn't bring their own. This is the heart of the
+      // "no Docker knowledge required" deploy: React/Vite/Next/Vue/Astro
+      // /static repos get a clean nginx-or-node image with a fixed
+      // internal port that Caddy reaches via container_name. The user
+      // never picks a port.
+      const composePathInitial = findComposePath(appDir);
+      const dockerfilePathInitial = path.join(appDir, 'Dockerfile');
+      const hasOwnDockerfile = fs.existsSync(dockerfilePathInitial);
+      const hasOwnCompose = !!composePathInitial;
+      if (!hasOwnDockerfile && !hasOwnCompose) {
+        const stack = detectStack(appDir);
+        if (stack) {
+          const tpl = FRAMEWORK_DOCKERFILES[stack];
+          fs.writeFileSync(dockerfilePathInitial, tpl);
+          log(`🪄 No Dockerfile in repo — generated one for detected stack: ${stack}`);
+          // Lock the app to the framework's canonical internal port so
+          // every later reload picks the same one.
+          const internalPort = FRAMEWORK_INTERNAL_PORT[stack];
+          await this.prisma.application.update({
+            where: { id: appId },
+            data: {
+              port: internalPort,
+              framework: (stack as any),
+              // Caddy reaches the app on the shared kryptalis-apps bridge
+              // by container_name:internalPort — no host port publish, no
+              // port collision possible.
+              containerName: containerName(slug),
+              containerPort: internalPort,
+            },
+          });
+          opts.port = internalPort;
+        }
+      }
+
+      const composePath = findComposePath(appDir);
+      const dockerfilePath = path.join(appDir, 'Dockerfile');
+      const hasCompose = !!composePath;
+      const hasDockerfile = fs.existsSync(dockerfilePath);
+
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { status: 'DEPLOYING' },
+      });
+
+      if (hasCompose) {
+        // apply remap + env injection on a copy
+        let content = fs.readFileSync(composePath!, 'utf-8');
+        if (opts.portMapping) content = remapComposePorts(content, opts.portMapping);
+        if (opts.envVars) content = injectComposeEnv(content, opts.envVars);
+
+        // Look up whether the app already has a domain attached. When it
+        // does, Caddy will reach the container via the shared bridge —
+        // so we strip the user's `ports:` blocks (which would otherwise
+        // collide with platform services like the dashboard on :3000)
+        // and replace them with kryptalis-apps network membership. The
+        // user's intent is "this is internet-facing via a domain"; the
+        // raw host port publish is a vestige of their local dev setup.
+        const appRowForDomain = await this.prisma.application.findUnique({
+          where: { id: appId },
+          include: { domains: { select: { id: true } } },
+        });
+        const hasAttachedDomain = (appRowForDomain?.domains?.length ?? 0) > 0;
+
+        if (hasAttachedDomain) {
+          // Capture the original first container_name + target port BEFORE
+          // stripping, so Caddy can route to it on the bridge.
+          const info = readComposeContainerInfo(content, containerName(slug));
+          if (info.containerPort) {
+            // We also write `port` so the Caddy renderer's mainLinked
+            // check (which gates on app.port being non-null) passes —
+            // otherwise the domain stays in "reserved" mode forever and
+            // the user sees the 503 placeholder.
+            await this.prisma.application.update({
+              where: { id: appId },
+              data: {
+                containerName: info.containerName,
+                containerPort: info.containerPort,
+                port: info.containerPort,
+              },
+            });
+            log(
+              `🛰  Domain attached — Caddy will route to ${info.containerName}:${info.containerPort}.`,
+            );
+          }
+          content = stripComposePorts(content);
+          content = attachSharedAppsNetwork(content);
+        } else if (opts.hostPort) {
+          // No domain → user picked a host port to publish on. Rewrite
+          // every service's ports block to <hostPort>:<containerPort>
+          // so the app is reachable at http://<serverIp>:<hostPort>.
+          // Use the parsed container port from the compose; default to
+          // hostPort if no internal target was declared.
+          const info = readComposeContainerInfo(content, containerName(slug));
+          const containerPort = info.containerPort || opts.hostPort;
+          content = remapComposePorts(content, { [String(containerPort)]: opts.hostPort });
+          await this.prisma.application.update({
+            where: { id: appId },
+            data: {
+              containerName: info.containerName,
+              containerPort,
+              port: containerPort,
+              hostPort: opts.hostPort,
+            },
+          });
+        }
+
+        if (projectNet) content = attachProjectNetwork(content, projectNet);
+        fs.writeFileSync(composePath!, content);
+
+        log('> docker compose pull');
+        const r1 = await dockerCompose(appDir, ['pull'], envFile, 600_000).catch((e: any) => ({ stdout: '', stderr: e?.stderr || e?.message || '' }));
+        log(r1.stdout + r1.stderr);
+        // Defensive: nuke any container squatting the explicit names this
+        // compose declares (leftovers from a failed deploy, etc).
+        await removeCollidingContainers(content, log);
+        // Force a fresh build so frameworks that inline env vars at build
+        // time (Next.js NEXT_PUBLIC_*, Vite VITE_*, Angular fileReplacements)
+        // pick up the latest values. Without --no-cache, Docker reuses
+        // cached layers based on COPY/RUN steps — which don't see env
+        // file changes — and the rebuilt image bakes in stale values.
+        log('> docker compose build --no-cache');
+        const rb = await dockerCompose(appDir, ['build', '--no-cache', '--pull'], envFile, 900_000).catch((e: any) => ({ stdout: '', stderr: e?.stderr || e?.message || '' }));
+        log(rb.stdout + rb.stderr);
+        log('> docker compose up -d --force-recreate');
+        const r2 = await dockerCompose(appDir, ['up', '-d', '--force-recreate', '--remove-orphans'], envFile, 900_000);
+        log(r2.stdout + r2.stderr);
+      } else if (hasDockerfile) {
+        const img = imageName(slug);
+        const cname = containerName(slug);
+        log(`> docker build -t ${img} .`);
+        const rb = await execFileAsync('docker', ['build', '-t', img, '.'], { cwd: appDir, timeout: 900_000 });
+        log(rb.stdout + rb.stderr);
+        try { await execFileAsync('docker', ['rm', '-f', cname]); } catch {}
+
+        // Resolve the container's internal port (EXPOSE in Dockerfile +
+        // opts.port override). This is what Caddy will reverse_proxy to,
+        // NOT a host port. The platform reaches the container through
+        // the shared `kryptalis-apps` bridge — host port publish is
+        // intentionally skipped so multiple apps can listen on port 80
+        // without colliding.
+        const exposed = parseDockerfileExposed(fs.readFileSync(dockerfilePath, 'utf-8'));
+        const internalPort =
+          opts.port ?? (exposed.length > 0 ? exposed[0] : undefined);
+
+        // Build run argv. Attach to:
+        //   1. kryptalis-apps  → Caddy proxies to <containerName>:<internalPort>
+        //   2. projectNet      → sibling apps in the same project reach by name
+        const runArgs = ['run', '-d', '--name', cname, '--restart', 'unless-stopped'];
+        runArgs.push('--network', 'kryptalis-apps', '--network-alias', slug);
+        if (projectNet) {
+          runArgs.push('--network', projectNet, '--network-alias', slug);
+        }
+        if (opts.envVars) {
+          for (const [k, v] of Object.entries(opts.envVars)) {
+            runArgs.push('-e', `${k}=${v}`);
+          }
+        }
+        // No host -p publish. Caddy reaches us via container_name.
+        // If the user explicitly passed a portMapping (advanced flow),
+        // we still honour it so they can opt-in to direct host access.
+        const portMap: Array<[number, number]> = [];
+        if (opts.portMapping) {
+          for (const [ct, ht] of Object.entries(opts.portMapping)) {
+            portMap.push([Number(ht), Number(ct)]);
+          }
+        }
+        for (const [h, c] of portMap) runArgs.push('-p', `${h}:${c}`);
+        runArgs.push(img);
+        log(`> docker ${runArgs.join(' ')}`);
+        const rr = await execFileAsync('docker', runArgs, { timeout: 120_000 });
+        log(rr.stdout + rr.stderr);
+
+        // Record container coordinates so Caddy's reverse_proxy uses
+        // the in-network path (containerName:internalPort) on every
+        // future regenerate.
+        if (internalPort) {
+          await this.prisma.application.update({
+            where: { id: appId },
+            data: { containerName: cname, containerPort: internalPort },
+          });
+        }
+
+        // Generate the compose mirror so start/stop/logs uses the same
+        // network attachment the run command did.
+        const portsBlock = portMap.length
+          ? `    ports:\n${portMap.map(([h, c]) => `      - "${h}:${c}"`).join('\n')}\n`
+          : '';
+        const envBlock = opts.envVars && Object.keys(opts.envVars).length
+          ? `    environment:\n${Object.entries(opts.envVars).map(([k, v]) => `      ${k}: ${JSON.stringify(v)}`).join('\n')}\n`
+          : '';
+        const networksBlock = `    networks:\n      - kryptalis-apps${projectNet ? `\n      - ${projectNet}` : ''}\n`;
+        const topLevelNetworks =
+          `networks:\n  kryptalis-apps:\n    external: true${projectNet ? `\n  ${projectNet}:\n    external: true` : ''}\n`;
+        const composeContent =
+          `services:\n  ${slug}:\n    image: ${img}\n    container_name: ${cname}\n    restart: unless-stopped\n${portsBlock}${envBlock}${networksBlock}\n${topLevelNetworks}`;
+        fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), composeContent);
+
+        if (!internalPort) {
+          log('⚠ no EXPOSE directive in Dockerfile — Caddy will not be able to reach this app');
+        }
+      } else {
+        // language autodetect — generate minimal compose.
+        // user-provided buildCommand/startCommand are passed through `sh -c` so they
+        // may contain arbitrary shell. Use YAML's structured representation (no
+        // string interpolation) so quotes/backslashes/$() are emitted as data.
+        const port = opts.port ?? 3000;
+        const buildCmd = opts.buildCommand || 'npm install';
+        const startCmd = opts.startCommand || 'npm start';
+        const doc: any = {
+          services: {
+            [slug]: {
+              image: 'node:20-alpine',
+              container_name: containerName(slug),
+              restart: 'unless-stopped',
+              working_dir: '/app',
+              volumes: ['.:/app'],
+              ports: [`${port}:${port}`],
+              command: ['sh', '-c', `${buildCmd} && ${startCmd}`],
+            },
+          },
+        };
+        if (opts.envVars && Object.keys(opts.envVars).length) {
+          doc.services[slug].environment = { ...opts.envVars };
+        }
+        let composeContent = yaml.dump(doc, { lineWidth: 200 });
+        if (projectNet) composeContent = attachProjectNetwork(composeContent, projectNet);
+        fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), composeContent);
+        await removeCollidingContainers(composeContent, log);
+        log('> docker compose up -d --build');
+        const r = await dockerCompose(appDir, ['up', '-d', '--build', '--remove-orphans'], envFile, 900_000);
+        log(r.stdout + r.stderr);
+      }
+
+      // healthcheck: poll docker ps for up to 30s, expect at least one running container
+      log('> healthcheck');
+      const ok = await this.waitForHealthy(appDir, 30_000);
+      if (!ok) throw new Error('Healthcheck failed — no container reached running state within 30s');
+
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: AppStatus.RUNNING },
+      });
+      // refresh Caddy now that the app is up and its port is canonical
+      this.proxy.regenerate().catch(() => {});
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.RUNNING,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          commitSha: commitSha || undefined,
+          commitMessage: commitMessage || undefined,
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.notifyDeploymentOutcome(deploymentId, name, 'success');
+    } catch (err: any) {
+      const msg = (err?.stderr || err?.stdout || err?.message || 'deploy failed').toString();
+      log(`✖ ${msg}`);
+
+      // attempt rollback: relaunch previous successful deployment's compose state
+      const prevOk = await this.prisma.deployment.findFirst({
+        where: { applicationId: appId, status: 'RUNNING' as any, id: { not: deploymentId } },
+        orderBy: { createdAt: 'desc' },
+      });
+      let rolledBack = false;
+      if (prevOk) {
+        try {
+          await this.prisma.deployment.update({
+            where: { id: deploymentId },
+            data: { status: 'ROLLING_BACK' as any },
+          });
+          // try to bring the existing compose back up (volumes/images survived)
+          if (fs.existsSync(appDir) && findComposePath(appDir)) {
+            await dockerCompose(appDir, ['up', '-d'], undefined, 120_000).catch(() => {});
+            const ok = await this.waitForHealthy(appDir, 20_000);
+            rolledBack = ok;
+            log(rolledBack ? '↺ rollback successful' : '✖ rollback healthcheck failed');
+          }
+        } catch (rb: any) {
+          log(`✖ rollback error: ${rb?.message || rb}`);
+        }
+      }
+
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: rolledBack ? AppStatus.RUNNING : AppStatus.ERROR },
+      });
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: rolledBack ? ('ROLLED_BACK' as any) : DeploymentStatus.FAILED,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          deployLogs: msg.slice(0, 10_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      // Refresh Caddy so the previous block (if any) reflects the
+      // current state — either the rollback is up, or the app is down.
+      this.proxy.regenerate().catch(() => {});
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+    }
+  }
+
+  private async waitForHealthy(appDir: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        const { stdout } = await dockerCompose(appDir, ['ps', '--format', 'json'], undefined, 5_000);
+        if (stdout.trim()) {
+          const lines = stdout.split('\n').filter(Boolean);
+          const states = lines.map((l) => {
+            try { return JSON.parse(l); } catch { return null; }
+          }).filter(Boolean) as any[];
+          if (states.length === 0) {
+            // some docker versions output a single JSON array
+            try {
+              const arr = JSON.parse(stdout);
+              if (Array.isArray(arr)) states.push(...arr);
+            } catch {}
+          }
+          const allHealthyOrUp = states.length > 0 && states.every((s) => {
+            const st = (s.State || s.state || '').toLowerCase();
+            const h = (s.Health || s.health || '').toLowerCase();
+            if (h === 'starting') return false;
+            if (h === 'unhealthy') return false;
+            return st === 'running';
+          });
+          if (allHealthyOrUp) return true;
+          // any exited / dead → fail fast
+          if (states.some((s) => {
+            const st = (s.State || s.state || '').toLowerCase();
+            return st === 'exited' || st === 'dead' || st === 'oomkilled';
+          })) {
+            return false;
+          }
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 2_000));
+    }
+    return false;
+  }
+}

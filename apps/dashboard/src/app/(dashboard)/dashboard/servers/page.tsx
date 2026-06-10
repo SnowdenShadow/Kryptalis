@@ -37,6 +37,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
+import type { ServerResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
@@ -45,28 +46,10 @@ import { useTranslation } from '@/lib/i18n';
 // Types
 // ---------------------------------------------------------------------------
 
-interface AgentToken {
-  id: string;
-  token: string;
-}
-
-interface ServerItem {
-  id: string;
-  name: string;
-  host: string;
-  port: number;
-  username: string;
-  status: string;
-  os: string | null;
-  arch: string | null;
-  cpuCores: number | null;
-  totalMemory: number | null;
-  totalDisk: number | null;
-  agentVersion: string | null;
-  lastSeenAt: string | null;
-  createdAt: string;
-  agentTokens?: AgentToken[];
-}
+// Shared API resource type — local alias keeps the diff/readability small.
+// Note: totalMemory/totalDisk are BigInt columns serialized as decimal
+// strings by the API — wrap in Number() before arithmetic.
+type ServerItem = ServerResponse;
 
 interface Metric {
   cpuPercent: number;
@@ -380,7 +363,7 @@ export default function ServersPage() {
                       <ProgressBar
                         label={t('server.memory')}
                         value={Math.round((latestMetric?.memoryUsed ?? 0) / (1024 ** 3) * 10) / 10}
-                        max={Math.round((latestMetric?.memoryTotal ?? server?.totalMemory ?? 0) / (1024 ** 3) * 10) / 10}
+                        max={Math.round((latestMetric?.memoryTotal ?? Number(server?.totalMemory ?? 0)) / (1024 ** 3) * 10) / 10}
                         unit=" GB"
                       />
                     </div>
@@ -391,7 +374,7 @@ export default function ServersPage() {
                       <ProgressBar
                         label={t('server.disk')}
                         value={Math.round((latestMetric?.diskUsed ?? 0) / (1024 ** 3) * 10) / 10}
-                        max={Math.round((latestMetric?.diskTotal ?? server?.totalDisk ?? 0) / (1024 ** 3) * 10) / 10}
+                        max={Math.round((latestMetric?.diskTotal ?? Number(server?.totalDisk ?? 0)) / (1024 ** 3) * 10) / 10}
                         unit=" GB"
                       />
                     </div>
