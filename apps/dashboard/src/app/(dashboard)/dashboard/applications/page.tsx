@@ -46,6 +46,8 @@ import {
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { FRAMEWORK_LABELS, makeTimeAgo, publicAppUrl } from '@/lib/app-format';
+import { StatusDot } from '@/components/ui/status-dot';
 import { QuickDeployDialog } from './quick-deploy';
 
 // ---------------------------------------------------------------------------
@@ -112,91 +114,12 @@ const FRAMEWORKS = [
   'DOCKER_COMPOSE',
 ] as const;
 
-const FRAMEWORK_LABELS: Record<string, string> = {
-  NEXTJS: 'Next.js',
-  REACT: 'React',
-  VUE: 'Vue',
-  ANGULAR: 'Angular',
-  NESTJS: 'NestJS',
-  EXPRESS: 'Express',
-  LARAVEL: 'Laravel',
-  SYMFONY: 'Symfony',
-  DJANGO: 'Django',
-  FLASK: 'Flask',
-  FASTAPI: 'FastAPI',
-  STATIC: 'Static',
-  DOCKER: 'Docker',
-  DOCKER_COMPOSE: 'Compose',
-};
-
-const HTTPS_PORTS = [443, 8443, 9443];
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeTimeAgo(t: (k: string, v?: Record<string, string | number>) => string) {
-  return (date: string) => {
-    const s = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
-    if (s < 60) return t('apps.timeJust');
-    if (s < 3600) return t('apps.timeMin', { n: Math.floor(s / 60) });
-    if (s < 86400) return t('apps.timeHour', { n: Math.floor(s / 3600) });
-    return t('apps.timeDay', { n: Math.floor(s / 86400) });
-  };
-}
-
-function appUrl(port: number) {
-  const proto = HTTPS_PORTS.includes(port) ? 'https' : 'http';
-  return `${proto}://${typeof window !== 'undefined' ? window.location.hostname : 'localhost'}:${port}`;
-}
-
-/**
- * First URL the user can open — handles clean-URL domain, port-pinned domain,
- * port-binding (app co-hosted on another domain), or bare IP:port fallback.
- */
-function publicAppUrl(app: {
-  port?: number | null;
-  hostPort?: number | null;
-  customPort?: boolean;
-  domains?: { domain: string; sslStatus: string }[];
-  portBindings?: { port: number; domain: { domain: string; sslStatus: string } }[];
-}): string | null {
-  const main = app.domains?.[0];
-  if (main) {
-    return app.customPort && app.port
-      ? `http://${main.domain}:${app.port}`
-      : `https://${main.domain}`;
-  }
-  const bound = app.portBindings?.[0];
-  if (bound) return `http://${bound.domain.domain}:${bound.port}`;
-  // No domain → use the host-port publish (the user-picked one). Falls
-  // back to the internal container port only when nothing else is set.
-  if (app.hostPort) return appUrl(app.hostPort);
-  return app.port ? appUrl(app.port) : null;
-}
+// FRAMEWORK_LABELS / makeTimeAgo / publicAppUrl / StatusDot come from the
+// shared modules (@/lib/app-format, @/components/ui/status-dot).
 
 function truncateGitUrl(url: string, max = 40) {
   if (url.length <= max) return url;
   return url.slice(0, max - 1) + '…';
-}
-
-// ---------------------------------------------------------------------------
-// Status dot component
-// ---------------------------------------------------------------------------
-
-function StatusDot({ status }: { status: string }) {
-  const base = 'inline-block h-2.5 w-2.5 rounded-full shrink-0';
-  switch (status) {
-    case 'RUNNING':
-      return <span className={`${base} bg-emerald-500 animate-pulse`} />;
-    case 'ERROR':
-      return <span className={`${base} bg-red-500`} />;
-    case 'DEPLOYING':
-    case 'BUILDING':
-      return <span className={`${base} bg-orange-500 animate-pulse`} />;
-    default:
-      return <span className={`${base} bg-zinc-400`} />;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +128,7 @@ function StatusDot({ status }: { status: string }) {
 
 export default function ApplicationsPage() {
   const { t } = useTranslation();
-  const timeAgo = makeTimeAgo(t);
+  const timeAgo = useMemo(() => makeTimeAgo(t), [t]);
   const router = useRouter();
   const queryClient = useQueryClient();
 

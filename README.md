@@ -44,4 +44,4 @@ MIT. Use it, fork it, run it commercially, no strings.
 
 ## Contributing
 
-PRs welcome — open an issue first for anything bigger than a typo fix. Run `pnpm install && pnpm dev` from the repo root for a local dev loop (the API and dashboard hot-reload independently). Make sure `docker compose up postgres redis` is running before booting the API.
+PRs welcome — open an issue first for anything bigger than a typo fix. Run `pnpm install && pnpm dev` from the repo root for a local dev loop (the API and dashboard hot-reload independently). Make sure `docker compose -f docker/docker-compose.dev.yml up -d postgres` is running before booting the API (redis is optional — the API doesn't consume it yet).

@@ -31,9 +31,15 @@ func Load() (*Config, error) {
 
 	interval := 5 * time.Second
 	if v := os.Getenv("POLL_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			interval = d
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid POLL_INTERVAL %q: %w", v, err)
 		}
+		// A zero/negative interval makes time.NewTicker panic at startup.
+		if d < time.Second {
+			return nil, fmt.Errorf("POLL_INTERVAL must be >= 1s, got %q", v)
+		}
+		interval = d
 	}
 
 	return &Config{

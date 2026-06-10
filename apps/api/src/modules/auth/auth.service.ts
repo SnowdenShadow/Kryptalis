@@ -374,7 +374,12 @@ export class AuthService {
     if (user.twoFactorEnabled) {
       const code = (dto as any).totpCode || (dto as any).backupCode;
       if (!code) {
-        throw new UnauthorizedException('Two-factor code required');
+        // Structured `code` field: the dashboard branches on TOTP_REQUIRED
+        // instead of regex-matching the (locale-dependent) English message.
+        throw new UnauthorizedException({
+          message: 'Two-factor code required',
+          code: 'TOTP_REQUIRED',
+        });
       }
       const ok = await this.verifyTwoFactor(user.id, user.twoFactorSecret, code, {
         forBackup: !!(dto as any).backupCode,

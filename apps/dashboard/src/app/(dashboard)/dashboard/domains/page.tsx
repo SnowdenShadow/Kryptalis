@@ -20,6 +20,7 @@ import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } fr
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { makeTimeAgo } from '@/lib/app-format';
 
 interface Domain {
   id: string; domain: string; applicationId: string | null; projectId: string | null;
@@ -71,15 +72,14 @@ interface DnsRecords {
   checkedAt: string;
 }
 
-function makeTimeAgo(t: (k: string, v?: Record<string, string | number>) => string) {
-  return (d: string) => {
-    const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
-    if (s < 60) return t('domains.timeJust');
-    if (s < 3600) return t('domains.timeMin', { n: Math.floor(s / 60) });
-    if (s < 86400) return t('domains.timeHour', { n: Math.floor(s / 3600) });
-    return t('domains.timeDay', { n: Math.floor(s / 86400) });
-  };
-}
+// Shared formatter, parameterized with this page's translation keys.
+const makeDomainsTimeAgo = (t: (k: string, v?: Record<string, string | number>) => string) =>
+  makeTimeAgo(t, {
+    just: 'domains.timeJust',
+    min: 'domains.timeMin',
+    hour: 'domains.timeHour',
+    day: 'domains.timeDay',
+  });
 
 function daysUntil(d: string) {
   const diff = new Date(d).getTime() - Date.now();
@@ -179,7 +179,7 @@ function DomainCard({
   copiedId: string;
 }) {
   const { t } = useTranslation();
-  const timeAgo = useMemo(() => makeTimeAgo(t), [t]);
+  const timeAgo = useMemo(() => makeDomainsTimeAgo(t), [t]);
   const sslOk = domain.sslStatus === 'ACTIVE';
   const sslPending = domain.sslStatus === 'PENDING';
   const sslBad = domain.sslStatus === 'EXPIRED' || domain.sslStatus === 'ERROR';

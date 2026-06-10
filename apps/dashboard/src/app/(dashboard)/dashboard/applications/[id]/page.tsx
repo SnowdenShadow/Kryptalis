@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -58,6 +58,15 @@ import {
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import {
+  STATUS_VARIANT,
+  STATUS_COLOR,
+  FRAMEWORK_LABELS,
+  makeTimeAgo,
+  appUrl as sharedAppUrl,
+  publicUrls as sharedPublicUrls,
+  type PublicUrlApp,
+} from '@/lib/app-format';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -119,46 +128,8 @@ type TabId = 'overview' | 'logs' | 'terminal' | 'deployments' | 'files' | 'ports
 // Constants
 // ---------------------------------------------------------------------------
 
-const STATUS_VARIANT: Record<string, 'success' | 'secondary' | 'warning' | 'destructive'> = {
-  RUNNING: 'success',
-  STOPPED: 'secondary',
-  BUILDING: 'warning',
-  DEPLOYING: 'warning',
-  ERROR: 'destructive',
-  SUCCESS: 'success',
-  FAILED: 'destructive',
-  PENDING: 'warning',
-  CANCELLED: 'secondary',
-};
-
-const STATUS_COLOR: Record<string, string> = {
-  RUNNING: 'bg-emerald-500',
-  STOPPED: 'bg-zinc-400',
-  BUILDING: 'bg-orange-500',
-  DEPLOYING: 'bg-orange-500',
-  ERROR: 'bg-red-500',
-  FAILED: 'bg-red-500',
-  PENDING: 'bg-orange-500',
-};
-
-const FRAMEWORK_LABELS: Record<string, string> = {
-  NEXTJS: 'Next.js',
-  REACT: 'React',
-  VUE: 'Vue',
-  ANGULAR: 'Angular',
-  NESTJS: 'NestJS',
-  EXPRESS: 'Express',
-  LARAVEL: 'Laravel',
-  SYMFONY: 'Symfony',
-  DJANGO: 'Django',
-  FLASK: 'Flask',
-  FASTAPI: 'FastAPI',
-  STATIC: 'Static',
-  DOCKER: 'Docker',
-  DOCKER_COMPOSE: 'Compose',
-};
-
-const HTTPS_PORTS = [443, 8443, 9443];
+// STATUS_VARIANT / STATUS_COLOR / FRAMEWORK_LABELS / HTTPS_PORTS / makeTimeAgo
+// / appUrl / publicUrls live in @/lib/app-format (shared across pages).
 const LOG_LINE_OPTIONS = [50, 100, 200, 500] as const;
 // Order matches the actual user journey: see → check history → debug live
 // → poke at runtime → tweak config. Settings always last (potentially
@@ -178,73 +149,20 @@ const TAB_IDS: { id: TabId; key: string }[] = [
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeTimeAgo(t: (k: string, v?: Record<string, string | number>) => string) {
-  return (date: string) => {
-    const s = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
-    if (s < 60) return t('apps.timeJust');
-    if (s < 3600) return t('apps.timeMin', { n: Math.floor(s / 60) });
-    if (s < 86400) return t('apps.timeHour', { n: Math.floor(s / 3600) });
-    return t('apps.timeDay', { n: Math.floor(s / 86400) });
-  };
-}
-
 function formatDuration(ms: number) {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-function appUrl(hostname: string, port: number) {
-  const proto = HTTPS_PORTS.includes(port) ? 'https' : 'http';
-  return `${proto}://${hostname}:${port}`;
-}
-
-/**
- * Every URL this app is reachable at:
- *   - clean-URL domains (app on :443)  → https://<domain>
- *   - port bindings (app co-hosted on another domain) → https://<domain>:<port>
- *   - no domain at all → fallback to <hostname>:<port>
- *
- * Multi-URL is real: an app linked to "myapp.com" as the main app AND port-
- * bound to "shared.com:8080" exposes BOTH URLs.
- */
-function publicUrls(
-  app: {
-    port?: number | null;
-    hostPort?: number | null;
-    customPort?: boolean;
-    domains?: { domain: string; sslStatus: string }[];
-    portBindings?: { port: number; domain: { domain: string; sslStatus: string } }[];
-  },
-  fallbackHostname: string,
-): string[] {
-  const urls: string[] = [];
-  for (const d of app.domains || []) {
-    // Clean URL on :443 → HTTPS via Caddy. Port-pinned → direct to container
-    // (http://) because Caddy only binds 80/443 and the container holds the
-    // custom port itself.
-    urls.push(app.customPort && app.port
-      ? `http://${d.domain}:${app.port}`
-      : `https://${d.domain}`);
-  }
-  for (const b of app.portBindings || []) {
-    urls.push(`http://${b.domain.domain}:${b.port}`);
-  }
-  // No-domain + host-port: published directly on the host. URL shown
-  // is the user-picked host port, NOT the internal container port.
-  if (urls.length === 0 && app.hostPort) {
-    urls.push(appUrl(fallbackHostname, app.hostPort));
-  } else if (urls.length === 0 && app.port) {
-    urls.push(appUrl(fallbackHostname, app.port));
-  }
-  return urls;
+// Thin local adapters over the shared helpers — pages call with
+// (app, hostname) in this file's historical argument order.
+function publicUrls(app: PublicUrlApp, fallbackHostname: string): string[] {
+  return sharedPublicUrls(app, fallbackHostname);
 }
 
 /** First URL — used by Open button / single-line displays. */
-function publicUrl(
-  app: Parameters<typeof publicUrls>[0],
-  fallbackHostname: string,
-): string | null {
+function publicUrl(app: PublicUrlApp, fallbackHostname: string): string | null {
   return publicUrls(app, fallbackHostname)[0] || null;
 }
 
@@ -390,7 +308,7 @@ export default function ApplicationDetailPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const id = params.id as string;
-  const timeAgo = makeTimeAgo(t);
+  const timeAgo = useMemo(() => makeTimeAgo(t), [t]);
 
   // Tab state
   const [activeTab, setActiveTab] = useState<TabId>('overview');
@@ -432,7 +350,7 @@ export default function ApplicationDetailPage() {
     enabled: activeTab === 'deployments',
   });
   const [deploymentDetail, setDeploymentDetail] = useState<Deployment | null>(null);
-  const deploymentLogsEndRef = useRef<HTMLDivElement>(null);
+  const deploymentLogsEndRef = useRef<HTMLSpanElement>(null);
 
   // live poll the open deployment as long as it's not in a final state
   const FINAL_STATES = new Set(['RUNNING', 'FAILED', 'CANCELLED', 'ROLLED_BACK']);
@@ -650,12 +568,23 @@ export default function ApplicationDetailPage() {
     queryFn: () => api.get(`/applications/${id}/env`),
     enabled: activeTab === 'env',
   });
-  const [envDraft, setEnvDraft] = useState<Array<{ key: string; value: string }>>([]);
+  // Each row carries a stable `id` used as the React key. Keying by array
+  // index made row-local state (the show/hide secret toggle) jump to the
+  // NEXT row when one was deleted — a masked secret could become visible.
+  const envRowId = useRef(0);
+  const nextEnvRowId = () => `env-${envRowId.current++}`;
+  const [envDraft, setEnvDraft] = useState<Array<{ id: string; key: string; value: string }>>([]);
   useEffect(() => {
     if (envData && envDraft.length === 0) {
       const entries = Object.entries(envData.envVars || {});
-      setEnvDraft(entries.length ? entries.map(([k, v]) => ({ key: k, value: v })) : [{ key: '', value: '' }]);
+      setEnvDraft(
+        entries.length
+          ? entries.map(([k, v]) => ({ id: nextEnvRowId(), key: k, value: v }))
+          : [{ id: nextEnvRowId(), key: '', value: '' }],
+      );
     }
+    // envDraft.length intentionally omitted: init-once draft pattern.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [envData]);
 
   const saveEnvMutation = useMutation({
@@ -899,12 +828,15 @@ export default function ApplicationDetailPage() {
                       );
                     }
                     // Pair each URL with the domain it came from (so we can show
-                    // the SSL badge alongside).
+                    // the SSL badge alongside). Protocols MUST match publicUrls()
+                    // — this block used to show https:// for port-pinned domains
+                    // while the header showed http://, one of them necessarily
+                    // wrong for the user.
                     const rows: { url: string; domain?: string; sslStatus?: string; kind: 'main' | 'binding' | 'ip' }[] = [];
                     for (const d of app.domains || []) {
                       rows.push({
                         url: app.customPort && app.port
-                          ? `https://${d.domain}:${app.port}`
+                          ? `http://${d.domain}:${app.port}`
                           : `https://${d.domain}`,
                         domain: d.domain,
                         sslStatus: d.sslStatus,
@@ -913,14 +845,14 @@ export default function ApplicationDetailPage() {
                     }
                     for (const b of app.portBindings || []) {
                       rows.push({
-                        url: `https://${b.domain.domain}:${b.port}`,
+                        url: `http://${b.domain.domain}:${b.port}`,
                         domain: b.domain.domain,
                         sslStatus: b.domain.sslStatus,
                         kind: 'binding',
                       });
                     }
                     if (rows.length === 0 && (app.hostPort || app.port)) {
-                      rows.push({ url: appUrl(hostname, app.hostPort || app.port!), kind: 'ip' });
+                      rows.push({ url: sharedAppUrl(app.hostPort || app.port!, hostname), kind: 'ip' });
                     }
                     return (
                       <div className="space-y-2">
@@ -1446,12 +1378,12 @@ export default function ApplicationDetailPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
-                {envDraft.map((row, i) => (
+                {envDraft.map((row) => (
                   <EnvRow
-                    key={i}
+                    key={row.id}
                     row={row}
-                    onChange={(next) => setEnvDraft(d => d.map((r, j) => j === i ? next : r))}
-                    onDelete={() => setEnvDraft(d => d.filter((_, j) => j !== i))}
+                    onChange={(next) => setEnvDraft(d => d.map((r) => r.id === row.id ? { ...r, ...next } : r))}
+                    onDelete={() => setEnvDraft(d => d.filter((r) => r.id !== row.id))}
                     phKey={t('apps.envPlaceholderKey')}
                     phValue={t('apps.envPlaceholderValue')}
                     titleHide={t('apps.envHideValue')}
@@ -1461,7 +1393,7 @@ export default function ApplicationDetailPage() {
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => setEnvDraft(d => [...d, { key: '', value: '' }])}
+                  onClick={() => setEnvDraft(d => [...d, { id: nextEnvRowId(), key: '', value: '' }])}
                 >
                   <Plus size={14} /> {t('apps.addVariable')}
                 </Button>
@@ -1669,12 +1601,12 @@ export default function ApplicationDetailPage() {
                     {(app.portBindings || []).map((b) => (
                       <div key={b.id} className="flex items-center justify-between rounded-md border border-border p-2.5">
                         <a
-                          href={`https://${b.domain.domain}:${b.port}`}
+                          href={`http://${b.domain.domain}:${b.port}`}
                           target="_blank"
                           rel="noreferrer"
                           className="font-mono text-sm text-primary hover:underline flex items-center gap-1"
                         >
-                          <ExternalLink size={11} /> https://{b.domain.domain}:{b.port}
+                          <ExternalLink size={11} /> http://{b.domain.domain}:{b.port}
                         </a>
                         <Button
                           size="sm"
@@ -1877,7 +1809,8 @@ export default function ApplicationDetailPage() {
               </p>
               <pre className="whitespace-pre-wrap break-all text-xs font-mono bg-zinc-950 text-green-300 p-3 rounded-md max-h-72 overflow-y-auto">
                 {liveDep.buildLogs}
-                <div ref={deploymentLogsEndRef} />
+                {/* span: block elements are invalid inside <pre> (phrasing content) */}
+                <span ref={deploymentLogsEndRef} />
               </pre>
             </div>
           ) : liveDep && !FINAL_STATES.has(liveDep.status) ? (

@@ -19,6 +19,7 @@ import { useAuthStore } from '@/lib/store';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { makeTimeAgo } from '@/lib/app-format';
 import { SystemConfigTab } from './system-config-tab';
 import { InfrastructureTab } from './infrastructure-tab';
 import { UpdatesTab } from './updates-tab';
@@ -59,16 +60,15 @@ const STATUS_BADGE: Record<Status, 'success' | 'warning' | 'destructive'> = {
   ACTIVE: 'success', SUSPENDED: 'warning', BANNED: 'destructive',
 };
 
-function makeTimeAgo(t: (k: string, v?: Record<string, string | number>) => string) {
-  return (d: string | null) => {
-    if (!d) return t('admin.timeNever');
-    const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
-    if (s < 60) return t('admin.timeJustNow');
-    if (s < 3600) return t('admin.timeMinAgo', { n: Math.floor(s / 60) });
-    if (s < 86400) return t('admin.timeHourAgo', { n: Math.floor(s / 3600) });
-    return t('admin.timeDayAgo', { n: Math.floor(s / 86400) });
-  };
-}
+// Shared formatter, parameterized with this page's translation keys.
+const makeAdminTimeAgo = (t: (k: string, v?: Record<string, string | number>) => string) =>
+  makeTimeAgo(t, {
+    just: 'admin.timeJustNow',
+    min: 'admin.timeMinAgo',
+    hour: 'admin.timeHourAgo',
+    day: 'admin.timeDayAgo',
+    never: 'admin.timeNever',
+  });
 
 export default function AdminPage() {
   const queryClient = useQueryClient();
@@ -76,7 +76,7 @@ export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   const router = useRouter();
   const me = useAuthStore((s) => s.user);
-  const timeAgo = useMemo(() => makeTimeAgo(t), [t]);
+  const timeAgo = useMemo(() => makeAdminTimeAgo(t), [t]);
 
   // Client-side role guard. Backend still enforces RBAC on every endpoint.
   // IMPORTANT: this must NOT early-return before the hooks below — on first
@@ -106,16 +106,24 @@ export default function AdminPage() {
   const [roleFilter, setRoleFilter] = useState<Role | ''>('');
   const [statusFilter, setStatusFilter] = useState<Status | ''>('');
 
+  // Debounced copy used in the queryKey — typing previously fired one
+  // /admin/users request per keystroke.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedSearch(userSearch), 300);
+    return () => clearTimeout(handle);
+  }, [userSearch]);
+
   const { data: usersData } = useQuery<{ total: number; users: AdminUser[] }>({
-    queryKey: ['admin-users', userSearch, roleFilter, statusFilter],
+    queryKey: ['admin-users', debouncedSearch, roleFilter, statusFilter],
     queryFn: () => {
       const params = new URLSearchParams();
-      if (userSearch) params.set('search', userSearch);
+      if (debouncedSearch) params.set('search', debouncedSearch);
       if (roleFilter) params.set('role', roleFilter);
       if (statusFilter) params.set('status', statusFilter);
       return api.get(`/admin/users?${params}`);
     },
-    enabled: activeTab === 'users',
+    enabled: isAdmin && activeTab === 'users',
   });
 
   const [editUser, setEditUser] = useState<AdminUser | null>(null);
@@ -127,8 +135,11 @@ export default function AdminPage() {
   const roleMutation = useMutation({
     mutationFn: ({ id, role }: { id: string; role: Role }) =>
       api.patch(`/admin/users/${id}/role`, { role }),
-    onSuccess: () => {
+    onSuccess: (_data, vars) => {
       toast.success(t('admin.roleUpdated'));
+      // Keep the dialog state in sync — the selects are controlled by
+      // editUser, so a failed mutation snaps back to the server value.
+      setEditUser((u) => (u && u.id === vars.id ? { ...u, role: vars.role } : u));
       queryClient.invalidateQueries({ queryKey: ['admin-users'] });
     },
     onError: (err: Error) => toast.error(err.message),
@@ -137,8 +148,9 @@ export default function AdminPage() {
   const statusMutation = useMutation({
     mutationFn: ({ id, status }: { id: string; status: Status }) =>
       api.patch(`/admin/users/${id}/status`, { status }),
-    onSuccess: () => {
+    onSuccess: (_data, vars) => {
       toast.success(t('admin.statusUpdated'));
+      setEditUser((u) => (u && u.id === vars.id ? { ...u, status: vars.status } : u));
       queryClient.invalidateQueries({ queryKey: ['admin-users'] });
     },
     onError: (err: Error) => toast.error(err.message),
@@ -559,7 +571,7 @@ export default function AdminPage() {
             <div className="space-y-2">
               <Label>{t('common.role')}</Label>
               <Select
-                defaultValue={editUser.role}
+                value={editUser.role}
                 onChange={(e) => roleMutation.mutate({ id: editUser.id, role: e.target.value as Role })}
               >
                 <option value="VIEWER">VIEWER</option>
@@ -571,7 +583,7 @@ export default function AdminPage() {
             <div className="space-y-2">
               <Label>{t('common.status')}</Label>
               <Select
-                defaultValue={editUser.status}
+                value={editUser.status}
                 onChange={(e) => statusMutation.mutate({ id: editUser.id, status: e.target.value as Status })}
               >
                 <option value="ACTIVE">ACTIVE</option>

@@ -10,7 +10,9 @@ cd "$(dirname "$0")"
 mkdir -p bin
 
 VERSION="${VERSION:-0.1.0}"
-LDFLAGS="-s -w -X main.version=$VERSION"
+# monitor.Version is what the heartbeat reports to the API — stamping it
+# here is the single source of truth for the agent version.
+LDFLAGS="-s -w -X github.com/kryptalis/agent/internal/monitor.Version=$VERSION"
 
 echo "▶ Building kryptalis-agent v$VERSION"
 

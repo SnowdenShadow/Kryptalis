@@ -5,9 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
-	"os/exec"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -16,6 +17,13 @@ import (
 
 	"github.com/kryptalis/agent/internal/config"
 )
+
+// Version is stamped at build time via:
+//
+//	go build -ldflags "-X github.com/kryptalis/agent/internal/monitor.Version=x.y.z"
+//
+// Hard-coding it here guaranteed drift with the API's expected version.
+var Version = "dev"
 
 type SystemMetrics struct {
 	CPUPercent  float64 `json:"cpuPercent"`
@@ -52,14 +60,14 @@ func (m *Monitor) Start(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	m.sendHeartbeat()
+	m.sendHeartbeat(ctx)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.sendHeartbeat()
+			m.sendHeartbeat(ctx)
 		}
 	}
 }
@@ -68,25 +76,33 @@ func (m *Monitor) collectMetrics() SystemMetrics {
 	metrics := SystemMetrics{}
 
 	if runtime.GOOS == "linux" {
-		// memory via /proc/meminfo
-		out, err := exec.Command("sh", "-c", "awk '/MemTotal/ {t=$2} /MemAvailable/ {a=$2} END {print t,a}' /proc/meminfo").Output()
-		if err == nil {
-			parts := strings.Fields(strings.TrimSpace(string(out)))
-			if len(parts) == 2 {
-				total, _ := strconv.ParseUint(parts[0], 10, 64)
-				avail, _ := strconv.ParseUint(parts[1], 10, 64)
-				metrics.MemoryTotal = total * 1024
-				if total > avail {
-					metrics.MemoryUsed = (total - avail) * 1024
+		// memory via /proc/meminfo — read directly; shelling out to sh+awk
+		// added a dependency on both binaries for two integers.
+		if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+			var total, avail uint64
+			for _, line := range strings.Split(string(data), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) < 2 {
+					continue
 				}
+				switch fields[0] {
+				case "MemTotal:":
+					total, _ = strconv.ParseUint(fields[1], 10, 64)
+				case "MemAvailable:":
+					avail, _ = strconv.ParseUint(fields[1], 10, 64)
+				}
+			}
+			metrics.MemoryTotal = total * 1024
+			if total > avail {
+				metrics.MemoryUsed = (total - avail) * 1024
 			}
 		}
 
 		// CPU via /proc/stat (delta-based)
-		out, err = exec.Command("sh", "-c", "head -n1 /proc/stat").Output()
-		if err == nil {
-			parts := strings.Fields(strings.TrimSpace(string(out)))
-			if len(parts) >= 5 {
+		if data, err := os.ReadFile("/proc/stat"); err == nil {
+			firstLine, _, _ := strings.Cut(string(data), "\n")
+			parts := strings.Fields(firstLine)
+			if len(parts) >= 5 && parts[0] == "cpu" {
 				var total, idle uint64
 				for i, v := range parts[1:] {
 					n, _ := strconv.ParseUint(v, 10, 64)
@@ -95,10 +111,10 @@ func (m *Monitor) collectMetrics() SystemMetrics {
 						idle = n
 					}
 				}
-				if m.prevCPUTotal > 0 {
+				if m.prevCPUTotal > 0 && total > m.prevCPUTotal {
 					dt := total - m.prevCPUTotal
 					di := idle - m.prevCPUIdle
-					if dt > 0 {
+					if dt > 0 && dt >= di {
 						metrics.CPUPercent = float64(dt-di) / float64(dt) * 100
 					}
 				}
@@ -122,28 +138,35 @@ func (m *Monitor) collectMetrics() SystemMetrics {
 	return metrics
 }
 
-func (m *Monitor) sendHeartbeat() {
+func (m *Monitor) sendHeartbeat(ctx context.Context) {
 	metrics := m.collectMetrics()
 	uptime := time.Since(m.startTime).Seconds()
 
 	body, _ := json.Marshal(map[string]interface{}{
 		"serverId":     m.cfg.ServerID,
 		"token":        m.cfg.AgentToken,
-		"agentVersion": "0.1.0",
+		"agentVersion": Version,
 		"os":           runtime.GOOS,
 		"arch":         runtime.GOARCH,
 		"uptime":       uptime,
 		"metrics":      metrics,
 	})
 
-	resp, err := m.client.Post(
-		fmt.Sprintf("%s/api/agent/heartbeat", m.cfg.APIUrl),
-		"application/json",
-		bytes.NewReader(body),
-	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/api/agent/heartbeat", m.cfg.APIUrl), bytes.NewReader(body))
 	if err != nil {
 		log.Printf("heartbeat error: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		log.Printf("heartbeat error: %v", err)
+		return
+	}
+	// Drain before close so the keep-alive connection is reused instead of
+	// opening a fresh TCP/TLS handshake every heartbeat.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 }

@@ -102,7 +102,8 @@ Buttons on the app detail page:
 - PostgreSQL
 - MySQL / MariaDB
 - MongoDB
-- Redis
+- Redis / KeyDB / Dragonfly
+- ClickHouse
 
 Kryptalis creates a container `kryptalis-db-<slug>` on the project network, with a generated username/password.
 
@@ -262,7 +263,7 @@ Reverse DNS (PTR) — only your VPS provider can set this. Most panels have a "R
 ### "I deployed an app on the remote server but services can't reach each other"
 
 - This requires the agent to be at the latest version (with project network support).
-- Update the agent: SSH into the remote VPS, `cd /opt/kryptalis/agent && git pull && systemctl restart kryptalis-agent` (or however your agent was installed).
+- Update the agent: the agent is a standalone binary (not a git checkout). Re-run the install one-liner from **Servers → your server → Install command** (`curl -fsSL '<api>/api/agent/install.sh?token=…' | sh`) — it downloads the latest binary and restarts the service.
 
 ### "My data is on the old server after migration"
 

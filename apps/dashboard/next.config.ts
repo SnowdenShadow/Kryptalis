@@ -34,7 +34,9 @@ const csp = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  `connect-src 'self' ${apiHost} ws: wss:`,
+  // ws/wss restricted to the API host — a bare `ws: wss:` allowed an XSS
+  // to open WebSockets to ANY host (silent exfiltration channel).
+  `connect-src 'self' ${apiHost}${apiHost ? ` ${apiHost.replace(/^http/, 'ws')}` : ' ws: wss:'}`,
   "frame-ancestors 'none'",
   "object-src 'none'",
   "base-uri 'self'",

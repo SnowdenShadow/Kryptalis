@@ -19,10 +19,8 @@ Built with:
 Features:
 
 * Dark Mode
-* Light Mode
 * Responsive Design
-* Real-time Updates
-* Keyboard Shortcuts
+* Real-time Updates (polling)
 
 ---
 
@@ -84,7 +82,7 @@ Features:
 * Environment Variables
 * Build Configuration
 * Deployment History
-* Rollbacks
+* Automatic rollback on failed deploys (API-side)
 
 ---
 
@@ -98,8 +96,7 @@ Features:
 * Download Files
 * Edit Files
 * Create Directories
-* Compress Files
-* Extract Archives
+* Rename / Delete
 
 No FTP client required.
 
@@ -163,10 +160,8 @@ Role-based access control.
 
 Roles:
 
-* Super Admin
-* Admin
-* Developer
-* Client
+* Global roles: SUPERADMIN / ADMIN / USER / VIEWER
+* Per-project roles: OWNER / ADMIN / DEVELOPER / VIEWER
 
 Fine-grained permissions for every resource.
 

@@ -20,6 +20,12 @@ import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } fr
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import {
+  STATUS_COLOR,
+  STATUS_VARIANT,
+  FRAMEWORK_LABELS as FW,
+  publicAppUrl,
+} from '@/lib/app-format';
 
 type Role = 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER';
 const ROLE_RANK: Record<Role, number> = { OWNER: 100, ADMIN: 80, DEVELOPER: 50, VIEWER: 10 };
@@ -52,19 +58,7 @@ interface Member {
   user: { id: string; name: string; email: string };
 }
 
-const STATUS_COLOR: Record<string, string> = {
-  RUNNING: 'bg-emerald-500', STOPPED: 'bg-zinc-400', ERROR: 'bg-red-500',
-  DEPLOYING: 'bg-orange-500', BUILDING: 'bg-orange-500',
-};
-const STATUS_VARIANT: Record<string, 'success' | 'secondary' | 'warning' | 'destructive'> = {
-  RUNNING: 'success', STOPPED: 'secondary', BUILDING: 'warning', DEPLOYING: 'warning', ERROR: 'destructive',
-};
-const FW: Record<string, string> = {
-  NEXTJS: 'Next.js', REACT: 'React', VUE: 'Vue', ANGULAR: 'Angular', NESTJS: 'NestJS',
-  EXPRESS: 'Express', LARAVEL: 'Laravel', SYMFONY: 'Symfony', DJANGO: 'Django', FLASK: 'Flask',
-  FASTAPI: 'FastAPI', STATIC: 'Static', DOCKER: 'Docker', DOCKER_COMPOSE: 'Compose',
-};
-const HTTPS_PORTS = [443, 8443, 9443];
+// STATUS_COLOR / STATUS_VARIANT / FW / publicAppUrl come from @/lib/app-format.
 
 function timeAgo(d: string) {
   const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
@@ -417,7 +411,10 @@ export default function ProjectDetailPage() {
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {apps.map(app => {
                 const isRunning = app.status === 'RUNNING';
-                const proto = app.port && HTTPS_PORTS.includes(app.port) ? 'https' : 'http';
+                // publicAppUrl resolves domain → binding → host:port; the old
+                // hardcoded localhost URL opened the VISITOR's machine on any
+                // remote install.
+                const openUrl = publicAppUrl(app);
                 return (
                   <Link key={app.id} href={`/dashboard/applications/${app.id}`} className="block">
                     <Card className="hover:border-primary/50 transition-colors cursor-pointer overflow-hidden">
@@ -430,8 +427,8 @@ export default function ProjectDetailPage() {
                               <h3 className="font-semibold">{app.name}</h3>
                               <Badge variant="outline" className="text-[10px]">{FW[app.framework] || app.framework}</Badge>
                             </div>
-                            {isRunning && app.port && (
-                              <Button size="sm" className="shrink-0" onClick={e => { e.preventDefault(); e.stopPropagation(); window.open(`${proto}://localhost:${app.port}`, '_blank'); }}>
+                            {isRunning && openUrl && (
+                              <Button size="sm" className="shrink-0" onClick={e => { e.preventDefault(); e.stopPropagation(); window.open(openUrl, '_blank'); }}>
                                 <ExternalLink size={12} /> Open
                               </Button>
                             )}

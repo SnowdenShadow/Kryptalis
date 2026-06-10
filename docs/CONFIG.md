@@ -81,11 +81,10 @@ The audit log has a hardcoded retention of 365 days (cleaned hourly), tracked in
 | Key | Env fallback | Default | Description |
 | --- | --- | --- | --- |
 | `registration_enabled` | — | `true` after first user | Public signup toggle. Defaults to allowing the first user, then can be locked down. |
-| `require_admin_approval` | — | `false` | If true, registered users land in `PENDING_APPROVAL` until a `SUPERADMIN` / `ADMIN` approves them. |
-| `default_user_role` | — | `USER` | Role assigned to the first user after `SUPERADMIN`. Allowed: `USER`, `VIEWER`. |
 | `platform_name` | — | `Kryptalis` | Branding in dashboard header + email subjects. |
-| `maintenance_mode` | — | `false` | When true, non-admins get a maintenance banner and write endpoints return 503. |
 | `deployment_mode` | — | `LOCAL` | `LOCAL` (single VPS) or `MULTI` (additional servers via the agent). Switching `LOCAL → MULTI` is reversible until you add a non-local server. |
+
+Planned, **not implemented yet** (the keys exist in `SETTING_KEYS` but no code enforces them): `require_admin_approval` (pending-approval signup flow), `default_user_role`, `maintenance_mode` (503 on write endpoints).
 
 ### Webhooks
 

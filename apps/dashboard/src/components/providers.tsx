@@ -12,7 +12,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
         defaultOptions: {
           queries: {
             staleTime: 5 * 1000,
-            refetchInterval: 10 * 1000,
+            // NO global refetchInterval: it re-fetched EVERY query in the app
+            // (settings, marketplace, git providers, …) every 10s, multiplying
+            // server load for data that rarely changes. Pages that need live
+            // data (statuses, logs, metrics) set their own refetchInterval.
           },
         },
       }),

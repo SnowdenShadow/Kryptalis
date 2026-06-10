@@ -163,7 +163,8 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
         cpuCores: payload.cpuCores,
         totalMemory: BigInt(payload.totalMemory),
         status: 'ONLINE',
-        agentVersion: '0.1.0',
+        // agentVersion intentionally not set here — the first heartbeat
+        // reports the ldflags-stamped binary version (single source of truth).
         lastSeenAt: new Date(),
       },
     });

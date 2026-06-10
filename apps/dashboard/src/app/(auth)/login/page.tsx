@@ -51,10 +51,12 @@ export default function LoginPage() {
       router.push('/dashboard');
       toast.success(t('auth.welcomeBack') || 'Welcome back!');
     } catch (err) {
-      // Backend signals 'Two-factor code required' on the first call when 2FA
-      // is enabled. Switch into the totp prompt without flashing an error.
+      // Backend signals TOTP_REQUIRED (structured code) on the first call
+      // when 2FA is enabled. Switch into the totp prompt without flashing an
+      // error. Message regex kept as fallback for older API versions.
       const msg = err instanceof Error ? err.message : 'Login failed';
-      if (/two[- ]?factor/i.test(msg)) {
+      const errCode = err instanceof ApiError ? (err.raw as any)?.code : undefined;
+      if (errCode === 'TOTP_REQUIRED' || /two[- ]?factor/i.test(msg)) {
         setTwoFactorRequired(true);
         setTotpCode('');
         setLoading(false);

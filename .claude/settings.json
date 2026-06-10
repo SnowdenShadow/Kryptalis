@@ -79,7 +79,23 @@
       "PowerShell(\"---\")",
       "Bash(python3 -c \"import sys,json;d=json.load\\(sys.stdin\\);print\\(d['output']\\)\")",
       "Bash(docker exec *)",
-      "PowerShell(& \\(Get-Content graphify-out\\\\.graphify_python\\) graphify-out\\\\.graphify_dirs.py)"
+      "PowerShell(& \\(Get-Content graphify-out\\\\.graphify_python\\) graphify-out\\\\.graphify_dirs.py)",
+      "PowerShell(Remove-Item -Recurse -Force -Confirm:$false \"apps\\\\agent\\\\internal\\\\backup\")",
+      "PowerShell(Remove-Item -Recurse -Force -Confirm:$false \"apps\\\\agent\\\\internal\\\\deploy\")",
+      "PowerShell(Remove-Item -Recurse -Force -Confirm:$false \"apps\\\\agent\\\\internal\\\\docker\")",
+      "PowerShell(Remove-Item -Recurse -Force -Confirm:$false \"apps\\\\agent\\\\internal\\\\proxy\")",
+      "PowerShell(Remove-Item -Recurse -Force -Confirm:$false \"apps\\\\agent\\\\internal\\\\ssl\")",
+      "PowerShell(Remove-Item -Recurse -Force -Confirm:$false \"apps\\\\agent\\\\internal\\\\system\")",
+      "PowerShell(Set-Location apps\\\\agent; go mod tidy; go vet ./...; go build ./...; Write-Host \"exit: $LASTEXITCODE\"; Set-Location ..\\\\..)",
+      "PowerShell(Set-Location apps\\\\agent; $env:GOOS=\"linux\"; $env:GOARCH=\"amd64\"; go vet ./...; go build ./...; Write-Host \"exit: $LASTEXITCODE\"; $env:GOOS=\"\"; $env:GOARCH=\"\"; Set-Location ..\\\\..)",
+      "Read(//c/Users/Snowden/Desktop/Kryptalis-dev/**)",
+      "PowerShell(pnpm install 2>&1)",
+      "PowerShell(Set-Location apps\\\\api; pnpm exec tsc --noEmit -p tsconfig.json 2>&1 | Select-Object -First 30; Write-Host \"API exit: $LASTEXITCODE\"; Set-Location ..\\\\..)",
+      "PowerShell(Set-Location apps\\\\dashboard; pnpm exec tsc --noEmit -p tsconfig.json 2>&1 | Select-Object -First 40; Write-Host \"Dashboard exit: $LASTEXITCODE\"; Set-Location ..\\\\..)",
+      "PowerShell(Set-Location apps\\\\agent; $env:GOOS=\"linux\"; $env:GOARCH=\"amd64\"; go vet ./... 2>&1; go build ./... 2>&1; Write-Host \"Go exit: $LASTEXITCODE\"; $env:GOOS=\"\"; $env:GOARCH=\"\"; Set-Location ..\\\\..)",
+      "Bash(sh -n update.sh)",
+      "Bash(sh -n install.sh)",
+      "PowerShell(pnpm build 2>&1)"
     ]
   }
 }

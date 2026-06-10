@@ -132,7 +132,11 @@ services:
       # Which branch the auto-update tracks. Default: main.
       KRYPTALIS_BRANCH: ${KRYPTALIS_BRANCH:-main}
     ports:
-      - "4000:4000"
+      # API_BIND lets operators restrict the REST API to loopback once Caddy
+      # fronts it (API_BIND=127.0.0.1). Default stays 0.0.0.0 so a fresh
+      # install is reachable before any domain is configured — same pattern
+      # as DASHBOARD_BIND.
+      - "${API_BIND:-0.0.0.0}:4000:4000"
     healthcheck:
       test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:4000/api/health"]
       interval: 15s
@@ -190,12 +194,10 @@ services:
     #         and chpasswd manipulates file modes/owners as non-root.
     #       SETUID/SETGID — sshd drops privs to the connecting user.
     #       SYS_CHROOT   — ChrootDirectory + sshd privsep chroot.
-    #     We deliberately do NOT grant SYS_ADMIN. The earlier
-    #     architecture used `mount --bind` to graft Docker volumes
-    #     into per-user chroots, but it raced the Docker daemon and
-    #     could wipe app volumes. The current design uses per-user
-    #     ChrootDirectory drop-ins (/etc/ssh/sshd_config.d/<user>.conf)
-    #     which sshd evaluates itself — no mount magic needed.
+    #       SYS_ADMIN    — mount --bind grafting (see cap_add note below
+    #     for the full rationale: sshd's root:root 0755 chroot-leaf
+    #     requirement + the ACL-mask/stat() interaction make bind mounts
+    #     the only workable layout).
     #   - no-new-privileges blocks SUID escalation inside the container
     #     even if a user manages to write a binary to a writable mount.
     #   - pids_limit caps fork bombs from a compromised account.
