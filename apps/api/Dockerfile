@@ -13,7 +13,11 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=deps /app/packages/types/node_modules ./packages/types/node_modules
-COPY . .
+# Scoped copies (not `COPY . .`): a dashboard-only change must not
+# invalidate the api build cache, and vice versa.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
+COPY packages ./packages
+COPY apps/api ./apps/api
 RUN pnpm --filter @kryptalis/types build
 # Generate the Prisma client BEFORE tsc — otherwise TaskType, Role, ProjectRole, etc.
 # aren't exported from @prisma/client and the API build fails with TS2305.
@@ -39,20 +43,15 @@ COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder /app/apps/api/src/modules/marketplace/catalog.json ./apps/api/dist/modules/marketplace/catalog.json
 WORKDIR /app/apps/api
 EXPOSE 4000
-# Reconcile the DB schema on every start.
+# Apply versioned migrations on every start.
 #
-# `prisma db push` syncs schema.prisma directly to the database — fast,
-# idempotent, doesn't care whether the DB is empty or already has data.
-# Pre-1.0 we treat schema.prisma as the single source of truth and skip
-# the migration file workflow entirely.
+# `migrate deploy` only runs migrations not yet recorded in
+# _prisma_migrations — fast and idempotent, and destructive changes are
+# explicit SQL in a reviewed migration file instead of an implicit diff.
 #
-# DELIBERATELY no `--accept-data-loss`: combined with the auto-update
-# timer it would let any push to main that drops a column silently
-# destroy data on every installation. Without the flag a destructive
-# schema change makes the container fail loudly at startup instead —
-# the operator must run the destructive push by hand:
-#   docker compose exec api pnpm exec prisma db push --accept-data-loss
-#
-# Once we cut 1.0 we'll mint versioned migrations and switch to
-# `migrate deploy`.
-CMD ["sh", "-c", "pnpm exec prisma db push --skip-generate && node dist/main"]
+# Existing installs were provisioned with `db push` (no migrations
+# table): the first `migrate deploy` fails with P3005 ("schema not
+# empty"). The fallback baselines them by marking 0_init as applied
+# (the tables already exist), then deploys the rest. Fresh installs run
+# 0_init normally.
+CMD ["sh", "-c", "(pnpm exec prisma migrate deploy || (pnpm exec prisma migrate resolve --applied 0_init && pnpm exec prisma migrate deploy)) && node dist/main"]

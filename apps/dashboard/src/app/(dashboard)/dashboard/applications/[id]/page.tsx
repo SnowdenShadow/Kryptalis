@@ -563,7 +563,7 @@ export default function ApplicationDetailPage() {
   });
   const rotateWebhookMutation = useMutation({
     mutationFn: () => api.post(`/applications/${id}/webhook/rotate`),
-    onSuccess: () => { toast.success(t('toast.secretRotated')); refetchWebhook(); },
+    onSuccess: () => { toast.success(t('toast.secretRotated')); setShowRotateSecret(false); refetchWebhook(); },
     onError: (err: Error) => toast.error(err.message),
   });
   const autoDeployMutation = useMutation({
@@ -583,6 +583,22 @@ export default function ApplicationDetailPage() {
     },
     onError: (err: Error) => toast.error(err.message),
   });
+
+  // --- Rollback (redeploy the commit of an earlier successful deployment) ---
+  const [rollbackTarget, setRollbackTarget] = useState<Deployment | null>(null);
+  const rollbackMutation = useMutation({
+    mutationFn: (deploymentId: string) => api.post(`/applications/${id}/rollback`, { deploymentId }),
+    onSuccess: () => {
+      toast.success(t('toast.rollbackTriggered'));
+      setRollbackTarget(null);
+      queryClient.invalidateQueries({ queryKey: ['application', id] });
+      queryClient.invalidateQueries({ queryKey: ['deployments', id] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  // Confirmation dialog for webhook secret rotation (replaces native confirm).
+  const [showRotateSecret, setShowRotateSecret] = useState(false);
 
   const execMutation = useMutation({
     mutationFn: (command: string) => api.post(`/applications/${id}/exec`, { command }),
@@ -629,9 +645,9 @@ export default function ApplicationDetailPage() {
     return (
       <div className="space-y-6">
         <Button variant="ghost" onClick={() => router.push('/dashboard/applications')}>
-          <ArrowLeft size={16} /> Back to Applications
+          <ArrowLeft size={16} /> {t('apps.backToApps')}
         </Button>
-        <p className="text-muted-foreground">Application not found.</p>
+        <p className="text-muted-foreground">{t('apps.notFound')}</p>
       </div>
     );
   }
@@ -692,7 +708,7 @@ export default function ApplicationDetailPage() {
               if (!url) return null;
               return (
                 <Button onClick={() => window.open(url, '_blank')}>
-                  <ExternalLink size={14} /> Open
+                  <ExternalLink size={14} /> {t('apps.open')}
                 </Button>
               );
             })()}
@@ -754,7 +770,7 @@ export default function ApplicationDetailPage() {
             <Card>
               <CardHeader className="pb-2">
                 <CardDescription className="flex items-center gap-1.5">
-                  <Activity size={14} /> Status
+                  <Activity size={14} /> {t('apps.status')}
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -1090,11 +1106,25 @@ export default function ApplicationDetailPage() {
                         <th className="pb-2 pr-4 font-medium">{t('apps.colCommit')}</th>
                         <th className="pb-2 pr-4 font-medium">{t('apps.colMessage')}</th>
                         <th className="pb-2 pr-4 font-medium">{t('apps.colDuration')}</th>
-                        <th className="pb-2 font-medium">{t('apps.colDate')}</th>
+                        <th className="pb-2 pr-4 font-medium">{t('apps.colDate')}</th>
+                        <th className="pb-2 font-medium text-right">{t('apps.colActions')}</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {deployments.map((dep) => (
+                      {(() => {
+                        // The newest successful deployment IS the current
+                        // version — only OLDER successful, commit-pinned
+                        // deployments of a git app are rollback targets.
+                        const latestRunningId = deployments
+                          .filter((d) => d.status === 'RUNNING')
+                          .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))[0]?.id;
+                        return deployments.map((dep) => {
+                          const canRollback =
+                            !!app.gitUrl &&
+                            dep.status === 'RUNNING' &&
+                            !!dep.commitSha &&
+                            dep.id !== latestRunningId;
+                          return (
                         <tr
                           key={dep.id}
                           className="border-b last:border-0 cursor-pointer hover:bg-accent/40"
@@ -1123,11 +1153,29 @@ export default function ApplicationDetailPage() {
                           <td className="py-2.5 pr-4 text-muted-foreground">
                             {dep.duration ? formatDuration(dep.duration) : '--'}
                           </td>
-                          <td className="py-2.5 text-muted-foreground whitespace-nowrap">
+                          <td className="py-2.5 pr-4 text-muted-foreground whitespace-nowrap">
                             {timeAgo(dep.createdAt)}
                           </td>
+                          <td className="py-2.5 text-right">
+                            {canRollback && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={rollbackMutation.isPending || app.status === 'DEPLOYING'}
+                                title={t('apps.rollbackHint')}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setRollbackTarget(dep);
+                                }}
+                              >
+                                <RotateCcw size={12} /> {t('apps.rollback')}
+                              </Button>
+                            )}
+                          </td>
                         </tr>
-                      ))}
+                          );
+                        });
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -1698,7 +1746,7 @@ export default function ApplicationDetailPage() {
                       size="sm"
                       variant="outline"
                       disabled={rotateWebhookMutation.isPending}
-                      onClick={() => { if (confirm(t('apps.rotateConfirm'))) rotateWebhookMutation.mutate(); }}
+                      onClick={() => setShowRotateSecret(true)}
                     >
                       <RefreshCw size={12} /> {t('apps.rotateSecret')}
                     </Button>
@@ -1816,6 +1864,51 @@ export default function ApplicationDetailPage() {
             onClick={() => deleteMutation.mutate()}
           >
             {deleteMutation.isPending ? t('apps.deletingDots') : t('common.delete')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Rollback Confirmation Dialog                                        */}
+      {/* ------------------------------------------------------------------ */}
+      <Dialog open={!!rollbackTarget} onClose={() => setRollbackTarget(null)}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <RotateCcw size={16} /> {t('apps.rollbackTitle')}
+          </DialogTitle>
+          <DialogDescription>
+            {t('apps.rollbackDesc', { sha: rollbackTarget?.commitSha?.slice(0, 7) ?? '' })}
+            {rollbackTarget?.commitMessage ? ` — ${rollbackTarget.commitMessage}` : ''}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setRollbackTarget(null)}>{t('common.cancel')}</Button>
+          <Button
+            disabled={rollbackMutation.isPending}
+            onClick={() => rollbackTarget && rollbackMutation.mutate(rollbackTarget.id)}
+          >
+            {rollbackMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+            {rollbackMutation.isPending ? t('apps.rollbackPending') : t('apps.rollbackConfirmBtn')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Rotate Webhook Secret Dialog (replaces native confirm)              */}
+      {/* ------------------------------------------------------------------ */}
+      <Dialog open={showRotateSecret} onClose={() => setShowRotateSecret(false)}>
+        <DialogHeader>
+          <DialogTitle>{t('apps.rotateTitle')}</DialogTitle>
+          <DialogDescription>{t('apps.rotateConfirm')}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setShowRotateSecret(false)}>{t('common.cancel')}</Button>
+          <Button
+            variant="destructive"
+            disabled={rotateWebhookMutation.isPending}
+            onClick={() => rotateWebhookMutation.mutate()}
+          >
+            <RefreshCw size={12} /> {t('apps.rotateSecret')}
           </Button>
         </DialogFooter>
       </Dialog>

@@ -49,6 +49,17 @@ jobs:
       - name: Test API
         run: pnpm --filter @kryptalis/api exec vitest run --passWithNoTests
 
+      # Full production builds — a compile-clean tree can still fail
+      # `next build` (prerender errors) or `nest build`; with auto-update
+      # deploying main everywhere, a broken build must never reach main.
+      - name: Build API
+        run: pnpm --filter @kryptalis/api build
+
+      - name: Build Dashboard
+        run: pnpm --filter @kryptalis/dashboard build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:4000
+
   go:
     name: Go (Agent)
     runs-on: ubuntu-latest

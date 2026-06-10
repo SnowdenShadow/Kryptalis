@@ -38,6 +38,7 @@ export class SystemConfigService implements OnModuleInit {
     'smtp_pass',
     'backup_encryption_key',
     'github_webhook_secret',
+    's3_secret_key',
   ]);
 
   constructor(

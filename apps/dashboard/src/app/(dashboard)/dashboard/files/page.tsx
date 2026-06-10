@@ -996,6 +996,9 @@ function Editor({
   t: (key: string, vars?: Record<string, string | number>) => string;
 }) {
   const dirty = editing.draft !== editing.original;
+  // Confirmation dialog for closing with unsaved changes (replaces the old
+  // native confirm()).
+  const [showDiscard, setShowDiscard] = useState(false);
   return (
     <>
       <div className="flex items-center justify-between border-b border-border p-3">
@@ -1011,13 +1014,28 @@ function Editor({
             </Button>
           )}
           <Button size="sm" variant="outline" onClick={() => {
-            if (dirty && !confirm(t('files.editorDiscard'))) return;
+            if (dirty) { setShowDiscard(true); return; }
             onClose();
           }}>
             <X size={12} /> {t('files.editorClose')}
           </Button>
         </div>
       </div>
+      <Dialog open={showDiscard} onClose={() => setShowDiscard(false)}>
+        <DialogHeader>
+          <DialogTitle>{t('files.editorDiscardTitle')}</DialogTitle>
+          <DialogDescription>{t('files.editorDiscard')}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setShowDiscard(false)}>{t('common.cancel')}</Button>
+          <Button
+            variant="destructive"
+            onClick={() => { setShowDiscard(false); onClose(); }}
+          >
+            {t('files.editorDiscardBtn')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
       <CardContent className="p-3">
         <textarea
           value={editing.draft}

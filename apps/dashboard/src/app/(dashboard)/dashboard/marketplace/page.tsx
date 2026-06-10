@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { QuickDeployDialog } from '../applications/quick-deploy';
+import type { MarketplaceApp as MarketplaceAppResponse } from '@kryptalis/types';
 
 /**
  * Marketplace page — slimmed down.
@@ -25,15 +26,7 @@ import { QuickDeployDialog } from '../applications/quick-deploy';
  * users already know from /dashboard/applications.
  */
 
-interface MarketplaceApp {
-  name: string;
-  slug: string;
-  description: string;
-  category: string;
-  icon: string;
-  iconUrl?: string;
-  ports: number[];
-}
+type MarketplaceApp = MarketplaceAppResponse;
 
 const CATEGORIES = [
   'All',

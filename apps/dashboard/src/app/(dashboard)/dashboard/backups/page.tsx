@@ -108,6 +108,14 @@ export default function BackupsPage() {
     queryFn: () => api.get('/backups'),
   });
 
+  // Remote targets (S3/R2/B2) are only selectable once the admin has filled
+  // in the S3-compatible storage settings — the API reports readiness here.
+  const { data: targetInfo } = useQuery<{ targets: string[]; s3Configured: boolean }>({
+    queryKey: ['backup-targets'],
+    queryFn: () => api.get('/backups/targets'),
+  });
+  const s3Configured = targetInfo?.s3Configured ?? false;
+
   const createMutation = useMutation({
     mutationFn: (data: {
       name: string;
@@ -367,12 +375,22 @@ export default function BackupsPage() {
               value={target}
               onChange={(e) => setTarget(e.target.value)}
             >
-              {TARGETS.map((tgt) => (
-                <option key={tgt.value} value={tgt.value}>
-                  {tgt.label}
-                </option>
-              ))}
+              {TARGETS.map((tgt) => {
+                const remoteDisabled = tgt.value !== 'LOCAL' && !s3Configured;
+                return (
+                  <option key={tgt.value} value={tgt.value} disabled={remoteDisabled}>
+                    {tgt.label}
+                    {remoteDisabled ? ' — S3 storage not configured' : ''}
+                  </option>
+                );
+              })}
             </Select>
+            {!s3Configured && (
+              <p className="text-xs text-muted-foreground">
+                Remote targets need S3-compatible storage. An admin can set the
+                endpoint, bucket and keys in Admin → System Config.
+              </p>
+            )}
           </div>
 
           <div className="space-y-3">

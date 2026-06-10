@@ -94,21 +94,21 @@ export class ApplicationOpsService {
     return this.syncStatus(fresh);
   }
 
-  async redeploy(userId: string, id: string) {
-    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER');
-
-    // Concurrency guard. Two redeploys in flight at the same time race for
-    // the app dir, clobber compose files mid-build, and produce conflicting
-    // Deployment rows. Refuse a second one while a fresh deployment is
-    // still PENDING/BUILDING/DEPLOYING. A stuck DEPLOYING older than 30
-    // minutes is treated as crashed and overridden.
-    // Filter on createdAt — startedAt is null until the worker actually
-    // picks up the job, and that's exactly the small window we MUST
-    // protect against (the gap between row insert and the build step
-    // wiping the app dir is when a second redeploy click would conflict).
+  /**
+   * Concurrency guard. Two deploys in flight at the same time race for
+   * the app dir, clobber compose files mid-build, and produce conflicting
+   * Deployment rows. Refuse a second one while a fresh deployment is
+   * still PENDING/BUILDING/DEPLOYING. A stuck DEPLOYING older than 30
+   * minutes is treated as crashed and overridden.
+   * Filter on createdAt — startedAt is null until the worker actually
+   * picks up the job, and that's exactly the small window we MUST
+   * protect against (the gap between row insert and the build step
+   * wiping the app dir is when a second redeploy click would conflict).
+   */
+  private async assertNoInflightDeployment(applicationId: string) {
     const inflight = await this.prisma.deployment.findFirst({
       where: {
-        applicationId: id,
+        applicationId,
         status: { in: ['PENDING', 'BUILDING', 'DEPLOYING'] as any },
         createdAt: { gt: new Date(Date.now() - 30 * 60 * 1000) },
       },
@@ -119,6 +119,27 @@ export class ApplicationOpsService {
         `A deployment is already running (status: ${inflight.status}). Wait for it to finish or cancel it first.`,
       );
     }
+  }
+
+  /**
+   * Resolve the git auth header from the persisted git provider — providers
+   * stay private per user, BUT any project member can (re)deploy using the
+   * connector chosen at create time. (The token itself is never exposed
+   * back to the requester.)
+   */
+  private async resolveCloneHeader(app: { gitProviderId: string | null }): Promise<string | undefined> {
+    if (!app.gitProviderId) return undefined;
+    const gp = await this.prisma.gitProvider.findUnique({
+      where: { id: app.gitProviderId },
+    });
+    if (!gp) return undefined;
+    return this.deploy.buildAuthHeader(gp.provider, this.encryption.decrypt(gp.token));
+  }
+
+  async redeploy(userId: string, id: string) {
+    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER');
+
+    await this.assertNoInflightDeployment(id);
 
     // Docker-image-only app: re-pull + recreate. No git clone needed.
     if (!app.gitUrl && app.dockerImage) {
@@ -137,16 +158,7 @@ export class ApplicationOpsService {
       throw new BadRequestException('Application has no git URL or docker image to redeploy from');
     }
 
-    // resolve auth header from the persisted git provider — providers stay private per user,
-    // BUT any project member can redeploy using the connector chosen at create time.
-    // (The token itself is never exposed back to the requester.)
-    let cloneHeader: string | undefined;
-    if (app.gitProviderId) {
-      const gp = await this.prisma.gitProvider.findUnique({
-        where: { id: app.gitProviderId },
-      });
-      if (gp) cloneHeader = this.deploy.buildAuthHeader(gp.provider, this.encryption.decrypt(gp.token));
-    }
+    const cloneHeader = await this.resolveCloneHeader(app);
 
     const deployment = await this.prisma.deployment.create({
       data: { applicationId: id, status: 'PENDING', triggeredById: userId },
@@ -165,6 +177,74 @@ export class ApplicationOpsService {
       portMapping: (app.portMapping as Record<string, number>) || undefined,
     }).catch(() => {});
     return { message: 'Redeploy triggered', deploymentId: deployment.id };
+  }
+
+  /**
+   * Manual rollback: redeploy the exact commit of an earlier successful
+   * deployment. The automatic rollback in the deploy pipeline only fires on
+   * a FAILED deploy — this endpoint lets a user revert a deploy that
+   * succeeded technically but shipped a bad version.
+   *
+   * Git-based apps only (a deployment must carry a commitSha to be
+   * reproducible). The clone is non-shallow + detached checkout, so the
+   * target commit must still be reachable from the configured branch
+   * (force-pushed-away commits will fail with a clear log).
+   */
+  async rollback(userId: string, id: string, deploymentId: string) {
+    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER');
+
+    if (!app.gitUrl) {
+      throw new BadRequestException(
+        'Rollback requires a git-based application — docker-image apps have no commit history to roll back to.',
+      );
+    }
+    if (!deploymentId) {
+      throw new BadRequestException('deploymentId is required');
+    }
+
+    const target = await this.prisma.deployment.findFirst({
+      where: { id: deploymentId, applicationId: id },
+    });
+    if (!target) throw new NotFoundException('Deployment not found for this application');
+    if (!target.commitSha) {
+      throw new BadRequestException('Target deployment has no commit SHA to roll back to');
+    }
+
+    // Remote (agent) deploys always build the branch tip — the agent
+    // protocol has no commit-pinning yet. Refuse instead of silently
+    // deploying the wrong code.
+    const server = await resolveAppServer(this.prisma, id);
+    if (!isAppLocal(server)) {
+      throw new BadRequestException('Rollback to a specific commit is not supported for apps on remote servers yet');
+    }
+
+    await this.assertNoInflightDeployment(id);
+
+    const cloneHeader = await this.resolveCloneHeader(app);
+
+    const deployment = await this.prisma.deployment.create({
+      data: {
+        applicationId: id,
+        status: 'PENDING',
+        triggeredById: userId,
+        commitMessage: `Rollback to ${target.commitSha.slice(0, 7)}`,
+      },
+    });
+    await this.prisma.application.update({
+      where: { id },
+      data: { status: AppStatus.DEPLOYING },
+    });
+    this.deploy.runDeploy(deployment.id, id, app.name, app.gitUrl, app.gitBranch || 'main', {
+      port: app.port,
+      hostPort: app.hostPort ?? undefined,
+      envVars: this.env.decryptEnvVars(app.envVars),
+      buildCommand: app.buildCommand,
+      startCommand: app.startCommand,
+      cloneHeader,
+      portMapping: (app.portMapping as Record<string, number>) || undefined,
+      gitRef: target.commitSha,
+    }).catch(() => {});
+    return { message: `Rollback to ${target.commitSha.slice(0, 7)} triggered`, deploymentId: deployment.id };
   }
 
   // ── logs / exec ────────────────────────────────────────────────────

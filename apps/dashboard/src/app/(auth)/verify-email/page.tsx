@@ -9,6 +9,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/com
 import { useAuthStore } from '@/lib/store';
 import { api } from '@/lib/api';
 import { toast } from 'sonner';
+import { useTranslation } from '@/lib/i18n';
 
 // Next 15 refuses to statically prerender a page that calls
 // useSearchParams() without an enclosing <Suspense>. The verification
@@ -28,10 +29,13 @@ type State = 'pending' | 'success' | 'error';
  * second mount no-ops.
  */
 function VerifyEmailInner() {
+  const { t } = useTranslation();
   const router = useRouter();
   const params = useSearchParams();
   const { setAuth } = useAuthStore();
   const [state, setState] = useState<State>('pending');
+  // 'missing' → no token in URL; otherwise the raw API error message
+  // (server-provided, shown as-is) or '' for the generic fallback.
   const [error, setError] = useState<string>('');
   const ran = useRef(false);
 
@@ -41,7 +45,7 @@ function VerifyEmailInner() {
     const token = params?.get('token');
     if (!token) {
       setState('error');
-      setError('Missing verification token');
+      setError('missing');
       return;
     }
     (async () => {
@@ -52,14 +56,14 @@ function VerifyEmailInner() {
         }>('/auth/verify-email', { token });
         setAuth(res.user, res.accessToken);
         setState('success');
-        toast.success('Email verified!');
+        toast.success(t('auth.verifySuccessToast'));
         setTimeout(() => router.push('/dashboard'), 800);
       } catch (err) {
         setState('error');
-        setError(err instanceof Error ? err.message : 'Verification failed');
+        setError(err instanceof Error ? err.message : '');
       }
     })();
-  }, [params, router, setAuth]);
+  }, [params, router, setAuth, t]);
 
   return (
     <Card className="w-full max-w-md">
@@ -70,26 +74,30 @@ function VerifyEmailInner() {
           {state === 'error' && <XCircle className="h-6 w-6 text-destructive" />}
         </div>
         <CardTitle>
-          {state === 'pending' && 'Verifying your email'}
-          {state === 'success' && 'Email verified'}
-          {state === 'error' && 'Verification failed'}
+          {state === 'pending' && t('auth.verifyTitle')}
+          {state === 'success' && t('auth.verifySuccessTitle')}
+          {state === 'error' && t('auth.verifyFailTitle')}
         </CardTitle>
         <CardDescription>
-          {state === 'pending' && 'One moment while we confirm your account.'}
-          {state === 'success' && 'Redirecting you to your dashboard...'}
-          {state === 'error' && (error || 'Your verification link is invalid or expired.')}
+          {state === 'pending' && t('auth.verifyPendingDesc')}
+          {state === 'success' && t('auth.verifySuccessDesc')}
+          {state === 'error' && (
+            error === 'missing'
+              ? t('auth.verifyMissingToken')
+              : error || t('auth.verifyFailDesc')
+          )}
         </CardDescription>
       </CardHeader>
       {state === 'error' && (
         <CardContent className="space-y-3">
           <Link href="/register" className="block">
             <Button type="button" variant="outline" className="w-full">
-              Request a new link
+              {t('auth.verifyRequestNew')}
             </Button>
           </Link>
           <Link href="/login" className="block">
             <Button type="button" variant="ghost" className="w-full">
-              Back to sign in
+              {t('auth.backToLogin')}
             </Button>
           </Link>
         </CardContent>
@@ -99,6 +107,7 @@ function VerifyEmailInner() {
 }
 
 export default function VerifyEmailPage() {
+  const { t } = useTranslation();
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
       <Suspense
@@ -108,7 +117,7 @@ export default function VerifyEmailPage() {
               <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-muted">
                 <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
               </div>
-              <CardTitle>Verifying your email</CardTitle>
+              <CardTitle>{t('auth.verifyTitle')}</CardTitle>
             </CardHeader>
           </Card>
         }

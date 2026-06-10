@@ -19,8 +19,11 @@ import { authenticator } from 'otplib';
 authenticator.options = { window: 1 };
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
+import { SystemConfigService } from '../system/system-config.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { passwordResetExpiry, isResetTokenUsable } from './password-reset';
+import { resolveDefaultRole } from './registration-policy';
 
 /**
  * Auth service with the hard-earned 2024 baselines:
@@ -43,8 +46,8 @@ import { LoginDto } from './dto/login.dto';
  *   valid TOTP code or one of the bcrypt-hashed backup codes.
  *
  * Password reset is implemented as a separate flow (forgotPassword /
- * resetPassword) using sha256-hashed reset tokens with 30-min expiry and
- * single-use semantics.
+ * resetPassword) using sha256-hashed reset tokens with 1-hour expiry and
+ * single-use semantics (policy in ./password-reset.ts).
  */
 const TIMING_DUMMY_HASH = '$2b$12$KIXqEJfQAQbJUTo94X5KQuQpQ9OYFJrJEZ4SAuNG0jQfM5KIc9pIu';
 
@@ -62,6 +65,9 @@ export class AuthService {
     // dep-free if NotificationsService ever needs to read from
     // AuthService (e.g. to honour per-user mail preferences).
     private notifications: NotificationsService,
+    // @Global SystemModule — in-memory cached SystemSetting reads for the
+    // registration policy toggles (require_admin_approval, default_user_role).
+    private systemConfig: SystemConfigService,
   ) {}
 
   // ── setup status ──────────────────────────────────────────────────
@@ -143,18 +149,34 @@ export class AuthService {
         throw new BadRequestException(strength.reason);
       }
 
+      // Registration policy (admin-managed SystemSettings, read from the
+      // in-memory SystemConfigService cache):
+      //   - require_admin_approval → new accounts park in PENDING_APPROVAL
+      //     until an admin activates them (no email round-trip needed).
+      //   - default_user_role → USER (default) or VIEWER; anything else is
+      //     ignored so a tampered row can't mint privileged accounts.
+      const requireApproval =
+        !isBootstrapPath && this.systemConfig.getBool('require_admin_approval');
+      const defaultRole = resolveDefaultRole(this.systemConfig.get('default_user_role'));
+
       const hashedPassword = await bcrypt.hash(dto.password, 12);
       const user = await tx.user.create({
         data: {
           name: dto.name,
           email,
           password: hashedPassword,
-          role: isBootstrapPath ? 'SUPERADMIN' : 'USER',
+          role: isBootstrapPath ? 'SUPERADMIN' : defaultRole,
           // Bootstrap path stays auto-ACTIVE — it's the install flow with no
           // SMTP wired yet, so an email round-trip is structurally impossible.
-          // Every other registration starts PENDING_VERIFICATION until the
-          // user proves inbox control via /auth/verify-email.
-          status: isBootstrapPath ? 'ACTIVE' : 'PENDING_VERIFICATION',
+          // With require_admin_approval on, the account waits for an admin
+          // (PENDING_APPROVAL). Every other registration starts
+          // PENDING_VERIFICATION until the user proves inbox control via
+          // /auth/verify-email.
+          status: isBootstrapPath
+            ? 'ACTIVE'
+            : requireApproval
+              ? 'PENDING_APPROVAL'
+              : 'PENDING_VERIFICATION',
         },
       });
 
@@ -205,6 +227,24 @@ export class AuthService {
             user: { id: user.id, name: user.name, email: user.email, role: user.role },
             ...tokens,
           },
+        };
+      }
+
+      // Approval-gated signup: no verification email — the account is
+      // waiting on an ADMIN, not on the registrant's inbox. The dashboard
+      // shows a "pending approval" screen off the `pendingApproval` flag.
+      if (requireApproval) {
+        return {
+          bootstrap: false as const,
+          response: {
+            message:
+              'Account created. An administrator must approve it before you can sign in.',
+            pendingApproval: true,
+            user: { id: user.id, name: user.name, email: user.email },
+          },
+          // Keeps the discriminated union shape aligned with the
+          // verification branch below (post-commit code reads this field).
+          pendingVerification: undefined,
         };
       }
 
@@ -358,6 +398,11 @@ export class AuthService {
     }
     if (user.status === 'PENDING_VERIFICATION') {
       throw new ForbiddenException('Email not verified');
+    }
+    if (user.status === 'PENDING_APPROVAL') {
+      throw new ForbiddenException(
+        'Your account is awaiting administrator approval. You will be able to sign in once it has been approved.',
+      );
     }
 
     // Account-level lockout. After 5 failed password OR TOTP attempts the
@@ -719,9 +764,9 @@ export class AuthService {
       return { message: 'If that email is registered, a reset link has been sent.' };
     }
 
-    const token = randomBytes(32).toString('base64url');
+    const token = randomBytes(32).toString('hex');
     const tokenHash = this.encryption.hash(token);
-    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+    const expiresAt = passwordResetExpiry();
 
     await this.prisma.passwordResetToken.create({
       data: { userId: user.id, tokenHash, expiresAt },
@@ -752,7 +797,7 @@ export class AuthService {
       where: { tokenHash },
       include: { user: true },
     });
-    if (!row || row.usedAt || row.expiresAt < new Date()) {
+    if (!row || !isResetTokenUsable(row)) {
       throw new BadRequestException('Reset link is invalid or expired.');
     }
 

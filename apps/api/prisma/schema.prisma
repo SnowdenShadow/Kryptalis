@@ -39,6 +39,7 @@ model User {
   backupCodes         TwoFactorBackupCode[]
   verificationTokens  EmailVerificationToken[]
   sftpAccounts        SftpAccount[]
+  notifications       Notification[]
 
   @@map("users")
 }
@@ -77,6 +78,10 @@ enum UserStatus {
   SUSPENDED
   BANNED
   PENDING_VERIFICATION
+  // Set at registration when the `require_admin_approval` SystemSetting is
+  // true. Login is refused (403) until an admin flips the user to ACTIVE
+  // via PATCH /admin/users/:id/status.
+  PENDING_APPROVAL
 }
 
 model SystemSetting {
@@ -892,4 +897,27 @@ model AuditLog {
   @@index([userId])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+// ─── In-app notifications ────────────────────────────────────────────
+//
+// Persisted feed entries backing the dashboard bell. One row per
+// recipient — "global" events (deploy outcome, SSL, backup, alert)
+// fan out to every active ADMIN/SUPERADMIN at dispatch time so each
+// recipient tracks their own read state. userId is nullable to allow
+// admin-wide broadcast rows in the future.
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String?
+  type      String
+  title     String
+  body      String?
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("notifications")
 }

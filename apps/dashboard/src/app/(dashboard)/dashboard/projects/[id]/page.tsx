@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -25,6 +25,7 @@ import {
   STATUS_COLOR,
   STATUS_VARIANT,
   FRAMEWORK_LABELS as FW,
+  makeTimeAgo,
   publicAppUrl,
 } from '@/lib/app-format';
 
@@ -50,15 +51,8 @@ interface Member {
   user: { id: string; name: string; email: string };
 }
 
-// STATUS_COLOR / STATUS_VARIANT / FW / publicAppUrl come from @/lib/app-format.
-
-function timeAgo(d: string) {
-  const s = Math.floor((Date.now() - new Date(d).getTime()) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
+// STATUS_COLOR / STATUS_VARIANT / FW / publicAppUrl / makeTimeAgo come
+// from @/lib/app-format.
 
 type Tab = 'overview' | 'applications' | 'mesh' | 'members' | 'settings';
 
@@ -99,6 +93,16 @@ export default function ProjectDetailPage() {
   const [showDelete, setShowDelete] = useState(false);
   const [showMigrate, setShowMigrate] = useState(false);
   const [migrateTargetId, setMigrateTargetId] = useState('');
+  const timeAgo = useMemo(
+    () =>
+      makeTimeAgo(t, {
+        just: 'projects.timeJust',
+        min: 'projects.timeMin',
+        hour: 'projects.timeHour',
+        day: 'projects.timeDay',
+      }),
+    [t],
+  );
 
   const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
     queryKey: ['public-settings'],
@@ -129,7 +133,7 @@ export default function ProjectDetailPage() {
   const TABS: { id: Tab; label: string }[] = [
     { id: 'overview', label: t('projects.tab.overview') },
     { id: 'applications', label: t('projects.tab.applications') },
-    { id: 'mesh', label: 'Service mesh' },
+    { id: 'mesh', label: t('projects.tab.mesh') },
     { id: 'members', label: t('projects.tab.members') },
     { id: 'settings', label: t('projects.tab.settings') },
   ];
@@ -206,6 +210,7 @@ export default function ProjectDetailPage() {
     onSuccess: () => {
       toast.success(t('toast.memberRemoved'));
       queryClient.invalidateQueries({ queryKey: ['project-members', id] });
+      setRemoveTarget(null);
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -216,9 +221,14 @@ export default function ProjectDetailPage() {
       toast.success(t('toast.ownershipTransferred'));
       queryClient.invalidateQueries({ queryKey: ['project-members', id] });
       queryClient.invalidateQueries({ queryKey: ['project', id] });
+      setTransferTarget(null);
     },
     onError: (err: Error) => toast.error(err.message),
   });
+
+  // Confirmation dialogs (replace the old native confirm() calls).
+  const [transferTarget, setTransferTarget] = useState<Member | null>(null);
+  const [removeTarget, setRemoveTarget] = useState<Member | null>(null);
 
   if (isLoading) {
     return (
@@ -232,8 +242,8 @@ export default function ProjectDetailPage() {
   if (!project) {
     return (
       <div className="space-y-6">
-        <Button variant="ghost" onClick={() => router.push('/dashboard/projects')}><ArrowLeft size={16} /> Back</Button>
-        <p className="text-muted-foreground">Project not found.</p>
+        <Button variant="ghost" onClick={() => router.push('/dashboard/projects')}><ArrowLeft size={16} /> {t('common.back')}</Button>
+        <p className="text-muted-foreground">{t('projects.notFound')}</p>
       </div>
     );
   }
@@ -327,19 +337,19 @@ export default function ProjectDetailPage() {
                 <div className="rounded-lg border border-border p-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Server</p>
-                      <p className="font-semibold truncate">{project.server?.name ?? 'Unknown'}</p>
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">{t('projects.serverLabel')}</p>
+                      <p className="font-semibold truncate">{project.server?.name ?? t('projects.unknown')}</p>
                       {project.server?.host && <p className="text-xs text-muted-foreground font-mono truncate">{project.server.host}</p>}
                     </div>
                     {isMulti && has(myRole, 'ADMIN') && servers.filter(s => s.id !== project.serverId && s.status === 'ONLINE').length > 0 && (
-                      <Button size="sm" variant="outline" onClick={() => setShowMigrate(true)} title="Move project to another server">
+                      <Button size="sm" variant="outline" onClick={() => setShowMigrate(true)} title={t('projects.moveServerTitle')}>
                         <ArrowRightLeft size={12} />
                       </Button>
                     )}
                   </div>
                 </div>
                 <div className="rounded-lg border border-border p-3">
-                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Created</p>
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">{t('common.created')}</p>
                   <p className="font-semibold">{timeAgo(project.createdAt)}</p>
                   <p className="text-xs text-muted-foreground">{new Date(project.createdAt).toLocaleDateString()}</p>
                 </div>
@@ -382,11 +392,11 @@ export default function ProjectDetailPage() {
       {activeTab === 'applications' && (
         <>
           <div className="flex items-center justify-between">
-            <p className="text-sm text-muted-foreground">{apps.length} application{apps.length !== 1 ? 's' : ''} in this project</p>
+            <p className="text-sm text-muted-foreground">{t('projects.appsCount', { n: apps.length })}</p>
             {has(myRole, 'DEVELOPER') && (
               <div className="flex gap-2">
-                <Link href="/dashboard/applications"><Button size="sm"><Plus size={14} /> Deploy</Button></Link>
-                <Link href="/dashboard/marketplace"><Button size="sm" variant="outline"><Store size={14} /> Marketplace</Button></Link>
+                <Link href="/dashboard/applications"><Button size="sm"><Plus size={14} /> {t('projects.deployBtn')}</Button></Link>
+                <Link href="/dashboard/marketplace"><Button size="sm" variant="outline"><Store size={14} /> {t('projects.marketplaceBtn')}</Button></Link>
               </div>
             )}
           </div>
@@ -395,8 +405,8 @@ export default function ProjectDetailPage() {
             <Card>
               <CardContent className="flex flex-col items-center justify-center py-16">
                 <Rocket size={48} className="mb-4 text-muted-foreground" />
-                <p className="text-lg font-medium">No applications yet</p>
-                <p className="mt-1 text-sm text-muted-foreground">Deploy or install an application to get started</p>
+                <p className="text-lg font-medium">{t('projects.noApps')}</p>
+                <p className="mt-1 text-sm text-muted-foreground">{t('projects.noAppsDesc')}</p>
               </CardContent>
             </Card>
           ) : (
@@ -421,18 +431,18 @@ export default function ProjectDetailPage() {
                             </div>
                             {isRunning && openUrl && (
                               <Button size="sm" className="shrink-0" onClick={e => { e.preventDefault(); e.stopPropagation(); window.open(openUrl, '_blank'); }}>
-                                <ExternalLink size={12} /> Open
+                                <ExternalLink size={12} /> {t('projects.open')}
                               </Button>
                             )}
                           </div>
 
                           <div className="grid grid-cols-2 gap-3 text-sm">
                             <div className="rounded-lg border border-border p-2">
-                              <p className="text-xs text-muted-foreground">Port</p>
+                              <p className="text-xs text-muted-foreground">{t('projects.port')}</p>
                               <p className="font-mono font-bold">{app.port || 'N/A'}</p>
                             </div>
                             <div className="rounded-lg border border-border p-2">
-                              <p className="text-xs text-muted-foreground">Status</p>
+                              <p className="text-xs text-muted-foreground">{t('common.status')}</p>
                               <p className={cn('font-bold', isRunning ? 'text-emerald-500' : app.status === 'ERROR' ? 'text-red-500' : 'text-muted-foreground')}>{app.status}</p>
                             </div>
                           </div>
@@ -466,38 +476,45 @@ export default function ProjectDetailPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-lg flex items-center gap-2">
-                <Network size={18} /> Service mesh
+                <Network size={18} /> {t('projects.mesh.title')}
               </CardTitle>
-              <CardDescription>
-                Containers in this project share a docker network — they can reach each other by these hostnames.
-              </CardDescription>
+              <CardDescription>{t('projects.mesh.desc')}</CardDescription>
             </CardHeader>
             <CardContent>
               {mesh && (
                 <div className="space-y-4">
                   <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2 text-xs">
                     <Network size={12} className="text-muted-foreground" />
-                    <span className="text-muted-foreground">Network:</span>
+                    <span className="text-muted-foreground">{t('projects.mesh.network')}</span>
                     <code className="font-mono">{mesh.networkName}</code>
                   </div>
 
                   {/* Scope warning — internal hostnames are project-local. */}
                   <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-3 text-xs space-y-1">
                     <p className="font-semibold text-blue-600 flex items-center gap-1">
-                      <Info size={11} /> Scope
+                      <Info size={11} /> {t('projects.mesh.scope')}
                     </p>
                     <p className="text-muted-foreground">
-                      These hostnames work <span className="font-semibold">only between services inside this project</span>, on the same Docker host. To reach a service in a different project (or on a different server), use its public HTTPS URL via its attached domain instead.
+                      {(() => {
+                        const parts = t('projects.mesh.scopeDesc', { bold: '__B__' }).split('__B__');
+                        return (
+                          <>
+                            {parts[0]}
+                            <span className="font-semibold">{t('projects.mesh.scopeBold')}</span>
+                            {parts[1] || ''}
+                          </>
+                        );
+                      })()}
                     </p>
                   </div>
 
                   {mesh.apps.length === 0 && mesh.databases.length === 0 && (
-                    <p className="text-sm text-muted-foreground italic">No apps or databases yet. Add some to see the mesh.</p>
+                    <p className="text-sm text-muted-foreground italic">{t('projects.mesh.empty')}</p>
                   )}
 
                   {mesh.apps.length > 0 && (
                     <div>
-                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Applications ({mesh.apps.length})</p>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">{t('projects.mesh.apps', { n: mesh.apps.length })}</p>
                       <div className="space-y-2">
                         {mesh.apps.map((n) => (
                           <div key={n.id} className="rounded-md border border-border p-2.5 flex items-center gap-3">
@@ -517,7 +534,7 @@ export default function ProjectDetailPage() {
 
                   {mesh.databases.length > 0 && (
                     <div>
-                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Databases ({mesh.databases.length})</p>
+                      <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">{t('projects.mesh.databases', { n: mesh.databases.length })}</p>
                       <div className="space-y-2">
                         {mesh.databases.map((d) => (
                           <div key={d.id} className="rounded-md border border-border p-2.5 flex items-center gap-3">
@@ -538,9 +555,9 @@ export default function ProjectDetailPage() {
                   {mesh.envSuggestions.length > 0 && (
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2 flex items-center gap-1">
-                        <Info size={11} /> Suggested env vars
+                        <Info size={11} /> {t('projects.mesh.envSuggestions')}
                       </p>
-                      <p className="text-xs text-muted-foreground mb-2">Paste into an app's environment variables to link it to a database.</p>
+                      <p className="text-xs text-muted-foreground mb-2">{t('projects.mesh.envHint')}</p>
                       <div className="space-y-2">
                         {mesh.envSuggestions.map((s, i) => {
                           const key = `env-${i}`;
@@ -549,7 +566,18 @@ export default function ProjectDetailPage() {
                             <div key={key} className="rounded-md border border-border p-2.5">
                               <div className="flex items-center justify-between gap-2 flex-wrap">
                                 <p className="text-xs text-muted-foreground">
-                                  Connect <span className="font-medium text-foreground">{s.to.name}</span> → <span className="font-medium text-foreground">{s.from.name}</span>
+                                  {(() => {
+                                    const parts = t('projects.mesh.connectLabel', { to: '__T__', from: '__F__' }).split(/__T__|__F__/);
+                                    return (
+                                      <>
+                                        {parts[0]}
+                                        <span className="font-medium text-foreground">{s.to.name}</span>
+                                        {parts[1] || ''}
+                                        <span className="font-medium text-foreground">{s.from.name}</span>
+                                        {parts[2] || ''}
+                                      </>
+                                    );
+                                  })()}
                                 </p>
                                 <button onClick={() => copyMesh(line, key)} className="text-muted-foreground hover:text-foreground">
                                   {copiedMesh === key ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
@@ -618,12 +646,8 @@ export default function ProjectDetailPage() {
                             <Button
                               size="sm"
                               variant="outline"
-                              title="Transfer ownership"
-                              onClick={() => {
-                                if (confirm(`Transfer project ownership to ${m.user.email}? You will be downgraded to ADMIN.`)) {
-                                  transferOwnershipMutation.mutate(m.user.id);
-                                }
-                              }}
+                              title={t('members.transferTitle')}
+                              onClick={() => setTransferTarget(m)}
                             >
                               <Crown size={12} />
                             </Button>
@@ -631,11 +655,7 @@ export default function ProjectDetailPage() {
                           <Button
                             size="icon"
                             variant="ghost"
-                            onClick={() => {
-                              if (confirm(t('members.removeConfirm'))) {
-                                removeMemberMutation.mutate(m.id);
-                              }
-                            }}
+                            onClick={() => setRemoveTarget(m)}
                           >
                             <Trash2 size={14} />
                           </Button>
@@ -670,19 +690,19 @@ export default function ProjectDetailPage() {
             <CardContent>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <div className="rounded-lg border border-border p-3">
-                  <p className="text-xs font-medium text-muted-foreground uppercase mb-1">Name</p>
+                  <p className="text-xs font-medium text-muted-foreground uppercase mb-1">{t('common.name')}</p>
                   <p className="font-semibold">{project.name}</p>
                 </div>
                 <div className="rounded-lg border border-border p-3">
-                  <p className="text-xs font-medium text-muted-foreground uppercase mb-1">Description</p>
-                  <p className="font-semibold">{project.description || 'No description'}</p>
+                  <p className="text-xs font-medium text-muted-foreground uppercase mb-1">{t('common.description')}</p>
+                  <p className="font-semibold">{project.description || t('projects.noDescription')}</p>
                 </div>
                 <div className="rounded-lg border border-border p-3">
-                  <p className="text-xs font-medium text-muted-foreground uppercase mb-1">Server</p>
+                  <p className="text-xs font-medium text-muted-foreground uppercase mb-1">{t('projects.serverLabel')}</p>
                   <p className="font-semibold">{project.server?.name}</p>
                 </div>
                 <div className="rounded-lg border border-border p-3">
-                  <p className="text-xs font-medium text-muted-foreground uppercase mb-1">Created</p>
+                  <p className="text-xs font-medium text-muted-foreground uppercase mb-1">{t('common.created')}</p>
                   <p className="font-semibold">{new Date(project.createdAt).toLocaleDateString()}</p>
                 </div>
               </div>
@@ -766,11 +786,21 @@ export default function ProjectDetailPage() {
       <Dialog open={showMigrate} onClose={() => { setShowMigrate(false); setMigrateTargetId(''); }}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <ArrowRightLeft size={16} /> Move project to another server
+            <ArrowRightLeft size={16} /> {t('projects.moveServerTitle')}
           </DialogTitle>
           <DialogDescription>
-            Every app and database in <span className="font-mono">{project.name}</span> will be torn down on{' '}
-            <span className="font-semibold">{project.server?.name}</span> and re-deployed on the target server. Domains follow automatically.
+            {(() => {
+              const parts = t('projects.moveServerDesc', { name: '__N__', server: '__S__' }).split(/__N__|__S__/);
+              return (
+                <>
+                  {parts[0]}
+                  <span className="font-mono">{project.name}</span>
+                  {parts[1] || ''}
+                  <span className="font-semibold">{project.server?.name}</span>
+                  {parts[2] || ''}
+                </>
+              );
+            })()}
           </DialogDescription>
         </DialogHeader>
 
@@ -778,15 +808,15 @@ export default function ProjectDetailPage() {
           <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 text-xs flex items-start gap-2">
             <AlertTriangle size={14} className="text-orange-500 shrink-0 mt-0.5" />
             <div>
-              <p className="font-semibold text-orange-600">Downtime expected.</p>
-              <p className="text-muted-foreground mt-0.5">Apps are unavailable while they redeploy on the new server. Data in mounted volumes is not copied across hosts — set up backups or use external DBs first.</p>
+              <p className="font-semibold text-orange-600">{t('projects.moveDowntime')}</p>
+              <p className="text-muted-foreground mt-0.5">{t('projects.moveDowntimeDesc')}</p>
             </div>
           </div>
 
           <div>
-            <Label className="text-xs">Target server</Label>
+            <Label className="text-xs">{t('projects.targetServer')}</Label>
             <Select value={migrateTargetId} onChange={(e) => setMigrateTargetId(e.target.value)}>
-              <option value="">Select server…</option>
+              <option value="">{t('projects.selectServerOption')}</option>
               {servers
                 .filter(s => s.id !== project.serverId && s.status === 'ONLINE')
                 .map(s => (
@@ -797,13 +827,58 @@ export default function ProjectDetailPage() {
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => { setShowMigrate(false); setMigrateTargetId(''); }}>Cancel</Button>
+          <Button variant="outline" onClick={() => { setShowMigrate(false); setMigrateTargetId(''); }}>{t('common.cancel')}</Button>
           <Button
             disabled={!migrateTargetId || migrateMutation.isPending}
             onClick={() => migrateMutation.mutate(migrateTargetId)}
           >
             {migrateMutation.isPending && <Loader2 size={12} className="animate-spin" />}
-            Migrate project
+            {t('projects.migrateBtn')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* Transfer Ownership Dialog (replaces native confirm) */}
+      <Dialog open={!!transferTarget} onClose={() => setTransferTarget(null)}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Crown size={16} /> {t('members.transferTitle')}
+          </DialogTitle>
+          <DialogDescription>
+            {t('members.transferDesc', { email: transferTarget?.user.email ?? '' })}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setTransferTarget(null)}>{t('common.cancel')}</Button>
+          <Button
+            disabled={transferOwnershipMutation.isPending}
+            onClick={() => transferTarget && transferOwnershipMutation.mutate(transferTarget.user.id)}
+          >
+            {transferOwnershipMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+            {t('members.transferBtn')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* Remove Member Dialog (replaces native confirm) */}
+      <Dialog open={!!removeTarget} onClose={() => setRemoveTarget(null)}>
+        <DialogHeader>
+          <DialogTitle>{t('members.removeTitle')}</DialogTitle>
+          <DialogDescription>
+            {removeTarget && <span className="font-medium">{removeTarget.user.email}</span>}
+            {removeTarget && ' — '}
+            {t('members.removeConfirm')}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setRemoveTarget(null)}>{t('common.cancel')}</Button>
+          <Button
+            variant="destructive"
+            disabled={removeMemberMutation.isPending}
+            onClick={() => removeTarget && removeMemberMutation.mutate(removeTarget.id)}
+          >
+            {removeMemberMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+            {t('common.remove')}
           </Button>
         </DialogFooter>
       </Dialog>

@@ -5,6 +5,7 @@ import { APP_GUARD } from '@nestjs/core';
 import * as Joi from 'joi';
 import { PrismaModule } from './prisma/prisma.module';
 import { CryptoModule } from './common/crypto/crypto.module';
+import { MaintenanceGuard } from './common/guards/maintenance.guard';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { ServersModule } from './modules/servers/servers.module';
@@ -96,6 +97,10 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // Maintenance gate AFTER the throttler: rate-limit first, then 503
+    // non-admin writes when `maintenance_mode` is on. The flag is cached
+    // in memory (SystemConfigService.onChange) — no DB hit per request.
+    { provide: APP_GUARD, useClass: MaintenanceGuard },
   ],
 })
 export class AppModule {}

@@ -43,6 +43,10 @@ function RegisterPageInner() {
   // to show the "check your inbox" view + a "Resend" button instead of
   // redirecting to /dashboard with no session.
   const [pendingVerification, setPendingVerification] = useState(false);
+  // When the `require_admin_approval` setting is on, the API returns
+  // { pendingApproval: true } — no email round-trip, the account waits
+  // for an admin. Show a dedicated screen instead of "check your inbox".
+  const [pendingApproval, setPendingApproval] = useState(false);
   const [resending, setResending] = useState(false);
   const { setAuth } = useAuthStore();
   const router = useRouter();
@@ -96,6 +100,7 @@ function RegisterPageInner() {
         user: { id: string; name: string; email: string; role?: string };
         accessToken?: string;
         message?: string;
+        pendingApproval?: boolean;
       }>('/auth/register', { name, email, password });
       if (res.accessToken && res.user.role) {
         setAuth(
@@ -103,13 +108,16 @@ function RegisterPageInner() {
           res.accessToken,
         );
         router.push('/dashboard');
-        toast.success('Account created!');
+        toast.success(t('auth.accountCreated'));
+      } else if (res.pendingApproval) {
+        setPendingApproval(true);
+        toast.success(res.message || t('auth.pendingApprovalDesc'));
       } else {
         setPendingVerification(true);
-        toast.success(res.message || 'Check your email to verify your account');
+        toast.success(res.message || t('auth.checkEmailToast'));
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Registration failed');
+      toast.error(err instanceof Error ? err.message : t('auth.registrationFailed'));
     } finally {
       setLoading(false);
     }
@@ -119,13 +127,36 @@ function RegisterPageInner() {
     setResending(true);
     try {
       const res = await api.post<{ message: string }>('/auth/resend-verification', { email });
-      toast.success(res.message || 'Verification email resent');
+      toast.success(res.message || t('auth.resendOk'));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to resend');
+      toast.error(err instanceof Error ? err.message : t('auth.resendFail'));
     } finally {
       setResending(false);
     }
   };
+
+  if (pendingApproval) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background p-4">
+        <Card className="w-full max-w-md">
+          <CardHeader className="text-center">
+            <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
+              <Lock className="h-6 w-6" />
+            </div>
+            <CardTitle>{t('auth.pendingApprovalTitle')}</CardTitle>
+            <CardDescription>{t('auth.pendingApprovalDesc')}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Link href="/login" className="block">
+              <Button type="button" variant="ghost" className="w-full">
+                {t('auth.backToLogin')}
+              </Button>
+            </Link>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   if (pendingVerification) {
     return (
@@ -135,9 +166,18 @@ function RegisterPageInner() {
             <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10 text-primary">
               <Mail className="h-6 w-6" />
             </div>
-            <CardTitle>Check your email</CardTitle>
+            <CardTitle>{t('auth.checkEmailTitle')}</CardTitle>
             <CardDescription>
-              We sent a verification link to <strong>{email}</strong>. Click it to activate your account.
+              {(() => {
+                const parts = t('auth.checkEmailDesc', { email: '__EMAIL__' }).split('__EMAIL__');
+                return (
+                  <>
+                    {parts[0]}
+                    <strong>{email}</strong>
+                    {parts[1] || ''}
+                  </>
+                );
+              })()}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -148,11 +188,11 @@ function RegisterPageInner() {
               onClick={handleResend}
               disabled={resending}
             >
-              {resending ? 'Sending...' : 'Resend verification email'}
+              {resending ? t('auth.resending') : t('auth.resendBtn')}
             </Button>
             <Link href="/login" className="block">
               <Button type="button" variant="ghost" className="w-full">
-                Back to sign in
+                {t('auth.backToLogin')}
               </Button>
             </Link>
           </CardContent>
@@ -192,12 +232,10 @@ function RegisterPageInner() {
             K
           </div>
           <CardTitle>
-            {isSetup ? 'Create your Kryptalis admin' : t('auth.registerTitle')}
+            {isSetup ? t('auth.setupTitle') : t('auth.registerTitle')}
           </CardTitle>
           <CardDescription>
-            {isSetup
-              ? 'Welcome — this is the first account on this install. It will be promoted to SUPERADMIN automatically.'
-              : t('auth.registerDesc')}
+            {isSetup ? t('auth.setupDesc') : t('auth.registerDesc')}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -205,13 +243,8 @@ function RegisterPageInner() {
             <div className="mb-4 rounded-md border border-primary/30 bg-primary/5 p-3 flex items-start gap-2">
               <Sparkles size={16} className="text-primary mt-0.5 shrink-0" />
               <div className="text-xs space-y-1">
-                <p className="font-medium">First-install bootstrap</p>
-                <p className="text-muted-foreground">
-                  After this account is created, the setup wizard goes away
-                  and every later signup becomes a regular USER. Pick a
-                  strong password — you can't downgrade or rotate this
-                  account without root DB access.
-                </p>
+                <p className="font-medium">{t('auth.setupBootstrapTitle')}</p>
+                <p className="text-muted-foreground">{t('auth.setupBootstrapDesc')}</p>
               </div>
             </div>
           )}

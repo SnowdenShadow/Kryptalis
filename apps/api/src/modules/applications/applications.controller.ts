@@ -87,6 +87,16 @@ export class ApplicationsController {
     return this.svc.redeploy(userId, id);
   }
 
+  @Post(':id/rollback')
+  @ApiOperation({ summary: 'Roll back to the commit of an earlier successful deployment' })
+  rollback(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('deploymentId') deploymentId: string,
+  ) {
+    return this.svc.rollback(userId, id, deploymentId);
+  }
+
   @Get(':id/files/compose')
   @ApiOperation({ summary: 'Read docker-compose.yml of the app' })
   readCompose(@CurrentUser('id') userId: string, @Param('id') id: string) {

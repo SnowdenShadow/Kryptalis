@@ -17,7 +17,11 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/dashboard/node_modules ./apps/dashboard/node_modules
 COPY --from=deps /app/packages/types/node_modules ./packages/types/node_modules
-COPY . .
+# Scoped copies (not `COPY . .`): an api-only change must not invalidate
+# the dashboard build cache, and vice versa.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
+COPY packages ./packages
+COPY apps/dashboard ./apps/dashboard
 RUN pnpm --filter @kryptalis/types build
 RUN pnpm --filter @kryptalis/dashboard build
 
@@ -29,8 +33,11 @@ ENV PORT=3000
 # Next.js standalone output already bundles the minimal node_modules it needs.
 # outputFileTracingRoot is set to the monorepo root, so the standalone tree
 # contains both apps/dashboard/server.js AND the workspace node_modules.
-COPY --from=builder /app/apps/dashboard/.next/standalone ./
-COPY --from=builder /app/apps/dashboard/.next/static ./apps/dashboard/.next/static
-COPY --from=builder /app/apps/dashboard/public ./apps/dashboard/public
+COPY --from=builder --chown=node:node /app/apps/dashboard/.next/standalone ./
+COPY --from=builder --chown=node:node /app/apps/dashboard/.next/static ./apps/dashboard/.next/static
+COPY --from=builder --chown=node:node /app/apps/dashboard/public ./apps/dashboard/public
+# Unlike the api container (which drives the host Docker daemon), the
+# dashboard has zero reason to run as root.
+USER node
 EXPOSE 3000
 CMD ["node", "apps/dashboard/server.js"]

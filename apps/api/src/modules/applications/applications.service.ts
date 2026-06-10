@@ -537,6 +537,10 @@ export class ApplicationsService {
     return this.ops.redeploy(userId, id);
   }
 
+  rollback(userId: string, id: string, deploymentId: string) {
+    return this.ops.rollback(userId, id, deploymentId);
+  }
+
   // ── logs / exec (delegated) ────────────────────────────────────────
 
   getLogs(userId: string, id: string, lines = 100) {

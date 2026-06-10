@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Save, Send, KeyRound, Mail, Globe2, Clock, ShieldCheck } from 'lucide-react';
+import { Save, Send, KeyRound, Mail, Globe2, Clock, ShieldCheck, CloudUpload } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -41,6 +41,12 @@ export function SystemConfigTab() {
       // Secrets: blank input = keep existing.
       smtp_pass: '',
       backup_encryption_key: '',
+      s3_secret_key: '',
+      // S3-compatible backup storage (non-secret parts).
+      s3_endpoint: snapshot.s3_endpoint || '',
+      s3_bucket: snapshot.s3_bucket || '',
+      s3_region: snapshot.s3_region || '',
+      s3_access_key: snapshot.s3_access_key || '',
       // Public URLs.
       public_dashboard_url: snapshot.public_dashboard_url || '',
       public_api_url: snapshot.public_api_url || '',
@@ -81,7 +87,7 @@ export function SystemConfigTab() {
     for (const [k, v] of Object.entries(form)) {
       const stored = snapshot[k];
       // For secrets, blank means "no change", anything else is a new value.
-      if (k === 'smtp_pass' || k === 'backup_encryption_key') {
+      if (k === 'smtp_pass' || k === 'backup_encryption_key' || k === 's3_secret_key') {
         if (v !== '' && v !== undefined) payload[k] = v;
         continue;
       }
@@ -292,6 +298,73 @@ export function SystemConfigTab() {
               onChange={(e) => set('backup_encryption_key', e.target.value)}
             />
             <SmtpHint active={!!snapshot.backup_encryption_key} />
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ─── S3 backup storage ────────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <CloudUpload size={18} /> S3 backup storage
+          </CardTitle>
+          <CardDescription>
+            S3-compatible object storage for remote backup targets (Amazon S3,
+            Cloudflare R2, Backblaze B2, MinIO). Endpoint, bucket, access key
+            and secret key are all required before S3/R2/B2 targets become
+            available on the Backups page. Objects are written under{' '}
+            <code className="text-xs">kryptalis-backups/&lt;backupId&gt;/</code>.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label htmlFor="s3_endpoint">Endpoint URL</Label>
+              <Input
+                id="s3_endpoint"
+                placeholder="https://<accountid>.r2.cloudflarestorage.com"
+                value={form.s3_endpoint || ''}
+                onChange={(e) => set('s3_endpoint', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="s3_bucket">Bucket</Label>
+              <Input
+                id="s3_bucket"
+                placeholder="kryptalis-backups"
+                value={form.s3_bucket || ''}
+                onChange={(e) => set('s3_bucket', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="s3_region">Region</Label>
+              <Input
+                id="s3_region"
+                placeholder="auto"
+                value={form.s3_region || ''}
+                onChange={(e) => set('s3_region', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="s3_access_key">Access key ID</Label>
+              <Input
+                id="s3_access_key"
+                placeholder="AKIA…"
+                value={form.s3_access_key || ''}
+                onChange={(e) => set('s3_access_key', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="s3_secret_key">Secret access key</Label>
+              <Input
+                id="s3_secret_key"
+                type="password"
+                placeholder="••••••••"
+                value={form.s3_secret_key || ''}
+                onChange={(e) => set('s3_secret_key', e.target.value)}
+              />
+              <SmtpHint active={!!snapshot.s3_secret_key} />
+            </div>
           </div>
         </CardContent>
       </Card>

@@ -580,6 +580,12 @@ export class ApplicationDeployService {
       dockerfileOverride?: string;
       portMapping?: Record<string, number>;
       hostPort?: number;
+      /**
+       * Optional commit SHA to deploy instead of the branch tip — used by
+       * the manual rollback endpoint. Requires a full (non-shallow) clone
+       * so the commit is reachable, then a detached checkout.
+       */
+      gitRef?: string;
     },
   ) {
     const slug = slugify(name);
@@ -721,8 +727,12 @@ export class ApplicationDeployService {
       }
       fs.mkdirSync(appDir, { recursive: true });
 
-      // 2. clone with header (token not persisted)
-      const cloneArgs = ['clone', '--depth', '1', '--branch', branch];
+      // 2. clone with header (token not persisted). A shallow clone is
+      // enough for branch-tip deploys; rollbacks target an older commit so
+      // they need the branch history to check it out.
+      const cloneArgs = opts.gitRef
+        ? ['clone', '--branch', branch]
+        : ['clone', '--depth', '1', '--branch', branch];
       if (opts.cloneHeader) {
         cloneArgs.unshift('-c', `http.extraheader=${opts.cloneHeader}`);
       }
@@ -734,6 +744,15 @@ export class ApplicationDeployService {
       );
       log(`> git ${redactedArgs.join(' ')}`);
       await execFileAsync('git', cloneArgs, { timeout: 180_000 });
+
+      if (opts.gitRef) {
+        log(`> git checkout --detach ${opts.gitRef}`);
+        await execFileAsync(
+          'git',
+          ['-C', appDir, 'checkout', '--detach', opts.gitRef],
+          { timeout: 30_000 },
+        );
+      }
 
       // 3. defensive: strip any token from .git/config
       try {

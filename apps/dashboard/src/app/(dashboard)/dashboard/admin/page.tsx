@@ -25,7 +25,7 @@ import { InfrastructureTab } from './infrastructure-tab';
 import { UpdatesTab } from './updates-tab';
 
 type Role = 'SUPERADMIN' | 'ADMIN' | 'USER' | 'VIEWER';
-type Status = 'ACTIVE' | 'SUSPENDED' | 'BANNED';
+type Status = 'ACTIVE' | 'SUSPENDED' | 'BANNED' | 'PENDING_VERIFICATION' | 'PENDING_APPROVAL';
 
 interface AdminUser {
   id: string; name: string; email: string; role: Role; status: Status;
@@ -56,8 +56,12 @@ const ROLE_BADGE: Record<Role, { variant: 'success' | 'warning' | 'secondary' | 
   VIEWER: { variant: 'outline', icon: Eye },
 };
 
-const STATUS_BADGE: Record<Status, 'success' | 'warning' | 'destructive'> = {
+const STATUS_BADGE: Record<Status, 'success' | 'warning' | 'destructive' | 'outline'> = {
   ACTIVE: 'success', SUSPENDED: 'warning', BANNED: 'destructive',
+  PENDING_VERIFICATION: 'outline',
+  // Signups gated by the `require_admin_approval` setting — admins flip
+  // these to ACTIVE from the edit dialog or the reactivate button.
+  PENDING_APPROVAL: 'warning',
 };
 
 // Shared formatter, parameterized with this page's translation keys.
@@ -127,6 +131,9 @@ export default function AdminPage() {
   });
 
   const [editUser, setEditUser] = useState<AdminUser | null>(null);
+  // Confirmation dialogs (replace the old native confirm() calls).
+  const [confirmDeleteUser, setConfirmDeleteUser] = useState(false);
+  const [pendingDeployMode, setPendingDeployMode] = useState<string | null>(null);
   const [resetPwUser, setResetPwUser] = useState<AdminUser | null>(null);
   const [resetPwValue, setResetPwValue] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
@@ -172,6 +179,7 @@ export default function AdminPage() {
     onSuccess: () => {
       toast.success(t('admin.userDeleted'));
       queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+      setConfirmDeleteUser(false);
       setEditUser(null);
     },
     onError: (err: Error) => toast.error(err.message),
@@ -199,6 +207,7 @@ export default function AdminPage() {
       api.patch(`/admin/settings/${key}`, { value }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin-settings'] });
+      setPendingDeployMode(null);
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -328,6 +337,8 @@ export default function AdminPage() {
               <option value="ACTIVE">ACTIVE</option>
               <option value="SUSPENDED">SUSPENDED</option>
               <option value="BANNED">BANNED</option>
+              <option value="PENDING_VERIFICATION">PENDING_VERIFICATION</option>
+              <option value="PENDING_APPROVAL">PENDING_APPROVAL</option>
             </Select>
             <Button onClick={() => setCreateOpen(true)}><UserPlus size={14} /> {t('admin.createUser')}</Button>
           </div>
@@ -486,9 +497,7 @@ export default function AdminPage() {
                     <Select
                       value={(val as string) ?? 'LOCAL'}
                       onChange={(e) => {
-                        if (confirm(t('admin.settings.deployModeConfirm', { mode: e.target.value }))) {
-                          updateSettingMutation.mutate({ key: s.key, value: e.target.value });
-                        }
+                        if (e.target.value !== val) setPendingDeployMode(e.target.value);
                       }}
                       className="w-40"
                     >
@@ -589,6 +598,8 @@ export default function AdminPage() {
                 <option value="ACTIVE">ACTIVE</option>
                 <option value="SUSPENDED">SUSPENDED</option>
                 <option value="BANNED">BANNED</option>
+                <option value="PENDING_VERIFICATION">PENDING_VERIFICATION</option>
+                <option value="PENDING_APPROVAL">PENDING_APPROVAL</option>
               </Select>
             </div>
             <div className="rounded-md border border-destructive/40 p-3">
@@ -596,11 +607,7 @@ export default function AdminPage() {
               <Button
                 variant="destructive"
                 size="sm"
-                onClick={() => {
-                  if (confirm(t('admin.deleteUserConfirm', { email: editUser.email }))) {
-                    deleteUserMutation.mutate(editUser.id);
-                  }
-                }}
+                onClick={() => setConfirmDeleteUser(true)}
               >
                 <Trash2 size={14} /> {t('admin.deleteUser')}
               </Button>
@@ -609,6 +616,45 @@ export default function AdminPage() {
         )}
         <DialogFooter>
           <Button variant="outline" onClick={() => setEditUser(null)}>{t('common.close')}</Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ─── Delete user confirmation (replaces native confirm) ─── */}
+      <Dialog open={confirmDeleteUser && !!editUser} onClose={() => setConfirmDeleteUser(false)}>
+        <DialogHeader>
+          <DialogTitle>{t('admin.deleteUser')}</DialogTitle>
+          <DialogDescription>
+            {t('admin.deleteUserConfirm', { email: editUser?.email ?? '' })}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setConfirmDeleteUser(false)}>{t('common.cancel')}</Button>
+          <Button
+            variant="destructive"
+            disabled={deleteUserMutation.isPending}
+            onClick={() => editUser && deleteUserMutation.mutate(editUser.id)}
+          >
+            <Trash2 size={14} /> {deleteUserMutation.isPending ? t('common.deleting') : t('common.delete')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ─── Deployment-mode change confirmation (replaces native confirm) ─── */}
+      <Dialog open={!!pendingDeployMode} onClose={() => setPendingDeployMode(null)}>
+        <DialogHeader>
+          <DialogTitle>{t('admin.settings.deployModeTitle')}</DialogTitle>
+          <DialogDescription>
+            {t('admin.settings.deployModeConfirm', { mode: pendingDeployMode ?? '' })}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setPendingDeployMode(null)}>{t('common.cancel')}</Button>
+          <Button
+            disabled={updateSettingMutation.isPending}
+            onClick={() => pendingDeployMode && updateSettingMutation.mutate({ key: 'deployment_mode', value: pendingDeployMode })}
+          >
+            {t('common.confirm')}
+          </Button>
         </DialogFooter>
       </Dialog>
 

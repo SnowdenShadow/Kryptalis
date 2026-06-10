@@ -75,16 +75,25 @@ The audit log has a hardcoded retention of 365 days (cleaned hourly), tracked in
 | Key | Env fallback | Default | Description |
 | --- | --- | --- | --- |
 | `backup_encryption_key` | `BACKUP_ENCRYPTION_KEY` | unset → plaintext | 32-byte hex key for AES-256-GCM backup encryption. **Encrypted at rest** (envelope inside `SystemSetting`). Set this *before* any production data lands, then back the key up off-system. |
+| `s3_endpoint` | `S3_ENDPOINT` | — | Endpoint URL of the S3-compatible store (Amazon S3, Cloudflare R2, Backblaze B2, MinIO). Required for remote backup targets. |
+| `s3_bucket` | `S3_BUCKET` | — | Bucket name backups are written into. Required for remote backup targets. |
+| `s3_region` | `S3_REGION` | `auto` | Bucket region. `auto` works for R2/B2/MinIO; set a real region for Amazon S3. |
+| `s3_access_key` | `S3_ACCESS_KEY` | — | Access key ID. Required for remote backup targets. |
+| `s3_secret_key` | `S3_SECRET_KEY` | — | Secret access key. **Encrypted at rest.** Blank field in the UI keeps the existing value. Required for remote backup targets. |
+
+Remote backup targets (`S3` / `R2` / `B2` in the create-backup dialog) only become selectable once `s3_endpoint`, `s3_bucket`, `s3_access_key` and `s3_secret_key` are all set (`GET /backups/targets` reports `s3Configured`). Dumps are uploaded under `kryptalis-backups/<backupId>/<filename>` (post-encryption bytes — the recorded sha256 still matches), the local file is deleted after a successful upload, and restores download to a temp file before running the usual integrity/decryption gate. Deleting a backup removes its remote objects best-effort.
 
 ### Admin / user policy
 
 | Key | Env fallback | Default | Description |
 | --- | --- | --- | --- |
 | `registration_enabled` | — | `true` after first user | Public signup toggle. Defaults to allowing the first user, then can be locked down. |
+| `require_admin_approval` | — | `false` | When `true`, every non-bootstrap signup is created with status `PENDING_APPROVAL` (no verification email is sent). Login answers 403 until an ADMIN/SUPERADMIN flips the user to `ACTIVE` via `PATCH /admin/users/:id/status` (Admin → Users). |
+| `default_user_role` | — | `USER` | Role granted to non-bootstrap signups. Allowed values: `USER` or `VIEWER` — anything else silently falls back to `USER` so a tampered row can never mint privileged accounts. |
+| `maintenance_mode` | — | `false` | When `true`, write requests (POST/PATCH/PUT/DELETE) from non-admins get a 503 with a `MAINTENANCE_MODE` code. GETs always pass; `/api/auth/*`, `/api/health`, `/api/agent/*` and `/api/webhooks/*` stay open; ADMIN/SUPERADMIN bearer tokens bypass the gate. Enforced by a global guard (`apps/api/src/common/guards/maintenance.guard.ts`) that caches the flag in memory via `SystemConfigService.onChange` — no DB query per request. |
 | `platform_name` | — | `Kryptalis` | Branding in dashboard header + email subjects. |
 | `deployment_mode` | — | `LOCAL` | `LOCAL` (single VPS) or `MULTI` (additional servers via the agent). Switching `LOCAL → MULTI` is reversible until you add a non-local server. |
 
-Planned, **not implemented yet** (the keys exist in `SETTING_KEYS` but no code enforces them): `require_admin_approval` (pending-approval signup flow), `default_user_role`, `maintenance_mode` (503 on write endpoints).
 
 ### Webhooks
 
@@ -99,6 +108,7 @@ The `SECRET_KEYS` allowlist in `SystemConfigService` controls which keys go thro
 - `smtp_pass`
 - `backup_encryption_key`
 - `github_webhook_secret`
+- `s3_secret_key`
 
 For these, `getPublicSnapshot()` returns a boolean (`true` if a non-empty value is stored) so the plaintext never leaves the API to the browser. The Admin UI shows them as masked fields; submitting blank means "keep existing".
 

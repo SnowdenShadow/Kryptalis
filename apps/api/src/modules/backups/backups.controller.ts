@@ -24,6 +24,13 @@ export class BackupsController {
     return this.svc.findAll(userId, serverId);
   }
 
+  // NB: declared before ':id' so 'targets' is not captured as an id.
+  @Get('targets')
+  @ApiOperation({ summary: 'Available backup targets + whether S3 storage is configured' })
+  getTargets() {
+    return this.svc.getTargets();
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get backup' })
   findOne(@CurrentUser('id') userId: string, @Param('id') id: string) {

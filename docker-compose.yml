@@ -4,7 +4,6 @@
 #
 # Services:
 #   postgres   — primary database (loopback-only)
-#   redis      — cache & job queue (loopback-only)
 #   caddy      — reverse proxy (auto SSL via Let's Encrypt for linked domains)
 #   api        — NestJS backend
 #   dashboard  — Next.js dashboard
@@ -14,7 +13,7 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.6-alpine
     container_name: kryptalis-postgres
     restart: unless-stopped
     logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
@@ -33,23 +32,12 @@ services:
       timeout: 5s
       retries: 5
 
-  redis:
-    image: redis:7-alpine
-    container_name: kryptalis-redis
-    restart: unless-stopped
-    logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
-    volumes:
-      - redis_data:/data
-    ports:
-      - "127.0.0.1:6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+  # redis was removed: the API never consumed it (no client, REDIS_URL never
+  # read) — it only burned RAM on every install. Reintroduce alongside an
+  # actual queue/cache implementation.
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.9-alpine
     container_name: kryptalis-caddy
     restart: unless-stopped
     logging: { driver: json-file, options: { max-size: "20m", max-file: "5" } }
@@ -83,7 +71,6 @@ services:
     logging: { driver: json-file, options: { max-size: "20m", max-file: "5" } }
     environment:
       DATABASE_URL: postgresql://kryptalis:${POSTGRES_PASSWORD}@postgres:5432/kryptalis
-      REDIS_URL: redis://redis:6379
       API_PORT: "4000"
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
@@ -161,7 +148,7 @@ services:
       # host install path mounted instead.
       - .:/app/install-host:ro
     networks:
-      # default — talk to postgres/redis here.
+      # default — talk to postgres here.
       - default
       # kryptalis-apps — shared bridge with Caddy + every user-deployed
       # container (including mail servers). Lets the API resolve other
@@ -169,8 +156,6 @@ services:
       - kryptalis-apps
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       caddy:
         condition: service_started
@@ -320,7 +305,7 @@ services:
         condition: service_healthy
 
 networks:
-  # default — postgres/redis/api/dashboard talk to each other here.
+  # default — postgres/api/dashboard talk to each other here.
   # kryptalis-apps — shared bridge that Caddy also joins. User apps the API
   #   deploys attach to it via `external: true`, which lets Caddy proxy by
   #   container_name (so we don't need host port publish on app containers
@@ -331,7 +316,6 @@ networks:
 
 volumes:
   postgres_data:
-  redis_data:
   caddy_data:
   caddy_config:
   sftp_host_keys:

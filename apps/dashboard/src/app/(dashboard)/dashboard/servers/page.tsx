@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Server,
@@ -41,6 +41,7 @@ import type { ServerResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
+import { makeTimeAgo } from '@/lib/app-format';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -72,19 +73,6 @@ const STATUS_VARIANT: Record<string, 'success' | 'destructive' | 'warning' | 'se
   UNKNOWN: 'secondary',
 };
 
-function relativeTime(dateStr: string | null): string {
-  if (!dateStr) return 'never';
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const seconds = Math.floor(diff / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
 function ProgressBar({ label, value, max, unit }: { label: string; value: number; max: number; unit?: string }) {
   const pct = max > 0 ? Math.min(100, Math.round((value / max) * 100)) : 0;
   const color = pct > 90 ? 'bg-destructive' : pct > 70 ? 'bg-warning' : 'bg-primary';
@@ -114,6 +102,17 @@ function ProgressBar({ label, value, max, unit }: { label: string; value: number
 export default function ServersPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const timeAgo = useMemo(
+    () =>
+      makeTimeAgo(t, {
+        just: 'server.timeJust',
+        min: 'server.timeMin',
+        hour: 'server.timeHour',
+        day: 'server.timeDay',
+        never: 'common.never',
+      }),
+    [t],
+  );
 
   const [setupDone, setSetupDone] = useState(false);
 
@@ -207,11 +206,17 @@ export default function ServersPage() {
     onError: (err: Error) => toastError(err),
   });
 
+  // Per-server confirmation dialogs (replace the old native confirm()).
+  const [rotateTarget, setRotateTarget] = useState<{ id: string; name: string } | null>(null);
+  const [resetTarget, setResetTarget] = useState<{ id: string; name: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+
   const rotateTokenMutation = useMutation({
     mutationFn: (id: string) => api.post<{ installCommand: string; token: string }>(`/servers/${id}/regen-token`),
     onSuccess: (data, id) => {
       setCreatedServer({ id, installCommand: data.installCommand });
       setShowAdd(true);
+      setRotateTarget(null);
       queryClient.invalidateQueries({ queryKey: ['servers'] });
       toast.success(t('toast.tokenRotated'));
     },
@@ -223,6 +228,7 @@ export default function ServersPage() {
     onSuccess: (data, id) => {
       setCreatedServer({ id, installCommand: data.installCommand });
       setShowAdd(true);
+      setResetTarget(null);
       queryClient.invalidateQueries({ queryKey: ['servers'] });
       queryClient.invalidateQueries({ queryKey: ['server-local'] });
       toast.success(t('toast.serverResetInstall'));
@@ -236,6 +242,7 @@ export default function ServersPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['servers'] });
       toast.success(t('toast.serverRemoved'));
+      setDeleteTarget(null);
     },
     onError: (err: Error) => toastError(err),
   });
@@ -285,10 +292,8 @@ export default function ServersPage() {
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-16">
             <Server size={48} className="mb-4 text-muted-foreground" />
-            <p className="text-lg font-medium">No server found</p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              A local server will be created automatically when you register.
-            </p>
+            <p className="text-lg font-medium">{t('server.noServer')}</p>
+            <p className="mt-1 text-sm text-muted-foreground">{t('server.noServerDesc')}</p>
           </CardContent>
         </Card>
       ) : (
@@ -335,7 +340,7 @@ export default function ServersPage() {
                   <p className="text-muted-foreground">{t('server.lastSeen')}</p>
                   <p className="font-medium flex items-center gap-1">
                     <Clock size={14} />
-                    {relativeTime(server.lastSeenAt)}
+                    {timeAgo(server.lastSeenAt)}
                   </p>
                 </div>
               </div>
@@ -388,20 +393,20 @@ export default function ServersPage() {
           <Card>
             <CardHeader>
               <CardTitle>{t('server.details')}</CardTitle>
-              <CardDescription>Connection information and agent configuration</CardDescription>
+              <CardDescription>{t('server.detailsDesc')}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 gap-4 text-sm md:grid-cols-3">
                 <div>
-                  <p className="text-muted-foreground">Host</p>
+                  <p className="text-muted-foreground">{t('server.hostLabel')}</p>
                   <p className="font-medium font-mono">{server.host}</p>
                 </div>
                 <div>
-                  <p className="text-muted-foreground">Port</p>
+                  <p className="text-muted-foreground">{t('server.portLabel')}</p>
                   <p className="font-medium font-mono">{server.port}</p>
                 </div>
                 <div>
-                  <p className="text-muted-foreground">Username</p>
+                  <p className="text-muted-foreground">{t('server.usernameLabel')}</p>
                   <p className="font-medium font-mono">{server.username}</p>
                 </div>
               </div>
@@ -415,7 +420,7 @@ export default function ServersPage() {
                       ? showToken
                         ? agentToken
                         : '•'.repeat(32)
-                      : 'No token available'}
+                      : t('server.noToken')}
                   </code>
                   {agentToken && (
                     <>
@@ -423,7 +428,7 @@ export default function ServersPage() {
                         size="icon"
                         variant="outline"
                         onClick={() => setShowToken(!showToken)}
-                        title={showToken ? 'Hide token' : 'Reveal token'}
+                        title={showToken ? t('server.hideToken') : t('server.revealToken')}
                       >
                         {showToken ? <EyeOff size={16} /> : <Eye size={16} />}
                       </Button>
@@ -431,7 +436,7 @@ export default function ServersPage() {
                         size="icon"
                         variant="outline"
                         onClick={() => handleCopyToken(agentToken)}
-                        title="Copy token"
+                        title={t('server.copyToken')}
                       >
                         {copied ? <Check size={16} /> : <Copy size={16} />}
                       </Button>
@@ -445,9 +450,9 @@ export default function ServersPage() {
                 <p className="text-sm text-muted-foreground">{t('server.agentStatus')}</p>
                 {server.agentVersion ? (
                   <div className="flex items-center gap-2">
-                    <Badge variant="success">Connected</Badge>
+                    <Badge variant="success">{t('server.connected')}</Badge>
                     <span className="text-sm text-muted-foreground">
-                      Running v{server.agentVersion}
+                      {t('server.runningVersion', { version: server.agentVersion })}
                     </span>
                   </div>
                 ) : (
@@ -455,10 +460,7 @@ export default function ServersPage() {
                     <Info size={16} className="mt-0.5 text-muted-foreground" />
                     <div>
                       <p className="text-sm font-medium">{t('server.agentNotInstalled')}</p>
-                      <p className="text-sm text-muted-foreground">
-                        Install the Kryptalis agent on your server to enable monitoring and deployments.
-                        Use the agent token above to authenticate.
-                      </p>
+                      <p className="text-sm text-muted-foreground">{t('server.agentInstallHint')}</p>
                     </div>
                   </div>
                 )}
@@ -487,17 +489,15 @@ export default function ServersPage() {
         <CardHeader className="flex flex-row items-start justify-between">
           <div>
             <CardTitle className="text-lg flex items-center gap-2">
-              <Server size={18} /> All servers
+              <Server size={18} /> {t('server.allServers')}
             </CardTitle>
             <CardDescription>
-              {isAdmin
-                ? 'Add VPS / cloud servers and let the Kryptalis agent provision them automatically.'
-                : 'Servers available for your projects. Adding new servers is admin-only.'}
+              {isAdmin ? t('server.allServersDescAdmin') : t('server.allServersDescUser')}
             </CardDescription>
           </div>
           {isAdmin && (
             <Button size="sm" onClick={() => setShowAdd(true)}>
-              <Plus size={14} /> Add Server
+              <Plus size={14} /> {t('server.addServer')}
             </Button>
           )}
         </CardHeader>
@@ -515,24 +515,24 @@ export default function ServersPage() {
                     onClick={() => setStatusFilter(s)}
                     className="text-xs h-7"
                   >
-                    {s === 'ALL' ? 'All' : s.replace('_', ' ')} ({count})
+                    {s === 'ALL' ? t('server.filterAll') : s.replace('_', ' ')} ({count})
                   </Button>
                 );
               })}
             </div>
           )}
           {allServers.length === 0 ? (
-            <p className="px-6 py-8 text-sm text-muted-foreground text-center">No servers yet — add one above.</p>
+            <p className="px-6 py-8 text-sm text-muted-foreground text-center">{t('server.noServersYet')}</p>
           ) : (
             <table className="w-full text-sm">
               <thead className="border-b border-border bg-muted/30">
                 <tr className="text-left text-muted-foreground">
-                  <th className="px-4 py-2 font-medium">Name</th>
-                  <th className="px-4 py-2 font-medium">Host</th>
-                  <th className="px-4 py-2 font-medium">Status</th>
-                  <th className="px-4 py-2 font-medium">OS / Arch</th>
-                  <th className="px-4 py-2 font-medium">Last seen</th>
-                  <th className="px-4 py-2 font-medium text-right">Actions</th>
+                  <th className="px-4 py-2 font-medium">{t('common.name')}</th>
+                  <th className="px-4 py-2 font-medium">{t('server.hostLabel')}</th>
+                  <th className="px-4 py-2 font-medium">{t('common.status')}</th>
+                  <th className="px-4 py-2 font-medium">{t('server.osArch')}</th>
+                  <th className="px-4 py-2 font-medium">{t('server.lastSeen')}</th>
+                  <th className="px-4 py-2 font-medium text-right">{t('common.actions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -545,7 +545,7 @@ export default function ServersPage() {
                     <td className="px-4 py-2 font-medium">
                       <div className="flex items-center gap-2">
                         {s.name}
-                        {isLocal && <Badge variant="outline" className="text-[10px]">local</Badge>}
+                        {isLocal && <Badge variant="outline" className="text-[10px]">{t('server.localBadge')}</Badge>}
                       </div>
                     </td>
                     <td className="px-4 py-2 font-mono text-xs">{s.host}</td>
@@ -562,7 +562,7 @@ export default function ServersPage() {
                       {s.os ? `${s.os} · ${s.arch || ''}` : '—'}
                     </td>
                     <td className="px-4 py-2 text-xs text-muted-foreground">
-                      {s.lastSeenAt ? new Date(s.lastSeenAt).toLocaleString() : 'never'}
+                      {s.lastSeenAt ? new Date(s.lastSeenAt).toLocaleString() : t('common.never')}
                     </td>
                     <td className="px-4 py-2">
                       <div className="flex justify-end gap-1">
@@ -570,44 +570,31 @@ export default function ServersPage() {
                           <Button size="sm" variant="outline"
                             onClick={() => regenInstallMutation.mutate(s.id)}
                             disabled={regenInstallMutation.isPending}
-                            title="Get install command">
-                            <Copy size={12} /> Install
+                            title={t('server.getInstallCmd')}>
+                            <Copy size={12} /> {t('common.install')}
                           </Button>
                         )}
                         {isAdmin && s.status === 'ONLINE' && (
                           <Button size="sm" variant="outline"
-                            onClick={() => {
-                              if (confirm(`Rotate the agent token for ${s.name}? The current agent will be invalidated until it re-registers with the new token.`)) {
-                                rotateTokenMutation.mutate(s.id);
-                              }
-                            }}
+                            onClick={() => setRotateTarget({ id: s.id, name: s.name })}
                             disabled={rotateTokenMutation.isPending}
-                            title="Rotate agent token">
+                            title={t('server.rotateTitle')}>
                             <RefreshCw size={12} />
                           </Button>
                         )}
                         {isAdmin && !isLocal && (
                           <Button size="sm" variant="outline"
-                            onClick={() => {
-                              if (confirm(`Reset ${s.name}? This wipes metrics + agent token but keeps projects. The server returns to PENDING_INSTALL.`)) {
-                                resetServerMutation.mutate(s.id);
-                              }
-                            }}
+                            onClick={() => setResetTarget({ id: s.id, name: s.name })}
                             disabled={resetServerMutation.isPending}
-                            title="Reset server">
+                            title={t('server.resetTitle')}>
                             <Wrench size={12} />
                           </Button>
                         )}
                         {isAdmin && !isLocal && (
                           <Button size="sm" variant="destructive"
-                            onClick={() => {
-                              const force = confirm(
-                                `Delete ${s.name}?\n\nProjects using this server will be deleted too if you click OK.\nCancel to keep the server.`
-                              );
-                              if (force) removeServerMutation.mutate({ id: s.id, force: true });
-                            }}
+                            onClick={() => setDeleteTarget({ id: s.id, name: s.name })}
                             disabled={removeServerMutation.isPending}
-                            title="Delete server">
+                            title={t('server.deleteTitle')}>
                             <Trash2 size={12} />
                           </Button>
                         )}
@@ -626,16 +613,14 @@ export default function ServersPage() {
       {/* ─── Add Server dialog ─── */}
       <Dialog open={showAdd} onClose={closeAddDialog} className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Add a server</DialogTitle>
-          <DialogDescription>
-            Create a server slot, then run the generated command on your VPS as root. The agent will install Docker, register itself, and start receiving deployments.
-          </DialogDescription>
+          <DialogTitle>{t('server.addTitle')}</DialogTitle>
+          <DialogDescription>{t('server.addDesc')}</DialogDescription>
         </DialogHeader>
 
         {!createdServer ? (
           <div className="space-y-3">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Server name</label>
+              <label className="text-sm font-medium">{t('server.serverName')}</label>
               <input
                 value={newServerName}
                 onChange={(e) => setNewServerName(e.target.value)}
@@ -644,13 +629,13 @@ export default function ServersPage() {
               />
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={closeAddDialog}>Cancel</Button>
+              <Button variant="outline" onClick={closeAddDialog}>{t('common.cancel')}</Button>
               <Button
                 disabled={!newServerName.trim() || createServerMutation.isPending}
                 onClick={() => createServerMutation.mutate({ name: newServerName.trim() })}
               >
                 {createServerMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-                {createServerMutation.isPending ? 'Creating...' : 'Create slot'}
+                {createServerMutation.isPending ? t('common.creating') : t('server.createSlot')}
               </Button>
             </DialogFooter>
           </div>
@@ -659,10 +644,8 @@ export default function ServersPage() {
             <div className="flex items-start gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
               <Check size={18} className="text-emerald-500 shrink-0 mt-0.5" />
               <div className="text-sm">
-                <p className="font-semibold">Server slot created</p>
-                <p className="text-muted-foreground text-xs mt-1">
-                  Run this command as root on your VPS. The token is valid 24h.
-                </p>
+                <p className="font-semibold">{t('server.slotCreated')}</p>
+                <p className="text-muted-foreground text-xs mt-1">{t('server.slotCreatedDesc')}</p>
               </div>
             </div>
 
@@ -680,24 +663,24 @@ export default function ServersPage() {
                   setTimeout(() => setCopiedInstall(false), 2000);
                 }}
               >
-                {copiedInstall ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
+                {copiedInstall ? <><Check size={12} /> {t('server.copied')}</> : <><Copy size={12} /> {t('common.copy')}</>}
               </Button>
               <Button size="sm" variant="outline"
                 onClick={() => regenInstallMutation.mutate(createdServer.id)}
                 disabled={regenInstallMutation.isPending}>
-                Regenerate token
+                {t('server.regenToken')}
               </Button>
             </div>
 
             <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground space-y-1">
-              <p><strong>1.</strong> SSH into your VPS as root: <code>ssh root@your-vps</code></p>
-              <p><strong>2.</strong> Paste and run the command above</p>
-              <p><strong>3.</strong> Wait ~30s — Docker installs, agent registers</p>
-              <p><strong>4.</strong> This dialog can be closed — the server status will turn ONLINE in the table above</p>
+              <p><strong>1.</strong> {t('server.step1')} <code>ssh root@your-vps</code></p>
+              <p><strong>2.</strong> {t('server.step2')}</p>
+              <p><strong>3.</strong> {t('server.step3')}</p>
+              <p><strong>4.</strong> {t('server.step4')}</p>
             </div>
 
             <DialogFooter>
-              <Button onClick={closeAddDialog}>Done</Button>
+              <Button onClick={closeAddDialog}>{t('server.done')}</Button>
             </DialogFooter>
           </div>
         )}
@@ -707,15 +690,12 @@ export default function ServersPage() {
       <Dialog open={showReset} onClose={() => setShowReset(false)}>
         <DialogHeader>
           <DialogTitle>{t('server.resetServer')}</DialogTitle>
-          <DialogDescription>
-            Are you sure you want to reset your server? This will remove all server
-            data and agent configuration. This action cannot be undone.
-          </DialogDescription>
+          <DialogDescription>{t('server.resetConfirmDesc')}</DialogDescription>
         </DialogHeader>
 
         <DialogFooter>
           <Button variant="outline" onClick={() => setShowReset(false)}>
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button
             variant="destructive"
@@ -723,7 +703,69 @@ export default function ServersPage() {
             onClick={() => server && deleteMutation.mutate(server.id)}
           >
             {deleteMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-            {deleteMutation.isPending ? 'Resetting...' : 'Reset Server'}
+            {deleteMutation.isPending ? t('server.resetting') : t('server.resetServer')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ---- Rotate Agent Token Dialog (replaces native confirm) ---- */}
+      <Dialog open={!!rotateTarget} onClose={() => setRotateTarget(null)}>
+        <DialogHeader>
+          <DialogTitle>{t('server.rotateTitle')}</DialogTitle>
+          <DialogDescription>
+            {t('server.rotateDesc', { name: rotateTarget?.name ?? '' })}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setRotateTarget(null)}>{t('common.cancel')}</Button>
+          <Button
+            disabled={rotateTokenMutation.isPending}
+            onClick={() => rotateTarget && rotateTokenMutation.mutate(rotateTarget.id)}
+          >
+            {rotateTokenMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+            {t('server.rotateBtn')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ---- Reset Remote Server Dialog (replaces native confirm) ---- */}
+      <Dialog open={!!resetTarget} onClose={() => setResetTarget(null)}>
+        <DialogHeader>
+          <DialogTitle>{t('server.resetTitle')}</DialogTitle>
+          <DialogDescription>
+            {t('server.resetDesc', { name: resetTarget?.name ?? '' })}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setResetTarget(null)}>{t('common.cancel')}</Button>
+          <Button
+            variant="destructive"
+            disabled={resetServerMutation.isPending}
+            onClick={() => resetTarget && resetServerMutation.mutate(resetTarget.id)}
+          >
+            {resetServerMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+            {t('server.resetBtn')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ---- Delete Server Dialog (replaces native confirm) ---- */}
+      <Dialog open={!!deleteTarget} onClose={() => setDeleteTarget(null)}>
+        <DialogHeader>
+          <DialogTitle>{t('server.deleteTitle')}</DialogTitle>
+          <DialogDescription>
+            {t('server.deleteDesc', { name: deleteTarget?.name ?? '' })}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t('common.cancel')}</Button>
+          <Button
+            variant="destructive"
+            disabled={removeServerMutation.isPending}
+            onClick={() => deleteTarget && removeServerMutation.mutate({ id: deleteTarget.id, force: true })}
+          >
+            {removeServerMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+            {t('server.deleteBtn')}
           </Button>
         </DialogFooter>
       </Dialog>

@@ -24,36 +24,19 @@ import { Badge } from '@/components/ui/badge';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import type {
+  ContainerResponse,
+  DockerImageResponse,
+  DockerNetworkResponse,
+  DockerVolumeResponse,
+} from '@kryptalis/types';
 
 type Tab = 'containers' | 'images' | 'networks' | 'volumes';
 
-interface DockerContainer {
-  id: string;
-  name: string;
-  image: string;
-  status: string;
-  ports: string;
-}
-
-interface DockerImage {
-  id: string;
-  tags: string[];
-  size: number;
-  created: string;
-}
-
-interface DockerNetwork {
-  id: string;
-  name: string;
-  driver: string;
-  scope: string;
-}
-
-interface DockerVolume {
-  name: string;
-  driver: string;
-  mountpoint: string;
-}
+type DockerContainer = ContainerResponse;
+type DockerImage = DockerImageResponse;
+type DockerNetwork = DockerNetworkResponse;
+type DockerVolume = DockerVolumeResponse;
 
 const tabDefs: { key: Tab; labelKey: string; icon: React.ElementType }[] = [
   { key: 'containers', labelKey: 'docker.containers', icon: Container },
@@ -70,14 +53,6 @@ const containerStatusVariant: Record<string, 'success' | 'secondary' | 'warning'
   restarting: 'warning',
   dead: 'destructive',
 };
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
-}
 
 const ACTION_TOAST_KEY: Record<string, string> = {
   start: 'docker.toastStart',
@@ -348,7 +323,7 @@ export default function DockerPage() {
                               </div>
                             </td>
                             <td className="px-6 py-4 text-sm text-muted-foreground">
-                              {formatBytes(image.size)}
+                              {image.size}
                             </td>
                             <td className="px-6 py-4 text-sm text-muted-foreground">
                               {image.created}

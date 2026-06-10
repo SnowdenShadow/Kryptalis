@@ -50,7 +50,12 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
    * deletes that override (reverts to env / default).
    */
   async updateConfigBulk(updates: Record<string, any>, actorId: string) {
-    const SECRET_KEYS = new Set(['smtp_pass', 'backup_encryption_key', 'github_webhook_secret']);
+    const SECRET_KEYS = new Set([
+      'smtp_pass',
+      'backup_encryption_key',
+      'github_webhook_secret',
+      's3_secret_key',
+    ]);
     const cleaned: Record<string, any> = {};
     const removed: string[] = [];
     for (const [k, v] of Object.entries(updates)) {

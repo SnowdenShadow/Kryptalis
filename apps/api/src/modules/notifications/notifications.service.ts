@@ -40,6 +40,18 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   private static readonly ALERT_TTL_MS = 15 * 60 * 1000;
   private cleanupTimer: NodeJS.Timeout | null = null;
 
+  /**
+   * 60s cache of active ADMIN/SUPERADMIN ids used by the in-app feed
+   * fan-out. Global events (deploy/ssl/backup/alert) create one
+   * Notification row per admin; re-querying the user table on every
+   * deployment would be wasteful, and 60s staleness is fine — a freshly
+   * promoted admin just misses at most one minute of feed entries.
+   */
+  private adminIdsCache: { ids: string[]; at: number } | null = null;
+  private static readonly ADMIN_CACHE_TTL_MS = 60 * 1000;
+  /** Feed retention — rows older than this are pruned at creation time. */
+  private static readonly RETENTION_DAYS = 90;
+
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
@@ -150,7 +162,9 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async sendPasswordReset(email: string, token: string, userName: string): Promise<void> {
-    const url = this.buildDashboardUrl(`/auth/reset-password?token=${encodeURIComponent(token)}`);
+    // Dashboard page lives in the (auth) route group → public URL has no
+    // /auth segment.
+    const url = this.buildDashboardUrl(`/reset-password?token=${encodeURIComponent(token)}`);
 
     // Dev-mode token surfacing — replaces the old console.warn in
     // AuthService. Gated on NODE_ENV so production logs never leak the
@@ -176,7 +190,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         <p style="margin:0 0 12px 0;">
           We received a request to reset the password for your Kryptalis
           account. Click the button below to choose a new one. This link
-          expires in 30 minutes and can only be used once.
+          expires in 1 hour and can only be used once.
         </p>
         <p style="margin:0;">If you didn't request a reset, no action is needed.</p>`,
       ctaLabel: 'Reset password',
@@ -190,8 +204,9 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async sendEmailVerification(email: string, token: string, userName: string): Promise<void> {
+    // (auth) route group → the page is served at /verify-email.
     const url = this.buildDashboardUrl(
-      `/auth/verify-email?token=${encodeURIComponent(token)}`,
+      `/verify-email?token=${encodeURIComponent(token)}`,
     );
     if (!this.smtpReady) {
       this.logger.warn(`Skipping verification email to ${email} — SMTP not configured.`);
@@ -271,6 +286,23 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       );
       return;
     }
+    const ok = status === 'success';
+    const title = ok ? `Deployment succeeded: ${appName}` : `Deployment failed: ${appName}`;
+    const url = this.buildDashboardUrl('/dashboard/applications');
+
+    // In-app feed: deploy outcomes are "global" events — fan out to all
+    // active admins plus the user who triggered the deploy. Persisted
+    // BEFORE the SMTP guard so the feed works without mail configured.
+    await this.notifyAdmins(
+      {
+        type: ok ? 'deploy.success' : 'deploy.failed',
+        title,
+        body: ok ? undefined : error,
+        link: '/dashboard/applications',
+      },
+      [userId],
+    );
+
     if (!email) {
       this.logger.warn(`sendDeploymentResult: no email on user ${userId}; skipping.`);
       return;
@@ -280,9 +312,6 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const ok = status === 'success';
-    const title = ok ? `Deployment succeeded: ${appName}` : `Deployment failed: ${appName}`;
-    const url = this.buildDashboardUrl('/dashboard/applications');
     const errorBlock = !ok && error
       ? `<p style="margin:12px 0 0 0;font-family:ui-monospace,Menlo,Consolas,monospace;
                   font-size:13px;background:#f5f5fa;border:1px solid #e5e5ec;
@@ -331,6 +360,16 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       server: rule.serverId,
       ts: new Date().toISOString(),
     };
+
+    // In-app feed for every active admin, whatever the outbound channel.
+    // Shares the 15-min dedupe window above so a sustained breach doesn't
+    // flood the bell either.
+    await this.notifyAdmins({
+      type: 'alert.fired',
+      title: `Alert: ${rule.name}`,
+      body: `${rule.metric} = ${value} (threshold ${rule.threshold}) on server ${rule.serverId}`,
+      link: '/dashboard/monitoring',
+    });
 
     const channel = String(rule.channel);
     if (channel === 'WEBHOOK' || channel === 'DISCORD' || channel === 'SLACK') {
@@ -400,6 +439,106 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       subject: `[Kryptalis] Alert: ${rule.name}`,
       html,
     });
+  }
+
+  // ── in-app notification feed ──────────────────────────────────────
+
+  /**
+   * Persist one feed entry per active ADMIN/SUPERADMIN. Used for the
+   * "global" events (deploy outcome, SSL, backup, monitoring alert).
+   * Best-effort: a DB hiccup must never break the calling flow, mirroring
+   * the sendMail contract. `extraUserIds` lets a caller include the
+   * directly-affected user (e.g. the deploy trigger) — deduped.
+   */
+  async notifyAdmins(
+    entry: { type: string; title: string; body?: string; link?: string },
+    extraUserIds: string[] = [],
+  ): Promise<void> {
+    try {
+      const adminIds = await this.getActiveAdminIds();
+      const userIds = [...new Set([...adminIds, ...extraUserIds])];
+      if (userIds.length === 0) return;
+      await this.prisma.notification.createMany({
+        data: userIds.map((userId) => ({
+          userId,
+          type: entry.type,
+          title: entry.title,
+          body: entry.body ?? null,
+          link: entry.link ?? null,
+        })),
+      });
+      // Retention: best-effort prune of entries older than 90 days for
+      // the users we just wrote to. Piggy-backing on creation keeps the
+      // table bounded without a dedicated cron.
+      await this.pruneOldNotifications(userIds);
+    } catch (err) {
+      this.logger.error(`notifyAdmins failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Feed for the current user, newest first. */
+  async listNotifications(userId: string, opts: { unread?: boolean; take?: number } = {}) {
+    const take = Math.min(Math.max(opts.take ?? 20, 1), 100);
+    return this.prisma.notification.findMany({
+      where: { userId, ...(opts.unread ? { readAt: null } : {}) },
+      orderBy: { createdAt: 'desc' },
+      take,
+    });
+  }
+
+  async unreadCount(userId: string): Promise<{ count: number }> {
+    const count = await this.prisma.notification.count({
+      where: { userId, readAt: null },
+    });
+    return { count };
+  }
+
+  /** Mark one notification read — scoped to the owner, idempotent. */
+  async markRead(userId: string, id: string): Promise<{ updated: number }> {
+    const res = await this.prisma.notification.updateMany({
+      where: { id, userId, readAt: null },
+      data: { readAt: new Date() },
+    });
+    return { updated: res.count };
+  }
+
+  async markAllRead(userId: string): Promise<{ updated: number }> {
+    const res = await this.prisma.notification.updateMany({
+      where: { userId, readAt: null },
+      data: { readAt: new Date() },
+    });
+    return { updated: res.count };
+  }
+
+  private async getActiveAdminIds(): Promise<string[]> {
+    const now = Date.now();
+    if (
+      this.adminIdsCache &&
+      now - this.adminIdsCache.at < NotificationsService.ADMIN_CACHE_TTL_MS
+    ) {
+      return this.adminIdsCache.ids;
+    }
+    const admins = await this.prisma.user.findMany({
+      where: { role: { in: ['ADMIN', 'SUPERADMIN'] }, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    const ids = admins.map((a: { id: string }) => a.id);
+    this.adminIdsCache = { ids, at: now };
+    return ids;
+  }
+
+  private async pruneOldNotifications(userIds: string[]): Promise<void> {
+    const cutoff = new Date(
+      Date.now() - NotificationsService.RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    );
+    try {
+      await this.prisma.notification.deleteMany({
+        where: { userId: { in: userIds }, createdAt: { lt: cutoff } },
+      });
+    } catch (err) {
+      // Best-effort — retention failure must never surface to callers.
+      this.logger.warn(`notification retention prune failed: ${(err as Error).message}`);
+    }
   }
 
   // ── internal helpers ──────────────────────────────────────────────
