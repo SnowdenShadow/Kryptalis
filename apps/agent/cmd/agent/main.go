@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/kryptalis/agent/internal/config"
 	"github.com/kryptalis/agent/internal/monitor"
@@ -33,6 +34,11 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	log.Println("Shutting down...")
+	log.Println("Shutting down — waiting for in-flight tasks (up to 60s)...")
 	cancel()
+	// Drain: an immediate exit killed running deployments mid-way and left
+	// their AgentTask rows stuck PENDING on the API side. Task contexts are
+	// cancelled by cancel() above, so the wait is bounded.
+	p.Wait(60 * time.Second)
+	log.Println("Shutdown complete")
 }

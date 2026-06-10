@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Users, Settings, Activity, ShieldAlert, Crown, Shield, Eye, Search,
@@ -76,22 +76,29 @@ export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<Tab>('overview');
   const router = useRouter();
   const me = useAuthStore((s) => s.user);
-  const timeAgo = makeTimeAgo(t);
+  const timeAgo = useMemo(() => makeTimeAgo(t), [t]);
 
   // Client-side role guard. Backend still enforces RBAC on every endpoint.
-  if (me && me.role !== 'ADMIN' && me.role !== 'SUPERADMIN') {
-    if (typeof window !== 'undefined') {
-      router.replace('/dashboard');
+  // IMPORTANT: this must NOT early-return before the hooks below — on first
+  // render `me` is null (zustand rehydration) so every hook runs; a later
+  // render with a non-admin `me` would then call fewer hooks and React
+  // throws "Rendered fewer hooks than expected". Redirect via effect and
+  // gate rendering AFTER all hooks instead.
+  const isAdmin = me?.role === 'ADMIN' || me?.role === 'SUPERADMIN';
+  const accessDenied = !!me && !isAdmin;
+  useEffect(() => {
+    if (accessDenied) {
       toast.error(t('admin.restricted'));
+      router.replace('/dashboard');
     }
-    return null;
-  }
+  }, [accessDenied, router, t]);
 
   // ── Overview ─────────────────────────────────────────────────────
   const { data: overview } = useQuery<Overview>({
     queryKey: ['admin-overview'],
     queryFn: () => api.get('/admin/overview'),
     refetchInterval: 15000,
+    enabled: isAdmin,
   });
 
   // ── Users ────────────────────────────────────────────────────────
@@ -210,6 +217,9 @@ export default function AdminPage() {
       </Badge>
     );
   };
+
+  // All hooks have run — safe to bail out now (redirect happens in effect).
+  if (!isAdmin) return null;
 
   return (
     <div className="space-y-5">

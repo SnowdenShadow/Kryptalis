@@ -8,8 +8,9 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateDatabaseDto } from './dto/create-database.dto';
 import { DbType } from '@prisma/client';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { randomBytes, randomInt } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { detectDatabasesInCompose, type DetectedDb } from './compose-db-detect';
@@ -21,15 +22,19 @@ import { EncryptionService } from '../../common/crypto/encryption.service';
 import { AgentService } from '../agent/agent.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 
-const execAsync = promisify(exec);
+// execFile (array argv, no shell) — container/DB names must never reach a
+// shell even though the DTO restricts them; defence in depth.
+const execFileAsync = promisify(execFile);
+const compose = (args: string[], opts: { cwd?: string; timeout?: number } = {}) =>
+  execFileAsync('docker', ['compose', ...args], opts);
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
 const DBS_DIR = path.join(DATA_DIR, 'databases');
 
-const DB_CONFIGS: Record<string, { image: string; defaultPort: number; hostPort: (name: string) => number; compose: (name: string, user: string, pass: string, port: number) => string }> = {
+const DB_CONFIGS: Record<string, { image: string; defaultPort: number; portBase: number; compose: (name: string, user: string, pass: string, port: number) => string }> = {
   POSTGRESQL: {
     image: 'postgres:16-alpine',
     defaultPort: 5432,
-    hostPort: () => 5440 + Math.floor(Math.random() * 50),
+    portBase: 5440,
     compose: (name, user, pass, port) => `services:
   ${name}:
     image: postgres:16-alpine
@@ -54,7 +59,7 @@ volumes:
   MYSQL: {
     image: 'mysql:8',
     defaultPort: 3306,
-    hostPort: () => 3310 + Math.floor(Math.random() * 50),
+    portBase: 3310,
     compose: (name, user, pass, port) => `services:
   ${name}:
     image: mysql:8
@@ -75,7 +80,7 @@ volumes:
   MARIADB: {
     image: 'mariadb:11',
     defaultPort: 3306,
-    hostPort: () => 3360 + Math.floor(Math.random() * 50),
+    portBase: 3360,
     compose: (name, user, pass, port) => `services:
   ${name}:
     image: mariadb:11
@@ -96,7 +101,7 @@ volumes:
   REDIS: {
     image: 'redis:7-alpine',
     defaultPort: 6379,
-    hostPort: () => 6390 + Math.floor(Math.random() * 50),
+    portBase: 6390,
     compose: (name, _user, pass, port) => `services:
   ${name}:
     image: redis:7-alpine
@@ -113,7 +118,7 @@ volumes:
   MONGODB: {
     image: 'mongo:7',
     defaultPort: 27017,
-    hostPort: () => 27020 + Math.floor(Math.random() * 50),
+    portBase: 27020,
     compose: (name, user, pass, port) => `services:
   ${name}:
     image: mongo:7
@@ -133,7 +138,7 @@ volumes:
   KEYDB: {
     image: 'eqalpha/keydb:latest',
     defaultPort: 6379,
-    hostPort: () => 6440 + Math.floor(Math.random() * 50),
+    portBase: 6440,
     compose: (name, _user, pass, port) => `services:
   ${name}:
     image: eqalpha/keydb:latest
@@ -150,7 +155,7 @@ volumes:
   DRAGONFLY: {
     image: 'docker.dragonflydb.io/dragonflydb/dragonfly:latest',
     defaultPort: 6379,
-    hostPort: () => 6490 + Math.floor(Math.random() * 50),
+    portBase: 6490,
     compose: (name, _user, pass, port) => `services:
   ${name}:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
@@ -169,7 +174,7 @@ volumes:
   CLICKHOUSE: {
     image: 'clickhouse/clickhouse-server:latest',
     defaultPort: 8123,
-    hostPort: () => 8130 + Math.floor(Math.random() * 50),
+    portBase: 8130,
     compose: (name, user, pass, port) => `services:
   ${name}:
     image: clickhouse/clickhouse-server:latest
@@ -316,9 +321,11 @@ export class DatabasesService {
       );
     }
 
-    const username = dto.username || dto.name;
-    const password = dto.password || `kryptalis_${Math.random().toString(36).slice(2, 10)}`;
-    const hostPort = config.hostPort(dto.name);
+    const username = dto.username || dto.name.replace(/-/g, '_');
+    // CSPRNG — Math.random() is predictable and was a credential-guessing
+    // vector for DB containers whose host port is published.
+    const password = dto.password || `kryptalis_${randomBytes(12).toString('base64url')}`;
+    const hostPort = await this.allocateHostPort(config.portBase);
 
     const db = await this.prisma.database.create({
       data: {
@@ -340,13 +347,16 @@ export class DatabasesService {
     });
     const server = project?.server ?? null;
     if (this.isDbLocal(server)) {
-      this.launchContainer(dto.name, dto.type, username, password, hostPort);
+      // Deliberately not awaited — container start can take minutes (pull);
+      // the row is returned as 'deploying' and status polling reflects
+      // reality. launchContainer logs its own failures.
+      void this.launchContainer(dto.name, dto.type, username, password, hostPort);
     } else if (server) {
-      const compose = config.compose(dto.name, username, password, hostPort);
+      const composeYaml = config.compose(dto.name, username, password, hostPort);
       await this.agent.enqueueTask(server.id, 'DEPLOY', {
         slug: `db-${dto.name}`,
         appName: `db-${dto.name}`,
-        compose,
+        compose: composeYaml,
       });
     }
 
@@ -433,7 +443,7 @@ export class DatabasesService {
     if (this.isDbLocal(server)) {
       const dbDir = path.join(DBS_DIR, db.name);
       if (fs.existsSync(dbDir)) {
-        await execAsync('docker compose up -d', { cwd: dbDir, timeout: 30000 });
+        await compose(['up', '-d'], { cwd: dbDir, timeout: 30000 });
       }
     } else if (server) {
       await this.agent.enqueueTask(server.id, 'START', { slug });
@@ -453,7 +463,7 @@ export class DatabasesService {
     if (this.isDbLocal(server)) {
       const dbDir = path.join(DBS_DIR, db.name);
       if (fs.existsSync(dbDir)) {
-        await execAsync('docker compose stop', { cwd: dbDir, timeout: 30000 });
+        await compose(['stop'], { cwd: dbDir, timeout: 30000 });
       }
     } else if (server) {
       await this.agent.enqueueTask(server.id, 'STOP', { slug });
@@ -475,10 +485,10 @@ export class DatabasesService {
     if (this.isDbLocal(server)) {
       const dbDir = path.join(DBS_DIR, db.name);
       if (fs.existsSync(dbDir)) {
-        try { await execAsync('docker compose down -v --remove-orphans', { cwd: dbDir, timeout: 30000 }); } catch {}
+        try { await compose(['down', '-v', '--remove-orphans'], { cwd: dbDir, timeout: 30000 }); } catch {}
         fs.rmSync(dbDir, { recursive: true, force: true });
       }
-      try { await execAsync(`docker rm -f ${containerName}`, { timeout: 10000 }); } catch {}
+      try { await execFileAsync('docker', ['rm', '-f', containerName], { timeout: 10000 }); } catch {}
     } else if (server) {
       await this.agent.enqueueTask(server.id, 'REMOVE', {
         slug,
@@ -527,6 +537,33 @@ export class DatabasesService {
 
   // ── helpers ────────────────────────────────────────────────────────
 
+  /**
+   * Pick a host port in [base, base+200) that no other Database row uses.
+   * The previous random pick (base + rand*50) had no collision check — two
+   * DBs of the same type could land on the same port and the second
+   * container would fail to start. Random start point keeps allocations
+   * spread; the linear scan guarantees uniqueness against the DB table.
+   */
+  private async allocateHostPort(base: number): Promise<number> {
+    const RANGE = 200;
+    const taken = new Set(
+      (
+        await this.prisma.database.findMany({
+          where: { port: { gte: base, lt: base + RANGE } },
+          select: { port: true },
+        })
+      ).map((d) => d.port),
+    );
+    const start = randomInt(RANGE);
+    for (let i = 0; i < RANGE; i++) {
+      const port = base + ((start + i) % RANGE);
+      if (!taken.has(port)) return port;
+    }
+    throw new ConflictException(
+      `No free host port left in ${base}-${base + RANGE - 1}. Remove unused databases first.`,
+    );
+  }
+
   private async launchContainer(name: string, type: string, user: string, pass: string, port: number) {
     const config = DB_CONFIGS[type];
     if (!config) return;
@@ -536,9 +573,14 @@ export class DatabasesService {
     fs.writeFileSync(path.join(dbDir, 'docker-compose.yml'), config.compose(name, user, pass, port));
 
     try {
-      await execAsync('docker compose pull', { cwd: dbDir, timeout: 120000 });
-      await execAsync('docker compose up -d', { cwd: dbDir, timeout: 60000 });
-    } catch {}
+      await compose(['pull'], { cwd: dbDir, timeout: 120000 });
+      await compose(['up', '-d'], { cwd: dbDir, timeout: 60000 });
+    } catch (err) {
+      // Surface the failure in the API logs — the row exists but the
+      // container didn't start; status polling will show 'not running'.
+      // eslint-disable-next-line no-console
+      console.error(`[databases] failed to launch container for "${name}":`, err);
+    }
   }
 
   private async getContainerStatus(nameOrContainer: string, isAutoImported = false): Promise<string> {
@@ -546,10 +588,11 @@ export class DatabasesService {
     // the DB name and we prepend the legacy kryptalis-db- prefix.
     const target = isAutoImported ? nameOrContainer : `kryptalis-db-${nameOrContainer}`;
     try {
-      // Use execFile to avoid shell interpretation of arbitrary container_name
-      // strings that might land in the auto-imported rows.
-      const { stdout } = await execAsync(
-        `docker inspect --format="{{.State.Status}}" ${JSON.stringify(target)}`,
+      // execFile: arbitrary container_name strings from auto-imported rows
+      // never touch a shell.
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['inspect', '--format', '{{.State.Status}}', target],
         { timeout: 5000 },
       );
       return stdout.trim() || 'unknown';

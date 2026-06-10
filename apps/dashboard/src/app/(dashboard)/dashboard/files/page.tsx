@@ -415,19 +415,16 @@ export default function FilesPage() {
   }, [readData, readingPath]);
 
   // ── upload ─────────────────────────────────────────────────────────
+  // Goes through api.rawFetch so the shared 401→refresh pipeline applies
+  // (a bare fetch with the stored token broke 15 min into a session).
   async function handleUpload(files: FileList | null) {
     if (!files || files.length === 0 || !selected) return;
     for (const f of Array.from(files)) {
       try {
-        const token = localStorage.getItem('accessToken');
-        const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
-        const url = `${baseUrl}/api/files/${selected.scope}/${selected.id}/upload?path=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(f.name)}`;
-        const res = await fetch(url, {
+        const endpoint = `/files/${selected.scope}/${selected.id}/upload?path=${encodeURIComponent(currentPath)}&name=${encodeURIComponent(f.name)}`;
+        const res = await api.rawFetch(endpoint, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
+          headers: { 'Content-Type': 'application/octet-stream' },
           body: f,
         });
         if (!res.ok) {
@@ -446,11 +443,7 @@ export default function FilesPage() {
 
   function handleDownload(p: string, name: string) {
     if (!selected) return;
-    const token = localStorage.getItem('accessToken');
-    const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
-    fetch(`${baseUrl}/api/files/${selected.scope}/${selected.id}/download?path=${encodeURIComponent(p)}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-    })
+    api.rawFetch(`/files/${selected.scope}/${selected.id}/download?path=${encodeURIComponent(p)}`)
       .then(r => r.ok ? r.blob() : Promise.reject(new Error('Download failed')))
       .then(blob => {
         const url = URL.createObjectURL(blob);

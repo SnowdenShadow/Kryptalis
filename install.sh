@@ -118,13 +118,20 @@ NEEDS_DASHBOARD_REBUILD=0
 if [ ! -f .env ]; then
   STALE_PG_VOLUME=$(docker volume ls --quiet --filter "name=kryptalis_postgres_data" 2>/dev/null)
   if [ -n "$STALE_PG_VOLUME" ]; then
-    warn "Found a Postgres volume from a previous install but no .env — wiping it"
-    docker volume rm $STALE_PG_VOLUME 2>/dev/null || true
-  fi
-  # Same logic for redis (less critical, but ensures clean state)
-  STALE_REDIS_VOLUME=$(docker volume ls --quiet --filter "name=kryptalis_redis_data" 2>/dev/null)
-  if [ -n "$STALE_REDIS_VOLUME" ]; then
-    docker volume rm $STALE_REDIS_VOLUME 2>/dev/null || true
+    # A Postgres volume WITHOUT a .env means the new random password won't
+    # match the one baked into the volume (P1000). The fix is wiping the
+    # volume — but that destroys the database, so never do it silently:
+    # a merely-misplaced .env would otherwise cost the operator all data.
+    if [ "${KRYPTALIS_RESET:-0}" = "1" ]; then
+      warn "KRYPTALIS_RESET=1 — wiping stale Postgres volume (ALL DATA LOST)"
+      docker volume rm "$STALE_PG_VOLUME" 2>/dev/null || true
+      STALE_REDIS_VOLUME=$(docker volume ls --quiet --filter "name=kryptalis_redis_data" 2>/dev/null)
+      if [ -n "$STALE_REDIS_VOLUME" ]; then
+        docker volume rm "$STALE_REDIS_VOLUME" 2>/dev/null || true
+      fi
+    else
+      die "Found a Postgres data volume but no .env. If the old .env is recoverable, restore it to $INSTALL_DIR/.env and re-run. To start FRESH and DELETE ALL DATA, re-run with KRYPTALIS_RESET=1."
+    fi
   fi
 
   say "Generating $INSTALL_DIR/.env with secure random secrets"
@@ -215,14 +222,13 @@ fi
 docker compose up -d --build --remove-orphans
 
 # ─── 8b. install auto-update systemd timer ──────────────────────────
-# Runs update.sh every 30 SECONDS — checks origin/main via the GitHub API
-# (no auth required, 60 req/h limit is well under our cadence), rebuilds only
-# if the upstream SHA changed. A no-op check is ~100ms and writes nothing to
-# disk, so polling this aggressively is essentially free.
+# Runs update.sh every 5 MINUTES by default (KRYPTALIS_UPDATE_INTERVAL to
+# override) — checks origin/main via the GitHub API (no auth required;
+# the If-None-Match ETag means an unchanged upstream is a free 304),
+# rebuilds only if the upstream SHA changed.
 #
-# This is what makes updates feel "instant" to end-users: ~30s between
-# `git push` and their install starting the rebuild. No webhook, no
-# third-party service, no per-install configuration.
+# Push→deploy latency averages under 10 min. No webhook, no third-party
+# service, no per-install configuration.
 #
 # Toggleable from the dashboard (writes `auto-update.pref` which update.sh
 # honours) or via KRYPTALIS_NO_AUTOUPDATE=1.
@@ -238,7 +244,11 @@ elif [ ! -f "$UPDATE_SCRIPT" ]; then
 elif ! command -v systemctl >/dev/null 2>&1; then
   warn "systemd not detected — auto-update timer skipped (use cron manually)"
 else
-  say "Installing kryptalis-update.timer (checks every 10 min)"
+  # Resolve the interval HERE — systemd does no shell expansion, so the
+  # ${VAR:-default} syntax must never reach the unit file (it would be
+  # written literally and the timer would fail to load).
+  UPDATE_INTERVAL="${KRYPTALIS_UPDATE_INTERVAL:-5min}"
+  say "Installing kryptalis-update.timer (checks every $UPDATE_INTERVAL)"
   cat > /etc/systemd/system/kryptalis-update.service <<EOF
 [Unit]
 Description=Kryptalis self-update (pull latest from origin/$BRANCH, rebuild if changed)
@@ -266,9 +276,9 @@ Requires=kryptalis-update.service
 # However at 30s cadence ANY rate-limit-skewed hour can cascade rebuilds
 # while you're still mid-edit; the 5-min default is conservative for prod
 # and still gives push→deploy latency under 10 min average.
-# Power users can override via /etc/kryptalis/.env: KRYPTALIS_UPDATE_INTERVAL=30s
+# Power users can override at install time: KRYPTALIS_UPDATE_INTERVAL=30s
 OnBootSec=1min
-OnUnitActiveSec=\${KRYPTALIS_UPDATE_INTERVAL:-5min}
+OnUnitActiveSec=$UPDATE_INTERVAL
 Unit=kryptalis-update.service
 Persistent=true
 

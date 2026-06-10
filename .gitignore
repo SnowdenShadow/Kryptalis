@@ -51,3 +51,7 @@ docker/data/
 apps/api/.kryptalis/
 *.sock
 *.lock
+
+graphify-out/
+.claude/
+.claude/settings.json

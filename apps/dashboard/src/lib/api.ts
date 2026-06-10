@@ -1,4 +1,6 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+import { useAuthStore } from './store';
+
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
 type RequestOptions = {
   method?: string;
@@ -68,8 +70,11 @@ class ApiClient {
 
   private clearTokensAndRedirect() {
     if (typeof window === 'undefined') return;
-    localStorage.removeItem('accessToken');
-    localStorage.removeItem('refreshToken');
+    // logout() clears BOTH localStorage tokens and the persisted zustand
+    // state ('kryptalis-auth'). Clearing only localStorage left zustand
+    // believing the user was still logged in → /login ↔ /dashboard
+    // redirect loop after session expiry.
+    useAuthStore.getState().logout();
     // Avoid bouncing if we're already on the login page.
     if (!window.location.pathname.startsWith('/login')) {
       window.location.href = '/login';
@@ -97,6 +102,14 @@ class ApiClient {
         const data = await res.json();
         if (data.accessToken) localStorage.setItem('accessToken', data.accessToken);
         if (data.refreshToken) localStorage.setItem('refreshToken', data.refreshToken);
+        // Keep the zustand copy in sync — it persists its own snapshot
+        // ('kryptalis-auth') and would otherwise hold revoked tokens.
+        if (data.accessToken) {
+          useAuthStore.setState({
+            accessToken: data.accessToken,
+            refreshToken: data.refreshToken ?? useAuthStore.getState().refreshToken,
+          });
+        }
         return data.accessToken ?? null;
       } catch {
         return null;
@@ -171,7 +184,39 @@ class ApiClient {
       throw new ApiError({ status: res.status, message: summary, fields, endpoint, raw: error });
     }
 
-    return res.json();
+    // 204 No Content / empty body (typical DELETE) — res.json() would throw
+    // "Unexpected end of JSON input".
+    if (res.status === 204) return undefined as T;
+    const text = await res.text();
+    return (text ? JSON.parse(text) : undefined) as T;
+  }
+
+  /**
+   * Raw fetch sharing the same auth/refresh pipeline, for endpoints that
+   * are not JSON (file upload streams, blob downloads). Callers get the
+   * Response object back; non-2xx still throws ApiError after one refresh
+   * attempt, so upload/download no longer break 15 minutes into a session.
+   */
+  async rawFetch(endpoint: string, init: RequestInit = {}): Promise<Response> {
+    const doFetch = (token: string | null) =>
+      fetch(`${this.baseUrl}/api${endpoint}`, {
+        ...init,
+        headers: {
+          ...(init.headers as Record<string, string> | undefined),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+
+    let res = await doFetch(this.getAccessToken());
+    if (res.status === 401) {
+      const newToken = await this.tryRefresh();
+      if (newToken) res = await doFetch(newToken);
+      if (res.status === 401) {
+        this.clearTokensAndRedirect();
+        throw new ApiError({ status: 401, message: 'Session expired — please log in again.', endpoint });
+      }
+    }
+    return res;
   }
 
   get<T>(endpoint: string) {

@@ -44,12 +44,15 @@ EXPOSE 4000
 # `prisma db push` syncs schema.prisma directly to the database — fast,
 # idempotent, doesn't care whether the DB is empty or already has data.
 # Pre-1.0 we treat schema.prisma as the single source of truth and skip
-# the migration file workflow entirely; there's no value in keeping a
-# linear migration history while the schema is still moving daily and
-# every existing install gets refreshed via the auto-update timer.
-# `--accept-data-loss` is required for column drops; pick destructive
-# ops manually and pre-truncate when needed.
+# the migration file workflow entirely.
 #
-# Once we cut 1.0 we'll start minting versioned migrations for every
-# schema change and switch this back to `migrate deploy`.
-CMD ["sh", "-c", "pnpm exec prisma db push --skip-generate --accept-data-loss && node dist/main"]
+# DELIBERATELY no `--accept-data-loss`: combined with the auto-update
+# timer it would let any push to main that drops a column silently
+# destroy data on every installation. Without the flag a destructive
+# schema change makes the container fail loudly at startup instead —
+# the operator must run the destructive push by hand:
+#   docker compose exec api pnpm exec prisma db push --accept-data-loss
+#
+# Once we cut 1.0 we'll mint versioned migrations and switch to
+# `migrate deploy`.
+CMD ["sh", "-c", "pnpm exec prisma db push --skip-generate && node dist/main"]

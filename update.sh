@@ -29,13 +29,29 @@ command -v git >/dev/null 2>&1 || apk add --no-cache git >>"$LOG_FILE" 2>&1
 date -u +'[%Y-%m-%dT%H:%M:%SZ] === update start ===' > "$LOG_FILE"
 
 log() { echo "$*" | tee -a "$LOG_FILE"; }
-run() { "$@" 2>&1 | tee -a "$LOG_FILE"; }
+# Mirror command output to the log AND propagate the command's exit code.
+# A plain `cmd | tee` returns tee's status (always 0), which made every
+# failed fetch/reset/build log "✓ update complete". POSIX sh has no
+# pipefail, so capture the real status through a temp file.
+run() {
+  _rc_file=$(mktemp)
+  { "$@" 2>&1; echo "$?" >"$_rc_file"; } | tee -a "$LOG_FILE"
+  _rc=$(cat "$_rc_file")
+  rm -f "$_rc_file"
+  return "$_rc"
+}
 
 log "→ fetching origin/$BRANCH"
-run git fetch --depth=1 origin "$BRANCH"
+if ! run git fetch --depth=1 origin "$BRANCH"; then
+  log "ERR: git fetch failed"
+  exit 1
+fi
 
 log "→ resetting to origin/$BRANCH"
-run git reset --hard "origin/$BRANCH"
+if ! run git reset --hard "origin/$BRANCH"; then
+  log "ERR: git reset failed"
+  exit 1
+fi
 
 # Windows checkouts drop the +x bit on shell scripts — restore.
 chmod +x "$INSTALL_DIR/update.sh" 2>/dev/null || true

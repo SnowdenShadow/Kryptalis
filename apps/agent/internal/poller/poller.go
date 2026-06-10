@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kryptalis/agent/internal/config"
@@ -31,9 +32,29 @@ type Poller struct {
 	cfg    *config.Config
 	client *http.Client
 	sem    chan struct{}
+	wg     sync.WaitGroup
 }
 
 const maxConcurrentTasks = 4
+
+// Per-task-type deadlines. Without them a hung `docker compose pull`
+// (network stall) permanently occupied a semaphore slot; four such tasks
+// silently bricked the agent.
+var taskTimeouts = map[string]time.Duration{
+	"DEPLOY":     30 * time.Minute, // image builds can be slow
+	"BUILD":      30 * time.Minute,
+	"START":      5 * time.Minute,
+	"RESTART":    5 * time.Minute,
+	"STOP":       5 * time.Minute,
+	"REMOVE":     5 * time.Minute,
+	"LOGS":       1 * time.Minute,
+	"EXEC":       2 * time.Minute,
+	"STATUS":     1 * time.Minute,
+	"FILE_READ":  30 * time.Second,
+	"FILE_WRITE": 30 * time.Second,
+}
+
+const defaultTaskTimeout = 5 * time.Minute
 
 func New(cfg *config.Config) *Poller {
 	return &Poller{
@@ -46,41 +67,78 @@ func New(cfg *config.Config) *Poller {
 }
 
 func (p *Poller) Start(ctx context.Context) {
-	ticker := time.NewTicker(p.cfg.PollInterval)
-	defer ticker.Stop()
+	// Exponential backoff with cap when the API is unreachable — a fixed
+	// interval hammers a recovering API from every agent at once.
+	interval := p.cfg.PollInterval
+	maxBackoff := 2 * time.Minute
+	current := interval
+
+	timer := time.NewTimer(current)
+	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			tasks, err := p.poll()
+		case <-timer.C:
+			tasks, err := p.poll(ctx)
 			if err != nil {
 				log.Printf("poll error: %v", err)
-				continue
+				current *= 2
+				if current > maxBackoff {
+					current = maxBackoff
+				}
+			} else {
+				current = interval
+				for _, task := range tasks {
+					select {
+					case p.sem <- struct{}{}:
+					case <-ctx.Done():
+						return
+					}
+					p.wg.Add(1)
+					go func(t Task) {
+						defer p.wg.Done()
+						defer func() { <-p.sem }()
+						p.handleTask(ctx, t)
+					}(task)
+				}
 			}
-			for _, task := range tasks {
-				p.sem <- struct{}{}
-				go func(t Task) {
-					defer func() { <-p.sem }()
-					p.handleTask(t)
-				}(task)
-			}
+			timer.Reset(current)
 		}
 	}
 }
 
-func (p *Poller) poll() ([]Task, error) {
+// Wait blocks until all in-flight tasks have finished and reported their
+// results. Called on shutdown so SIGTERM doesn't kill a deployment halfway
+// and leave the API row stuck PENDING.
+func (p *Poller) Wait(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		log.Printf("shutdown: %s grace period elapsed with tasks still running", timeout)
+	}
+}
+
+func (p *Poller) poll(ctx context.Context) ([]Task, error) {
 	body, _ := json.Marshal(map[string]string{
 		"serverId": p.cfg.ServerID,
 		"token":    p.cfg.AgentToken,
 	})
 
-	resp, err := p.client.Post(
-		fmt.Sprintf("%s/api/agent/poll", p.cfg.APIUrl),
-		"application/json",
-		bytes.NewReader(body),
-	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/api/agent/poll", p.cfg.APIUrl), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -100,8 +158,15 @@ func (p *Poller) poll() ([]Task, error) {
 // handleTask runs whatever the API queued for us. The payload is forwarded
 // from ApplicationsService etc. and contains the docker-compose stack (or
 // commands) we should apply locally on this server.
-func (p *Poller) handleTask(task Task) {
+func (p *Poller) handleTask(ctx context.Context, task Task) {
 	log.Printf("▶ task %s (%s)", task.ID, task.Type)
+
+	timeout, ok := taskTimeouts[task.Type]
+	if !ok {
+		timeout = defaultTaskTimeout
+	}
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
 	var result map[string]interface{}
 	var taskErr string
@@ -115,21 +180,21 @@ func (p *Poller) handleTask(task Task) {
 
 	switch task.Type {
 	case "DEPLOY", "BUILD":
-		result, taskErr = p.runDeploy(task)
+		result, taskErr = p.runDeploy(tctx, task)
 	case "START":
-		result, taskErr = p.runComposeCmd(task, "up", "-d")
+		result, taskErr = p.runComposeCmd(tctx, task, "up", "-d")
 	case "RESTART":
-		result, taskErr = p.runComposeCmd(task, "restart")
+		result, taskErr = p.runComposeCmd(tctx, task, "restart")
 	case "STOP":
-		result, taskErr = p.runComposeCmd(task, "stop")
+		result, taskErr = p.runComposeCmd(tctx, task, "stop")
 	case "REMOVE":
-		result, taskErr = p.runRemove(task)
+		result, taskErr = p.runRemove(tctx, task)
 	case "LOGS":
-		result, taskErr = p.runLogs(task)
+		result, taskErr = p.runLogs(tctx, task)
 	case "EXEC":
-		result, taskErr = p.runExec(task)
+		result, taskErr = p.runExec(tctx, task)
 	case "STATUS":
-		result, taskErr = p.runStatus(task)
+		result, taskErr = p.runStatus(tctx, task)
 	case "FILE_READ":
 		result, taskErr = p.runFileRead(task)
 	case "FILE_WRITE":
@@ -138,6 +203,10 @@ func (p *Poller) handleTask(task Task) {
 		result = map[string]interface{}{"status": "not_implemented"}
 	default:
 		taskErr = fmt.Sprintf("unknown task type: %s", task.Type)
+	}
+
+	if tctx.Err() == context.DeadlineExceeded && taskErr == "" {
+		taskErr = fmt.Sprintf("task timed out after %s", timeout)
 	}
 
 	p.reportResult(task.ID, result, taskErr)
@@ -170,6 +239,8 @@ func writeProjectNetworkOverride(dir, networkName string) error {
 	}
 	// Cheap service discovery: collect top-level keys under "services:". We
 	// only care about direct children of the services map, not nested keys.
+	// Skip comments and compose extension fields (x-*) — both match the
+	// "two-space indent ending in ':'" shape but are not services.
 	services := []string{}
 	inServices := false
 	for _, line := range strings.Split(string(data), "\n") {
@@ -188,9 +259,10 @@ func writeProjectNetworkOverride(dir, networkName string) error {
 			if strings.HasPrefix(trim, "  ") && !strings.HasPrefix(trim, "   ") &&
 				strings.HasSuffix(strings.TrimSpace(trim), ":") {
 				name := strings.TrimSuffix(strings.TrimSpace(trim), ":")
-				if name != "" {
-					services = append(services, name)
+				if name == "" || strings.HasPrefix(name, "#") || strings.HasPrefix(name, "x-") {
+					continue
 				}
+				services = append(services, name)
 			}
 		}
 	}
@@ -209,9 +281,56 @@ func writeProjectNetworkOverride(dir, networkName string) error {
 	return os.WriteFile(filepath.Join(dir, "docker-compose.override.yml"), []byte(b.String()), 0644)
 }
 
+// writeEnvFile renders KEY=VALUE lines, escaping values so a value
+// containing a newline can't inject extra variables, and quoting anything
+// that isn't a plain token. Keys that aren't valid env identifiers are
+// rejected outright.
+func writeEnvFile(path string, envVars map[string]interface{}) error {
+	var b strings.Builder
+	for k, v := range envVars {
+		if !isValidEnvKey(k) {
+			return fmt.Errorf("invalid env var name: %q", k)
+		}
+		val := fmt.Sprintf("%v", v)
+		if strings.ContainsAny(val, "\n\r\"'\\$` #") {
+			val = strconv_QuoteCompat(val)
+		}
+		fmt.Fprintf(&b, "%s=%s\n", k, val)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0600)
+}
+
+// strconv_QuoteCompat double-quotes a value for .env consumption, escaping
+// backslashes, double quotes, dollars and newlines (docker compose reads
+// double-quoted values with standard escapes).
+func strconv_QuoteCompat(s string) string {
+	r := strings.NewReplacer(
+		`\`, `\\`,
+		`"`, `\"`,
+		"$", `$$`, // compose interpolation escape
+		"\n", `\n`,
+		"\r", ``,
+	)
+	return `"` + r.Replace(s) + `"`
+}
+
+func isValidEnvKey(k string) bool {
+	if k == "" {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		ok := c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (i > 0 && c >= '0' && c <= '9')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // runDeploy: clones the repo (if gitUrl given) and brings the compose stack up.
 // Falls back to writing a pre-rendered compose when the API supplies one.
-func (p *Poller) runDeploy(task Task) (map[string]interface{}, string) {
+func (p *Poller) runDeploy(ctx context.Context, task Task) (map[string]interface{}, string) {
 	slug, _ := task.Payload["slug"].(string)
 	if slug == "" {
 		if name, ok := task.Payload["appName"].(string); ok {
@@ -229,7 +348,7 @@ func (p *Poller) runDeploy(task Task) (map[string]interface{}, string) {
 
 	logs := &bytes.Buffer{}
 	runIn := func(cwd, prog string, args ...string) error {
-		c := exec.Command(prog, args...)
+		c := exec.CommandContext(ctx, prog, args...)
 		c.Dir = cwd
 		c.Stdout = logs
 		c.Stderr = logs
@@ -270,15 +389,15 @@ func (p *Poller) runDeploy(task Task) (map[string]interface{}, string) {
 		}
 	}
 	if dockerfileOverride, ok := task.Payload["dockerfileOverride"].(string); ok && dockerfileOverride != "" {
-		_ = os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfileOverride), 0644)
+		if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfileOverride), 0644); err != nil {
+			return map[string]interface{}{"logs": logs.String()}, "writing Dockerfile override: " + err.Error()
+		}
 	}
 
 	if envVars, ok := task.Payload["envVars"].(map[string]interface{}); ok && len(envVars) > 0 {
-		var b strings.Builder
-		for k, v := range envVars {
-			fmt.Fprintf(&b, "%s=%v\n", k, v)
+		if err := writeEnvFile(filepath.Join(dir, ".env"), envVars); err != nil {
+			return map[string]interface{}{"logs": logs.String()}, "writing .env: " + err.Error()
 		}
-		_ = os.WriteFile(filepath.Join(dir, ".env"), []byte(b.String()), 0600)
 	}
 
 	// Project network — apps in the same Kryptalis project share a docker
@@ -295,7 +414,7 @@ func (p *Poller) runDeploy(task Task) (map[string]interface{}, string) {
 	//      simpler (and more robust) than parsing the user's YAML in Go — it
 	//      composes cleanly with whatever they already have.
 	if projectNet, ok := task.Payload["projectNetwork"].(string); ok && projectNet != "" {
-		if err := exec.Command("docker", "network", "inspect", projectNet).Run(); err != nil {
+		if err := exec.CommandContext(ctx, "docker", "network", "inspect", projectNet).Run(); err != nil {
 			fmt.Fprintf(logs, "> docker network create %s\n", projectNet)
 			_ = runIn(".", "docker", "network", "create", projectNet)
 		}
@@ -307,14 +426,17 @@ func (p *Poller) runDeploy(task Task) (map[string]interface{}, string) {
 	// capture commit (best-effort)
 	commitSha := ""
 	commitMsg := ""
-	if shaOut, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").Output(); err == nil {
+	if shaOut, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output(); err == nil {
 		commitSha = strings.TrimSpace(string(shaOut))
 	}
-	if msgOut, err := exec.Command("git", "-C", dir, "log", "-1", "--pretty=%B").Output(); err == nil {
+	if msgOut, err := exec.CommandContext(ctx, "git", "-C", dir, "log", "-1", "--pretty=%B").Output(); err == nil {
 		commitMsg = strings.TrimSpace(string(msgOut))
 	}
 
-	_ = runIn(dir, "docker", "compose", "pull")
+	if err := runIn(dir, "docker", "compose", "pull"); err != nil {
+		// Non-fatal (image may be built locally) but worth surfacing in logs.
+		fmt.Fprintf(logs, "> warn: compose pull failed: %v\n", err)
+	}
 	if err := runIn(dir, "docker", "compose", "up", "-d", "--build", "--remove-orphans"); err != nil {
 		return map[string]interface{}{"logs": tail(logs.String(), 8000)}, err.Error()
 	}
@@ -326,7 +448,7 @@ func (p *Poller) runDeploy(task Task) (map[string]interface{}, string) {
 	}, ""
 }
 
-func (p *Poller) runComposeCmd(task Task, action ...string) (map[string]interface{}, string) {
+func (p *Poller) runComposeCmd(ctx context.Context, task Task, action ...string) (map[string]interface{}, string) {
 	slug, _ := task.Payload["slug"].(string)
 	if slug == "" {
 		return nil, "missing slug"
@@ -334,7 +456,7 @@ func (p *Poller) runComposeCmd(task Task, action ...string) (map[string]interfac
 	dir := appDir(slug)
 	logs := bytes.Buffer{}
 	args := append([]string{"compose"}, action...)
-	cmd := exec.Command("docker", args...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Dir = dir
 	cmd.Stdout = &logs
 	cmd.Stderr = &logs
@@ -344,7 +466,7 @@ func (p *Poller) runComposeCmd(task Task, action ...string) (map[string]interfac
 	return map[string]interface{}{"status": "ok", "logs": tail(logs.String(), 2000)}, ""
 }
 
-func (p *Poller) runRemove(task Task) (map[string]interface{}, string) {
+func (p *Poller) runRemove(ctx context.Context, task Task) (map[string]interface{}, string) {
 	slug, _ := task.Payload["slug"].(string)
 	if slug == "" {
 		return nil, "missing slug"
@@ -362,36 +484,51 @@ func (p *Poller) runRemove(task Task) (map[string]interface{}, string) {
 	}
 	dir := appDir(slug)
 	logs := bytes.Buffer{}
+	// Collect errors instead of swallowing them: reporting "removed" while
+	// `compose down` failed left the API state diverged from reality
+	// (running containers the dashboard no longer shows).
+	var errs []string
 	if _, err := os.Stat(dir); err == nil {
 		args := []string{"compose", "down", "--remove-orphans"}
 		if purgeVolumes {
 			args = []string{"compose", "down", "-v", "--remove-orphans"}
 		}
-		c := exec.Command("docker", args...)
+		c := exec.CommandContext(ctx, "docker", args...)
 		c.Dir = dir
 		c.Stdout = &logs
 		c.Stderr = &logs
-		_ = c.Run()
+		if err := c.Run(); err != nil {
+			errs = append(errs, "compose down: "+err.Error())
+		}
 	}
 	if cname, ok := task.Payload["containerName"].(string); ok && cname != "" {
-		c := exec.Command("docker", "rm", "-f", cname)
+		c := exec.CommandContext(ctx, "docker", "rm", "-f", cname)
 		c.Stdout = &logs
 		c.Stderr = &logs
-		_ = c.Run()
+		// `docker rm -f` on an already-gone container exits non-zero; that's
+		// fine — only record the error when compose down ALSO failed.
+		if err := c.Run(); err != nil && len(errs) > 0 {
+			errs = append(errs, "docker rm: "+err.Error())
+		}
 	}
 	// Only wipe the on-disk app dir when we're also purging volumes.
 	// Otherwise leave it so a later restore can recover state.
-	if purgeVolumes {
-		_ = os.RemoveAll(dir)
+	if purgeVolumes && len(errs) == 0 {
+		if err := os.RemoveAll(dir); err != nil {
+			errs = append(errs, "removing app dir: "+err.Error())
+		}
+	}
+	if len(errs) > 0 {
+		return map[string]interface{}{"logs": tail(logs.String(), 2000)}, strings.Join(errs, "; ")
 	}
 	return map[string]interface{}{
-		"status":       "removed",
+		"status":        "removed",
 		"purgedVolumes": purgeVolumes,
-		"logs":         tail(logs.String(), 2000),
+		"logs":          tail(logs.String(), 2000),
 	}, ""
 }
 
-func (p *Poller) runLogs(task Task) (map[string]interface{}, string) {
+func (p *Poller) runLogs(ctx context.Context, task Task) (map[string]interface{}, string) {
 	slug, _ := task.Payload["slug"].(string)
 	if slug == "" {
 		return nil, "missing slug"
@@ -401,7 +538,7 @@ func (p *Poller) runLogs(task Task) (map[string]interface{}, string) {
 	if n, ok := task.Payload["lines"].(float64); ok && n > 0 {
 		lines = int(n)
 	}
-	c := exec.Command("docker", "compose", "logs", "--tail", fmt.Sprintf("%d", lines), "--no-color")
+	c := exec.CommandContext(ctx, "docker", "compose", "logs", "--tail", fmt.Sprintf("%d", lines), "--no-color")
 	c.Dir = dir
 	out, err := c.CombinedOutput()
 	if err != nil {
@@ -410,7 +547,7 @@ func (p *Poller) runLogs(task Task) (map[string]interface{}, string) {
 	return map[string]interface{}{"logs": string(out)}, ""
 }
 
-func (p *Poller) runExec(task Task) (map[string]interface{}, string) {
+func (p *Poller) runExec(ctx context.Context, task Task) (map[string]interface{}, string) {
 	cname, _ := task.Payload["containerName"].(string)
 	command, _ := task.Payload["command"].(string)
 	if cname == "" || command == "" {
@@ -418,7 +555,7 @@ func (p *Poller) runExec(task Task) (map[string]interface{}, string) {
 	}
 	shells := []string{"/bin/sh", "/bin/bash", "sh", "bash"}
 	for _, shell := range shells {
-		c := exec.Command("docker", "exec", cname, shell, "-c", command)
+		c := exec.CommandContext(ctx, "docker", "exec", cname, shell, "-c", command)
 		out, err := c.CombinedOutput()
 		if err == nil {
 			return map[string]interface{}{"output": string(out), "exitCode": 0}, ""
@@ -439,13 +576,13 @@ func (p *Poller) runExec(task Task) (map[string]interface{}, string) {
 	}, ""
 }
 
-func (p *Poller) runStatus(task Task) (map[string]interface{}, string) {
+func (p *Poller) runStatus(ctx context.Context, task Task) (map[string]interface{}, string) {
 	slug, _ := task.Payload["slug"].(string)
 	if slug == "" {
 		return nil, "missing slug"
 	}
 	dir := appDir(slug)
-	c := exec.Command("docker", "compose", "ps", "--format", "json")
+	c := exec.CommandContext(ctx, "docker", "compose", "ps", "--format", "json")
 	c.Dir = dir
 	out, err := c.CombinedOutput()
 	if err != nil {
@@ -548,18 +685,37 @@ func (p *Poller) reportResult(taskID string, result map[string]interface{}, task
 		"error":    taskErr,
 	})
 
-	resp, err := p.client.Post(
-		fmt.Sprintf("%s/api/agent/tasks/%s/result", p.cfg.APIUrl, taskID),
-		"application/json",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		log.Printf("failed to report task %s: %v", taskID, err)
+	// Retry with backoff — a transient network blip here used to lose the
+	// result permanently, leaving the task PENDING until the staleness
+	// sweeper failed it.
+	delays := []time.Duration{0, 5 * time.Second, 15 * time.Second}
+	var lastErr error
+	for _, d := range delays {
+		if d > 0 {
+			time.Sleep(d)
+		}
+		resp, err := p.client.Post(
+			fmt.Sprintf("%s/api/agent/tasks/%s/result", p.cfg.APIUrl, taskID),
+			"application/json",
+			bytes.NewReader(body),
+		)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		// Drain so the keep-alive connection is reusable.
+		buf, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			// 4xx = rejected (bad token, unknown task) — retrying won't help.
+			log.Printf("task %s report rejected (%d): %s", taskID, resp.StatusCode, string(buf))
+			if resp.StatusCode < 500 {
+				return
+			}
+			lastErr = fmt.Errorf("status %d", resp.StatusCode)
+			continue
+		}
 		return
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		buf, _ := io.ReadAll(resp.Body)
-		log.Printf("task %s report rejected (%d): %s", taskID, resp.StatusCode, string(buf))
-	}
+	log.Printf("failed to report task %s after retries: %v", taskID, lastErr)
 }
