@@ -290,12 +290,12 @@ function EnvRow({
     <div className="flex items-center gap-2">
       <Input
         placeholder={phKey}
-        className="font-mono"
+        className="font-mono flex-1 min-w-0"
         value={row.key}
         onChange={(e) => onChange({ ...row, key: e.target.value })}
       />
-      <span className="text-muted-foreground">=</span>
-      <div className="flex-1 relative">
+      <span className="text-muted-foreground shrink-0">=</span>
+      <div className="flex-1 min-w-0 relative">
         <Input
           type={show ? 'text' : 'password'}
           placeholder={phValue}
