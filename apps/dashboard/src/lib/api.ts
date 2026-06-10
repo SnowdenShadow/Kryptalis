@@ -1,4 +1,4 @@
-import { useAuthStore } from './store';
+import { useAuthStore, consumeLegacyRefreshToken } from './store';
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
 
@@ -40,12 +40,13 @@ export class ApiError extends Error {
 /**
  * API client with transparent JWT refresh.
  *
- * The access token has a short TTL (15m); the refresh token lasts 7 days.
+ * The access token has a short TTL (15m); the refresh token lasts 7 days and
+ * lives in the httpOnly `kryptalis_rt` cookie (path-scoped to /api/auth).
  * Without auto-refresh the user gets kicked back to /login every 15 minutes,
- * which is what was happening. Now: on any 401 we try /auth/refresh once with
- * the stored refresh token, swap in the new pair, and retry the original
- * request. Only if the refresh itself fails do we wipe storage and bounce to
- * /login.
+ * which is what was happening. Now: on any 401 we POST /auth/refresh with
+ * credentials:'include' (the cookie does the authenticating), swap in the new
+ * access token, and retry the original request. Only if the refresh itself
+ * fails do we wipe storage and bounce to /login.
  *
  * Concurrent requests landing during a refresh share the same in-flight promise
  * so we never fire two refreshes in parallel.
@@ -63,11 +64,6 @@ class ApiClient {
     return localStorage.getItem('accessToken');
   }
 
-  private getRefreshToken(): string | null {
-    if (typeof window === 'undefined') return null;
-    return localStorage.getItem('refreshToken');
-  }
-
   private clearTokensAndRedirect() {
     if (typeof window === 'undefined') return;
     // logout() clears BOTH localStorage tokens and the persisted zustand
@@ -82,35 +78,44 @@ class ApiClient {
   }
 
   /**
-   * Returns a new access token (and rotates the refresh token in storage) on
-   * success, or null if the refresh failed. Multi-call safe: a single
-   * in-flight refresh is shared across all concurrent callers.
+   * Returns a new access token on success, or null if the refresh failed.
+   * Cookie-first: the httpOnly `kryptalis_rt` cookie rides along via
+   * credentials:'include' and the body stays empty. If that fails AND a
+   * pre-cookie localStorage refresh token still exists (legacy session),
+   * we retry once with the body — the server then sets the cookie and the
+   * migration completes. The rotated refresh token returned in the JSON
+   * body is deliberately NOT persisted anywhere readable by JS.
+   * Multi-call safe: a single in-flight refresh is shared across all
+   * concurrent callers.
    */
   private async tryRefresh(): Promise<string | null> {
     if (this.refreshPromise) return this.refreshPromise;
-    const refreshToken = this.getRefreshToken();
-    if (!refreshToken) return null;
 
     this.refreshPromise = (async () => {
       try {
-        const res = await fetch(`${this.baseUrl}/api/auth/refresh`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken }),
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        if (data.accessToken) localStorage.setItem('accessToken', data.accessToken);
-        if (data.refreshToken) localStorage.setItem('refreshToken', data.refreshToken);
-        // Keep the zustand copy in sync — it persists its own snapshot
-        // ('kryptalis-auth') and would otherwise hold revoked tokens.
-        if (data.accessToken) {
-          useAuthStore.setState({
-            accessToken: data.accessToken,
-            refreshToken: data.refreshToken ?? useAuthStore.getState().refreshToken,
+        const attempt = async (body: Record<string, string>) => {
+          const res = await fetch(`${this.baseUrl}/api/auth/refresh`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
           });
+          if (!res.ok) return null;
+          return res.json();
+        };
+
+        let data = await attempt({});
+        if (!data) {
+          const legacy = consumeLegacyRefreshToken();
+          if (legacy) data = await attempt({ refreshToken: legacy });
         }
-        return data.accessToken ?? null;
+        if (!data?.accessToken) return null;
+
+        localStorage.setItem('accessToken', data.accessToken);
+        // Keep the zustand copy in sync — it persists its own snapshot
+        // ('kryptalis-auth') and would otherwise hold a revoked token.
+        useAuthStore.setState({ accessToken: data.accessToken });
+        return data.accessToken;
       } catch {
         return null;
       } finally {
@@ -132,6 +137,9 @@ class ApiClient {
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...headers,
       },
+      // /api/auth/* carries the httpOnly refresh cookie (login/refresh set
+      // it, logout clears it) — everything else stays cookie-less.
+      ...(endpoint.startsWith('/auth') ? { credentials: 'include' as const } : {}),
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
 

@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
+import { headers } from 'next/headers';
 import './globals.css';
 import { Providers } from '@/components/providers';
 import { Toaster } from 'sonner';
@@ -11,11 +12,19 @@ export const metadata: Metadata = {
   description: 'The next-generation self-hosted infrastructure platform',
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  // Per-request CSP nonce minted by src/middleware.ts. Reading headers()
+  // here deliberately opts every route into dynamic rendering — required
+  // for the nonce CSP: statically prerendered HTML would embed Next's
+  // inline bootstrap scripts WITHOUT a nonce and the browser would block
+  // them. Next stamps this nonce on its own inline scripts automatically
+  // (it reads it from the forwarded Content-Security-Policy request
+  // header); we only need to apply it to our hand-written inline script.
+  const nonce = (await headers()).get('x-nonce') ?? undefined;
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
@@ -25,6 +34,7 @@ export default function RootLayout({
           on purpose — runs before any client component renders.
         */}
         <script
+          nonce={nonce}
           dangerouslySetInnerHTML={{
             __html: `(function(){try{var l=localStorage.getItem('kryptalis-lang');if(l==='fr'||l==='en'){document.documentElement.lang=l;}}catch(e){}})();`,
           }}

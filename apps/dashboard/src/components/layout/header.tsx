@@ -18,8 +18,10 @@ export function Header() {
 
   /**
    * Logout flow:
-   *   1. POST /auth/logout with the current refreshToken so the server
-   *      revokes the whole family — a stolen token elsewhere is now dead.
+   *   1. POST /auth/logout — the httpOnly refresh cookie rides along
+   *      automatically (the api client sends credentials:'include' on
+   *      /auth/*), the server revokes the whole family and clears the
+   *      cookie — a stolen token elsewhere is now dead.
    *   2. Clear local storage + zustand auth state.
    *   3. Wipe the react-query cache so the next user on this browser
    *      doesn't see the previous user's data flash.
@@ -29,13 +31,9 @@ export function Header() {
    * the UI on a slow network when the user is leaving.
    */
   const handleLogout = async () => {
-    const refreshToken =
-      typeof window !== 'undefined' ? localStorage.getItem('refreshToken') : null;
-    if (refreshToken) {
-      try {
-        await api.post('/auth/logout', { refreshToken });
-      } catch {}
-    }
+    try {
+      await api.post('/auth/logout', {});
+    } catch {}
     logout();
     qc.clear();
     router.push('/login');
