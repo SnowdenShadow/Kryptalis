@@ -18,7 +18,11 @@
 
 set -eu
 
-INSTALL_DIR="${KRYPTALIS_DIR:-/app}"
+# Default to the directory this script lives in — works both inside the
+# updater container (mounted at /app) and run manually from the host
+# checkout (e.g. /opt/kryptalis). KRYPTALIS_DIR still overrides.
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+INSTALL_DIR="${KRYPTALIS_DIR:-$SCRIPT_DIR}"
 BRANCH="${KRYPTALIS_BRANCH:-main}"
 LOG_DIR="$INSTALL_DIR/.kryptalis"
 LOG_FILE="$LOG_DIR/update.log"
