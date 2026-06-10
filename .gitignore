@@ -52,3 +52,7 @@ apps/api/.kryptalis/
 graphify-out/
 .claude/
 .claude/settings.json
+
+# Playwright
+apps/dashboard/test-results/
+apps/dashboard/playwright-report/
