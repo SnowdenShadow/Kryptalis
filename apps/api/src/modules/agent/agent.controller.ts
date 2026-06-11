@@ -255,11 +255,24 @@ echo "▶ Kryptalis agent installer"
 echo "  API:  \$API_URL"
 echo "  Dir:  \$AGENT_DIR"
 
+# systemd available? (containers / WSL / Cloud Shell run without it —
+# systemctl exists there but PID 1 isn't systemd and every call fails
+# with "System has not been booted with systemd")
+HAS_SYSTEMD=0
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  HAS_SYSTEMD=1
+fi
+
 # ─── 1. Install Docker if missing ─────────────────────────────────
 if ! command -v docker >/dev/null 2>&1; then
   echo "▶ Installing Docker..."
   curl -fsSL https://get.docker.com | sh
-  systemctl enable --now docker
+  if [ "\$HAS_SYSTEMD" = 1 ]; then
+    systemctl enable --now docker
+  else
+    # non-systemd host: start the daemon directly if it isn't running
+    docker info >/dev/null 2>&1 || nohup dockerd >/var/log/dockerd.log 2>&1 &
+  fi
 else
   echo "✓ Docker already installed"
 fi
@@ -300,7 +313,7 @@ if [ -z "\$SERVER_ID" ] || [ -z "\$NEW_TOKEN" ]; then
   echo "✖ Register failed:"; echo "\$REGISTER_RESP"; exit 1
 fi
 
-# ─── 4. Write config + systemd unit ───────────────────────────────
+# ─── 4. Write config + service ────────────────────────────────────
 cat > "\$AGENT_DIR/agent.env" <<ENVEOF
 KRYPTALIS_API_URL=\$API_URL
 KRYPTALIS_SERVER_ID=\$SERVER_ID
@@ -308,7 +321,8 @@ KRYPTALIS_TOKEN=\$NEW_TOKEN
 ENVEOF
 chmod 600 "\$AGENT_DIR/agent.env"
 
-cat > /etc/systemd/system/kryptalis-agent.service <<UNITEOF
+if [ "\$HAS_SYSTEMD" = 1 ]; then
+  cat > /etc/systemd/system/kryptalis-agent.service <<UNITEOF
 [Unit]
 Description=Kryptalis Agent
 After=docker.service network-online.target
@@ -326,13 +340,43 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 UNITEOF
 
-systemctl daemon-reload
-systemctl enable --now kryptalis-agent
+  systemctl daemon-reload
+  systemctl enable --now kryptalis-agent
 
-echo ""
-echo "✓ Installation complete (agent v${AGENT_VERSION})"
-echo "  Server ID: \$SERVER_ID"
-echo "  Status:    systemctl status kryptalis-agent"
-echo "  Logs:      journalctl -u kryptalis-agent -f"
+  echo ""
+  echo "✓ Installation complete (agent v${AGENT_VERSION})"
+  echo "  Server ID: \$SERVER_ID"
+  echo "  Status:    systemctl status kryptalis-agent"
+  echo "  Logs:      journalctl -u kryptalis-agent -f"
+else
+  # No systemd (container / WSL / Cloud Shell) — run the agent with nohup
+  # and drop a start script so it can be relaunched after a reboot.
+  # NOTE: without an init system the agent does NOT survive reboots on
+  # its own; the start script must be re-run (or wired into the host's
+  # own startup mechanism).
+  cat > "\$AGENT_DIR/start-agent.sh" <<'STARTEOF'
+#!/bin/sh
+AGENT_DIR=/opt/kryptalis
+set -a; . "\$AGENT_DIR/agent.env"; set +a
+# already running?
+if [ -f "\$AGENT_DIR/agent.pid" ] && kill -0 "\$(cat "\$AGENT_DIR/agent.pid")" 2>/dev/null; then
+  echo "kryptalis-agent already running (pid \$(cat "\$AGENT_DIR/agent.pid"))"
+  exit 0
+fi
+nohup "\$AGENT_DIR/kryptalis-agent" >> "\$AGENT_DIR/agent.log" 2>&1 &
+echo \$! > "\$AGENT_DIR/agent.pid"
+echo "kryptalis-agent started (pid \$(cat "\$AGENT_DIR/agent.pid"))"
+STARTEOF
+  chmod +x "\$AGENT_DIR/start-agent.sh"
+  "\$AGENT_DIR/start-agent.sh"
+
+  echo ""
+  echo "✓ Installation complete (agent v${AGENT_VERSION}) — no systemd detected"
+  echo "  Server ID: \$SERVER_ID"
+  echo "  Started with nohup (PID \$(cat "\$AGENT_DIR/agent.pid"))"
+  echo "  Logs:      tail -f \$AGENT_DIR/agent.log"
+  echo "  Restart:   \$AGENT_DIR/start-agent.sh"
+  echo "  ⚠ Without systemd the agent does not auto-start on reboot."
+fi
 `;
 }
