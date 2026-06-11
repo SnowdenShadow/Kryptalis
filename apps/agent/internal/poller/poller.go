@@ -508,12 +508,31 @@ func (p *Poller) runDeploy(ctx context.Context, task Task) (map[string]interface
 	}, ""
 }
 
-func (p *Poller) runComposeCmd(ctx context.Context, task Task, action ...string) (map[string]interface{}, string) {
-	slug, _ := task.Payload["slug"].(string)
+// resolveTaskDir picks the compose dir for lifecycle ops. New deploys use a
+// per-instance slug (<name-slug>-<id12>); apps deployed before that
+// convention live under the bare slug. `legacySlug` lets the API name both
+// without knowing which one exists on THIS host's disk.
+func resolveTaskDir(payload map[string]interface{}) (string, string) {
+	slug, _ := payload["slug"].(string)
 	if slug == "" {
-		return nil, "missing slug"
+		return "", "missing slug"
 	}
 	dir := appDir(slug)
+	if _, err := os.Stat(dir); err != nil {
+		if legacy, ok := payload["legacySlug"].(string); ok && legacy != "" {
+			if legacyDir := appDir(legacy); func() bool { _, e := os.Stat(legacyDir); return e == nil }() {
+				return legacyDir, ""
+			}
+		}
+	}
+	return dir, ""
+}
+
+func (p *Poller) runComposeCmd(ctx context.Context, task Task, action ...string) (map[string]interface{}, string) {
+	dir, errStr := resolveTaskDir(task.Payload)
+	if errStr != "" {
+		return nil, errStr
+	}
 	logs := bytes.Buffer{}
 	args := append([]string{"compose"}, action...)
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -542,7 +561,7 @@ func (p *Poller) runRemove(ctx context.Context, task Task) (map[string]interface
 	if v, ok := task.Payload["purgeVolumes"].(bool); ok {
 		purgeVolumes = v
 	}
-	dir := appDir(slug)
+	dir, _ := resolveTaskDir(task.Payload)
 	logs := bytes.Buffer{}
 	// Collect errors instead of swallowing them: reporting "removed" while
 	// `compose down` failed left the API state diverged from reality
@@ -589,11 +608,10 @@ func (p *Poller) runRemove(ctx context.Context, task Task) (map[string]interface
 }
 
 func (p *Poller) runLogs(ctx context.Context, task Task) (map[string]interface{}, string) {
-	slug, _ := task.Payload["slug"].(string)
-	if slug == "" {
-		return nil, "missing slug"
+	dir, errStr := resolveTaskDir(task.Payload)
+	if errStr != "" {
+		return nil, errStr
 	}
-	dir := appDir(slug)
 	lines := 100
 	if n, ok := task.Payload["lines"].(float64); ok && n > 0 {
 		lines = int(n)
@@ -637,11 +655,10 @@ func (p *Poller) runExec(ctx context.Context, task Task) (map[string]interface{}
 }
 
 func (p *Poller) runStatus(ctx context.Context, task Task) (map[string]interface{}, string) {
-	slug, _ := task.Payload["slug"].(string)
-	if slug == "" {
-		return nil, "missing slug"
+	dir, errStr := resolveTaskDir(task.Payload)
+	if errStr != "" {
+		return nil, errStr
 	}
-	dir := appDir(slug)
 	c := exec.CommandContext(ctx, "docker", "compose", "ps", "--format", "json")
 	c.Dir = dir
 	out, err := c.CombinedOutput()

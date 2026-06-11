@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, ConflictException, BadRequestException, 
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate } from './templates';
-import { projectNetworkName, listComposeContainerNames } from '../applications/applications.helpers';
+import { projectNetworkName, listComposeContainerNames, remoteAppSlug } from '../applications/applications.helpers';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
 import { DatabasesService } from '../databases/databases.service';
@@ -266,12 +266,17 @@ export class MarketplaceService implements OnModuleInit {
     // port-pinned (DomainPortBinding, reachable at http://domain:port via the
     // container's own publish; https://domain 308-redirects there) vs clean
     // URL (https://domain, Caddy terminates TLS on 443 and proxies).
+    // NOTE: isPortFree/allocateFreePort probe the LOCAL docker daemon. For a
+    // REMOTE project that's the wrong machine — a port busy here may be free
+    // there (and vice versa). Skip the local probe for remote installs; a
+    // real conflict surfaces as a clear bind error from the agent's
+    // `docker compose up` and flips the deploy to ERROR.
     const basePort = PORT_MAP[data.appSlug] || app.ports[0];
     const requestedPort = data.port ?? data.hostPort;
     let realPort: number;
     const customPort = !!requestedPort;
     if (requestedPort) {
-      if (!(await this.isPortFree(requestedPort))) {
+      if (!isRemoteServer && !(await this.isPortFree(requestedPort))) {
         throw new ConflictException(`Port ${requestedPort} is already used by another container. Pick another.`);
       }
       realPort = requestedPort;
@@ -280,9 +285,9 @@ export class MarketplaceService implements OnModuleInit {
       // template default until we find a free host port. Caddy still
       // serves https://<domain> cleanly because each instance has its own
       // container_name and domain binding.
-      realPort = await this.allocateFreePort(basePort);
+      realPort = isRemoteServer ? basePort : await this.allocateFreePort(basePort);
     } else {
-      if (!(await this.isPortFree(basePort))) {
+      if (!isRemoteServer && !(await this.isPortFree(basePort))) {
         throw new ConflictException(
           `Default port ${basePort} for ${app.name} is taken. Provide a custom port in the install form.`,
         );
@@ -466,7 +471,14 @@ export class MarketplaceService implements OnModuleInit {
       //
       // __HOST_APP_DIR__ (PrestaShop bind mounts) must point at the AGENT's
       // app dir, not the platform host's data dir.
-      const remoteSlug = `${data.appSlug}-${instanceId}`;
+      //
+      // Slug convention MUST match what applications.service.remove() and
+      // the lifecycle ops (start/stop/restart/logs) later compute:
+      // remoteAppSlug(app.name, app.id) = slugify(name)-<id12>. Using the
+      // catalog appSlug here would diverge for suffixed installs
+      // ("WordPress 2" → wordpress-2-<id12>, not wordpress-<id12>) and the
+      // remove would never find the dir.
+      const remoteSlug = remoteAppSlug(appName, application.id);
       composeContent = composeContent.replace(
         new RegExp(hostAppDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
         `/opt/kryptalis/apps/${remoteSlug}`,
@@ -677,15 +689,16 @@ export class MarketplaceService implements OnModuleInit {
     }
 
     // Port: user-supplied OR find one starting at 18000 (high range to avoid
-    // colliding with marketplace defaults).
+    // colliding with marketplace defaults). Local-docker probes are skipped
+    // for remote projects (wrong machine) — the agent surfaces real binds.
     let hostPort: number;
     if (data.hostPort) {
-      if (!(await this.isPortFree(data.hostPort))) {
+      if (!isRemoteServer && !(await this.isPortFree(data.hostPort))) {
         throw new ConflictException(`Port ${data.hostPort} is already used by another container`);
       }
       hostPort = data.hostPort;
     } else {
-      hostPort = await this.allocateFreePort(18000);
+      hostPort = isRemoteServer ? 18000 : await this.allocateFreePort(18000);
     }
 
     let composeContent = renderCustomComposeTemplate({
@@ -735,8 +748,9 @@ export class MarketplaceService implements OnModuleInit {
     if (isRemoteServer) {
       // Same remote-dispatch story as template installs: ship the rendered
       // compose to the agent; the DEPLOY completion handler flips status.
+      // Slug = remoteAppSlug(name, id) so remove()/lifecycle find the dir.
       const task = await this.agent.enqueueTask(data.serverId, 'DEPLOY', {
-        slug: `custom-${instanceId}`,
+        slug: remoteAppSlug(application.name, application.id),
         appName: application.name,
         applicationId: application.id,
         compose: composeContent,

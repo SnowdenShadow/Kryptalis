@@ -14,6 +14,7 @@ import { ApplicationEnvService } from './application-env.service';
 import {
   execFileAsync,
   slugify,
+  remoteAppSlug,
   resolveAppDir,
   resolveContainerName,
   dockerCompose,
@@ -51,8 +52,13 @@ export class ApplicationOpsService {
     const appDir = resolveAppDir(slug, id);
     // Local: skip if the app dir was never materialized (no compose to run).
     // Remote: always dispatch — the agent owns dir state on its host.
+    // remote slug/legacySlug = the agent's per-instance dir naming + the
+    // bare-slug fallback for pre-convention deploys.
     if (!this.deploymentTarget.isLocal(server) || fs.existsSync(appDir)) {
-      await this.deploymentTarget.composeUp(server, appDir);
+      await this.deploymentTarget.composeUp(server, appDir, {
+        slug: remoteAppSlug(app.name, id),
+        legacySlug: slug,
+      });
     }
     // Don't blindly flip the DB to RUNNING — the docker compose call returned
     // 0, but the container might still be crashlooping. syncStatus reads the
@@ -66,7 +72,10 @@ export class ApplicationOpsService {
     const server = await resolveAppServer(this.prisma, id);
     const appDir = resolveAppDir(slug, id);
     if (!this.deploymentTarget.isLocal(server) || fs.existsSync(appDir)) {
-      await this.deploymentTarget.composeStop(server, appDir);
+      await this.deploymentTarget.composeStop(server, appDir, {
+        slug: remoteAppSlug(app.name, id),
+        legacySlug: slug,
+      });
     }
     return this.refreshAndReturn(id);
   }
@@ -77,7 +86,10 @@ export class ApplicationOpsService {
     const server = await resolveAppServer(this.prisma, id);
     const appDir = resolveAppDir(slug, id);
     if (!this.deploymentTarget.isLocal(server) || fs.existsSync(appDir)) {
-      await this.deploymentTarget.composeRestart(server, appDir);
+      await this.deploymentTarget.composeRestart(server, appDir, {
+        slug: remoteAppSlug(app.name, id),
+        legacySlug: slug,
+      });
     }
     return this.refreshAndReturn(id);
   }
@@ -255,7 +267,12 @@ export class ApplicationOpsService {
     const server = await resolveAppServer(this.prisma, id);
     if (!isAppLocal(server) && server) {
       try {
-        const task = await this.agent.enqueueAndWait(server.id, 'LOGS', { slug, lines }, 30_000);
+        const task = await this.agent.enqueueAndWait(
+          server.id,
+          'LOGS',
+          { slug: remoteAppSlug(app.name, id), legacySlug: slug, lines },
+          30_000,
+        );
         if (task.status === 'FAILED') return { logs: task.error || 'Agent failed to fetch logs' };
         const r: any = task.result;
         return { logs: r?.logs || 'No output yet.' };

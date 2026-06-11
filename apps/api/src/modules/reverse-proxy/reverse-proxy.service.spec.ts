@@ -169,6 +169,77 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
     expect(caddyfile).not.toContain('tls_insecure_skip_verify');
   });
 
+  it('remote-server app → Caddy proxies to <server-host>:<hostPort>, not the container name', async () => {
+    const { service } = makeService([
+      domainRow({
+        applicationId: 'a1',
+        application: {
+          id: 'a1',
+          name: 'WordPress',
+          port: 8080,
+          customPort: false,
+          containerName: 'kryptalis-wordpress-abc123def456',
+          containerPort: 80,
+          project: { server: { host: '203.0.113.7' } },
+        },
+      }),
+    ]);
+    const { caddyfile } = await service.regenerate();
+    expect(caddyfile).toContain('reverse_proxy 203.0.113.7:8080');
+    expect(caddyfile).not.toContain('kryptalis-wordpress-abc123def456:80');
+  });
+
+  it('remote port-bound app → https://domain proxies through instead of redirecting to a dead local port', async () => {
+    const { service } = makeService([
+      domainRow({
+        applicationId: null,
+        application: null,
+        portBindings: [
+          {
+            id: 'b1',
+            port: 12000,
+            application: {
+              id: 'a1',
+              name: 'Grafana',
+              containerName: 'kryptalis-grafana-abc123def456',
+              containerPort: 3000,
+              port: 12000,
+              project: { server: { host: '203.0.113.7' } },
+            },
+          },
+        ],
+      }),
+    ]);
+    const { caddyfile } = await service.regenerate();
+    expect(caddyfile).toContain('reverse_proxy 203.0.113.7:12000');
+    expect(caddyfile).not.toContain('redir http://athexis.xyz:12000');
+  });
+
+  it('local port-bound app keeps the 308 redirect to http://domain:port', async () => {
+    const { service } = makeService([
+      domainRow({
+        applicationId: null,
+        application: null,
+        portBindings: [
+          {
+            id: 'b1',
+            port: 12000,
+            application: {
+              id: 'a1',
+              name: 'Grafana',
+              containerName: 'kryptalis-grafana-abc123def456',
+              containerPort: 3000,
+              port: 12000,
+              project: { server: { host: 'localhost' } },
+            },
+          },
+        ],
+      }),
+    ]);
+    const { caddyfile } = await service.regenerate();
+    expect(caddyfile).toContain('redir http://athexis.xyz:12000{uri} 308');
+  });
+
   it('plain HTTP app (grafana) keeps an http upstream without TLS transport', async () => {
     const { service } = makeService([
       domainRow({

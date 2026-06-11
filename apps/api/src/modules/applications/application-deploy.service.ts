@@ -11,6 +11,7 @@ import { ApplicationEnvService } from './application-env.service';
 import {
   execFileAsync,
   slugify,
+  remoteAppSlug,
   containerName,
   imageName,
   resolveAppDir,
@@ -99,7 +100,10 @@ export class ApplicationDeployService {
     name: string,
     payload: Record<string, unknown>,
   ) {
-    const slug = slugify(name);
+    // Per-instance slug — must match what lifecycle ops + remove() compute
+    // (remoteAppSlug). Bare slugify(name) would collide for same-named apps
+    // and diverge from the dir the agent's REMOVE later looks for.
+    const slug = remoteAppSlug(name, appId);
     const started = Date.now();
     const buildLogs: string[] = [];
     try {
@@ -803,7 +807,8 @@ export class ApplicationDeployService {
           remoteServer.id,
           'DEPLOY',
           {
-            slug,
+            // Per-instance slug, same convention as lifecycle ops + remove().
+            slug: remoteAppSlug(name, appId),
             appName: name,
             gitUrl,
             branch,

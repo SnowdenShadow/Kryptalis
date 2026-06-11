@@ -1028,7 +1028,9 @@ describe('runDeploy — remote server delegation', () => {
       'srv-remote',
       'DEPLOY',
       expect.objectContaining({
-        slug: SLUG,
+        // per-instance slug (remoteAppSlug) — same convention lifecycle ops
+        // and remove() use, so the agent dir matches across the app's life.
+        slug: `${SLUG}-${APP_ID.slice(0, 12)}`,
         appName: APP_NAME,
         gitUrl: GIT_URL,
         branch: 'main',

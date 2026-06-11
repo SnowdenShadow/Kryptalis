@@ -86,8 +86,10 @@ export interface ApplicationResponse {
   project?: {
     id: string;
     name: string;
-    /** Included by GET /applications/:id only. */
-    server?: { id: string; name: string } | null;
+    /** id+name on GET /applications/:id; host on both list and detail —
+     *  the dashboard derives IP:port URLs from the app's OWN server in
+     *  MULTI mode (remote server ≠ the host serving the dashboard). */
+    server?: { id?: string; name?: string; host?: string | null } | null;
   };
   domains?: DomainSummary[];
   portBindings?: ApplicationPortBinding[];

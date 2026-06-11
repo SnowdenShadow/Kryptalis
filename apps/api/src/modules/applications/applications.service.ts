@@ -24,6 +24,7 @@ import { ApplicationEnvService } from './application-env.service';
 import {
   execFileAsync,
   slugify,
+  remoteAppSlug,
   containerName,
   resolveAppDir,
   projectNetworkName,
@@ -417,7 +418,10 @@ export class ApplicationsService {
       where: { projectId: { in: projectIds } },
       orderBy: { createdAt: 'desc' },
       include: {
-        project: { select: { id: true, name: true } },
+        // server.host: the dashboard builds the IP:port fallback URL from it
+        // — for apps on a remote server, linking to <platform-host>:<port>
+        // would point at the wrong machine.
+        project: { select: { id: true, name: true, server: { select: { host: true } } } },
         // Both the clean-URL domain (apps.domains) AND port-pinned bindings
         // (apps.portBindings) are surfaced — the dashboard shows one URL per
         // entry. An app that owns Domain.applicationId AND has port bindings
@@ -440,7 +444,7 @@ export class ApplicationsService {
     const application = await this.prisma.application.findUnique({
       where: { id },
       include: {
-        project: { include: { server: { select: { id: true, name: true } } } },
+        project: { include: { server: { select: { id: true, name: true, host: true } } } },
         domains: { select: { id: true, domain: true, sslStatus: true, status: true } },
         portBindings: {
           select: {
@@ -507,9 +511,14 @@ export class ApplicationsService {
     } else if (server) {
       // User-initiated delete → purge volumes (databases + uploads). The agent
       // defaults to keeping volumes (safe for migration); flip it on here.
+      // slug: per-instance naming (new remote deploys); legacySlug: bare-slug
+      // dirs from pre-convention installs. containerName: prefer the STORED
+      // name (marketplace stamps kryptalis-<slug>-<id12>, custom installs
+      // kryptalis-custom-<id12>) — the kryptalis-<slug> guess only as fallback.
       await this.agent.enqueueTask(server.id, 'REMOVE', {
-        slug,
-        containerName: containerName(slug),
+        slug: remoteAppSlug(app.name, id),
+        legacySlug: slug,
+        containerName: app.containerName || containerName(slug),
         purgeVolumes: true,
       });
     }

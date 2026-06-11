@@ -123,10 +123,19 @@ export class DeploymentTargetService {
 
   /**
    * `docker compose up -d --remove-orphans` in `dir`. Returns the normalized
-   * exec result on local; on remote, fires a START task (agent already knows
-   * the convention from its current usage in applications.service).
+   * exec result on local; on remote, fires a START task.
+   *
+   * `remote` carries the slug(s) the agent resolves its own app dir from
+   * (/opt/kryptalis/apps/<slug>) — the agent reads payload.slug, NOT a dir
+   * path. Passing {dir} here used to fail every remote lifecycle op with
+   * "missing slug": the local dir path means nothing on the agent's disk.
+   * `legacySlug` covers apps deployed before the per-instance convention.
    */
-  async composeUp(server: TargetServer | null, dir: string): Promise<ExecResult> {
+  async composeUp(
+    server: TargetServer | null,
+    dir: string,
+    remote?: { slug: string; legacySlug?: string },
+  ): Promise<ExecResult> {
     if (this.isLocal(server)) {
       return this.execute(server, 'docker', ['compose', 'up', '-d', '--remove-orphans'], {
         cwd: dir,
@@ -136,7 +145,7 @@ export class DeploymentTargetService {
     const task = await this.agent.enqueueAndWait(
       server!.id,
       'START',
-      { dir },
+      { slug: remote?.slug, legacySlug: remote?.legacySlug },
       180_000,
     );
     return this.taskToExec(task);
@@ -150,6 +159,7 @@ export class DeploymentTargetService {
     server: TargetServer | null,
     dir: string,
     purgeVolumes = false,
+    remote?: { slug: string; legacySlug?: string },
   ): Promise<ExecResult> {
     const args = ['compose', 'down'];
     if (purgeVolumes) args.push('-v');
@@ -160,7 +170,7 @@ export class DeploymentTargetService {
     const task = await this.agent.enqueueAndWait(
       server!.id,
       'REMOVE',
-      { dir, purgeVolumes },
+      { slug: remote?.slug, legacySlug: remote?.legacySlug, purgeVolumes },
       120_000,
     );
     return this.taskToExec(task);
@@ -172,7 +182,11 @@ export class DeploymentTargetService {
    * with purgeVolumes, deletes named volumes). Used by the "Stop" lifecycle
    * button so the user can hit "Start" later without redeploying.
    */
-  async composeStop(server: TargetServer | null, dir: string): Promise<ExecResult> {
+  async composeStop(
+    server: TargetServer | null,
+    dir: string,
+    remote?: { slug: string; legacySlug?: string },
+  ): Promise<ExecResult> {
     if (this.isLocal(server)) {
       return this.execute(server, 'docker', ['compose', 'stop'], {
         cwd: dir,
@@ -182,13 +196,17 @@ export class DeploymentTargetService {
     const task = await this.agent.enqueueAndWait(
       server!.id,
       'STOP',
-      { dir },
+      { slug: remote?.slug, legacySlug: remote?.legacySlug },
       120_000,
     );
     return this.taskToExec(task);
   }
 
-  async composeRestart(server: TargetServer | null, dir: string): Promise<ExecResult> {
+  async composeRestart(
+    server: TargetServer | null,
+    dir: string,
+    remote?: { slug: string; legacySlug?: string },
+  ): Promise<ExecResult> {
     if (this.isLocal(server)) {
       return this.execute(server, 'docker', ['compose', 'restart'], {
         cwd: dir,
@@ -198,7 +216,7 @@ export class DeploymentTargetService {
     const task = await this.agent.enqueueAndWait(
       server!.id,
       'RESTART',
-      { dir },
+      { slug: remote?.slug, legacySlug: remote?.legacySlug },
       120_000,
     );
     return this.taskToExec(task);

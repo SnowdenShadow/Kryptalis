@@ -281,8 +281,12 @@ export class ProjectsService implements OnModuleInit {
         try { await execFileAsync('docker', ['rm', '-f', `kryptalis-${slug}-${id12}`], { timeout: 10_000 }); } catch {}
       } else {
         try {
+          // slug: per-instance convention (new remote deploys);
+          // legacySlug: bare slug for pre-convention installs. The agent's
+          // resolveTaskDir tries slug first, then legacySlug.
           await this.agent.enqueueTask(project.serverId, 'REMOVE', {
-            slug,
+            slug: `${slug}-${app.id.slice(0, 12)}`,
+            legacySlug: slug,
             containerName: `kryptalis-${slug}`,
             purgeVolumes: true,
           });
@@ -406,7 +410,9 @@ export class ProjectsService implements OnModuleInit {
     for (const app of project.applications) {
       try {
         await this.agent.enqueueTask(oldServerId, 'REMOVE', {
-          slug: slugify(app.name),
+          // per-instance dir convention first, bare slug for legacy installs
+          slug: `${slugify(app.name)}-${app.id.slice(0, 12)}`,
+          legacySlug: slugify(app.name),
           containerName: `kryptalis-${slugify(app.name)}`,
           purgeVolumes: false,
         });

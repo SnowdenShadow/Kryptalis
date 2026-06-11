@@ -29,6 +29,17 @@ export function containerName(slug: string) {
   return `kryptalis-${slug}`;
 }
 
+/**
+ * Canonical slug for an app's compose dir on a REMOTE agent
+ * (/opt/kryptalis/apps/<remoteAppSlug>). Always per-instance — the agent
+ * has no resolveAppDir() fallback logic, so every dispatch (deploy, start,
+ * stop, restart, remove) must derive the exact same name from the same
+ * inputs or lifecycle ops land on the wrong directory.
+ */
+export function remoteAppSlug(name: string, applicationId: string): string {
+  return `${slugify(name)}-${applicationId.slice(0, 12)}`;
+}
+
 export function imageName(slug: string) {
   return `kryptalis/${slug}:latest`;
 }

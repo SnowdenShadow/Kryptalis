@@ -66,6 +66,7 @@ import {
   makeTimeAgo,
   appUrl as sharedAppUrl,
   publicUrls as sharedPublicUrls,
+  appServerHostname,
   type PublicUrlApp,
 } from '@/lib/app-format';
 
@@ -830,7 +831,9 @@ export default function ApplicationDetailPage() {
                       });
                     }
                     if (rows.length === 0 && (app.hostPort || app.port)) {
-                      rows.push({ url: sharedAppUrl(app.hostPort || app.port!, hostname), kind: 'ip' });
+                      // IP:port targets the app's own server (remote in MULTI
+                      // mode), not the dashboard's host.
+                      rows.push({ url: sharedAppUrl(app.hostPort || app.port!, appServerHostname(app, hostname)), kind: 'ip' });
                     }
                     return (
                       <div className="space-y-2">

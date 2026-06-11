@@ -4,6 +4,7 @@ import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 import { PrismaService } from '../../prisma/prisma.service';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
 
 const execFileAsync = promisify(execFile);
 const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
@@ -230,12 +231,19 @@ ${email ? `  email ${email}\n` : ''}}
           select: {
             id: true, name: true, port: true, customPort: true,
             containerName: true, containerPort: true,
+            // Server host — when the app runs on a REMOTE server, Caddy
+            // (this host) can't reach it by container name; it must proxy
+            // to <server.host>:<published host port> over the wire.
+            project: { select: { server: { select: { host: true } } } },
           },
         },
         portBindings: {
           include: {
             application: {
-              select: { id: true, name: true, containerName: true, containerPort: true },
+              select: {
+                id: true, name: true, containerName: true, containerPort: true, port: true,
+                project: { select: { server: { select: { host: true } } } },
+              },
             },
           },
         },
@@ -300,12 +308,27 @@ ${email ? `  email ${email}\n` : ''}}
      * to redeploy from the marketplace to migrate.
      */
     const proxyFor = (
-      app: { name: string; containerName?: string | null; containerPort?: number | null },
+      app: {
+        name: string;
+        containerName?: string | null;
+        containerPort?: number | null;
+        project?: { server?: { host: string | null } | null } | null;
+      },
       hostPort: number,
     ): string => {
-      const target = app.containerName && app.containerPort
-        ? `${app.containerName}:${app.containerPort}`
-        : `host.docker.internal:${hostPort}`;
+      // Remote app (MULTI mode): the container lives on another machine —
+      // container-name DNS doesn't resolve here. Proxy to the remote
+      // server's public host on the app's PUBLISHED host port (every
+      // remote deploy publishes hostPort:containerPort, so the port is
+      // reachable from this box). TLS hint keys off the CONTAINER port —
+      // that's the listener's protocol regardless of the published number.
+      const serverHost = app.project?.server?.host;
+      const isRemote = !!serverHost && !isLocalHost(serverHost);
+      const target = isRemote
+        ? `${serverHost}:${hostPort}`
+        : app.containerName && app.containerPort
+          ? `${app.containerName}:${app.containerPort}`
+          : `host.docker.internal:${hostPort}`;
       const targetPortForHttpsHint = app.containerPort || hostPort;
       // Known containerPort is authoritative — new Portainer installs target
       // the plain-HTTP listener (9000) and must NOT be forced to TLS by the
@@ -358,6 +381,15 @@ ${email ? `  email ${email}\n` : ''}}
       // file) and proxies via the shared docker network.
       const portBindings = (d.portBindings || []).filter((b) => !!b.port);
 
+      // Is a port-bound app remote? The redirect to http://domain:port only
+      // works when the container publishes on THIS host (the domain's DNS
+      // points here). A remote app publishes on its own server — Caddy must
+      // proxy over the wire instead of redirecting into the void.
+      const bindingIsRemote = (b: (typeof portBindings)[number]) => {
+        const h = (b.application as any)?.project?.server?.host;
+        return !!h && !isLocalHost(h);
+      };
+
       // ── :443 block ────────────────────────────────────────────────
       if (isLocal) {
         blocks.push(`# ${host} :80 → ${mainLinked ? `app ${safeMainAppName}` : 'reserved'}`);
@@ -372,16 +404,24 @@ ${email ? `  email ${email}\n` : ''}}
         }
         blocks.push(`}`);
       } else {
-        blocks.push(`# ${host} :443 → ${mainLinked ? `app ${safeMainAppName}` : (portBindings.length > 0 ? 'redirect to port-bound apps' : 'reserved')}`);
+        blocks.push(`# ${host} :443 → ${mainLinked ? `app ${safeMainAppName}` : (portBindings.length > 0 ? 'port-bound apps' : 'reserved')}`);
         blocks.push(`${host} {`);
         if (mainLinked) {
           blocks.push(proxyFor(mainApp!, mainPort ?? 0));
         } else if (portBindings.length > 0) {
-          // Port bindings are direct container publishes (plain HTTP, no TLS
-          // termination by Caddy) — redirect to http://, not https://, or the
-          // browser hits a TLS handshake error against the bare container.
           const first = portBindings[0];
-          blocks.push(`  redir http://${host}:${first.port}{uri} 308`);
+          if (bindingIsRemote(first)) {
+            // Remote port-bound app: proxy through to <server>:<port> —
+            // a redirect to http://domain:port would land on THIS host
+            // where nothing listens on that port.
+            blocks.push(proxyFor(first.application as any, first.port));
+          } else {
+            // Local port binding = direct container publish (plain HTTP, no
+            // TLS termination by Caddy) — redirect to http://, not https://,
+            // or the browser hits a TLS handshake error against the bare
+            // container.
+            blocks.push(`  redir http://${host}:${first.port}{uri} 308`);
+          }
         } else {
           blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
         }
