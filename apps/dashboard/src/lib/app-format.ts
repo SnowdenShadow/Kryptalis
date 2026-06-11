@@ -87,17 +87,20 @@ export interface PublicUrlApp {
   customPort?: boolean;
   domains?: { domain: string; sslStatus: string }[];
   portBindings?: { port: number; domain: { domain: string; sslStatus: string } }[];
-  /** Project → server host. MULTI mode: the IP:port fallback URL must use
-   *  the app's own server, not the host the dashboard is served from. */
+  /** Per-app server placement (wins over the project default). */
+  server?: { host?: string | null } | null;
+  /** Project → default server host. MULTI mode: the IP:port fallback URL
+   *  must use the app's own server, not the dashboard's host. */
   project?: { server?: { host?: string | null } | null } | null;
 }
 
 const LOCAL_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', 'host.docker.internal', '::1'];
 
-/** The hostname IP:port URLs should target: the app's server when it's a
- *  remote machine, else the caller-provided fallback / current host. */
+/** The hostname IP:port URLs should target: the app's resolved server
+ *  (app.server > project.server) when it's a remote machine, else the
+ *  caller-provided fallback / current host. */
 export function appServerHostname(app: PublicUrlApp, fallbackHostname?: string): string | undefined {
-  const h = app.project?.server?.host;
+  const h = app.server?.host ?? app.project?.server?.host;
   if (h && !LOCAL_HOSTS.includes(h)) return h;
   return fallbackHostname;
 }

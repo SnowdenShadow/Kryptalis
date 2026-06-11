@@ -64,6 +64,9 @@ function makePrisma() {
     // server.host=localhost → install path runs the local docker branch.
     // Remote-dispatch tests override this with a routable host.
     project: { findUnique: vi.fn().mockResolvedValue({ serverId: 'srv-1', server: { host: 'localhost' } }) },
+    // Per-app placement: install() validates an explicit serverId against
+    // the servers table. Default: unknown id → null (404 path).
+    server: { findUnique: vi.fn().mockResolvedValue(null) },
     application: {
       findFirst: vi.fn().mockResolvedValue(null),
       findUnique: vi.fn().mockResolvedValue(null),
@@ -213,21 +216,48 @@ describe('install — input validation and RBAC', () => {
     ).rejects.toThrow(NotFoundException);
   });
 
-  it("rejects a serverId that does not match the project's server", async () => {
+  it('rejects an unknown serverId (per-app placement validates against the servers table)', async () => {
     const { service } = makeService();
     await expect(
       service.install(
-        { appSlug: 'wordpress', projectId: 'p1', serverId: 'srv-evil' },
+        { appSlug: 'wordpress', projectId: 'p1', serverId: 'srv-unknown' },
+        'u1',
+      ),
+    ).rejects.toThrow(NotFoundException);
+  });
+
+  it('rejects a serverId pointing at a non-ONLINE server', async () => {
+    const { service, prisma } = makeService();
+    prisma.server.findUnique.mockResolvedValue({ id: 'srv-off', name: 'Off box', status: 'OFFLINE', host: '203.0.113.9' });
+    await expect(
+      service.install(
+        { appSlug: 'wordpress', projectId: 'p1', serverId: 'srv-off' },
         'u1',
       ),
     ).rejects.toThrow(BadRequestException);
   });
 
-  it("pins the agent task to the project's server, whatever the client sent", async () => {
+  it('per-app placement: an ONLINE serverId different from the project default is honored (app row + task)', async () => {
+    const { service, prisma } = makeService();
+    prisma.server.findUnique.mockResolvedValue({ id: 'srv-2', name: 'Second box', status: 'ONLINE', host: 'localhost' });
+    await service.install({ appSlug: 'wordpress', projectId: 'p1', serverId: 'srv-2' }, 'u1');
+    expect(prisma.application.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ serverId: 'srv-2' }) }),
+    );
+    expect(prisma.agentTask.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ serverId: 'srv-2' }) }),
+    );
+  });
+
+  it("defaults the agent task to the project's server when no serverId is sent", async () => {
     const { service, prisma } = makeService();
     await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
     expect(prisma.agentTask.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ serverId: 'srv-1' }) }),
+    );
+    // NULL serverId on the app row = inherit the project default.
+    expect(prisma.application.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ serverId: null }) }),
     );
   });
 

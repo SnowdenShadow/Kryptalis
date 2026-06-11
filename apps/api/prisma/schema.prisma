@@ -196,6 +196,7 @@ model Server {
   updatedAt    DateTime     @updatedAt
 
   projects     Project[]
+  applications Application[]
   agentTokens  AgentToken[]
   databases    Database[]
   backups      Backup[]
@@ -296,6 +297,11 @@ model Application {
   // null. Safe to change anytime — purely cosmetic, no infra impact.
   displayName       String?
   projectId         String
+  // Per-app server placement. NULL = inherit the project's serverId (the
+  // project server is a DEFAULT, not a constraint — apps in one project can
+  // run on different machines). Resolution: resolveAppServer() — every
+  // deploy / lifecycle / reverse-proxy path goes through it.
+  serverId          String?
   framework         AppFramework    @default(DOCKER)
   status            AppStatus       @default(STOPPED)
   gitUrl            String?
@@ -333,6 +339,9 @@ model Application {
   updatedAt         DateTime        @updatedAt
 
   project          Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // SetNull: deleting a server must not delete the apps that ran on it —
+  // they fall back to the project's server and can be redeployed there.
+  server           Server?             @relation(fields: [serverId], references: [id], onDelete: SetNull)
   deployments      Deployment[]
   domains          Domain[]
   portBindings     DomainPortBinding[]
@@ -340,6 +349,7 @@ model Application {
   sftpAccounts     SftpAccount[]
 
   @@index([projectId])
+  @@index([serverId])
   @@map("applications")
 }
 

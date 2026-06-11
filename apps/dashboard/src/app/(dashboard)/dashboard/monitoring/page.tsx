@@ -62,6 +62,19 @@ interface Metric {
   timestamp: string;
 }
 
+interface ServerRow {
+  id: string;
+  name: string;
+  host: string;
+  status: string;
+  lastSeenAt?: string | null;
+  agentVersion?: string | null;
+  os?: string | null;
+  cpuCores?: number | null;
+}
+
+const LOCAL_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', 'host.docker.internal', '::1'];
+
 // Shared API resource type — local alias keeps the JSX readable.
 type AlertRule = AlertRuleResponse;
 
@@ -211,21 +224,32 @@ export default function MonitoringPage() {
   const accessDenied = !!user && !isAdmin;
 
   // --- Data fetching (admin-only endpoints) ---
+  // Server picker: every registered server (local + remote agents). The
+  // local one is the default selection.
+  const { data: servers = [] } = useQuery<ServerRow[]>({
+    queryKey: ['servers'],
+    queryFn: () => api.get('/servers'),
+    enabled: isAdmin,
+    retry: false,
+    refetchInterval: 30000,
+  });
+  const [selectedServerId, setSelectedServerId] = useState('');
+  const localServer = servers.find((s) => LOCAL_HOSTS.includes(s.host));
+  const selectedServer =
+    servers.find((s) => s.id === selectedServerId) ?? localServer ?? servers[0];
+  const serverId = selectedServer?.id || '';
+  const isLocalSelected = !!selectedServer && LOCAL_HOSTS.includes(selectedServer.host);
+
+  // Live process/docker/interface stats only exist for the LOCAL host (the
+  // API reads its own /proc). Remote servers report metrics through their
+  // agent heartbeats (ServerMetric rows) — charts + gauges come from there.
   const { data: stats } = useQuery<ServerStats>({
     queryKey: ['server-stats'],
     queryFn: () => api.get('/servers/local/stats'),
     refetchInterval: 10000,
-    enabled: isAdmin,
+    enabled: isAdmin && isLocalSelected,
     retry: false,
   });
-
-  const { data: server } = useQuery<any>({
-    queryKey: ['server-local'],
-    queryFn: () => api.get('/servers/local'),
-    enabled: isAdmin,
-    retry: false,
-  });
-  const serverId = server?.id || '';
 
   const { data: metrics = [] } = useQuery<Metric[]>({
     queryKey: ['metrics', serverId, period],
@@ -234,6 +258,10 @@ export default function MonitoringPage() {
     enabled: isAdmin && !!serverId,
     refetchInterval: 10000,
   });
+
+  // Remote gauges: derive current CPU/RAM/disk from the latest agent metric
+  // sample so the metric cards work for every server, not just the local one.
+  const lastMetric = metrics.length > 0 ? metrics[metrics.length - 1] : null;
 
   const { data: alertRules = [] } = useQuery<AlertRule[]>({
     queryKey: ['monitoring', 'alert-rules', serverId],
@@ -268,18 +296,35 @@ export default function MonitoringPage() {
   });
 
   // --- Derived data ---
-  const cpuAvg = stats?.cpu.average ?? 0;
-  const memPercent = stats?.memory.percent ?? 0;
-  const memUsedGB = stats ? toGB(stats.memory.used) : 0;
-  const memTotalGB = stats ? toGB(stats.memory.total) : 0;
-  const diskPercent = stats?.disk.percent ?? 0;
-  const diskUsedGB = stats ? toGB(stats.disk.used) : 0;
-  const diskTotalGB = stats ? toGB(stats.disk.total) : 0;
-  const diskFreeGB = stats ? toGB(stats.disk.free) : 0;
-  const primaryIp = stats?.network.interfaces
-    .flatMap((i) => i.addresses)
-    .find((a) => a.family === 'IPv4')?.address ?? '---';
+  // Local server → live /proc stats. Remote server → latest agent heartbeat
+  // sample (Number() is safe: BigInt columns serialize as decimal strings).
+  const remoteMemUsed = lastMetric ? Number(lastMetric.memoryUsed) : 0;
+  const remoteMemTotal = lastMetric ? Number(lastMetric.memoryTotal) : 0;
+  const remoteDiskUsed = lastMetric ? Number(lastMetric.diskUsed) : 0;
+  const remoteDiskTotal = lastMetric ? Number(lastMetric.diskTotal) : 0;
+  const cpuAvg = isLocalSelected ? (stats?.cpu.average ?? 0) : (lastMetric?.cpuPercent ?? 0);
+  const memPercent = isLocalSelected
+    ? (stats?.memory.percent ?? 0)
+    : remoteMemTotal > 0 ? Math.round((remoteMemUsed / remoteMemTotal) * 100) : 0;
+  const memUsedGB = isLocalSelected ? (stats ? toGB(stats.memory.used) : 0) : toGB(remoteMemUsed);
+  const memTotalGB = isLocalSelected ? (stats ? toGB(stats.memory.total) : 0) : toGB(remoteMemTotal);
+  const diskPercent = isLocalSelected
+    ? (stats?.disk.percent ?? 0)
+    : remoteDiskTotal > 0 ? Math.round((remoteDiskUsed / remoteDiskTotal) * 100) : 0;
+  const diskUsedGB = isLocalSelected ? (stats ? toGB(stats.disk.used) : 0) : toGB(remoteDiskUsed);
+  const diskTotalGB = isLocalSelected ? (stats ? toGB(stats.disk.total) : 0) : toGB(remoteDiskTotal);
+  const diskFreeGB = isLocalSelected
+    ? (stats ? toGB(stats.disk.free) : 0)
+    : toGB(Math.max(0, remoteDiskTotal - remoteDiskUsed));
+  const primaryIp = isLocalSelected
+    ? (stats?.network.interfaces
+        .flatMap((i) => i.addresses)
+        .find((a) => a.family === 'IPv4')?.address ?? '---')
+    : (selectedServer?.host ?? '---');
   const ifaceCount = stats?.network.interfaces.length ?? 0;
+  // "Has data" gate for the metric sections — local needs live stats,
+  // remote needs at least one heartbeat sample.
+  const hasData = isLocalSelected ? !!stats : !!lastMetric;
 
   const chartData = metrics.map((m) => ({
     time: new Date(m.timestamp).toLocaleTimeString('fr-FR', {
@@ -329,19 +374,42 @@ export default function MonitoringPage() {
     <div className="space-y-4">
       {/* ========== 1. Header ========== */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <h1 className="text-2xl font-bold">{t('monitoring.title')}</h1>
-          {stats && (
-            <>
-              <Badge variant="outline" className="gap-1 text-xs font-mono">
-                <Server size={12} />
-                {stats.hostname}
-              </Badge>
-              <Badge variant="secondary" className="gap-1 text-xs">
-                <Clock size={12} />
-                {stats.uptime.formatted}
-              </Badge>
-            </>
+          {/* Server picker — local + every registered remote agent */}
+          {servers.length > 1 && (
+            <Select
+              value={serverId}
+              onChange={(e) => setSelectedServerId(e.target.value)}
+              className="w-auto text-xs"
+            >
+              {servers.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({LOCAL_HOSTS.includes(s.host) ? 'local' : s.host}){s.status !== 'ONLINE' ? ` — ${s.status}` : ''}
+                </option>
+              ))}
+            </Select>
+          )}
+          {selectedServer && (
+            <Badge
+              variant={selectedServer.status === 'ONLINE' ? 'success' : 'destructive'}
+              className="gap-1 text-xs"
+            >
+              <Server size={12} />
+              {selectedServer.status}
+            </Badge>
+          )}
+          {isLocalSelected && stats && (
+            <Badge variant="secondary" className="gap-1 text-xs">
+              <Clock size={12} />
+              {stats.uptime.formatted}
+            </Badge>
+          )}
+          {!isLocalSelected && selectedServer?.lastSeenAt && (
+            <Badge variant="secondary" className="gap-1 text-xs">
+              <Clock size={12} />
+              {t('monitoring.lastSeen')} {new Date(selectedServer.lastSeenAt).toLocaleTimeString()}
+            </Badge>
           )}
         </div>
         <div className="flex gap-1 rounded-lg border border-border bg-muted/50 p-0.5 w-fit">
@@ -363,7 +431,7 @@ export default function MonitoringPage() {
       </div>
 
       {/* ========== 2. System Info Bar ========== */}
-      {stats && (
+      {isLocalSelected && stats && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
           <span className="font-medium text-foreground">{stats.cpu.model}</span>
           <span>{stats.cpu.cores} {t('monitoring.cores')}</span>
@@ -372,11 +440,21 @@ export default function MonitoringPage() {
           <span>{t('monitoring.up')} {stats.uptime.formatted}</span>
         </div>
       )}
+      {!isLocalSelected && selectedServer && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-muted/30 px-4 py-2 text-xs text-muted-foreground">
+          <span className="font-medium text-foreground font-mono">{selectedServer.host}</span>
+          {selectedServer.os && <span>{selectedServer.os}</span>}
+          {selectedServer.cpuCores != null && <span>{selectedServer.cpuCores} {t('monitoring.cores')}</span>}
+          {selectedServer.agentVersion && <span>agent v{selectedServer.agentVersion}</span>}
+        </div>
+      )}
 
-      {!stats ? (
+      {!hasData ? (
         <Card>
           <CardContent className="flex items-center justify-center py-16">
-            <p className="text-sm text-muted-foreground">{t('monitoring.loadingStats')}</p>
+            <p className="text-sm text-muted-foreground">
+              {isLocalSelected ? t('monitoring.loadingStats') : t('monitoring.noRemoteData')}
+            </p>
           </CardContent>
         </Card>
       ) : (
@@ -398,7 +476,9 @@ export default function MonitoringPage() {
                     CPU
                   </div>
                   <p className="text-lg font-bold leading-tight">{cpuAvg.toFixed(1)}%</p>
-                  <p className="text-[10px] text-muted-foreground">{stats.cpu.cores} {t('monitoring.cores')}</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {(isLocalSelected ? stats?.cpu.cores : selectedServer?.cpuCores) ?? '—'} {t('monitoring.cores')}
+                  </p>
                 </div>
               </div>
             </Card>
@@ -620,7 +700,9 @@ export default function MonitoringPage() {
               </CardContent>
             </Card>
 
-            {/* Docker Containers */}
+            {/* Docker Containers — live data exists only for the local host;
+                remote container state is visible per-app on the apps pages. */}
+            {isLocalSelected && stats && (
             <Card>
               <CardHeader className="px-4 py-3 pb-0">
                 <CardTitle className="flex items-center gap-2 text-sm font-medium">
@@ -666,9 +748,12 @@ export default function MonitoringPage() {
                 )}
               </CardContent>
             </Card>
+            )}
           </div>
 
           {/* ========== 6. Top Processes & 7. Network Interfaces ========== */}
+          {/* Both read live /proc + os.networkInterfaces() — local host only. */}
+          {isLocalSelected && stats && (
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             {/* Top Processes */}
             <Card>
@@ -750,6 +835,7 @@ export default function MonitoringPage() {
               </CardContent>
             </Card>
           </div>
+          )}
 
           {/* ========== 8. Alert Rules ========== */}
           <div className="space-y-3">

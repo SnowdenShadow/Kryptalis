@@ -60,31 +60,12 @@ export class DomainAttachService {
     });
     if (!domain) throw new NotFoundException('Domain not found');
 
-    // Cross-server attach guard. A domain belongs to a project on one
-    // server; an app on a different server cannot terminate TLS for it
-    // because Caddy only runs on the host the domain's project lives on.
-    // Silently allowing the attach used to result in 404/502 in production.
-    const [domainProj, appProj] = await Promise.all([
-      domain.projectId
-        ? this.prisma.project.findUnique({
-            where: { id: domain.projectId },
-            select: { serverId: true },
-          })
-        : Promise.resolve(null),
-      this.prisma.application.findUnique({
-        where: { id: opts.applicationId },
-        select: { project: { select: { serverId: true } } },
-      }),
-    ]);
-    if (
-      domainProj?.serverId &&
-      appProj?.project?.serverId &&
-      domainProj.serverId !== appProj.project.serverId
-    ) {
-      throw new BadRequestException(
-        `Domain '${domain.domain}' lives on a different server than the app — attach refused. Move one of them first.`,
-      );
-    }
+    // NOTE: no cross-server guard anymore. TLS for every domain terminates
+    // on the PLATFORM host's Caddy (where the DNS points), which proxies to
+    // remote apps over <server-host>:<published-port> — so a domain can be
+    // attached to an app on any server. The old guard predates remote
+    // proxying and would now refuse perfectly working setups (it also read
+    // the project's server, which per-app placement can override).
 
     // Cross-PROJECT guard. The caller's opts.projectId is the project
     // the new attach is supposed to land in. If the Domain row already

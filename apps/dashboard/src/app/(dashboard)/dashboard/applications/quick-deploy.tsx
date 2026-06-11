@@ -42,7 +42,7 @@ import { cn } from '@/lib/utils';
 type Mode = 'git' | 'docker' | 'compose' | 'dockerfile' | 'marketplace';
 type GitSource = 'provider' | 'url';
 
-interface Project { id: string; name: string }
+interface Project { id: string; name: string; serverId?: string; server?: { id: string; name: string } }
 interface GitProvider { id: string; provider: string; username?: string }
 interface Repo {
   fullName: string;
@@ -156,6 +156,10 @@ export function QuickDeployDialog({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [envRows, setEnvRows] = useState<EnvRow[]>([]);
 
+  // ── Per-app server placement (MULTI mode) ───────────────────────
+  // '' = inherit the project's default server.
+  const [serverChoice, setServerChoice] = useState('');
+
   // ── Loaders ─────────────────────────────────────────────────────
   const { data: projects = [] } = useQuery<Project[]>({
     queryKey: ['projects'],
@@ -176,6 +180,20 @@ export function QuickDeployDialog({
     queryKey: ['marketplace-catalog'],
     queryFn: () => api.get('/marketplace/apps'),
     enabled: open && mode === 'marketplace',
+  });
+
+  // MULTI mode → offer a per-app server picker (default: project's server).
+  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
+    queryKey: ['public-settings'],
+    queryFn: () => api.get('/settings/public'),
+    enabled: open,
+    staleTime: 60_000,
+  });
+  const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
+  const { data: servers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
+    queryKey: ['servers'],
+    queryFn: () => api.get('/servers'),
+    enabled: open && isMultiMode,
   });
 
   // Auto-suggest the next free host port the moment the user picks
@@ -320,6 +338,7 @@ export function QuickDeployDialog({
     setShowAdvanced(false);
     setEnvRows([]);
     setGitSource('provider');
+    setServerChoice('');
   }
 
   function handleClose() {
@@ -386,6 +405,7 @@ export function QuickDeployDialog({
           else body.domainId = domainChoice;
         }
         if (needsPort && hostPortNumber) body.hostPort = hostPortNumber;
+        if (serverChoice) body.serverId = serverChoice;
         return api.post('/marketplace/install', body);
       }
 
@@ -424,6 +444,7 @@ export function QuickDeployDialog({
       if (needsPort && hostPortNumber) {
         body.hostPort = hostPortNumber;
       }
+      if (serverChoice) body.serverId = serverChoice;
       return api.post('/applications', body);
     },
     onSuccess: () => {
@@ -655,6 +676,28 @@ export function QuickDeployDialog({
                 ))}
               </Select>
             )}
+          </div>
+        )}
+
+        {/* ── Server placement (MULTI mode) ───────────────────── */}
+        {sourceValid && projectId && isMultiMode && servers.length > 1 && (
+          <div className="space-y-2">
+            <Label className="text-sm">{t('quickDeploy.serverLabel') || 'Server'}</Label>
+            <Select value={serverChoice} onChange={(e) => setServerChoice(e.target.value)}>
+              <option value="">
+                {(() => {
+                  const proj = projects.find((p) => p.id === projectId);
+                  const defaultName = proj?.server?.name;
+                  return (t('quickDeploy.serverDefault') || 'Project default') + (defaultName ? ` (${defaultName})` : '');
+                })()}
+              </option>
+              {servers.filter((s) => s.status === 'ONLINE').map((s) => (
+                <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+              ))}
+            </Select>
+            <p className="text-[11px] text-muted-foreground">
+              {t('quickDeploy.serverHint') || 'Apps in the same project can run on different servers.'}
+            </p>
           </div>
         )}
 

@@ -147,9 +147,25 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
     }
     const memberships = await this.prisma.projectMember.findMany({
       where: { userId },
-      select: { project: { select: { serverId: true } } },
+      select: {
+        project: {
+          select: {
+            serverId: true,
+            // Per-app placement: an app can run on a different server than
+            // its project — members get read access to those servers too.
+            applications: { select: { serverId: true } },
+          },
+        },
+      },
     });
-    return Array.from(new Set(memberships.map((m) => m.project.serverId).filter(Boolean)));
+    const ids = new Set<string>();
+    for (const m of memberships) {
+      if (m.project.serverId) ids.add(m.project.serverId);
+      for (const a of m.project.applications) {
+        if (a.serverId) ids.add(a.serverId);
+      }
+    }
+    return Array.from(ids);
   }
 
   async getMetrics(userId: string, serverId: string, period: string = '24h') {

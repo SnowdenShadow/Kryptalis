@@ -181,23 +181,35 @@ export class MarketplaceService implements OnModuleInit {
     }
     await assertProjectAccess(this.prisma, userId, data.projectId, 'DEVELOPER');
 
-    // Pin serverId to the project's server, ignore whatever the client passed.
+    // Per-app server placement: an explicit serverId wins (apps in one
+    // project CAN live on different machines); default = project's server.
     const project = await this.prisma.project.findUnique({
       where: { id: data.projectId },
       select: { serverId: true, server: { select: { host: true } } },
     });
     if (!project) throw new NotFoundException('Project not found.');
+    let serverHost = project.server?.host ?? null;
+    // appServerId is persisted on the Application row ONLY when it differs
+    // from the project default (NULL = inherit).
+    let appServerId: string | null = null;
     if (data.serverId && data.serverId !== project.serverId) {
-      throw new BadRequestException(
-        "serverId must match the project's server. Move the project first if you need to relocate.",
-      );
+      const target = await this.prisma.server.findUnique({ where: { id: data.serverId } });
+      if (!target) throw new NotFoundException('Server not found.');
+      if (target.status !== 'ONLINE') {
+        throw new BadRequestException(`Server "${target.name}" is ${target.status} — choose an ONLINE server.`);
+      }
+      appServerId = target.id;
+      serverHost = target.host;
+    } else {
+      data.serverId = project.serverId;
     }
-    data.serverId = project.serverId;
-    // Remote project → the compose stack must run on the project's server,
-    // not on the platform host. runDockerCompose() below shells out to the
-    // LOCAL docker daemon, so for remote servers we dispatch the rendered
-    // compose to the agent instead (runRemoteInstall).
-    const isRemoteServer = !isLocalHost(project.server?.host);
+    const effectiveServerId = appServerId ?? project.serverId;
+    data.serverId = effectiveServerId;
+    // Remote target → the compose stack must run on that server, not on the
+    // platform host. runDockerCompose() below shells out to the LOCAL docker
+    // daemon, so for remote servers we dispatch the rendered compose to the
+    // agent instead.
+    const isRemoteServer = !isLocalHost(serverHost);
 
     const app = this.getApp(data.appSlug);
     const template = COMPOSE_TEMPLATES[data.appSlug];
@@ -369,6 +381,7 @@ export class MarketplaceService implements OnModuleInit {
       data: {
         name: appName,
         projectId: data.projectId,
+        serverId: appServerId,
         framework: 'DOCKER_COMPOSE',
         status: 'DEPLOYING',
         port: realPort,
@@ -645,11 +658,21 @@ export class MarketplaceService implements OnModuleInit {
       select: { serverId: true, server: { select: { host: true } } },
     });
     if (!project) throw new NotFoundException('Project not found.');
+    // Per-app placement, same rules as install(): explicit serverId wins,
+    // NULL on the row = inherit the project default.
+    let serverHost = project.server?.host ?? null;
+    let appServerId: string | null = null;
     if (data.serverId && data.serverId !== project.serverId) {
-      throw new BadRequestException("serverId must match the project's server.");
+      const target = await this.prisma.server.findUnique({ where: { id: data.serverId } });
+      if (!target) throw new NotFoundException('Server not found.');
+      if (target.status !== 'ONLINE') {
+        throw new BadRequestException(`Server "${target.name}" is ${target.status} — choose an ONLINE server.`);
+      }
+      appServerId = target.id;
+      serverHost = target.host;
     }
-    data.serverId = project.serverId;
-    const isRemoteServer = !isLocalHost(project.server?.host);
+    data.serverId = appServerId ?? project.serverId;
+    const isRemoteServer = !isLocalHost(serverHost);
     if (!data.name?.trim()) throw new BadRequestException('Name required');
     if (!data.image?.trim()) throw new BadRequestException('Image required');
     if (!Number.isInteger(data.containerPort) || data.containerPort < 1 || data.containerPort > 65535) {
@@ -713,6 +736,7 @@ export class MarketplaceService implements OnModuleInit {
       data: {
         name: data.name.trim(),
         projectId: data.projectId,
+        serverId: appServerId,
         framework: 'DOCKER_COMPOSE',
         status: 'DEPLOYING',
         port: hostPort,

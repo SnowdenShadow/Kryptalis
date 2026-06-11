@@ -108,8 +108,26 @@ export class ApplicationsService {
       domain: dtoDomainString,
       envVars: dtoEnvVars,
       hostPort: dtoHostPort,
+      serverId: dtoServerId,
       ...dbData
     } = dto;
+
+    // Per-app server placement (MULTI mode). Stored only when it differs
+    // from the project default — NULL serverId means "inherit", so moving
+    // the project later carries inherit-apps along automatically.
+    let appServerId: string | null = null;
+    if (dtoServerId) {
+      const target = await this.prisma.server.findUnique({ where: { id: dtoServerId } });
+      if (!target) throw new NotFoundException('Server not found');
+      if (target.status !== 'ONLINE') {
+        throw new BadRequestException(`Server "${target.name}" is ${target.status} — choose an ONLINE server`);
+      }
+      const proj = await this.prisma.project.findUnique({
+        where: { id: dto.projectId },
+        select: { serverId: true },
+      });
+      if (proj && proj.serverId !== dtoServerId) appServerId = dtoServerId;
+    }
 
     // ── PRE-WRITE VALIDATION ───────────────────────────────────────
     // Every validation rule runs BEFORE any DB mutation. A failure
@@ -278,6 +296,7 @@ export class ApplicationsService {
           port: firstMappedHost ?? dbData.port,
           hostPort: dtoHostPort,
           customPort: userPickedPort,
+          serverId: appServerId,
           status: 'DEPLOYING',
           envVars: this.env.encryptEnvVars(dtoEnvVars) as any,
           webhookSecret: this.encryption.encrypt(crypto.randomBytes(24).toString('hex')),
@@ -420,7 +439,10 @@ export class ApplicationsService {
       include: {
         // server.host: the dashboard builds the IP:port fallback URL from it
         // — for apps on a remote server, linking to <platform-host>:<port>
-        // would point at the wrong machine.
+        // would point at the wrong machine. app.server (per-app placement)
+        // wins over the project default; the dashboard checks app.server
+        // first via appServerHostname().
+        server: { select: { id: true, name: true, host: true } },
         project: { select: { id: true, name: true, server: { select: { host: true } } } },
         // Both the clean-URL domain (apps.domains) AND port-pinned bindings
         // (apps.portBindings) are surfaced — the dashboard shows one URL per
@@ -444,6 +466,7 @@ export class ApplicationsService {
     const application = await this.prisma.application.findUnique({
       where: { id },
       include: {
+        server: { select: { id: true, name: true, host: true } },
         project: { include: { server: { select: { id: true, name: true, host: true } } } },
         domains: { select: { id: true, domain: true, sslStatus: true, status: true } },
         portBindings: {

@@ -160,4 +160,13 @@ export class CreateApplicationDto {
   @Min(1024)
   @Max(65535)
   hostPort?: number;
+
+  /**
+   * Optional per-app server placement (MULTI mode). Omit to inherit the
+   * project's default server. Must reference an ONLINE server.
+   */
+  @ApiProperty({ required: false, description: 'Server to deploy this app on (defaults to the project server)' })
+  @IsOptional()
+  @IsString()
+  serverId?: string;
 }

@@ -234,6 +234,8 @@ ${email ? `  email ${email}\n` : ''}}
             // Server host — when the app runs on a REMOTE server, Caddy
             // (this host) can't reach it by container name; it must proxy
             // to <server.host>:<published host port> over the wire.
+            // app.server (per-app placement) wins over the project default.
+            server: { select: { host: true } },
             project: { select: { server: { select: { host: true } } } },
           },
         },
@@ -242,6 +244,7 @@ ${email ? `  email ${email}\n` : ''}}
             application: {
               select: {
                 id: true, name: true, containerName: true, containerPort: true, port: true,
+                server: { select: { host: true } },
                 project: { select: { server: { select: { host: true } } } },
               },
             },
@@ -312,6 +315,7 @@ ${email ? `  email ${email}\n` : ''}}
         name: string;
         containerName?: string | null;
         containerPort?: number | null;
+        server?: { host: string | null } | null;
         project?: { server?: { host: string | null } | null } | null;
       },
       hostPort: number,
@@ -322,7 +326,8 @@ ${email ? `  email ${email}\n` : ''}}
       // remote deploy publishes hostPort:containerPort, so the port is
       // reachable from this box). TLS hint keys off the CONTAINER port —
       // that's the listener's protocol regardless of the published number.
-      const serverHost = app.project?.server?.host;
+      // app.server = per-app placement; falls back to the project default.
+      const serverHost = app.server?.host ?? app.project?.server?.host;
       const isRemote = !!serverHost && !isLocalHost(serverHost);
       const target = isRemote
         ? `${serverHost}:${hostPort}`
@@ -386,7 +391,8 @@ ${email ? `  email ${email}\n` : ''}}
       // points here). A remote app publishes on its own server — Caddy must
       // proxy over the wire instead of redirecting into the void.
       const bindingIsRemote = (b: (typeof portBindings)[number]) => {
-        const h = (b.application as any)?.project?.server?.host;
+        const a: any = b.application;
+        const h = a?.server?.host ?? a?.project?.server?.host;
         return !!h && !isLocalHost(h);
       };
 

@@ -12,6 +12,7 @@ import {
   execFileAsync,
   slugify,
   remoteAppSlug,
+  resolveAppServer,
   containerName,
   imageName,
   resolveAppDir,
@@ -79,11 +80,9 @@ export class ApplicationDeployService {
    * claims it lives on the project's server.
    */
   private async resolveRemoteServer(appId: string): Promise<{ id: string; host: string | null } | null> {
-    const appRow = await this.prisma.application.findUnique({
-      where: { id: appId },
-      select: { project: { select: { server: { select: { id: true, host: true } } } } },
-    });
-    const server = appRow?.project?.server;
+    // resolveAppServer: app.serverId (per-app placement) wins over the
+    // project's default server.
+    const server = await resolveAppServer(this.prisma, appId);
     return server && !isLocalHost(server.host) ? server : null;
   }
 
@@ -790,14 +789,10 @@ export class ApplicationDeployService {
     // docker network — enables service-name DNS between apps of the same project.
     const appRow = await this.prisma.application.findUnique({
       where: { id: appId },
-      select: {
-        projectId: true,
-        project: { select: { server: { select: { id: true, host: true } } } },
-      },
+      select: { projectId: true },
     });
-    const remoteServer = appRow?.project?.server && !isLocalHost(appRow.project.server.host)
-      ? appRow.project.server
-      : null;
+    // Per-app placement: app.serverId wins over the project default.
+    const remoteServer = await this.resolveRemoteServer(appId);
 
     // Remote server → delegate the entire deploy to the agent.
     if (remoteServer) {

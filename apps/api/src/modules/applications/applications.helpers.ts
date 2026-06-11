@@ -421,17 +421,20 @@ export function findComposePath(dir: string): string | null {
 // ── shared cross-service helpers ─────────────────────────────────────────
 
 /**
- * Resolve the server an app runs on. Loads { id, host } off project.serverId,
- * caches nothing — calls are cheap and we want fresh status.
+ * Resolve the server an app runs on: the app's OWN serverId when set
+ * (per-app placement — apps in one project can live on different machines),
+ * else the project's server (the default placement). Caches nothing —
+ * calls are cheap and we want fresh status.
  */
 export async function resolveAppServer(prisma: PrismaService, appId: string) {
   const app = await prisma.application.findUnique({
     where: { id: appId },
     select: {
+      server: { select: { id: true, host: true } },
       project: { select: { server: { select: { id: true, host: true } } } },
     },
   });
-  return app?.project?.server ?? null;
+  return app?.server ?? app?.project?.server ?? null;
 }
 
 export function isAppLocal(server: { host: string } | null): boolean {
