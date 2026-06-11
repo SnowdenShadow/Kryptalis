@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, ConflictException, BadRequestException, ForbiddenException, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate } from './templates';
@@ -6,6 +6,8 @@ import { projectNetworkName, listComposeContainerNames } from '../applications/a
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
 import { DatabasesService } from '../databases/databases.service';
+import { AgentService } from '../agent/agent.service';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -100,16 +102,51 @@ const APPS_DIR = path.join(DATA_DIR, 'apps');
 const WEBMAIL_SLUGS = new Set(['roundcube', 'snappymail']);
 
 @Injectable()
-export class MarketplaceService {
+export class MarketplaceService implements OnModuleInit {
+  private readonly logger = new Logger(MarketplaceService.name);
+
   constructor(
     private prisma: PrismaService,
     private proxy: ReverseProxyService,
     private domainAttach: DomainAttachService,
     private databases: DatabasesService,
+    private agent: AgentService,
   ) {
     if (!fs.existsSync(APPS_DIR)) {
       fs.mkdirSync(APPS_DIR, { recursive: true });
     }
+  }
+
+  onModuleInit() {
+    // Remote installs (and project-migration redeploys) run as queued DEPLOY
+    // tasks the agent executes asynchronously — nothing on the platform host
+    // observes the result. This hook flips the Application/Deployment rows
+    // when the agent reports back, so the dashboard doesn't show DEPLOYING
+    // forever. Local installs never hit it (their task is created RUNNING
+    // and completed by runDockerCompose directly).
+    this.agent.registerTaskCompletionHandler('DEPLOY', async (task) => {
+      const applicationId = (task.payload as any)?.applicationId;
+      if (!applicationId) return; // git/agent deploys without an app row marker
+      const ok = task.status === 'COMPLETED';
+      await this.prisma.application
+        .update({
+          where: { id: applicationId },
+          data: { status: ok ? 'RUNNING' : 'ERROR' },
+        })
+        .catch(() => {}); // app row may be gone (uninstalled mid-deploy)
+      await this.prisma.deployment.updateMany({
+        where: { applicationId, status: 'DEPLOYING' },
+        data: { status: ok ? 'RUNNING' : 'FAILED', finishedAt: new Date() },
+      });
+      if (!ok) {
+        this.logger.warn(
+          `Remote DEPLOY ${task.id} for app ${applicationId} failed: ${task.error ?? 'unknown error'}`,
+        );
+      }
+      // Domain routing may point at the new container — refresh either way
+      // (success: start routing; failure: stop routing to a dead target).
+      this.proxy.regenerate().catch(() => {});
+    });
   }
 
   listApps() { return APPS; }
@@ -147,7 +184,7 @@ export class MarketplaceService {
     // Pin serverId to the project's server, ignore whatever the client passed.
     const project = await this.prisma.project.findUnique({
       where: { id: data.projectId },
-      select: { serverId: true },
+      select: { serverId: true, server: { select: { host: true } } },
     });
     if (!project) throw new NotFoundException('Project not found.');
     if (data.serverId && data.serverId !== project.serverId) {
@@ -156,6 +193,11 @@ export class MarketplaceService {
       );
     }
     data.serverId = project.serverId;
+    // Remote project → the compose stack must run on the project's server,
+    // not on the platform host. runDockerCompose() below shells out to the
+    // LOCAL docker daemon, so for remote servers we dispatch the rendered
+    // compose to the agent instead (runRemoteInstall).
+    const isRemoteServer = !isLocalHost(project.server?.host);
 
     const app = this.getApp(data.appSlug);
     const template = COMPOSE_TEMPLATES[data.appSlug];
@@ -414,20 +456,48 @@ export class MarketplaceService {
       // Let's Encrypt issuance against an unreachable host.
     }
 
-    const task = await this.prisma.agentTask.create({
-      data: {
-        serverId: data.serverId,
-        type: 'DEPLOY',
-        status: 'RUNNING',
-        startedAt: new Date(),
-        payload: {
-          appSlug: app.slug,
-          appName,
-          applicationId: application.id,
-          ports: app.ports,
+    let taskId: string;
+    if (isRemoteServer) {
+      // The project lives on a remote server — running `docker compose up`
+      // here would plant the app on the PLATFORM host while the dashboard
+      // says it's on the project's server. Ship the fully-rendered compose
+      // to the agent instead; it writes compose/.env/side-files under
+      // /opt/kryptalis/apps/<slug> and brings the stack up there.
+      //
+      // __HOST_APP_DIR__ (PrestaShop bind mounts) must point at the AGENT's
+      // app dir, not the platform host's data dir.
+      const remoteSlug = `${data.appSlug}-${instanceId}`;
+      composeContent = composeContent.replace(
+        new RegExp(hostAppDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
+        `/opt/kryptalis/apps/${remoteSlug}`,
+      );
+      const task = await this.agent.enqueueTask(data.serverId, 'DEPLOY', {
+        slug: remoteSlug,
+        appName,
+        applicationId: application.id,
+        compose: composeContent,
+        envVars: envOverride,
+        sideFiles: SIDE_FILES[data.appSlug] || undefined,
+        projectNetwork: projectNetworkName(data.projectId),
+      });
+      taskId = task.id;
+    } else {
+      const task = await this.prisma.agentTask.create({
+        data: {
+          serverId: data.serverId,
+          type: 'DEPLOY',
+          status: 'RUNNING',
+          startedAt: new Date(),
+          payload: {
+            appSlug: app.slug,
+            appName,
+            applicationId: application.id,
+            ports: app.ports,
+          },
         },
-      },
-    });
+      });
+      taskId = task.id;
+    }
 
     if (userId) {
       await this.prisma.deployment.create({
@@ -444,11 +514,16 @@ export class MarketplaceService {
     // Every template now uses __INSTANCE_ID__ — so EVERY install needs its
     // own dir (no more single-install bucket). This also enables clean
     // multi-install for non-webmail apps the day we lift that restriction.
-    this.runDockerCompose(data.appSlug, composeContent, application.id, task.id, envOverride, true, data.projectId);
+    // Remote installs skip this — the agent runs the stack on its own host
+    // and the DEPLOY completion handler (onRemoteDeployComplete) flips the
+    // application status when the agent reports back.
+    if (!isRemoteServer) {
+      this.runDockerCompose(data.appSlug, composeContent, application.id, taskId, envOverride, true, data.projectId);
+    }
 
     return {
       message: `Installing ${app.name}...`,
-      taskId: task.id,
+      taskId,
       applicationId: application.id,
       app,
     };
@@ -555,13 +630,14 @@ export class MarketplaceService {
     await assertProjectAccess(this.prisma, userId, data.projectId, 'DEVELOPER');
     const project = await this.prisma.project.findUnique({
       where: { id: data.projectId },
-      select: { serverId: true },
+      select: { serverId: true, server: { select: { host: true } } },
     });
     if (!project) throw new NotFoundException('Project not found.');
     if (data.serverId && data.serverId !== project.serverId) {
       throw new BadRequestException("serverId must match the project's server.");
     }
     data.serverId = project.serverId;
+    const isRemoteServer = !isLocalHost(project.server?.host);
     if (!data.name?.trim()) throw new BadRequestException('Name required');
     if (!data.image?.trim()) throw new BadRequestException('Image required');
     if (!Number.isInteger(data.containerPort) || data.containerPort < 1 || data.containerPort > 65535) {
@@ -655,21 +731,37 @@ export class MarketplaceService {
       this.proxy.regenerate().catch(() => {});
     }
 
-    const task = await this.prisma.agentTask.create({
-      data: {
-        serverId: data.serverId,
-        type: 'DEPLOY',
-        status: 'RUNNING',
-        startedAt: new Date(),
-        payload: {
-          appSlug: 'custom',
-          appName: application.name,
-          applicationId: application.id,
-          image: data.image,
-          hostPort,
+    let taskId: string;
+    if (isRemoteServer) {
+      // Same remote-dispatch story as template installs: ship the rendered
+      // compose to the agent; the DEPLOY completion handler flips status.
+      const task = await this.agent.enqueueTask(data.serverId, 'DEPLOY', {
+        slug: `custom-${instanceId}`,
+        appName: application.name,
+        applicationId: application.id,
+        compose: composeContent,
+        envVars: data.envVars || {},
+        projectNetwork: projectNetworkName(data.projectId),
+      });
+      taskId = task.id;
+    } else {
+      const task = await this.prisma.agentTask.create({
+        data: {
+          serverId: data.serverId,
+          type: 'DEPLOY',
+          status: 'RUNNING',
+          startedAt: new Date(),
+          payload: {
+            appSlug: 'custom',
+            appName: application.name,
+            applicationId: application.id,
+            image: data.image,
+            hostPort,
+          },
         },
-      },
-    });
+      });
+      taskId = task.id;
+    }
     if (userId) {
       await this.prisma.deployment.create({
         data: {
@@ -684,11 +776,13 @@ export class MarketplaceService {
 
     // perInstanceDir = true: custom installs always isolate (slug is "custom"
     // so a shared dir would clobber across installs).
-    this.runDockerCompose('custom', composeContent, application.id, task.id, data.envVars || {}, true, data.projectId);
+    if (!isRemoteServer) {
+      this.runDockerCompose('custom', composeContent, application.id, taskId, data.envVars || {}, true, data.projectId);
+    }
 
     return {
       message: `Deploying ${data.image}…`,
-      taskId: task.id,
+      taskId,
       applicationId: application.id,
       hostPort,
     };

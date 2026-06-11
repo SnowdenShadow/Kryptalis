@@ -420,10 +420,44 @@ func (p *Poller) runDeploy(ctx context.Context, task Task) (map[string]interface
 		}
 	}
 
+	// sideFiles: companion files some compose templates bind-mount (e.g.
+	// PrestaShop's Apache proxy conf) and Dockerfile-only build contexts.
+	// Written before compose up so the mount targets / build inputs exist.
+	// Keys are paths relative to the app dir; traversal is rejected.
+	if sideFiles, ok := task.Payload["sideFiles"].(map[string]interface{}); ok {
+		for name, raw := range sideFiles {
+			content, ok := raw.(string)
+			if !ok {
+				continue
+			}
+			safe := filepath.Clean(name)
+			if safe == "." || strings.HasPrefix(safe, "..") || filepath.IsAbs(safe) {
+				return map[string]interface{}{"logs": logs.String()}, "sideFiles path traversal rejected: " + name
+			}
+			full := filepath.Join(dir, safe)
+			if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+				return map[string]interface{}{"logs": logs.String()}, "creating sideFiles dir: " + err.Error()
+			}
+			if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+				return map[string]interface{}{"logs": logs.String()}, "writing side file " + safe + ": " + err.Error()
+			}
+		}
+	}
+
 	if envVars, ok := task.Payload["envVars"].(map[string]interface{}); ok && len(envVars) > 0 {
 		if err := writeEnvFile(filepath.Join(dir, ".env"), envVars); err != nil {
 			return map[string]interface{}{"logs": logs.String()}, "writing .env: " + err.Error()
 		}
+	}
+
+	// Shared kryptalis-apps bridge — every marketplace/compose template
+	// declares it as `external: true`, so it must exist BEFORE compose up
+	// or the deploy fails with "network kryptalis-apps ... could not be
+	// found". On the platform host the API creates it; on agent servers
+	// we are the only one who can. Idempotent: inspect, then create.
+	if err := exec.CommandContext(ctx, "docker", "network", "inspect", "kryptalis-apps").Run(); err != nil {
+		fmt.Fprintf(logs, "> docker network create kryptalis-apps\n")
+		_ = runIn(".", "docker", "network", "create", "kryptalis-apps")
 	}
 
 	// Project network — apps in the same Kryptalis project share a docker

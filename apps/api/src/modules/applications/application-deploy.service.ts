@@ -71,6 +71,98 @@ export class ApplicationDeployService {
   }
 
   /**
+   * Resolve the app's project server; returns it when it's a REMOTE host
+   * (deploy must be dispatched to the agent), null when local. Every deploy
+   * path calls this first — running docker locally for a remote project
+   * would plant the container on the platform host while the dashboard
+   * claims it lives on the project's server.
+   */
+  private async resolveRemoteServer(appId: string): Promise<{ id: string; host: string | null } | null> {
+    const appRow = await this.prisma.application.findUnique({
+      where: { id: appId },
+      select: { project: { select: { server: { select: { id: true, host: true } } } } },
+    });
+    const server = appRow?.project?.server;
+    return server && !isLocalHost(server.host) ? server : null;
+  }
+
+  /**
+   * Dispatch a non-git deploy (image / raw compose / raw Dockerfile) to the
+   * remote agent and mirror the outcome onto the Application + Deployment
+   * rows. The agent writes the compose/Dockerfile under its own
+   * /opt/kryptalis/apps/<slug> and runs `docker compose up -d --build`.
+   */
+  private async dispatchRemoteDeploy(
+    server: { id: string },
+    deploymentId: string,
+    appId: string,
+    name: string,
+    payload: Record<string, unknown>,
+  ) {
+    const slug = slugify(name);
+    const started = Date.now();
+    const buildLogs: string[] = [];
+    try {
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { status: 'DEPLOYING', startedAt: new Date() },
+      });
+      const appRow = await this.prisma.application.findUnique({
+        where: { id: appId },
+        select: { projectId: true },
+      });
+      const task = await this.agent.enqueueAndWait(
+        server.id,
+        'DEPLOY',
+        {
+          slug,
+          appName: name,
+          projectNetwork: appRow ? projectNetworkName(appRow.projectId) : null,
+          ...payload,
+        },
+        15 * 60_000,
+      );
+      const r: any = task.result || {};
+      if (r.logs) buildLogs.push(r.logs);
+      if (task.status === 'FAILED') throw new Error(task.error || 'agent deploy failed');
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: AppStatus.RUNNING },
+      });
+      this.proxy.regenerate().catch(() => {});
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.RUNNING,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.notifyDeploymentOutcome(deploymentId, name, 'success');
+    } catch (err: any) {
+      const msg = err?.message || 'remote deploy failed';
+      buildLogs.push(`✖ ${msg}`);
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: AppStatus.ERROR },
+      });
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.FAILED,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          deployLogs: msg.slice(0, 10_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+    }
+  }
+
+  /**
    * Pull-and-run path for "I just want this Docker image" deploys. Writes a
    * synthesized docker-compose.yml into the app dir so the agent + dashboard
    * treat it like any other compose stack — start/stop/restart all keep
@@ -83,6 +175,34 @@ export class ApplicationDeployService {
     image: string,
     opts: { port?: number; envVars?: Record<string, string>; hostPort?: number },
   ) {
+    // Remote project → ship a synthesized compose to the agent instead of
+    // running docker locally.
+    const remoteForImage = await this.resolveRemoteServer(appId);
+    if (remoteForImage) {
+      const slugR = slugify(name);
+      const env = opts.envVars || {};
+      const publishHost = opts.hostPort;
+      const publishContainer = opts.port ?? opts.hostPort ?? null;
+      const composeDoc: any = {
+        services: {
+          app: {
+            image,
+            container_name: containerName(slugR),
+            restart: 'unless-stopped',
+            pull_policy: 'always',
+            ...(Object.keys(env).length ? { environment: { ...env } } : {}),
+            ...(publishHost && publishContainer ? { ports: [`${publishHost}:${publishContainer}`] } : {}),
+            networks: ['kryptalis_apps'],
+          },
+        },
+        networks: { kryptalis_apps: { external: true, name: 'kryptalis-apps' } },
+      };
+      await this.dispatchRemoteDeploy(remoteForImage, deploymentId, appId, name, {
+        compose: yaml.dump(composeDoc, { lineWidth: 200 }),
+      });
+      return;
+    }
+
     const slug = slugify(name);
     const containerNm = containerName(slug);
     const appDir = resolveAppDir(slug, appId);
@@ -263,6 +383,16 @@ export class ApplicationDeployService {
     composeYaml: string,
     opts: { envVars?: Record<string, string> | null; hostPort?: number },
   ) {
+    // Remote project → the agent writes + runs the user's compose on its host.
+    const remoteForCompose = await this.resolveRemoteServer(appId);
+    if (remoteForCompose) {
+      await this.dispatchRemoteDeploy(remoteForCompose, deploymentId, appId, name, {
+        compose: composeYaml,
+        envVars: opts.envVars || undefined,
+      });
+      return;
+    }
+
     const slug = slugify(name);
     const appDir = resolveAppDir(slug, appId);
     const started = Date.now();
@@ -404,6 +534,35 @@ export class ApplicationDeployService {
       contextFiles?: Record<string, string>;
     },
   ) {
+    // Remote project → ship Dockerfile + context + synthesized compose to
+    // the agent; it builds and runs on its own host.
+    const remoteForDockerfile = await this.resolveRemoteServer(appId);
+    if (remoteForDockerfile) {
+      const slugR = slugify(name);
+      const env = opts.envVars || {};
+      const publishContainer = opts.port ?? null;
+      const publishHost = opts.hostPort;
+      const composeDoc: any = {
+        services: {
+          app: {
+            build: { context: '.' },
+            container_name: containerName(slugR),
+            restart: 'unless-stopped',
+            ...(Object.keys(env).length ? { environment: { ...env } } : {}),
+            ...(publishHost && publishContainer ? { ports: [`${publishHost}:${publishContainer}`] } : {}),
+            networks: ['kryptalis_apps'],
+          },
+        },
+        networks: { kryptalis_apps: { external: true, name: 'kryptalis-apps' } },
+      };
+      await this.dispatchRemoteDeploy(remoteForDockerfile, deploymentId, appId, name, {
+        compose: yaml.dump(composeDoc, { lineWidth: 200 }),
+        dockerfileOverride: dockerfile,
+        sideFiles: opts.contextFiles || undefined,
+      });
+      return;
+    }
+
     const slug = slugify(name);
     const containerNm = containerName(slug);
     const appDir = resolveAppDir(slug, appId);

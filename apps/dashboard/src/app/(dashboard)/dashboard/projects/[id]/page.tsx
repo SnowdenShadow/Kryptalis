@@ -8,6 +8,7 @@ import {
   ArrowLeft, Trash2, Server, Rocket, Plus, ExternalLink, Store,
   FolderKanban, Activity, Users, Shield, Crown, UserPlus, Loader2,
   ArrowRightLeft, AlertTriangle, Network, Database, Copy, Check, Info,
+  HardDrive,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -220,6 +221,34 @@ export default function ProjectDetailPage() {
     },
     onError: (err: Error) => toast.error(err.message),
   });
+
+  // ── Storage quota (Settings tab) ────────────────────────────────────
+  // Usage is computed server-side from real on-disk bytes; quota edit is
+  // platform-ADMIN only (PATCH /projects/:id/quota is @Roles-guarded).
+  const me = useAuthStore((s) => s.user);
+  const isPlatformAdmin = me?.role === 'ADMIN' || me?.role === 'SUPERADMIN';
+  const [quotaGiB, setQuotaGiB] = useState('');
+  const { data: storageUsage } = useQuery<{ used: string; quota: string }>({
+    queryKey: ['project-storage', id],
+    queryFn: () => api.get(`/files/project/${id}/usage`),
+    enabled: !!id && activeTab === 'settings',
+  });
+  const quotaMutation = useMutation({
+    mutationFn: (bytes: string) => api.patch(`/projects/${id}/quota`, { quotaBytes: bytes }),
+    onSuccess: () => {
+      toast.success(t('projects.quotaSaved'));
+      setQuotaGiB('');
+      queryClient.invalidateQueries({ queryKey: ['project-storage', id] });
+      queryClient.invalidateQueries({ queryKey: ['project', id] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+  const usedB = storageUsage ? Number(storageUsage.used) : 0;
+  const quotaB = storageUsage ? Number(storageUsage.quota) : 0;
+  const quotaPct = quotaB > 0 ? Math.min(100, (usedB / quotaB) * 100) : 0;
+  const fmtGiB = (n: number) => `${(n / 1024 ** 3).toFixed(n >= 100 * 1024 ** 3 ? 0 : 2)} GiB`;
+  const quotaGiBNumber = quotaGiB.trim() ? parseFloat(quotaGiB.trim()) : null;
+  const quotaInputValid = quotaGiBNumber !== null && Number.isFinite(quotaGiBNumber) && quotaGiBNumber > 0 && quotaGiBNumber <= 100_000;
 
   // ── Member management ───────────────────────────────────────────────
   const [showAdd, setShowAdd] = useState(false);
@@ -792,6 +821,58 @@ export default function ProjectDetailPage() {
                   <p className="font-semibold">{new Date(project.createdAt).toLocaleDateString()}</p>
                 </div>
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Storage quota — usage visible to all members, edit is platform-admin only */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <HardDrive size={18} /> {t('projects.storageTitle')}
+              </CardTitle>
+              <CardDescription>{t('projects.storageDesc')}</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {storageUsage && (
+                <div>
+                  <div className="flex items-center justify-between text-xs mb-1.5">
+                    <span className="font-medium">{t('projects.storageUsed')}</span>
+                    <span className={cn('font-mono', quotaPct > 95 ? 'text-red-500' : quotaPct > 80 ? 'text-orange-500' : 'text-muted-foreground')}>
+                      {fmtGiB(usedB)} / {fmtGiB(quotaB)} ({quotaPct.toFixed(0)}%)
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className={cn('h-full rounded-full transition-all', quotaPct > 95 ? 'bg-red-500' : quotaPct > 80 ? 'bg-orange-500' : 'bg-primary')}
+                      style={{ width: `${quotaPct}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              {isPlatformAdmin ? (
+                <div className="flex items-end gap-2">
+                  <div className="flex-1 space-y-1">
+                    <Label className="text-xs">{t('projects.quotaLabel')}</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      step={1}
+                      placeholder={quotaB ? String(Math.round(quotaB / 1024 ** 3)) : '10'}
+                      value={quotaGiB}
+                      onChange={(e) => setQuotaGiB(e.target.value)}
+                    />
+                  </div>
+                  <Button
+                    disabled={!quotaInputValid || quotaMutation.isPending}
+                    onClick={() => quotaMutation.mutate(String(Math.round(quotaGiBNumber! * 1024 ** 3)))}
+                  >
+                    {quotaMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+                    {t('projects.quotaSaveBtn')}
+                  </Button>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">{t('projects.quotaAdminOnly')}</p>
+              )}
             </CardContent>
           </Card>
 

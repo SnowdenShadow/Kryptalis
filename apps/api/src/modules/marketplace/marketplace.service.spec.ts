@@ -61,7 +61,9 @@ const INSTANCE_ID = APP_ID.slice(0, 12); // 'app123456789'
 
 function makePrisma() {
   return {
-    project: { findUnique: vi.fn().mockResolvedValue({ serverId: 'srv-1' }) },
+    // server.host=localhost → install path runs the local docker branch.
+    // Remote-dispatch tests override this with a routable host.
+    project: { findUnique: vi.fn().mockResolvedValue({ serverId: 'srv-1', server: { host: 'localhost' } }) },
     application: {
       findFirst: vi.fn().mockResolvedValue(null),
       findUnique: vi.fn().mockResolvedValue(null),
@@ -94,13 +96,19 @@ function makeService() {
   const proxy = { regenerate: vi.fn().mockResolvedValue(undefined) };
   const domainAttach = { attach: vi.fn().mockResolvedValue(undefined) };
   const databases = { importFromAppCompose: vi.fn().mockResolvedValue(undefined) };
+  const agent = {
+    enqueueTask: vi.fn().mockImplementation(async (serverId: string, type: string, payload: any) =>
+      ({ id: 'task-remote-1', serverId, type, status: 'QUEUED', payload })),
+    registerTaskCompletionHandler: vi.fn(),
+  };
   const service = new MarketplaceService(
     prisma as any,
     proxy as any,
     domainAttach as any,
     databases as any,
+    agent as any,
   );
-  return { service, prisma, proxy, domainAttach, databases };
+  return { service, prisma, proxy, domainAttach, databases, agent };
 }
 
 /** Drain the fire-and-forget runDockerCompose() chain. */
@@ -229,6 +237,80 @@ describe('install — input validation and RBAC', () => {
       service.install({ appSlug: 'no-such-app', projectId: 'p1' }, 'u1'),
     ).rejects.toThrow(NotFoundException);
     expect(prisma.application.create).not.toHaveBeenCalled();
+  });
+});
+
+// ── install: remote server dispatch ─────────────────────────────────
+
+describe('install — remote-server projects dispatch via the agent', () => {
+  it('remote project → DEPLOY queued on the agent with the rendered compose, no local docker compose', async () => {
+    const { service, prisma, agent } = makeService();
+    prisma.project.findUnique.mockResolvedValue({
+      serverId: 'srv-remote',
+      server: { host: '203.0.113.7' },
+    });
+
+    await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
+    await flushAsync();
+
+    expect(agent.enqueueTask).toHaveBeenCalledWith(
+      'srv-remote',
+      'DEPLOY',
+      expect.objectContaining({
+        applicationId: APP_ID,
+        compose: expect.stringContaining('wordpress:latest'),
+        projectNetwork: expect.stringContaining('kryptalis_proj_'),
+      }),
+    );
+    // The queued payload carries fully-rendered compose (no placeholders).
+    const payload = agent.enqueueTask.mock.calls[0][2];
+    expect(payload.compose).not.toContain('__INSTANCE_ID__');
+    expect(payload.compose).not.toContain('__HOST_PORT__');
+    expect(payload.compose).not.toContain('__RANDOM_PASSWORD');
+    // No RUNNING task row, no local compose run, no local compose file.
+    expect(prisma.agentTask.create).not.toHaveBeenCalled();
+    expect(execAsyncMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('docker compose up'),
+      expect.anything(),
+    );
+  });
+
+  it('local project keeps the local docker path (no agent queue)', async () => {
+    const { service, prisma, agent } = makeService();
+    await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
+    await flushAsync();
+    expect(agent.enqueueTask).not.toHaveBeenCalled();
+    expect(prisma.agentTask.create).toHaveBeenCalled();
+  });
+
+  it('remote custom-image install also dispatches to the agent', async () => {
+    const { service, prisma, agent } = makeService();
+    prisma.project.findUnique.mockResolvedValue({
+      serverId: 'srv-remote',
+      server: { host: '203.0.113.7' },
+    });
+
+    await service.installCustom(
+      {
+        name: 'my-custom',
+        image: 'nginx:alpine',
+        serverId: '',
+        projectId: 'p1',
+        containerPort: 80,
+      },
+      'u1',
+    );
+    await flushAsync();
+
+    expect(agent.enqueueTask).toHaveBeenCalledWith(
+      'srv-remote',
+      'DEPLOY',
+      expect.objectContaining({
+        applicationId: APP_ID,
+        compose: expect.stringContaining('nginx:alpine'),
+      }),
+    );
+    expect(prisma.agentTask.create).not.toHaveBeenCalled();
   });
 });
 
