@@ -743,7 +743,10 @@ export default function ApplicationsPage() {
                       <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1.5">
                         <p className="text-xs font-medium text-muted-foreground">{t('apps.publicUrls')}</p>
                         {(app.domains || []).map((d) => {
-                          const url = app.customPort && app.port ? `https://${d.domain}:${app.port}` : `https://${d.domain}`;
+                          // Protocols MUST match publicUrls() in app-format.ts:
+                          // port-pinned = direct container publish, plain HTTP
+                          // (Caddy only terminates TLS on 443).
+                          const url = app.customPort && app.port ? `http://${d.domain}:${app.port}` : `https://${d.domain}`;
                           return (
                             <div key={d.id} className="flex items-center justify-between gap-2">
                               <a
@@ -772,7 +775,7 @@ export default function ApplicationsPage() {
                         {(app.portBindings || []).map((b) => (
                           <div key={b.id} className="flex items-center justify-between gap-2">
                             <a
-                              href={`https://${b.domain.domain}:${b.port}`}
+                              href={`http://${b.domain.domain}:${b.port}`}
                               target="_blank"
                               rel="noreferrer"
                               onClick={(e) => e.stopPropagation()}

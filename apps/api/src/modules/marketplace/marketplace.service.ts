@@ -220,9 +220,10 @@ export class MarketplaceService {
     //   2. Multi-install apps → search upward from the template default.
     //   3. Single-install apps → use the template default; refuse with a
     //      clear error if it's busy (instead of silently changing it).
-    // Track whether the user PICKED a port — controls whether Caddy serves
-    // https://domain:port (user wants the port visible) or https://domain
-    // (clean URL, Caddy proxies on 443).
+    // Track whether the user PICKED a port — controls the attach mode:
+    // port-pinned (DomainPortBinding, reachable at http://domain:port via the
+    // container's own publish; https://domain 308-redirects there) vs clean
+    // URL (https://domain, Caddy terminates TLS on 443 and proxies).
     const basePort = PORT_MAP[data.appSlug] || app.ports[0];
     const requestedPort = data.port ?? data.hostPort;
     let realPort: number;
