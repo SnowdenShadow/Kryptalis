@@ -625,6 +625,76 @@ export class ApplicationsService {
     return this.network.setUrlMode(userId, id, customPort);
   }
 
+  /**
+   * Move ONE app to another server (per-app placement). Tears the stack
+   * down on the current server (volumes KEPT for recovery), flips
+   * Application.serverId (NULL when the target is the project default so
+   * the app re-inherits), redeploys on the target, refreshes Caddy.
+   *
+   * NOTE: docker volumes are NOT transferred — that's the project-level
+   * migrate flow. This endpoint is for stateless/redeployable apps; the
+   * dashboard warns accordingly.
+   */
+  async moveServer(userId: string, id: string, targetServerId: string) {
+    const app = await this.assertOwnership(userId, id, 'ADMIN');
+    const target = await this.prisma.server.findUnique({ where: { id: targetServerId } });
+    if (!target) throw new NotFoundException('Target server not found');
+    if (target.status !== 'ONLINE') {
+      throw new BadRequestException(`Server "${target.name}" is ${target.status} — choose an ONLINE server`);
+    }
+    const current = await resolveAppServer(this.prisma, id);
+    if (current?.id === targetServerId) {
+      throw new BadRequestException('App is already on this server');
+    }
+
+    const slug = slugify(app.name);
+    // Tear down on the CURRENT server, volumes kept.
+    if (isAppLocal(current)) {
+      const appDir = resolveAppDir(slug, id);
+      if (fs.existsSync(appDir)) {
+        try { await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 90_000); } catch {}
+      }
+      try { await execFileAsync('docker', ['rm', '-f', app.containerName || containerName(slug)]); } catch {}
+    } else if (current) {
+      try {
+        await this.agent.enqueueTask(current.id, 'REMOVE', {
+          slug: remoteAppSlug(app.name, id),
+          legacySlug: slug,
+          containerName: app.containerName || containerName(slug),
+          purgeVolumes: false,
+        });
+      } catch {}
+    }
+
+    // Flip placement: NULL = inherit when the target IS the project default.
+    const proj = await this.prisma.project.findUnique({
+      where: { id: app.projectId },
+      select: { serverId: true },
+    });
+    await this.prisma.application.update({
+      where: { id },
+      data: {
+        serverId: proj?.serverId === targetServerId ? null : targetServerId,
+        status: 'DEPLOYING',
+      },
+    });
+
+    // Redeploy on the target via the standard redeploy path (it resolves
+    // the app's server fresh, so it lands on the new machine).
+    const result = await this.ops.redeploy(userId, id).catch(async (err: any) => {
+      await this.prisma.application.update({
+        where: { id },
+        data: { status: 'ERROR' },
+      }).catch(() => {});
+      throw err;
+    });
+    this.proxy.regenerate().catch(() => {});
+    return {
+      message: `App moving to ${target.name}. Volumes were NOT transferred — databases/uploads start empty on the new server (the old server keeps them).`,
+      deployment: result,
+    };
+  }
+
   addPortBinding(userId: string, appId: string, domainId: string, port: number) {
     return this.network.addPortBinding(userId, appId, domainId, port);
   }

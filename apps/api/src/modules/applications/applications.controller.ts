@@ -156,6 +156,16 @@ export class ApplicationsController {
     return this.svc.setUrlMode(userId, id, customPort);
   }
 
+  @Post(':id/move-server')
+  @ApiOperation({ summary: 'Move this app to another server (volumes are NOT transferred)' })
+  moveServer(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Body('targetServerId') targetServerId: string,
+  ) {
+    return this.svc.moveServer(userId, id, targetServerId);
+  }
+
   // Port bindings — for apps co-hosted on a domain on a custom port. See
   // DomainPortBinding in the Prisma schema.
   @Post(':id/port-bindings')

@@ -111,6 +111,8 @@ export default function DatabasesPage() {
   const [password, setPassword] = useState('');
   const [projectId, setProjectId] = useState('');
   const [applicationId, setApplicationId] = useState('');
+  // '' = inherit the project's default server (per-DB placement, MULTI mode)
+  const [serverChoice, setServerChoice] = useState('');
 
   // Filter state
   const [filterProjectId, setFilterProjectId] = useState('');
@@ -128,11 +130,19 @@ export default function DatabasesPage() {
     ? allApps.filter((a) => a.projectId === projectId)
     : [];
 
-  const { data: server } = useQuery<any>({
-    queryKey: ['server-local'],
-    queryFn: () => api.get('/servers/local'),
+  // MULTI mode → per-DB server picker; default = the project's server
+  // (the API resolves that when serverId is omitted).
+  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
+    queryKey: ['public-settings'],
+    queryFn: () => api.get('/settings/public'),
+    staleTime: 60_000,
   });
-  const serverId = server?.id || '';
+  const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
+  const { data: servers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
+    queryKey: ['servers'],
+    queryFn: () => api.get('/servers'),
+    enabled: isMultiMode,
+  });
 
   const { data: databases = [], isLoading } = useQuery<DatabaseItem[]>({
     queryKey: ['databases', filterProjectId],
@@ -143,7 +153,7 @@ export default function DatabasesPage() {
     mutationFn: (data: {
       name: string;
       type: string;
-      serverId: string;
+      serverId?: string;
       projectId: string;
       applicationId?: string;
       username?: string;
@@ -179,16 +189,18 @@ export default function DatabasesPage() {
     setPassword('');
     setProjectId('');
     setApplicationId('');
+    setServerChoice('');
   }
 
   function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || !serverId || !projectId) return;
+    if (!name.trim() || !projectId) return;
     createMutation.mutate({
       name: name.trim(),
       type,
-      serverId,
       projectId,
+      // omitted = the API places the DB on the project's server
+      ...(serverChoice ? { serverId: serverChoice } : {}),
       ...(applicationId ? { applicationId } : {}),
       ...(username.trim() ? { username: username.trim() } : {}),
       ...(password ? { password } : {}),
@@ -641,6 +653,22 @@ export default function DatabasesPage() {
             />
           </div>
 
+          {isMultiMode && servers.length > 1 && (
+            <div className="space-y-2">
+              <Label htmlFor="db-server">{t('databases.serverLabel')}</Label>
+              <Select
+                id="db-server"
+                value={serverChoice}
+                onChange={(e) => setServerChoice(e.target.value)}
+              >
+                <option value="">{t('databases.serverDefault')}</option>
+                {servers.filter((s) => s.status === 'ONLINE').map((s) => (
+                  <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+                ))}
+              </Select>
+            </div>
+          )}
+
           <p className="text-xs text-muted-foreground">
             {t('databases.serverInfo')}
           </p>
@@ -649,7 +677,7 @@ export default function DatabasesPage() {
             <Button type="button" variant="outline" onClick={closeCreateDialog}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={createMutation.isPending || !serverId || !projectId}>
+            <Button type="submit" disabled={createMutation.isPending || !projectId}>
               {createMutation.isPending && (
                 <Loader2 size={16} className="animate-spin" />
               )}

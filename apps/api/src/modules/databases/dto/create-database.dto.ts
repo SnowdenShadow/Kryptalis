@@ -17,9 +17,14 @@ export class CreateDatabaseDto {
   @IsIn(['POSTGRESQL', 'MYSQL', 'MARIADB', 'REDIS', 'KEYDB', 'DRAGONFLY', 'MONGODB', 'CLICKHOUSE'])
   type: string;
 
-  @ApiProperty()
+  /**
+   * Optional per-DB server placement. Omit to inherit the project's
+   * server (the default). Must reference an ONLINE server when set.
+   */
+  @ApiProperty({ required: false, description: 'Server to run the DB on (defaults to the project server)' })
+  @IsOptional()
   @IsString()
-  serverId: string;
+  serverId?: string;
 
   // Same constraint: lands in the compose env block (MYSQL_USER, …).
   @ApiProperty({ required: false })

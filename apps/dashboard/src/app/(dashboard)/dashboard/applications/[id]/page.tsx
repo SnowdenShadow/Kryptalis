@@ -34,6 +34,7 @@ import {
   Check,
   Eye,
   EyeOff,
+  Server,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -430,6 +431,33 @@ export default function ApplicationDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['applications'] });
       toast.success(t('toast.urlModeUpdated'));
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  // ── per-app server move (MULTI mode) ──────────────────────────────
+  const [showMoveServer, setShowMoveServer] = useState(false);
+  const [moveTargetId, setMoveTargetId] = useState('');
+  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
+    queryKey: ['public-settings'],
+    queryFn: () => api.get('/settings/public'),
+    staleTime: 60_000,
+  });
+  const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
+  const { data: allServers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
+    queryKey: ['servers'],
+    queryFn: () => api.get('/servers'),
+    enabled: isMultiMode,
+  });
+  const moveServerMutation = useMutation({
+    mutationFn: (targetServerId: string) =>
+      api.post(`/applications/${id}/move-server`, { targetServerId }) as Promise<{ message: string }>,
+    onSuccess: (data) => {
+      toast.success(data.message);
+      queryClient.invalidateQueries({ queryKey: ['application', id] });
+      queryClient.invalidateQueries({ queryKey: ['applications'] });
+      setShowMoveServer(false);
+      setMoveTargetId('');
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -1773,6 +1801,31 @@ export default function ApplicationDetailPage() {
             </Card>
             )}
 
+            {/* Server placement (MULTI mode) */}
+            {isMultiMode && allServers.filter((s) => s.status === 'ONLINE').length > 1 && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Server size={18} /> {t('apps.serverTitle')}
+                  </CardTitle>
+                  <CardDescription>{t('apps.serverDesc')}</CardDescription>
+                </CardHeader>
+                <CardContent className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-medium">
+                    {app.server?.name || app.project?.server?.name || '—'}
+                    {(app.server?.host || app.project?.server?.host) && (
+                      <span className="ml-2 font-mono text-xs text-muted-foreground">
+                        {app.server?.host || app.project?.server?.host}
+                      </span>
+                    )}
+                  </p>
+                  <Button variant="outline" size="sm" onClick={() => setShowMoveServer(true)}>
+                    {t('apps.moveServerBtn')}
+                  </Button>
+                </CardContent>
+              </Card>
+            )}
+
             {/* Danger zone */}
             <Card className="border-destructive/50">
               <CardHeader>
@@ -1788,6 +1841,38 @@ export default function ApplicationDetailPage() {
           </>
         )}
       </div>
+
+      {/* Move-server Dialog */}
+      <Dialog open={showMoveServer} onClose={() => { setShowMoveServer(false); setMoveTargetId(''); }}>
+        <DialogHeader>
+          <DialogTitle>{t('apps.moveServerTitle')}</DialogTitle>
+          <DialogDescription>{t('apps.moveServerWarn')}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          <Label>{t('apps.moveServerTarget')}</Label>
+          <Select value={moveTargetId} onChange={(e) => setMoveTargetId(e.target.value)}>
+            <option value="">—</option>
+            {allServers
+              .filter((s) => s.status === 'ONLINE')
+              .filter((s) => s.id !== (app.server?.id ?? app.project?.server?.id))
+              .map((s) => (
+                <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+              ))}
+          </Select>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => { setShowMoveServer(false); setMoveTargetId(''); }}>
+            {t('common.cancel')}
+          </Button>
+          <Button
+            disabled={!moveTargetId || moveServerMutation.isPending}
+            onClick={() => moveServerMutation.mutate(moveTargetId)}
+          >
+            {moveServerMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+            {t('apps.moveServerBtn')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
 
       {/* ------------------------------------------------------------------ */}
       {/* Deployment Detail Dialog                                            */}
