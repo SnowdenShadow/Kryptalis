@@ -25,7 +25,11 @@ export const COMPOSE_TEMPLATES: Record<string, { compose: string; healthCheck?: 
     networks:
       - kryptalis-apps
     ports:
-      - "__HOST_PORT__:9443"
+      # 9000 = Portainer's plain-HTTP listener. The dashboard links users to
+      # http://<ip>:<hostPort>, so mapping the HTTPS listener (9443, self-signed)
+      # here made every direct visit a 400 "Client sent an HTTP request to an
+      # HTTPS server".
+      - "__HOST_PORT__:9000"
       - "8000:8000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -873,7 +877,10 @@ if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
 };
 
 export const PORT_MAP: Record<string, number> = {
-  portainer: 9443,
+  // 9090, NOT 9000: minio's template hard-publishes 9000:9000 (S3 API), and
+  // NOT 9443: that's an HTTPS-looking port — the dashboard would render an
+  // https:// link to what is now a plain-HTTP container listener (9000).
+  portainer: 9090,
   grafana: 3001,
   'uptime-kuma': 3002,
   n8n: 5678,

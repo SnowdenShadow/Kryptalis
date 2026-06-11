@@ -242,21 +242,20 @@ ${email ? `  email ${email}\n` : ''}}
       },
     });
 
-    // Some marketplace apps listen on HTTPS internally with a self-signed
-    // cert (Portainer is the canonical case — its container listens HTTPS on
-    // 9443 even when published on a different host port). When we reverse_proxy
-    // to them in plain HTTP, Caddy gets a TLS alert and returns 502.
-    //
-    // Detection is layered because none of the signals alone is reliable:
-    //   1. containerName prefix — marketplace installs always stamp
-    //      `kryptalis-portainer-<id12>` regardless of the display name.
-    //   2. app name — case-INsensitive prefix match. The unified deploy
-    //      dialog auto-names installs from the slug ("portainer", lowercase)
-    //      and multi-installs get suffixed ("Portainer 2"); an exact
-    //      case-sensitive Set lookup missed both → Caddy spoke plain HTTP
-    //      to a TLS-only upstream and the domain never answered.
-    //   3. well-known TLS-only port numbers (incl. 9443, Portainer's
-    //      canonical internal port) for home-rolled HTTPS services.
+    // Some apps listen on HTTPS internally with a self-signed cert. When we
+    // reverse_proxy to them in plain HTTP, Caddy gets a TLS alert and
+    // returns 502. Detection:
+    //   1. well-known TLS-only port numbers (443/8443/9443) on the target
+    //      port. Covers current installs — the Portainer template now maps
+    //      the plain-HTTP listener (9000), so a 9000 target stays http; old
+    //      installs stored containerPort 9443 and stay https.
+    //   2. Portainer name/containerName heuristics, ONLY as a fallback for
+    //      legacy rows with no containerPort (pre-schema-bump installs all
+    //      used the 9443 HTTPS template). Must NOT apply when containerPort
+    //      is known: a new install named "portainer" targets HTTP :9000 and
+    //      forcing TLS there would break it the same way in reverse.
+    //      Name matching is case-INsensitive prefix ("portainer" from the
+    //      unified deploy dialog, "Portainer 2" multi-install suffix).
     const HTTPS_UPSTREAM_CONTAINER_RE = /^kryptalis-portainer-/;
     const HTTPS_UPSTREAM_NAME_RE = /^portainer\b/i;
     const HTTPS_UPSTREAM_PORTS = new Set([443, 8443, 9443]);
@@ -308,10 +307,14 @@ ${email ? `  email ${email}\n` : ''}}
         ? `${app.containerName}:${app.containerPort}`
         : `host.docker.internal:${hostPort}`;
       const targetPortForHttpsHint = app.containerPort || hostPort;
-      const upstreamHttps =
-        (!!app.containerName && HTTPS_UPSTREAM_CONTAINER_RE.test(app.containerName)) ||
-        HTTPS_UPSTREAM_NAME_RE.test(app.name) ||
-        HTTPS_UPSTREAM_PORTS.has(targetPortForHttpsHint);
+      // Known containerPort is authoritative — new Portainer installs target
+      // the plain-HTTP listener (9000) and must NOT be forced to TLS by the
+      // legacy name heuristics below.
+      const upstreamHttps = app.containerPort
+        ? HTTPS_UPSTREAM_PORTS.has(app.containerPort)
+        : (!!app.containerName && HTTPS_UPSTREAM_CONTAINER_RE.test(app.containerName)) ||
+          HTTPS_UPSTREAM_NAME_RE.test(app.name) ||
+          HTTPS_UPSTREAM_PORTS.has(targetPortForHttpsHint);
       // Caddy resolves the upstream hostname ONCE at config load when no
       // explicit DNS TTL is set, then caches the IP forever. Docker
       // assigns new IPs on every container recreate (redeploy / restart),

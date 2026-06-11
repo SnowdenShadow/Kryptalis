@@ -150,6 +150,25 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
     expect(caddyfile).toContain('tls_insecure_skip_verify');
   });
 
+  it('new Portainer install (HTTP listener 9000) stays plain http despite the name', async () => {
+    const { service } = makeService([
+      domainRow({
+        applicationId: 'a1',
+        application: {
+          id: 'a1',
+          name: 'Portainer',
+          port: 9090,
+          customPort: false,
+          containerName: 'kryptalis-portainer-abc123def456',
+          containerPort: 9000,
+        },
+      }),
+    ]);
+    const { caddyfile } = await service.regenerate();
+    expect(caddyfile).toContain('reverse_proxy kryptalis-portainer-abc123def456:9000');
+    expect(caddyfile).not.toContain('tls_insecure_skip_verify');
+  });
+
   it('plain HTTP app (grafana) keeps an http upstream without TLS transport', async () => {
     const { service } = makeService([
       domainRow({

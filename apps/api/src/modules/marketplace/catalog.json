@@ -10,9 +10,9 @@
       "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/portainer.png",
       "version": "2.21",
       "dockerImage": "portainer/portainer-ce:latest",
-      "ports": [9443],
-      "containerPort": 9443,
-      "defaultPort": 9443,
+      "ports": [9090],
+      "containerPort": 9000,
+      "defaultPort": 9090,
       "envVars": []
     },
     {
