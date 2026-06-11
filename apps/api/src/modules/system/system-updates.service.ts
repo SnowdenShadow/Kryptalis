@@ -36,6 +36,17 @@ import * as fs from 'fs';
  * install dir + the host docker socket so it can run `docker compose` on
  * the host daemon. The script itself is plain sh — no systemd, no
  * self-heal, no rewriting timer units.
+ *
+ * CRITICAL: the install dir is mounted at the SAME absolute path inside
+ * the updater container as on the host (`-v <dir>:<dir> -w <dir>`), never
+ * at /app. The compose file interpolates ${PWD} (fallback for
+ * KRYPTALIS_HOST_*_DIR) and resolves relative bind-mount sources against
+ * the cwd — and the HOST docker daemon resolves those paths against the
+ * HOST filesystem. Mounting at /app used to make `docker compose up`
+ * recreate the stack under project name "app" with fresh empty volumes
+ * (apparent data loss) and bind-mounts pointing at a nonexistent host
+ * /app — bricking the install. Same-path mount + `name: kryptalis` in
+ * docker-compose.yml make the update path-stable.
  */
 @Injectable()
 export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
@@ -329,16 +340,24 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`could not write marker: ${(e as Error).message}`);
     }
 
+    // HOST path of the install dir. Mount it at the SAME path inside the
+    // updater container so the host docker daemon resolves the compose
+    // file's relative bind mounts and ${PWD} fallbacks against the real
+    // install dir (see class doc above). KRYPTALIS_DIR pins update.sh's
+    // INSTALL_DIR to the same value (belt + braces with `-w`).
     const installDir = this.hostInstallDir();
     const args = [
       'run', '--rm', '-d',
-      '-v', `${installDir}:/app`,
+      '-v', `${installDir}:${installDir}`,
       '-v', '/var/run/docker.sock:/var/run/docker.sock',
-      '-w', '/app',
+      '-w', installDir,
+      '-e', `KRYPTALIS_DIR=${installDir}`,
+      '-e', `KRYPTALIS_BRANCH=${this.state.branch}`,
       'docker:cli',
       'sh', '-c',
-      // Wrapper cleans the marker on exit no matter what.
-      `sh /app/update.sh; rc=$?; rm -f /app/.kryptalis/.update-running; exit $rc`,
+      // Wrapper cleans the marker on exit no matter what. Paths are
+      // double-quoted in case the install dir contains spaces.
+      `sh "${installDir}/update.sh"; rc=$?; rm -f "${installDir}/.kryptalis/.update-running"; exit $rc`,
     ];
 
     // Fire-and-forget. Container runs on the host docker daemon — it

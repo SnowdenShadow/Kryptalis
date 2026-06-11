@@ -38,7 +38,36 @@ case "$OS_ID" in
   *) warn "Untested OS ($OS_ID) — proceeding anyway" ;;
 esac
 
-# ─── 2. install Docker ───────────────────────────────────────────────
+# ─── 2. install base tools (git, curl, openssl) ─────────────────────
+# The installer itself needs git (clone/fetch), curl (Docker bootstrap,
+# IP detection, API wait-loop) and openssl (secret generation) — none of
+# which a minimal VPS image or get.docker.com guarantees. Same distro
+# detection as above: apt for Ubuntu/Debian, dnf/yum/apk as fallbacks.
+NEED_PKGS=""
+for c in git curl openssl; do
+  command -v "$c" >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS $c"
+done
+if [ -n "$NEED_PKGS" ]; then
+  say "Installing missing tools:$NEED_PKGS"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq
+    # shellcheck disable=SC2086 — NEED_PKGS is a deliberate word list
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $NEED_PKGS ca-certificates
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y $NEED_PKGS ca-certificates
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y $NEED_PKGS ca-certificates
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache $NEED_PKGS ca-certificates
+  else
+    die "Missing tools ($NEED_PKGS ) and no supported package manager (apt-get/dnf/yum/apk) — install them manually and re-run"
+  fi
+  ok "Tools installed:$NEED_PKGS"
+else
+  ok "git / curl / openssl already present"
+fi
+
+# ─── 2b. install Docker ──────────────────────────────────────────────
 if command -v docker >/dev/null 2>&1; then
   ok "Docker already installed: $(docker --version)"
 else
@@ -107,6 +136,23 @@ else
   ok "Using operator-supplied PUBLIC_API_URL=$PUBLIC_API_URL_RESOLVED"
 fi
 
+# The API builds email CTA links from PUBLIC_DASHBOARD_URL — without it
+# every production email points at http://localhost:3000. Same host as
+# the API, port 3000 (the dashboard's published port). Operators fronting
+# the dashboard with a domain via Caddy can override with the env var or
+# edit .env later.
+if [ -n "${PUBLIC_DASHBOARD_URL:-}" ]; then
+  PUBLIC_DASHBOARD_URL_RESOLVED="$PUBLIC_DASHBOARD_URL"
+  ok "Using operator-supplied PUBLIC_DASHBOARD_URL=$PUBLIC_DASHBOARD_URL_RESOLVED"
+else
+  # Swap the API port for the dashboard port; if PUBLIC_API_URL has no
+  # :4000 suffix (custom domain), just append :3000 to the same origin.
+  case "$PUBLIC_API_URL_RESOLVED" in
+    *:4000) PUBLIC_DASHBOARD_URL_RESOLVED=$(printf '%s' "$PUBLIC_API_URL_RESOLVED" | sed 's|:4000$|:3000|') ;;
+    *)      PUBLIC_DASHBOARD_URL_RESOLVED="$PUBLIC_API_URL_RESOLVED:3000" ;;
+  esac
+fi
+
 # ─── 6. .env consistency check ───────────────────────────────────────
 # CRITICAL: the Postgres volume bakes POSTGRES_PASSWORD on first init only.
 # If we drop the .env without dropping the volume, the API will then mint a
@@ -116,6 +162,8 @@ fi
 NEEDS_DASHBOARD_REBUILD=0
 
 if [ ! -f .env ]; then
+  # The kryptalis_ prefix is guaranteed by `name: kryptalis` at the top of
+  # docker-compose.yml (project name no longer depends on the cwd basename).
   STALE_PG_VOLUME=$(docker volume ls --quiet --filter "name=kryptalis_postgres_data" 2>/dev/null)
   if [ -n "$STALE_PG_VOLUME" ]; then
     # A Postgres volume WITHOUT a .env means the new random password won't
@@ -143,6 +191,7 @@ JWT_SECRET=$JWT_SECRET
 JWT_REFRESH_SECRET=$JWT_REFRESH_SECRET
 ENCRYPTION_KEY=$ENCRYPTION_KEY
 PUBLIC_API_URL=$PUBLIC_API_URL_RESOLVED
+PUBLIC_DASHBOARD_URL=$PUBLIC_DASHBOARD_URL_RESOLVED
 EOF
   chmod 600 .env
   ok ".env created (kept private at $INSTALL_DIR/.env)"
@@ -158,7 +207,36 @@ else
   else
     ok ".env already exists — leaving it alone"
   fi
+  # Older installs never wrote PUBLIC_DASHBOARD_URL → emails pointed at
+  # http://localhost:3000. Backfill it (append-only; never overwrite an
+  # operator-set value).
+  if ! grep -qE '^PUBLIC_DASHBOARD_URL=' .env; then
+    say "Backfilling PUBLIC_DASHBOARD_URL=$PUBLIC_DASHBOARD_URL_RESOLVED"
+    printf 'PUBLIC_DASHBOARD_URL=%s\n' "$PUBLIC_DASHBOARD_URL_RESOLVED" >> .env
+  fi
 fi
+
+# ─── 6b. pin the HOST install paths in .env ──────────────────────────
+# The compose file falls back to ${PWD} for these, which is only correct
+# when `docker compose` runs from the install root ON THE HOST. The
+# auto-updater runs compose inside a docker:cli container — there ${PWD}
+# would resolve to a container path, making every API-generated bind
+# mount (marketplace apps, mail server, Caddyfile) point at host paths
+# that don't exist. Pinning the absolute values here makes the stack
+# path-stable no matter where compose is invoked from. Rewritten on every
+# install run so a moved checkout self-heals.
+set_env_var() {
+  # set_env_var KEY VALUE — idempotent upsert into .env
+  if grep -qE "^$1=" .env; then
+    sed -i.bak "s|^$1=.*|$1=$2|" .env
+  else
+    printf '%s=%s\n' "$1" "$2" >> .env
+  fi
+}
+set_env_var KRYPTALIS_HOST_INSTALL_DIR "$INSTALL_DIR"
+set_env_var KRYPTALIS_HOST_DATA_DIR "$INSTALL_DIR/.kryptalis"
+rm -f .env.bak
+ok "Host paths pinned: KRYPTALIS_HOST_INSTALL_DIR=$INSTALL_DIR"
 
 # ─── 7. seed the Caddyfile so Caddy can mount it on first boot ──────
 # The API regenerates this file on every domain change, but the file MUST exist
@@ -246,8 +324,12 @@ say "Waiting for the API to come up (up to 180s)..."
 DEADLINE=$((`date +%s` + 180))
 LAST_TICK=$(date +%s)
 while :; do
-  CODE=$(curl -fsS -o /dev/null -w "%{http_code}" http://localhost:4000/api/settings/public 2>/dev/null || echo "000")
-  if echo "$CODE" | grep -qE "200|401"; then
+  # NOTE: don't `|| echo 000` on the same line — curl with -w prints the
+  # code even on failure (e.g. "401" with -f), so the fallback would
+  # CONCATENATE ("401000"). Capture first, then default only if empty.
+  CODE=$(curl -fsS -o /dev/null -w "%{http_code}" http://localhost:4000/api/settings/public 2>/dev/null) || true
+  [ -n "$CODE" ] || CODE="000"
+  if [ "$CODE" = "200" ] || [ "$CODE" = "401" ]; then
     ok "API ready"
     break
   fi

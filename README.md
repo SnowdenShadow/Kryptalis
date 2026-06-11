@@ -10,7 +10,7 @@ Kryptalis is a self-hosted Platform-as-a-Service that turns one or more Linux VP
 - **Monitoring + alerts** — per-server CPU / RAM / disk / network metrics with configurable retention, threshold alerts dispatched over SMTP, Discord, Slack, or arbitrary webhooks.
 - **Multi-server support** — start in LOCAL mode on a single VPS, flip to MULTI to enroll additional servers via a Go agent (long-poll task queue, concurrency-safe claim).
 - **2FA** — TOTP enrolment per user, enforced on next login, recovery codes generated at setup.
-- **Encrypted backups** — Postgres / MySQL / app file dumps written to disk with AES-256-GCM (using a dedicated `BACKUP_ENCRYPTION_KEY` siloed from app secrets), SHA-256 verified on restore.
+- **Encrypted backups** — Postgres / MySQL / app file dumps written to disk with AES-256-GCM (using a dedicated `BACKUP_ENCRYPTION_KEY` siloed from app secrets), SHA-256 verified on restore. Schedulable (hourly / daily / weekly / custom time presets) and uploadable to remote S3-compatible targets (Amazon S3, Cloudflare R2, Backblaze B2).
 
 ## Quick install
 

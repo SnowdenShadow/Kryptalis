@@ -223,15 +223,17 @@ In Multi mode, you can move a project (and all its apps + databases) from one se
 
 **What happens:**
 
-1. Apps and DBs are torn down on the source server (best-effort — failures don't block).
+1. Apps and DBs are torn down on the source server (best-effort — failures don't block). Source volumes are **kept** on the old server for recovery.
 2. The project's `serverId` flips to the target.
-3. Apps and DBs are re-deployed on the target.
-4. Caddy regenerates so domains follow.
+3. Docker volumes are transferred to the target **asynchronously** (export on the source, import on the target).
+4. Apps and DBs deploy on the target once the volume data arrives, so containers come up on real data.
+5. Caddy regenerates so domains follow.
 
 **Limitations:**
 
-- **Downtime**: apps are unavailable while they redeploy on the new server.
-- **Data in volumes is not copied across hosts**. If you have data you need to keep (DBs, uploads), back it up before migrating, or use external storage / managed DBs.
+- **Downtime**: apps are unavailable while the volumes transfer and the apps redeploy on the new server.
+- **Volume transfer is best-effort**: if the export/import setup fails, the migration falls back to deploying immediately with **empty volumes** (a warning is surfaced). Source volumes stay intact on the old server either way — take a backup before migrating if the data is critical.
+- Volume discovery uses the compose-project naming convention; stacks declaring differently-named volumes are not covered when the source is a remote server.
 - Target server must be `ONLINE`.
 
 ---
@@ -267,8 +269,9 @@ Reverse DNS (PTR) — only your VPS provider can set this. Most panels have a "R
 
 ### "My data is on the old server after migration"
 
-- Volume migration across hosts is not automatic. Back up before migrating.
-- For databases: use the Backups feature, restore on the new server.
+- Volumes are normally transferred automatically (asynchronously) during migration. If the transfer setup failed, the apps were deployed with empty volumes — check the migration warnings.
+- Source volumes are preserved on the old server for recovery; nothing is purged by the migration itself.
+- Fallback: use the Backups feature on the old server, restore on the new one.
 
 ### "I switched from Multi to Local, where did my apps go?"
 

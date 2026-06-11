@@ -45,6 +45,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
+import type { AlertRuleResponse, CreateAlertRuleRequest } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
@@ -61,16 +62,8 @@ interface Metric {
   timestamp: string;
 }
 
-interface AlertRule {
-  id: string;
-  name: string;
-  serverId: string;
-  metric: string;
-  threshold: number;
-  operator?: string;
-  channel: string;
-  webhookUrl?: string;
-}
+// Shared API resource type — local alias keeps the JSX readable.
+type AlertRule = AlertRuleResponse;
 
 const operatorSymbols: Record<string, string> = {
   GT: '>',
@@ -250,15 +243,8 @@ export default function MonitoringPage() {
 
   // --- Mutations ---
   const createAlert = useMutation({
-    mutationFn: (data: {
-      name: string;
-      serverId: string;
-      metric: string;
-      threshold: number;
-      operator: string;
-      channel: string;
-      webhookUrl?: string;
-    }) => api.post('/monitoring/alert-rules', data),
+    mutationFn: (data: CreateAlertRuleRequest) =>
+      api.post('/monitoring/alert-rules', data),
     onSuccess: () => {
       toast.success(t('toast.alertCreated'));
       queryClient.invalidateQueries({
@@ -313,10 +299,12 @@ export default function MonitoringPage() {
     createAlert.mutate({
       name: alertForm.name,
       serverId,
-      metric: alertForm.metric,
+      // Select values are constrained to the request unions by the <option>
+      // lists below — the casts just bridge the untyped DOM string.
+      metric: alertForm.metric as CreateAlertRuleRequest['metric'],
       threshold: alertForm.threshold,
-      operator: alertForm.operator,
-      channel: alertForm.channel,
+      operator: alertForm.operator as CreateAlertRuleRequest['operator'],
+      channel: alertForm.channel as CreateAlertRuleRequest['channel'],
       ...(alertForm.channel === 'WEBHOOK' && alertForm.webhookUrl
         ? { webhookUrl: alertForm.webhookUrl }
         : {}),
@@ -860,12 +848,12 @@ export default function MonitoringPage() {
                   onChange={(e) => setAlertForm((f) => ({ ...f, metric: e.target.value }))}
                 >
                   <option value="cpu">CPU</option>
-                  <option value="memory">Memory</option>
-                  <option value="disk">Disk</option>
+                  <option value="memory">{t('monitoring.metricMemory')}</option>
+                  <option value="disk">{t('monitoring.metricDisk')}</option>
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="alert-operator">Condition</Label>
+                <Label htmlFor="alert-operator">{t('monitoring.condition')}</Label>
                 <Select
                   id="alert-operator"
                   value={alertForm.operator}

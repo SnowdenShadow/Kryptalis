@@ -98,6 +98,8 @@ The audit log has a hardcoded retention of 365 days (cleaned hourly), tracked in
 | `s3_access_key` | `S3_ACCESS_KEY` | — | Access key ID. Required for remote backup targets. |
 | `s3_secret_key` | `S3_SECRET_KEY` | — | Secret access key. **Encrypted at rest.** Blank field in the UI keeps the existing value. Required for remote backup targets. |
 
+> **Note on the `S3_*` env fallbacks:** the provided `docker-compose.yml` does **not** pass any `S3_*` variable into the API container, so setting them in `.env` has no effect on a standard install — they only work for bare-metal / custom-compose deployments that inject them explicitly. On a standard install, configure S3 storage via **Admin → System Config** (which is the recommended path anyway).
+
 Remote backup targets (`S3` / `R2` / `B2` in the create-backup dialog) only become selectable once `s3_endpoint`, `s3_bucket`, `s3_access_key` and `s3_secret_key` are all set (`GET /backups/targets` reports `s3Configured`). Dumps are uploaded under `kryptalis-backups/<backupId>/<filename>` (post-encryption bytes — the recorded sha256 still matches), the local file is deleted after a successful upload, and restores download to a temp file before running the usual integrity/decryption gate. Deleting a backup removes its remote objects best-effort.
 
 ### Admin / user policy

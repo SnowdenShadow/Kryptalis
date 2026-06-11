@@ -22,10 +22,10 @@ curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/main/instal
 
 The script:
 
-1. Detects the OS and installs Docker + the `docker compose` plugin if missing.
+1. Detects the OS and installs `git`/`curl`/`openssl` (apt/dnf/yum/apk) plus Docker + the `docker compose` plugin if missing.
 2. Clones the repo to `/opt/kryptalis` (override with `KRYPTALIS_DIR`).
 3. Detects the public IP via `api.ipify.org` (override with `PUBLIC_API_URL`).
-4. Generates `/opt/kryptalis/.env` with cryptographically random values for `POSTGRES_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ENCRYPTION_KEY` (mode `0600`).
+4. Generates `/opt/kryptalis/.env` with cryptographically random values for `POSTGRES_PASSWORD`, `JWT_SECRET`, `JWT_REFRESH_SECRET`, `ENCRYPTION_KEY` (mode `0600`), plus `PUBLIC_API_URL`, `PUBLIC_DASHBOARD_URL` (same host, port 3000 — override with the env var if a domain fronts the dashboard) and the absolute host paths `KRYPTALIS_HOST_INSTALL_DIR` / `KRYPTALIS_HOST_DATA_DIR` (pinned so bind mounts and the auto-updater stay correct no matter where `docker compose` is invoked from).
 5. Seeds bind-mount targets (`docker-compose.override.yml`, `.kryptalis/reverse-proxy/Caddyfile`) so Docker doesn't materialise them as empty directories.
 6. Runs `docker compose up -d --build`, waits up to 180 s for `/api/settings/public` to answer.
 7. Removes the legacy `kryptalis-update.timer` if a previous install created one — auto-update now runs **inside the API** (see [Updating](#updating-kryptalis)).
@@ -38,6 +38,7 @@ The installer asks for **nothing interactively**. Everything is taken from env v
 | `KRYPTALIS_REPO` | `https://github.com/SnowdenShadow/Kryptalis.git` | Source repo. |
 | `KRYPTALIS_BRANCH` | `main` | Branch to track. |
 | `PUBLIC_API_URL` | autodetected | Forces the public API URL baked into the dashboard build. |
+| `PUBLIC_DASHBOARD_URL` | derived from `PUBLIC_API_URL` (same host, port 3000) | Public dashboard origin used in email CTA links. |
 | `KRYPTALIS_RESET=1` | off | **Destructive.** Wipes `.env` + all Docker volumes, reinstalls fresh. |
 
 Re-running the installer is safe — it preserves `.env`, the Postgres volume, and only rebuilds the dashboard when `PUBLIC_API_URL` changes (Next inlines `NEXT_PUBLIC_*` at build time, so a stale image would call the wrong origin and trigger CORS errors).

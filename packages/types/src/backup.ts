@@ -28,6 +28,8 @@ export interface BackupResponse {
   sha256: string | null;
   /** True when the dump is AES-256-GCM encrypted at rest. */
   encryptedAt: boolean;
+  /** On-disk archive filename (null for rows predating the column / never-run jobs). */
+  filename?: string | null;
   includeApplications: boolean;
   includeDatabases: boolean;
   includeVolumes: boolean;
@@ -35,3 +37,32 @@ export interface BackupResponse {
   lastRunAt: string | null;
   createdAt: string;
 }
+
+/**
+ * POST /backups/:id/restore — two shapes depending on where the backup's
+ * server lives:
+ *   - local server  → synchronous restore: `databasesRestored` /
+ *     `volumesRestored` counters, message "Restore completed.".
+ *   - remote server → the archive is staged and a RESTORE task is enqueued
+ *     on the agent: `taskId` + `databasesQueued` / `volumesQueued`, message
+ *     contains "queued".
+ * Discriminate on the presence of `databasesRestored` vs `databasesQueued`.
+ */
+export interface RestoreBackupLocalResponse {
+  message: string;
+  backupId: string;
+  databasesRestored: number;
+  volumesRestored: number;
+}
+
+export interface RestoreBackupQueuedResponse {
+  message: string;
+  backupId: string;
+  taskId: string;
+  databasesQueued: number;
+  volumesQueued: number;
+}
+
+export type RestoreBackupResponse =
+  | RestoreBackupLocalResponse
+  | RestoreBackupQueuedResponse;

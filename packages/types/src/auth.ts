@@ -27,6 +27,18 @@ export interface JwtPayload {
   exp: number;
 }
 
+/**
+ * Per-user notification preferences (User.notificationPrefs Json column).
+ * Shape: { [event]: { [channel]: boolean } } — opt-out model (absent =
+ * allowed). Events/channels outside the API whitelist are silently dropped
+ * on write (see apps/api/src/modules/users/users.service.ts).
+ */
+export type NotificationPrefs = Record<string, Record<string, boolean>>;
+
+export interface NotificationPrefsResponse {
+  prefs: NotificationPrefs;
+}
+
 export interface UserResponse {
   id: string;
   name: string;

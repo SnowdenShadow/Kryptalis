@@ -67,7 +67,7 @@ Every project also gets a dedicated user-defined bridge network `kryptalis_proj_
 
 ## Notification flow
 
-`NotificationsService` is the single fan-out. Events that produce notifications: deployment outcomes (success/failure), SSL renewal failures, server alerts (CPU/RAM/disk threshold), backup failures.
+`NotificationsService` is the single fan-out. Events that produce notifications: deployment outcomes (`deployOk` / `deployFail`), server offline (`serverOff`), SSL certificate expiry/renewal failures (`sslExpire`), backup outcomes (`backupOk` / `backupFail`), and server alerts (CPU/RAM/disk threshold rules). Email delivery of each event is filtered per-recipient against the user's notification preferences (`User.notificationPrefs`, edited under Settings → Notifications — opt-out model, absent = allowed); the in-app feed is written regardless.
 
 Each event renders **once** into a structured payload, then dispatches to the operator's configured channels:
 

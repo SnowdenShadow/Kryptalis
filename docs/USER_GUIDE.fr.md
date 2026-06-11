@@ -223,15 +223,17 @@ En mode Multi, tu peux déplacer un projet (et toutes ses apps + bases) d'un ser
 
 **Ce qui se passe :**
 
-1. Les apps et DBs sont démontées sur le serveur source (best-effort — les échecs ne bloquent pas).
+1. Les apps et DBs sont démontées sur le serveur source (best-effort — les échecs ne bloquent pas). Les volumes source sont **conservés** sur l'ancien serveur pour récupération.
 2. Le `serverId` du projet bascule vers la cible.
-3. Les apps et DBs sont re-déployées sur la cible.
-4. Caddy se régénère pour que les domaines suivent.
+3. Les volumes Docker sont transférés vers la cible **de façon asynchrone** (export sur la source, import sur la cible).
+4. Les apps et DBs se déploient sur la cible une fois les données des volumes arrivées, donc les containers démarrent sur les vraies données.
+5. Caddy se régénère pour que les domaines suivent.
 
 **Limitations :**
 
-- **Downtime** : les apps sont indisponibles pendant le redéploiement sur le nouveau serveur.
-- **Les données dans les volumes ne sont pas copiées entre hôtes**. Si tu as des données à garder (DBs, uploads), sauvegarde-les avant la migration, ou utilise du stockage externe / DBs managées.
+- **Downtime** : les apps sont indisponibles pendant le transfert des volumes et le redéploiement sur le nouveau serveur.
+- **Le transfert de volumes est best-effort** : si la mise en place de l'export/import échoue, la migration retombe sur un déploiement immédiat avec des **volumes vides** (un avertissement est remonté). Les volumes source restent intacts sur l'ancien serveur dans tous les cas — fais une sauvegarde avant de migrer si les données sont critiques.
+- La découverte des volumes suit la convention de nommage compose-project ; les stacks déclarant des volumes nommés différemment ne sont pas couvertes quand la source est un serveur distant.
 - Le serveur cible doit être `ONLINE`.
 
 ---
@@ -267,8 +269,9 @@ DNS inverse (PTR) — seul ton fournisseur VPS peut le définir. La plupart des 
 
 ### "Mes données sont sur l'ancien serveur après migration"
 
-- La migration de volumes entre hôtes n'est pas automatique. Sauvegarde avant de migrer.
-- Pour les bases de données : utilise la fonction Backups, restaure sur le nouveau serveur.
+- Les volumes sont normalement transférés automatiquement (de façon asynchrone) pendant la migration. Si la mise en place du transfert a échoué, les apps ont été déployées avec des volumes vides — vérifie les avertissements de migration.
+- Les volumes source sont préservés sur l'ancien serveur pour récupération ; la migration elle-même ne purge rien.
+- Solution de repli : utilise la fonction Backups sur l'ancien serveur, restaure sur le nouveau.
 
 ### "J'ai basculé de Multi à Local, où sont passées mes apps ?"
 

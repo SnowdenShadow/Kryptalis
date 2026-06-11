@@ -95,8 +95,11 @@ interface BackupManifest {
  * Remote (agent-managed) servers:
  *   - create() on a remote server enqueues a BACKUP agent task instead of
  *     running the dump engine locally. The task payload carries the resolved
- *     database credentials (same container names / decrypted passwords as
- *     dumpDatabases), the deterministic volume list, an uploadName and the
+ *     database credentials (same container names as dumpDatabases; passwords
+ *     ride ENCRYPTED in the stored payload and are decrypted by
+ *     AgentService.poll() when served to the authenticated agent — the
+ *     agent_tasks Json column never holds plaintext credentials),
+ *     the deterministic volume list, an uploadName and the
  *     backupId — the agent dumps everything host-side, tars it and streams
  *     the archive back through POST /agent/transfers/<taskId>/upload. The
  *     row stays IN_PROGRESS until the task result arrives; the BACKUP
@@ -924,9 +927,15 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Resolve the database-dump descriptors for a remote BACKUP task — the
-   * same container names / decrypted credentials / dumpAll semantics
-   * dumpDatabases derives, but handed to the agent instead of executed via
-   * local `docker exec`.
+   * same container names / credentials / dumpAll semantics dumpDatabases
+   * derives, but handed to the agent instead of executed via local
+   * `docker exec`.
+   *
+   * SECURITY: the password rides ENCRYPTED in the task payload (the
+   * agent_tasks row is plain Json in the DB) — AgentService.poll() decrypts
+   * it transparently at the moment the task is served to the authenticated
+   * agent. decrypt-then-encrypt guarantees a v1 ciphertext even for legacy
+   * plaintext password columns.
    */
   private async remoteBackupDatabases(serverId: string) {
     const dbs = await this.prisma.database.findMany({ where: { serverId } });
@@ -935,7 +944,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       type: db.type,
       container: this.dbContainerName(db),
       username: db.username,
-      password: this.encryption.decrypt(db.password),
+      password: this.encryption.encrypt(this.encryption.decrypt(db.password)),
       name: db.name,
       dumpAll: db.autoImported,
     }));
@@ -1041,7 +1050,8 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
    * Remote restore: stage the verified (and already-decrypted) archive under
    * transfers/<local-id>/, then enqueue a RESTORE task carrying the manifest's
    * database descriptors (re-resolved against live rows for fresh container
-   * names + decrypted credentials) and volume list. The agent downloads the
+   * names; credentials ride encrypted in the stored payload — see
+   * remoteBackupDatabases) and volume list. The agent downloads the
    * archive via /agent/transfers (sourceTaskId) and replays it host-side.
    */
   private async queueRemoteRestore(
@@ -1071,7 +1081,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         type: db.type,
         container: this.dbContainerName(db),
         username: db.username,
-        password: this.encryption.decrypt(db.password),
+        // Encrypted in the stored payload (agent_tasks is plain Json);
+        // AgentService.poll() decrypts when serving the task to the agent.
+        password: this.encryption.encrypt(this.encryption.decrypt(db.password)),
         name: db.name,
         dumpAll: entry.dumpAll,
         file: entry.file,

@@ -11,6 +11,13 @@
 # Required secrets (refuse to start otherwise — see install.sh):
 #   POSTGRES_PASSWORD, JWT_SECRET, JWT_REFRESH_SECRET, ENCRYPTION_KEY
 
+# Pin the compose project name regardless of the cwd's basename. Without
+# this, running `docker compose up` from anywhere other than a dir named
+# "kryptalis" (e.g. the auto-updater container, or a checkout in ~/src/app)
+# would create a SECOND project with fresh empty volumes (app_postgres_data
+# instead of kryptalis_postgres_data) — apparent loss of the whole DB.
+name: kryptalis
+
 services:
   postgres:
     image: postgres:16.6-alpine
@@ -105,8 +112,11 @@ services:
       # API generates child docker-compose stacks (mail server, marketplace
       # apps): the docker daemon on the HOST resolves bind-mount sources
       # against the host filesystem, not the API container's filesystem.
-      # Override via .env if your repo lives somewhere other than $PWD.
-      KRYPTALIS_HOST_DATA_DIR: ${PWD}/.kryptalis
+      # install.sh writes the absolute value into .env — the ${PWD} fallback
+      # only covers manual `docker compose up` runs from the install root.
+      # NEVER rely on ${PWD} from a container (it would resolve to a path
+      # that doesn't exist on the host and create phantom dirs at /).
+      KRYPTALIS_HOST_DATA_DIR: ${KRYPTALIS_HOST_DATA_DIR:-${PWD}/.kryptalis}
       # Optional SMTP transport for transactional mail (password reset,
       # invites, deployment + alert notifications). If SMTP_HOST is unset
       # the NotificationsService becomes a logged no-op — the API still
@@ -122,9 +132,11 @@ services:
       PUBLIC_DASHBOARD_URL: ${PUBLIC_DASHBOARD_URL:-http://localhost:3000}
       # Auto-update: the install dir on the HOST. The API reads its
       # current SHA from <install_dir>/.git and spawns update.sh via
-      # docker run with this dir mounted. Defaults to ${PWD} so the
-      # value matches wherever `docker compose up` was run from.
-      KRYPTALIS_HOST_INSTALL_DIR: ${PWD}
+      # docker run with this dir mounted at the SAME path (host daemon
+      # resolves mounts against the host fs). install.sh writes the
+      # absolute value into .env; the ${PWD} fallback only covers manual
+      # `docker compose up` runs from the install root.
+      KRYPTALIS_HOST_INSTALL_DIR: ${KRYPTALIS_HOST_INSTALL_DIR:-${PWD}}
       # Optional — override the auto-detected owner/repo (the API
       # otherwise parses .git/config). Useful when running a fork.
       KRYPTALIS_GITHUB_REPO: ${KRYPTALIS_GITHUB_REPO:-}

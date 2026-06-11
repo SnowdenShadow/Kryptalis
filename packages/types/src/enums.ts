@@ -152,6 +152,7 @@ export enum TaskType {
   MONITOR = 'MONITOR',
   VOLUME_EXPORT = 'VOLUME_EXPORT',
   VOLUME_IMPORT = 'VOLUME_IMPORT',
+  RESTORE = 'RESTORE',
 }
 
 export enum TaskStatus {

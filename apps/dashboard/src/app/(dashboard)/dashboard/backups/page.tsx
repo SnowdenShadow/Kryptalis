@@ -31,7 +31,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import type { BackupResponse } from '@kryptalis/types';
+import type { BackupResponse, RestoreBackupResponse } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -189,10 +189,23 @@ export default function BackupsPage() {
   });
 
   const restoreMutation = useMutation({
-    mutationFn: (id: string) => api.post(`/backups/${id}/restore`),
-    onSuccess: () => {
+    mutationFn: (id: string) =>
+      api.post<RestoreBackupResponse>(`/backups/${id}/restore`),
+    onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['backups'] });
-      toast.success(t('toast.backupRestoreInitiated'));
+      // Two API shapes: local server → synchronous counters
+      // (databasesRestored/volumesRestored); remote server → task queued on
+      // the agent (databasesQueued/volumesQueued, message contains "queued").
+      if ('databasesRestored' in res) {
+        toast.success(
+          t('toast.backupRestoreDone', {
+            dbs: res.databasesRestored,
+            vols: res.volumesRestored,
+          }),
+        );
+      } else {
+        toast.success(t('toast.backupRestoreQueued'));
+      }
     },
     onError: (err: Error) => {
       toastError(err);
@@ -288,16 +301,16 @@ export default function BackupsPage() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-border text-left text-sm text-muted-foreground">
-                    <th className="px-6 py-3 font-medium">Name</th>
-                    <th className="px-6 py-3 font-medium">Server</th>
+                    <th className="px-6 py-3 font-medium">{t('common.name')}</th>
+                    <th className="px-6 py-3 font-medium">{t('backups.colServer')}</th>
                     <th className="px-6 py-3 font-medium">{t('backups.target')}</th>
-                    <th className="px-6 py-3 font-medium">Status</th>
+                    <th className="px-6 py-3 font-medium">{t('common.status')}</th>
                     <th className="px-6 py-3 font-medium">{t('backups.size')}</th>
-                    <th className="px-6 py-3 font-medium" title="sha256 of the on-disk dump">Integrity</th>
-                    <th className="px-6 py-3 font-medium" title="At-rest encryption status">Enc</th>
+                    <th className="px-6 py-3 font-medium" title={t('backups.colIntegrityTip')}>{t('backups.colIntegrity')}</th>
+                    <th className="px-6 py-3 font-medium" title={t('backups.colEncTip')}>{t('backups.colEnc')}</th>
                     <th className="px-6 py-3 font-medium">{t('backups.schedule')}</th>
                     <th className="px-6 py-3 font-medium">{t('backups.lastRun')}</th>
-                    <th className="px-6 py-3 font-medium">Actions</th>
+                    <th className="px-6 py-3 font-medium">{t('common.actions')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -351,14 +364,14 @@ export default function BackupsPage() {
                         {backup.encryptedAt ? (
                           <span
                             className="flex items-center gap-1 text-green-600"
-                            title="Encrypted at rest (AES-256-GCM)"
+                            title={t('backups.encryptedTip')}
                           >
                             <Lock size={14} />
                           </span>
                         ) : (
                           <span
                             className="flex items-center gap-1 text-muted-foreground/60"
-                            title="Stored in plaintext on disk"
+                            title={t('backups.plaintextTip')}
                           >
                             <Unlock size={14} />
                           </span>
@@ -385,7 +398,7 @@ export default function BackupsPage() {
                           <Button
                             variant="ghost"
                             size="icon"
-                            title="Restore"
+                            title={t('backups.restore')}
                             disabled={
                               restoreMutation.isPending ||
                               backup.status === 'IN_PROGRESS' ||
@@ -398,7 +411,7 @@ export default function BackupsPage() {
                           <Button
                             variant="ghost"
                             size="icon"
-                            title="Delete"
+                            title={t('common.delete')}
                             onClick={() => setDeleteId(backup.id)}
                           >
                             <Trash2 size={16} className="text-destructive" />
@@ -419,7 +432,7 @@ export default function BackupsPage() {
         <DialogHeader>
           <DialogTitle>{t('backups.create')}</DialogTitle>
           <DialogDescription>
-            Configure a new backup job for your server
+            {t('backups.createDesc')}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleCreate} className="space-y-4">
@@ -446,21 +459,20 @@ export default function BackupsPage() {
                 return (
                   <option key={tgt.value} value={tgt.value} disabled={remoteDisabled}>
                     {tgt.label}
-                    {remoteDisabled ? ' — S3 storage not configured' : ''}
+                    {remoteDisabled ? ` — ${t('backups.s3NotConfigured')}` : ''}
                   </option>
                 );
               })}
             </Select>
             {!s3Configured && (
               <p className="text-xs text-muted-foreground">
-                Remote targets need S3-compatible storage. An admin can set the
-                endpoint, bucket and keys in Admin → System Config.
+                {t('backups.s3Hint')}
               </p>
             )}
           </div>
 
           <div className="space-y-3">
-            <Label>Include</Label>
+            <Label>{t('backups.include')}</Label>
             <div className="flex flex-col gap-2">
               <div className="flex items-center gap-2">
                 <input
@@ -549,9 +561,9 @@ export default function BackupsPage() {
       {/* Delete Confirmation Dialog */}
       <Dialog open={!!deleteId} onClose={() => setDeleteId(null)}>
         <DialogHeader>
-          <DialogTitle>Delete Backup</DialogTitle>
+          <DialogTitle>{t('backups.deleteTitle')}</DialogTitle>
           <DialogDescription>
-            Are you sure you want to delete this backup? This action cannot be undone.
+            {t('backups.deleteConfirm')}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>

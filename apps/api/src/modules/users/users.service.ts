@@ -26,7 +26,10 @@ const NOTIF_EVENTS = [
   'backupOk',
   'backupFail',
 ] as const;
-const NOTIF_CHANNELS = ['email', 'discord', 'slack', 'webhook'] as const;
+// Only email delivery is implemented at the user level today — re-extend
+// this whitelist (and the settings UI columns) when discord/slack/webhook
+// user-level channels exist.
+const NOTIF_CHANNELS = ['email'] as const;
 
 export type NotificationPrefs = Record<string, Record<string, boolean>>;
 

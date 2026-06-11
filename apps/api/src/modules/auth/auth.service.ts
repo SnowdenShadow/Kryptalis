@@ -51,6 +51,16 @@ import { resolveDefaultRole } from './registration-policy';
  */
 const TIMING_DUMMY_HASH = '$2b$12$KIXqEJfQAQbJUTo94X5KQuQpQ9OYFJrJEZ4SAuNG0jQfM5KIc9pIu';
 
+/**
+ * SystemSetting key recording that the first-user bootstrap has run.
+ * Written by register() and read by getSetupStatus() — ONE key for both,
+ * so the setup wizard and the registration gate can never disagree.
+ * `BOOTSTRAP_DONE` is the legacy spelling getSetupStatus() used to read;
+ * it is still honoured on READ for existing installs but never written.
+ */
+const BOOTSTRAP_FLAG_KEY = 'bootstrapped';
+const LEGACY_BOOTSTRAP_FLAG_KEY = 'BOOTSTRAP_DONE';
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -77,23 +87,30 @@ export class AuthService {
   // operator straight to /register with a "you're about to become the
   // SUPERADMIN" notice. After the first signup the wizard goes away.
   //
-  // We additionally check the BOOTSTRAP_DONE setting so that a fully
+  // We additionally check the `bootstrapped` setting so that a fully
   // re-seeded DB after an emergency reset doesn't re-open the bootstrap
-  // — same flag the register() method already consults.
+  // — same flag the register() method already consults. The legacy
+  // `BOOTSTRAP_DONE` key is still accepted on READ for installs that may
+  // have been stamped under the old name; new writes only use
+  // BOOTSTRAP_FLAG_KEY.
 
   async getSetupStatus(): Promise<{ needsSetup: boolean }> {
     const userCount = await this.prisma.user.count();
     if (userCount > 0) return { needsSetup: false };
-    // Belt + suspenders: even at 0 users, if BOOTSTRAP_DONE was set we
+    // Belt + suspenders: even at 0 users, if the bootstrap flag was set we
     // refuse to declare needsSetup=true. Operator must use `prisma
     // studio` or a SQL console to reopen — protects against a
     // misconfigured DB drop accidentally letting someone register as
     // SUPERADMIN.
     try {
       const flag = await this.prisma.systemSetting.findUnique({
-        where: { key: 'BOOTSTRAP_DONE' },
+        where: { key: BOOTSTRAP_FLAG_KEY },
       });
       if (flag) return { needsSetup: false };
+      const legacyFlag = await this.prisma.systemSetting.findUnique({
+        where: { key: LEGACY_BOOTSTRAP_FLAG_KEY },
+      });
+      if (legacyFlag) return { needsSetup: false };
     } catch {}
     return { needsSetup: true };
   }
@@ -119,9 +136,15 @@ export class AuthService {
       // every user gets deleted, restoring from a partial DB dump can't
       // re-trigger an unauthenticated SUPERADMIN escalation.
       const bootstrappedSetting = await tx.systemSetting.findUnique({
-        where: { key: 'bootstrapped' },
+        where: { key: BOOTSTRAP_FLAG_KEY },
       });
-      const isBootstrapped = !!(bootstrappedSetting?.value as any);
+      const legacyBootstrappedSetting = bootstrappedSetting
+        ? null
+        : await tx.systemSetting.findUnique({
+            where: { key: LEGACY_BOOTSTRAP_FLAG_KEY },
+          });
+      const isBootstrapped =
+        !!(bootstrappedSetting?.value as any) || !!(legacyBootstrappedSetting?.value as any);
 
       // If bootstrapped, registration_enabled rules. If NOT yet bootstrapped
       // and userCount===0 (first install), we let the registrant through
@@ -184,8 +207,8 @@ export class AuthService {
         // Lock the bootstrap door behind us. Any future userCount===0 path
         // will see bootstrapped=true and require registration_enabled.
         await tx.systemSetting.upsert({
-          where: { key: 'bootstrapped' },
-          create: { key: 'bootstrapped', value: true as any, updatedBy: user.id },
+          where: { key: BOOTSTRAP_FLAG_KEY },
+          create: { key: BOOTSTRAP_FLAG_KEY, value: true as any, updatedBy: user.id },
           update: { value: true as any, updatedBy: user.id },
         });
       }

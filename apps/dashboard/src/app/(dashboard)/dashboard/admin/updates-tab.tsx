@@ -9,21 +9,10 @@ import {
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import type { UpdateStatus } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
-
-interface UpdateStatus {
-  status: 'UP_TO_DATE' | 'UPDATE_AVAILABLE' | 'UPDATING' | 'ERROR' | 'UNKNOWN';
-  message: string;
-  currentSha: string | null;
-  latestSha: string | null;
-  branch: string;
-  repo: string | null;
-  lastCheckedAt: string | null;
-  lastUpdatedAt: string | null;
-  pollIntervalSec: number;
-}
 
 export function UpdatesTab() {
   const { t } = useTranslation();

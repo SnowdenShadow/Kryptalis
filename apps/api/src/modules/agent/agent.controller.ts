@@ -15,6 +15,7 @@ import {
 import type { Request, Response } from 'express';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AgentService } from './agent.service';
 import { AgentPollDto } from './dto/agent-poll.dto';
 import { AgentHeartbeatDto } from './dto/agent-heartbeat.dto';
@@ -219,11 +220,15 @@ export class AgentController {
 
   // ─── operator routes (JWT) ────────────────────────────────────────
 
+  // Task payloads can carry sensitive operational data (e.g. BACKUP/RESTORE
+  // database credentials while the task is in flight) — getTaskForUser()
+  // redacts the payload for non-admin callers and only ever returns the
+  // status fields the dashboard consumes.
   @Get('tasks/:id')
   @UseGuards(AuthGuard('jwt'))
-  @ApiOperation({ summary: 'Get task status' })
-  getTask(@Param('id') id: string) {
-    return this.svc.getTask(id);
+  @ApiOperation({ summary: 'Get task status (payload redacted for non-admins)' })
+  getTask(@Param('id') id: string, @CurrentUser('role') role: string) {
+    return this.svc.getTaskForUser(id, role);
   }
 }
 

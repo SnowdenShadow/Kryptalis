@@ -89,6 +89,11 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
    *  One handler per type keeps the wiring simple and explicit. */
   private completionHandlers = new Map<string, AgentTaskCompletionHandler>();
 
+  /** Task types whose payload carries database credentials in flight
+   *  (encrypted at rest, decrypted only when served to the agent in poll()).
+   *  Their payload is scrubbed from the DB once the task is terminal. */
+  private static readonly SENSITIVE_PAYLOAD_TYPES = new Set<string>(['BACKUP', 'RESTORE']);
+
   constructor(
     private prisma: PrismaService,
     private encryption: EncryptionService,
@@ -154,6 +159,11 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
           `Stale-task termination handling for ${task.id} failed: ${(err as Error).message}`,
         );
       });
+      // AFTER termination hooks (they read payload.onComplete /
+      // payload.sourceTaskId / payload.backupId) — drop in-flight secrets.
+      if (AgentService.SENSITIVE_PAYLOAD_TYPES.has(String(task.type))) {
+        await this.scrubTerminalPayload(task.id, task.payload);
+      }
     }
   }
 
@@ -161,6 +171,73 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     const task = await this.prisma.agentTask.findUnique({ where: { id: taskId } });
     if (!task) throw new NotFoundException('Task not found');
     return task;
+  }
+
+  /**
+   * Operator-facing task read (GET /agent/tasks/:id). The raw payload can
+   * carry sensitive operational data — BACKUP/RESTORE tasks hold database
+   * credentials while in flight — so it is only returned to platform
+   * ADMIN/SUPERADMIN. Everyone else gets the status projection the dashboard
+   * actually consumes (status/type/error/result/createdAt + timestamps),
+   * with the payload omitted entirely.
+   */
+  async getTaskForUser(taskId: string, role: string | undefined) {
+    const task = await this.getTask(taskId);
+    if (role === 'ADMIN' || role === 'SUPERADMIN') return task;
+    return {
+      id: task.id,
+      type: task.type,
+      status: task.status,
+      error: task.error,
+      result: task.result,
+      createdAt: task.createdAt,
+      startedAt: task.startedAt,
+      completedAt: task.completedAt,
+    };
+  }
+
+  /**
+   * Replace a terminal task's stored payload with a minimal stub so secrets
+   * (BACKUP/RESTORE database credentials) never linger in agent_tasks after
+   * completion. MUST run AFTER handleTaskTermination — the termination hooks
+   * read payload.onComplete / payload.sourceTaskId / payload.backupId. Only
+   * `sourceTaskId` survives (it stays useful for transfer-dir correlation),
+   * plus a `scrubbed` marker so operators understand why the payload is gone.
+   */
+  private async scrubTerminalPayload(taskId: string, payload: any): Promise<void> {
+    const scrubbed: { scrubbed: true; sourceTaskId?: string } = { scrubbed: true };
+    if (typeof payload?.sourceTaskId === 'string') {
+      scrubbed.sourceTaskId = payload.sourceTaskId;
+    }
+    await this.prisma.agentTask
+      .update({ where: { id: taskId }, data: { payload: scrubbed } })
+      .catch((err) => {
+        this.logger.error(
+          `Failed to scrub payload of terminal task ${taskId}: ${(err as Error).message}`,
+        );
+      });
+  }
+
+  /**
+   * Decrypt the credential fields of a sensitive (BACKUP/RESTORE) payload
+   * just before handing the task to the agent. The DB only ever stores the
+   * encrypted form (backups.service encrypts at enqueue time); the agent
+   * receives plaintext over its authenticated HTTPS poll. Convention: every
+   * `password` field inside `payload.databases[]`. decrypt() passes
+   * non-`v1.`-prefixed values through unchanged, so legacy plaintext
+   * payloads (enqueued before this hardening) keep working.
+   */
+  private decryptPayloadCredentials(type: string, payload: any): any {
+    if (!AgentService.SENSITIVE_PAYLOAD_TYPES.has(type)) return payload;
+    if (!payload || !Array.isArray(payload.databases)) return payload;
+    return {
+      ...payload,
+      databases: payload.databases.map((db: any) =>
+        db && typeof db.password === 'string'
+          ? { ...db, password: this.encryption.decrypt(db.password) }
+          : db,
+      ),
+    };
   }
 
   /**
@@ -294,7 +371,15 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
       serverId,
     );
 
-    return { tasks: claimed };
+    // Sensitive payloads (BACKUP/RESTORE) store credentials encrypted at
+    // rest — decrypt them only here, at the moment the task is handed to
+    // the authenticated agent.
+    return {
+      tasks: claimed.map((t) => ({
+        ...t,
+        payload: this.decryptPayloadCredentials(t.type, t.payload),
+      })),
+    };
   }
 
   async heartbeat(
@@ -396,6 +481,13 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
         `Post-completion handling for task ${taskId} failed: ${(err as Error).message}`,
       );
     });
+
+    // AFTER handleTaskTermination (which reads payload.onComplete /
+    // payload.sourceTaskId and feeds completion handlers payload.backupId):
+    // scrub in-flight secrets (BACKUP/RESTORE DB credentials) from the row.
+    if (AgentService.SENSITIVE_PAYLOAD_TYPES.has(String(task.type))) {
+      await this.scrubTerminalPayload(task.id, task.payload);
+    }
 
     return { ok: true };
   }

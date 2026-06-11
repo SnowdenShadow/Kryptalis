@@ -64,7 +64,12 @@ function makePrisma() {
 function makeService() {
   const prisma = makePrisma();
   const systemConfig = { get: vi.fn().mockReturnValue(undefined) };
-  const encryption = { decrypt: vi.fn().mockReturnValue('pw') };
+  const encryption = {
+    decrypt: vi.fn().mockReturnValue('pw'),
+    // Deterministic marker so tests can assert payloads carry the encrypted
+    // form (never the plaintext).
+    encrypt: vi.fn((s: string) => `v1.enc(${s})`),
+  };
   const notifications = { sendBackupResult: vi.fn().mockResolvedValue(undefined) };
   const agent = {
     enqueueTask: vi.fn().mockResolvedValue({ id: 'task1' }),
@@ -480,11 +485,14 @@ describe('remote backups', () => {
         type: 'POSTGRESQL',
         container: 'kryptalis-db-maindb', // manually provisioned naming scheme
         username: 'admin',
-        password: 'decrypted-pw', // decrypted, same as dumpDatabases
+        // ENCRYPTED in the stored payload — poll() decrypts when serving the
+        // task to the agent. Plaintext must never reach agent_tasks.
+        password: 'v1.enc(decrypted-pw)',
         name: 'maindb',
         dumpAll: false,
       }),
     ]);
+    expect(JSON.stringify(payload)).not.toContain('"decrypted-pw"');
     // Deterministic <composeProject>_data names — no docker volume ls remotely.
     expect(payload.volumes).toContain('maindb_data');
     expect(payload.volumes.some((v: string) => v.startsWith('web-app-'))).toBe(true);
@@ -631,7 +639,8 @@ describe('remote backups', () => {
         downloadName: 'b1.tar.gz',
         sourceTaskId: 'local-xfer-1',
         volumes: ['maindb_data'],
-        databases: [expect.objectContaining({ id: 'd1', container: 'kryptalis-db-maindb', password: 'pw' })],
+        // password is encrypted in the stored payload (decrypted by poll()).
+        databases: [expect.objectContaining({ id: 'd1', container: 'kryptalis-db-maindb', password: 'v1.enc(pw)' })],
       }),
     );
     expect(res.message).toContain('queued on remote server');

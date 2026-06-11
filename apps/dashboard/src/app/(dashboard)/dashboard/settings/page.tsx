@@ -14,8 +14,6 @@ import {
   Key,
   Smartphone,
   Mail,
-  MessageSquare,
-  Webhook,
   Moon,
   Globe,
   Check,
@@ -39,6 +37,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Select } from '@/components/ui/select';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
+import type { NotificationPrefs } from '@kryptalis/types';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -102,13 +101,11 @@ const NOTIF_EVENTS = [
   { key: 'backupFail', labelKey: 'settings.notifEv.backupFail' },
 ];
 
-type NotificationPrefs = Record<string, Record<string, boolean>>;
-
+// Only email is actually filtered by the backend today (the API whitelist
+// in users.service.ts is ['email']) — re-add discord/slack/webhook columns
+// here when user-level delivery for those channels exists.
 const notificationChannels = [
   { key: 'email', label: 'Email', icon: Mail },
-  { key: 'discord', label: 'Discord', icon: MessageSquare },
-  { key: 'slack', label: 'Slack', icon: MessageSquare },
-  { key: 'webhook', label: 'Webhook', icon: Webhook },
 ];
 
 export default function SettingsPage() {

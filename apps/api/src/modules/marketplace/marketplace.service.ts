@@ -2,16 +2,18 @@ import { Injectable, NotFoundException, ConflictException, BadRequestException, 
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate } from './templates';
+import { projectNetworkName, listComposeContainerNames } from '../applications/applications.helpers';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
 import { DatabasesService } from '../databases/databases.service';
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export interface MarketplaceEnvVar {
   key: string;
@@ -436,7 +438,7 @@ export class MarketplaceService {
     // Every template now uses __INSTANCE_ID__ — so EVERY install needs its
     // own dir (no more single-install bucket). This also enables clean
     // multi-install for non-webmail apps the day we lift that restriction.
-    this.runDockerCompose(data.appSlug, composeContent, application.id, task.id, envOverride, true);
+    this.runDockerCompose(data.appSlug, composeContent, application.id, task.id, envOverride, true, data.projectId);
 
     return {
       message: `Installing ${app.name}...`,
@@ -676,7 +678,7 @@ export class MarketplaceService {
 
     // perInstanceDir = true: custom installs always isolate (slug is "custom"
     // so a shared dir would clobber across installs).
-    this.runDockerCompose('custom', composeContent, application.id, task.id, data.envVars || {}, true);
+    this.runDockerCompose('custom', composeContent, application.id, task.id, data.envVars || {}, true, data.projectId);
 
     return {
       message: `Deploying ${data.image}…`,
@@ -686,6 +688,35 @@ export class MarketplaceService {
     };
   }
 
+  /**
+   * Attach every container the compose stack declares (app + any DB sidecar,
+   * e.g. WordPress + its MariaDB) to the project network
+   * `kryptalis_proj_<projectId>`. The service-mesh view
+   * (projects.service.getServiceMesh) advertises hostnames reachable on that
+   * network — without this connect, sibling apps deployed via the classic
+   * deploy path could never resolve a marketplace install by container_name.
+   *
+   * Mirrors application-deploy.service: `network inspect` → `network create`
+   * (idempotent, races swallowed) → `network connect` per container.
+   * Best-effort — the install is already RUNNING; a mesh-attach failure must
+   * not flip the deploy red.
+   */
+  private async attachToProjectNetwork(projectId: string, compose: string): Promise<void> {
+    const projectNet = projectNetworkName(projectId);
+    try {
+      await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5000 });
+    } catch {
+      try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
+    }
+    for (const name of listComposeContainerNames(compose)) {
+      // "already connected to network" → non-zero exit; swallowed (idempotent
+      // on retry / redeploy).
+      try {
+        await execFileAsync('docker', ['network', 'connect', projectNet, name], { timeout: 10_000 });
+      } catch {}
+    }
+  }
+
   private async runDockerCompose(
     slug: string,
     compose: string,
@@ -693,6 +724,7 @@ export class MarketplaceService {
     taskId: string,
     envOverride: Record<string, string> = {},
     perInstanceDir = false,
+    projectId?: string,
   ) {
     // perInstanceDir = true for apps that support multi-install (webmail).
     // Single-install apps keep using APPS_DIR/<slug> for back-compat with
@@ -727,6 +759,13 @@ export class MarketplaceService {
     try {
       await execAsync('docker compose pull', { cwd: appDir, timeout: 600000 });
       await execAsync('docker compose up -d', { cwd: appDir, timeout: 120000 });
+
+      // Join the project's service-mesh network so siblings (classic deploys,
+      // other marketplace apps) can reach this install — and its DB sidecar —
+      // by container_name, exactly as getServiceMesh() advertises.
+      if (projectId) {
+        await this.attachToProjectNetwork(projectId, compose);
+      }
 
       await this.prisma.agentTask.update({
         where: { id: taskId },

@@ -20,8 +20,9 @@ import * as path from 'path';
  *   land on disk.
  */
 
-const { execAsyncMock, writeFileSyncMock, mkdirSyncMock } = vi.hoisted(() => ({
+const { execAsyncMock, execFileAsyncMock, writeFileSyncMock, mkdirSyncMock } = vi.hoisted(() => ({
   execAsyncMock: vi.fn(),
+  execFileAsyncMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
 }));
@@ -30,7 +31,10 @@ vi.mock('child_process', async () => {
   const util = await import('util');
   const exec: any = vi.fn();
   exec[util.promisify.custom] = (...args: unknown[]) => execAsyncMock(...args);
-  return { exec };
+  // execFile is used (promisified) for the project-network attach argv calls.
+  const execFile: any = vi.fn();
+  execFile[util.promisify.custom] = (...args: unknown[]) => execFileAsyncMock(...args);
+  return { exec, execFile, spawn: vi.fn() };
 });
 
 vi.mock('fs', async (importOriginal) => {
@@ -132,6 +136,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockAssert.mockResolvedValue('DEVELOPER' as any);
   mockExec();
+  // docker network inspect/create/connect (execFile argv path) succeed by default.
+  execFileAsyncMock.mockResolvedValue({ stdout: '', stderr: '' });
 });
 
 // ── catalogue ───────────────────────────────────────────────────────
@@ -500,6 +506,95 @@ describe('install — docker compose outcome', () => {
     );
   });
 
+  it('attaches the app AND its DB sidecar to the project network after compose up (argv form)', async () => {
+    const { service, prisma } = makeService();
+    prisma.application.findUnique.mockResolvedValue({
+      projectId: 'p1',
+      project: { serverId: 'srv-1' },
+    });
+    // Network already exists → inspect succeeds, no create needed.
+    await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
+    await flushAsync();
+
+    expect(execFileAsyncMock).toHaveBeenCalledWith(
+      'docker',
+      ['network', 'inspect', 'kryptalis_proj_p1'],
+      expect.anything(),
+    );
+    // WordPress template declares TWO containers (app + MariaDB sidecar) —
+    // both must join the mesh so getServiceMesh() hostnames resolve.
+    expect(execFileAsyncMock).toHaveBeenCalledWith(
+      'docker',
+      ['network', 'connect', 'kryptalis_proj_p1', `kryptalis-wordpress-${INSTANCE_ID}`],
+      expect.anything(),
+    );
+    expect(execFileAsyncMock).toHaveBeenCalledWith(
+      'docker',
+      ['network', 'connect', 'kryptalis_proj_p1', `kryptalis-wordpress-db-${INSTANCE_ID}`],
+      expect.anything(),
+    );
+    // inspect succeeded → no create.
+    expect(execFileAsyncMock).not.toHaveBeenCalledWith(
+      'docker',
+      ['network', 'create', 'kryptalis_proj_p1'],
+      expect.anything(),
+    );
+  });
+
+  it('creates the project network first when it does not exist yet', async () => {
+    const { service, prisma } = makeService();
+    prisma.application.findUnique.mockResolvedValue({
+      projectId: 'p1',
+      project: { serverId: 'srv-1' },
+    });
+    execFileAsyncMock.mockImplementation(async (_cmd: string, args: string[]) => {
+      if (args[0] === 'network' && args[1] === 'inspect') {
+        throw new Error('Error: No such network: kryptalis_proj_p1');
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    await service.install({ appSlug: 'uptime-kuma', projectId: 'p1' }, 'u1');
+    await flushAsync();
+
+    expect(execFileAsyncMock).toHaveBeenCalledWith(
+      'docker',
+      ['network', 'create', 'kryptalis_proj_p1'],
+      expect.anything(),
+    );
+    expect(execFileAsyncMock).toHaveBeenCalledWith(
+      'docker',
+      ['network', 'connect', 'kryptalis_proj_p1', `kryptalis-uptime-kuma-${INSTANCE_ID}`],
+      expect.anything(),
+    );
+  });
+
+  it('a failed network connect does not flip the install red (best-effort mesh attach)', async () => {
+    const { service, prisma } = makeService();
+    prisma.application.findUnique.mockResolvedValue({
+      projectId: 'p1',
+      project: { serverId: 'srv-1' },
+    });
+    execFileAsyncMock.mockRejectedValue(new Error('already connected'));
+
+    await service.install({ appSlug: 'ghost', projectId: 'p1' }, 'u1');
+    await flushAsync();
+
+    expect(prisma.application.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: APP_ID }, data: { status: 'RUNNING' } }),
+    );
+  });
+
+  it('compose failure → no network attach attempted', async () => {
+    const { service } = makeService();
+    mockExec({ composeFailure: 'pull failed' });
+
+    await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
+    await flushAsync();
+
+    expect(execFileAsyncMock).not.toHaveBeenCalled();
+  });
+
   it('records a deployment row crediting the installing user', async () => {
     const { service, prisma } = makeService();
     await service.install({ appSlug: 'ghost', projectId: 'p1' }, 'u1');
@@ -585,5 +680,21 @@ describe('installCustom — arbitrary image deploys', () => {
     const { service } = makeService();
     mockAssert.mockRejectedValue(new ForbiddenException('nope'));
     await expect(service.installCustom(base, 'u1')).rejects.toThrow(ForbiddenException);
+  });
+
+  it('attaches the custom container to the project network after compose up', async () => {
+    const { service, prisma } = makeService();
+    prisma.application.findUnique.mockResolvedValue({
+      projectId: 'p1',
+      project: { serverId: 'srv-1' },
+    });
+    await service.installCustom(base, 'u1');
+    await flushAsync();
+
+    expect(execFileAsyncMock).toHaveBeenCalledWith(
+      'docker',
+      ['network', 'connect', 'kryptalis_proj_p1', `kryptalis-custom-${INSTANCE_ID}`],
+      expect.anything(),
+    );
   });
 });

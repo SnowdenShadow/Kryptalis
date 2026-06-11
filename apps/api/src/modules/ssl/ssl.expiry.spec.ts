@@ -28,6 +28,7 @@ function makeService() {
   };
   const proxy = {
     regenerate: vi.fn().mockResolvedValue({ domains: 1, caddyfile: '' }),
+    scheduleReload: vi.fn(),
   };
   const service = new SslService(prisma as any, notifications as any, proxy as any);
   return { service, prisma, notifications, proxy };
@@ -146,7 +147,7 @@ describe('sweepExpiringCertificates', () => {
 });
 
 describe('issue', () => {
-  it('marks the domain PENDING and triggers a Caddy regenerate (no agent task)', async () => {
+  it('marks the domain PENDING and schedules a debounced Caddy reload (no agent task, no inline regenerate)', async () => {
     const { service, prisma, proxy } = makeService();
     prisma.domain.findUnique.mockResolvedValue({
       id: 'd1',
@@ -161,7 +162,10 @@ describe('issue', () => {
       where: { id: 'd1' },
       data: { sslStatus: 'PENDING' },
     });
-    expect(proxy.regenerate).toHaveBeenCalledTimes(1);
+    expect(proxy.scheduleReload).toHaveBeenCalledTimes(1);
+    // Costly path (Caddyfile rewrite + docker exec reload) must go through
+    // the debounce — never called inline from issue().
+    expect(proxy.regenerate).not.toHaveBeenCalled();
     expect(res.message).toContain('reverse proxy');
   });
 
@@ -175,6 +179,7 @@ describe('issue', () => {
     });
 
     await expect(service.issue('admin-user', 'd2')).rejects.toThrow(/local hostname/);
+    expect(proxy.scheduleReload).not.toHaveBeenCalled();
     expect(proxy.regenerate).not.toHaveBeenCalled();
     expect(prisma.domain.update).not.toHaveBeenCalled();
   });
@@ -195,6 +200,7 @@ describe('issue', () => {
     prisma.user.findUnique.mockResolvedValue({ role: 'USER' });
 
     await expect(service.issue('regular-user', 'd3')).rejects.toThrow(/platform ADMIN/);
+    expect(proxy.scheduleReload).not.toHaveBeenCalled();
     expect(proxy.regenerate).not.toHaveBeenCalled();
   });
 });

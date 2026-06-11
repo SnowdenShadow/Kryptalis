@@ -60,17 +60,14 @@ COPY --from=builder /app/apps/api/src/modules/marketplace/catalog.json ./apps/ap
 # Agent binaries served by GET /api/agent/binary?arch=... — the controller
 # probes /app/apps/agent/bin/kryptalis-agent-linux-<arch>.
 COPY --from=agent-builder /out/ ./apps/agent/bin/
+# Startup script: migrate deploy, P3005-gated baseline fallback, then
+# node dist/main. A dedicated COPY'd script (instead of an inline sh -c
+# one-liner) so the P3005 detection logic is readable and reviewable —
+# the unconditional fallback used to baseline 0_init after ANY deploy
+# failure, which could silently stamp a half-applied 0_init on a fresh
+# DB. Full rationale in docker-start.sh.
+COPY apps/api/docker-start.sh /usr/local/bin/docker-start.sh
+RUN chmod +x /usr/local/bin/docker-start.sh
 WORKDIR /app/apps/api
 EXPOSE 4000
-# Apply versioned migrations on every start.
-#
-# `migrate deploy` only runs migrations not yet recorded in
-# _prisma_migrations — fast and idempotent, and destructive changes are
-# explicit SQL in a reviewed migration file instead of an implicit diff.
-#
-# Existing installs were provisioned with `db push` (no migrations
-# table): the first `migrate deploy` fails with P3005 ("schema not
-# empty"). The fallback baselines them by marking 0_init as applied
-# (the tables already exist), then deploys the rest. Fresh installs run
-# 0_init normally.
-CMD ["sh", "-c", "(pnpm exec prisma migrate deploy || (pnpm exec prisma migrate resolve --applied 0_init && pnpm exec prisma migrate deploy)) && node dist/main"]
+CMD ["docker-start.sh"]

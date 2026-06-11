@@ -11,3 +11,4 @@ export * from './monitoring';
 export * from './backup';
 export * from './marketplace';
 export * from './agent';
+export * from './system';

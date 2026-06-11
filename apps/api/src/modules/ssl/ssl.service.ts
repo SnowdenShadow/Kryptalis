@@ -181,7 +181,14 @@ export class SslService implements OnModuleInit, OnModuleDestroy {
     // pass where Caddy re-checks cert lifetimes. regenerate() also schedules
     // delayed syncSslStatuses() passes that flip sslStatus → ACTIVE once the
     // cert is on disk.
-    await this.proxy.regenerate();
+    //
+    // Debounced (scheduleReload, 1.5 s) instead of an inline regenerate():
+    // a burst of issue() calls (bulk re-issue from the dashboard) used to
+    // fire one full Caddyfile rewrite + `docker exec caddy reload` (or
+    // restart fallback) EACH — now they collapse into a single reload.
+    // ACME is async anyway and the periodic syncSslStatuses() reconciles
+    // sslStatus afterwards, so nothing needs the reload to be synchronous.
+    this.proxy.scheduleReload();
 
     return { message: 'SSL issuance triggered — certificate is provisioned by the managed reverse proxy' };
   }
