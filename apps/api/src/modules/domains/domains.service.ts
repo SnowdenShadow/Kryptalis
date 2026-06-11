@@ -33,7 +33,9 @@ export class DomainsService {
       where: { domain: dto.domain },
     });
     if (existing) throw new ConflictException('Domain already exists');
-    const { autoSsl, ...data } = dto;
+    // `port` is routed through DomainAttachService below — it must NOT land
+    // in the prisma.domain.create payload (no such column on Domain).
+    const { autoSsl, port, ...data } = dto;
 
     // resolve project: prefer explicit projectId, fall back to app's project
     let projectId = (dto as any).projectId as string | undefined;
@@ -56,15 +58,30 @@ export class DomainsService {
         'projectId is required — a domain must always belong to a project, even without an app',
       );
     }
+    if (port && !applicationId) {
+      throw new BadRequestException('port requires applicationId — a port binding always targets an app');
+    }
     await assertProjectAccess(this.prisma, userId, projectId, 'DEVELOPER');
 
+    // Port-pinned create: the app is reachable at http://<domain>:<port>
+    // (DomainPortBinding) instead of taking the clean-URL :443 slot.
+    const usePortBinding = !!port && !!applicationId;
     const created = await this.prisma.domain.create({
       data: {
         ...data,
         projectId,
-        applicationId: applicationId || null,
+        applicationId: usePortBinding ? null : applicationId || null,
       },
     });
+    if (usePortBinding) {
+      await this.domainAttach.attach({
+        applicationId: applicationId!,
+        domainId: created.id,
+        projectId,
+        customPort: true,
+        port: port!,
+      });
+    }
     this.proxy.regenerate().catch(() => {});
     return created;
   }
@@ -81,6 +98,15 @@ export class DomainsService {
             id: true,
             name: true,
             project: { select: { id: true, name: true } },
+          },
+        },
+        // Port-pinned apps (http://<domain>:<port>) — the dashboard shows
+        // them in the App cell so a port-bound domain doesn't look orphaned.
+        portBindings: {
+          select: {
+            id: true,
+            port: true,
+            application: { select: { id: true, name: true } },
           },
         },
       },

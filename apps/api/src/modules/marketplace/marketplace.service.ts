@@ -213,6 +213,10 @@ export class MarketplaceService {
 
     // Port resolution:
     //   1. User-supplied port wins (must be free across all apps + host).
+    //      Both `port` (legacy field) and `hostPort` (what the unified
+    //      deploy dialog actually sends for the "IP + port" choice) are
+    //      honored — the dialog's custom port used to be silently dropped
+    //      because only `port` was read here.
     //   2. Multi-install apps → search upward from the template default.
     //   3. Single-install apps → use the template default; refuse with a
     //      clear error if it's busy (instead of silently changing it).
@@ -220,13 +224,14 @@ export class MarketplaceService {
     // https://domain:port (user wants the port visible) or https://domain
     // (clean URL, Caddy proxies on 443).
     const basePort = PORT_MAP[data.appSlug] || app.ports[0];
+    const requestedPort = data.port ?? data.hostPort;
     let realPort: number;
-    const customPort = !!data.port;
-    if (data.port) {
-      if (!(await this.isPortFree(data.port))) {
-        throw new ConflictException(`Port ${data.port} is already used by another container. Pick another.`);
+    const customPort = !!requestedPort;
+    if (requestedPort) {
+      if (!(await this.isPortFree(requestedPort))) {
+        throw new ConflictException(`Port ${requestedPort} is already used by another container. Pick another.`);
       }
-      realPort = data.port;
+      realPort = requestedPort;
     } else if (isWebmail || isMultiInstall) {
       // Multi-install (second WordPress, etc.) → walk upward from the
       // template default until we find a free host port. Caddy still

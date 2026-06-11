@@ -194,6 +194,51 @@ describe('create', () => {
     ).rejects.toThrow(ForbiddenException);
     expect(prisma.domain.create).not.toHaveBeenCalled();
   });
+
+  it('port without applicationId → 400 (a binding always targets an app)', async () => {
+    const { service, prisma } = makeService();
+    await expect(
+      service.create('u1', { domain: 'example.com', projectId: 'p1', port: 8443 } as any),
+    ).rejects.toThrow(/port requires applicationId/);
+    expect(prisma.domain.create).not.toHaveBeenCalled();
+  });
+
+  it('port + applicationId → port binding via DomainAttachService, clean-URL slot left empty', async () => {
+    const { service, prisma, domainAttach, proxy } = makeService();
+    prisma.application.findUnique.mockResolvedValue({ projectId: 'p1' });
+    prisma.domain.create.mockResolvedValue({ id: 'd-new' });
+
+    await service.create('u1', {
+      domain: 'example.com', projectId: 'p1', applicationId: 'a1', port: 8443,
+    } as any);
+
+    // The Domain row itself must NOT take the :443 slot…
+    const data = prisma.domain.create.mock.calls[0][0].data;
+    expect(data.applicationId).toBeNull();
+    expect(data.port).toBeUndefined(); // no such column — stripped before create
+    // …the binding goes through the central attach service in port-pinned mode.
+    expect(domainAttach.attach).toHaveBeenCalledWith({
+      applicationId: 'a1',
+      domainId: 'd-new',
+      projectId: 'p1',
+      customPort: true,
+      port: 8443,
+    });
+    expect(proxy.regenerate).toHaveBeenCalled();
+  });
+
+  it('CreateDomainDto rejects out-of-range port', async () => {
+    for (const port of [80, 443, 0, 70000]) {
+      const dto = plainToInstance(CreateDomainDto, {
+        domain: 'example.com', projectId: 'p1', port,
+      });
+      expect((await validate(dto)).length).toBeGreaterThan(0);
+    }
+    const ok = plainToInstance(CreateDomainDto, {
+      domain: 'example.com', projectId: 'p1', port: 8443,
+    });
+    expect(await validate(ok)).toHaveLength(0);
+  });
 });
 
 // ── reads ────────────────────────────────────────────────────────────

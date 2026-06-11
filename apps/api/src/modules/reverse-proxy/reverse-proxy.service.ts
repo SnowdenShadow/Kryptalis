@@ -245,14 +245,21 @@ ${email ? `  email ${email}\n` : ''}}
     // Some marketplace apps listen on HTTPS internally with a self-signed
     // cert (Portainer is the canonical case — its container listens HTTPS on
     // 9443 even when published on a different host port). When we reverse_proxy
-    // to them in plain HTTP, Caddy gets a TLS alert and returns 502. Match by
-    // app NAME — not host port — because the user can remap the host port.
-    const HTTPS_UPSTREAM_APP_NAMES = new Set([
-      'Portainer',
-    ]);
-    // Fallback: well-known HTTPS-only port numbers, in case someone bound a
-    // home-rolled HTTPS service to one of these.
-    const HTTPS_UPSTREAM_PORTS = new Set([443, 8443]);
+    // to them in plain HTTP, Caddy gets a TLS alert and returns 502.
+    //
+    // Detection is layered because none of the signals alone is reliable:
+    //   1. containerName prefix — marketplace installs always stamp
+    //      `kryptalis-portainer-<id12>` regardless of the display name.
+    //   2. app name — case-INsensitive prefix match. The unified deploy
+    //      dialog auto-names installs from the slug ("portainer", lowercase)
+    //      and multi-installs get suffixed ("Portainer 2"); an exact
+    //      case-sensitive Set lookup missed both → Caddy spoke plain HTTP
+    //      to a TLS-only upstream and the domain never answered.
+    //   3. well-known TLS-only port numbers (incl. 9443, Portainer's
+    //      canonical internal port) for home-rolled HTTPS services.
+    const HTTPS_UPSTREAM_CONTAINER_RE = /^kryptalis-portainer-/;
+    const HTTPS_UPSTREAM_NAME_RE = /^portainer\b/i;
+    const HTTPS_UPSTREAM_PORTS = new Set([443, 8443, 9443]);
     // mail server domains — we provision a Let's Encrypt cert for mail.<apex>
     // so the mail server container can re-use it.
     const mailServers = await this.prisma.mailServer.findMany({
@@ -302,7 +309,9 @@ ${email ? `  email ${email}\n` : ''}}
         : `host.docker.internal:${hostPort}`;
       const targetPortForHttpsHint = app.containerPort || hostPort;
       const upstreamHttps =
-        HTTPS_UPSTREAM_APP_NAMES.has(app.name) || HTTPS_UPSTREAM_PORTS.has(targetPortForHttpsHint);
+        (!!app.containerName && HTTPS_UPSTREAM_CONTAINER_RE.test(app.containerName)) ||
+        HTTPS_UPSTREAM_NAME_RE.test(app.name) ||
+        HTTPS_UPSTREAM_PORTS.has(targetPortForHttpsHint);
       // Caddy resolves the upstream hostname ONCE at config load when no
       // explicit DNS TTL is set, then caches the IP forever. Docker
       // assigns new IPs on every container recreate (redeploy / restart),
@@ -354,7 +363,7 @@ ${email ? `  email ${email}\n` : ''}}
           blocks.push(proxyFor(mainApp!, mainPort ?? 0));
         } else if (portBindings.length > 0) {
           const first = portBindings[0];
-          blocks.push(`  respond "Open https://${host}:${first.port} for ${sanitizeCaddyName(first.application.name)}." 200`);
+          blocks.push(`  respond "Open http://${host}:${first.port} for ${sanitizeCaddyName(first.application.name)}." 200`);
         } else {
           blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
         }
@@ -365,8 +374,11 @@ ${email ? `  email ${email}\n` : ''}}
         if (mainLinked) {
           blocks.push(proxyFor(mainApp!, mainPort ?? 0));
         } else if (portBindings.length > 0) {
+          // Port bindings are direct container publishes (plain HTTP, no TLS
+          // termination by Caddy) — redirect to http://, not https://, or the
+          // browser hits a TLS handshake error against the bare container.
           const first = portBindings[0];
-          blocks.push(`  redir https://${host}:${first.port}{uri} 308`);
+          blocks.push(`  redir http://${host}:${first.port}{uri} 308`);
         } else {
           blocks.push(`  respond "Domain reserved in Kryptalis — link it to an app to serve traffic." 503`);
         }

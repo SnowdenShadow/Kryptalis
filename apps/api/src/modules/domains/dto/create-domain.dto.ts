@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsBoolean, Matches, MaxLength } from 'class-validator';
+import { IsString, IsOptional, IsBoolean, IsInt, Matches, MaxLength, Min, Max } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 // RFC 1035 hostname: labels of 1-63 chars [a-z0-9-] separated by '.', no leading/trailing '-'.
@@ -23,6 +23,20 @@ export class CreateDomainDto {
   @IsOptional()
   @IsString()
   applicationId?: string;
+
+  @ApiProperty({
+    required: false,
+    description:
+      'Optional — bind the app on http://<domain>:<port> (DomainPortBinding) instead of the '
+      + 'clean-URL :443 slot. Requires applicationId. The port must match a host port the app '
+      + 'container actually publishes — Caddy only listens on 80/443, port-pinned URLs hit the '
+      + 'container publish directly.',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1024)
+  @Max(65535)
+  port?: number;
 
   @ApiProperty({ required: false, default: true })
   @IsOptional()

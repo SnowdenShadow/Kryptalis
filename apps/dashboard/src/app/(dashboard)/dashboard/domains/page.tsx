@@ -263,9 +263,20 @@ function DomainCard({
                 <Link href={`/dashboard/applications/${domain.application.id}`} className="text-xs font-medium hover:underline block truncate">
                   {domain.application.name}
                 </Link>
-              ) : (
+              ) : (domain.portBindings || []).length > 0 ? null : (
                 <p className="text-xs text-muted-foreground italic">—</p>
               )}
+              {/* Port-pinned apps (http://<domain>:<port>) */}
+              {(domain.portBindings || []).map((b) => (
+                <Link
+                  key={b.id}
+                  href={`/dashboard/applications/${b.application.id}`}
+                  className="text-xs font-medium hover:underline block truncate"
+                  title={`http://${domain.domain}:${b.port}`}
+                >
+                  {b.application.name} <span className="font-mono text-muted-foreground">:{b.port}</span>
+                </Link>
+              ))}
             </div>
             <div className="rounded-md border border-border p-2">
               <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{t('domains.projectLabel')}</p>
@@ -574,6 +585,9 @@ export default function DomainsPage() {
   const [applicationId, setApplicationId] = useState('');
   const [createProjectId, setCreateProjectId] = useState('');
   const [autoSsl, setAutoSsl] = useState(true);
+  // Optional custom port → DomainPortBinding (http://<domain>:<port>)
+  // instead of the clean-URL :443 slot.
+  const [bindPort, setBindPort] = useState('');
 
   const { data: domains = [], isLoading } = useQuery<Domain[]>({
     queryKey: ['domains'],
@@ -655,7 +669,7 @@ export default function DomainsPage() {
   }
 
   const createMutation = useMutation({
-    mutationFn: (data: { domain: string; projectId: string; applicationId?: string; autoSsl?: boolean }) =>
+    mutationFn: (data: { domain: string; projectId: string; applicationId?: string; autoSsl?: boolean; port?: number }) =>
       api.post('/domains', data),
     onSuccess: (res: any) => {
       queryClient.invalidateQueries({ queryKey: ['domains'] });
@@ -692,15 +706,20 @@ export default function DomainsPage() {
 
   function closeAdd() {
     setShowAdd(false); setDomainName(''); setApplicationId('');
-    setCreateProjectId(''); setAutoSsl(true);
+    setCreateProjectId(''); setAutoSsl(true); setBindPort('');
   }
+  const bindPortNumber = bindPort.trim() ? parseInt(bindPort.trim(), 10) : null;
+  const bindPortValid =
+    bindPortNumber === null ||
+    (Number.isInteger(bindPortNumber) && bindPortNumber >= 1024 && bindPortNumber <= 65535);
   function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!domainName.trim() || !createProjectId) return;
+    if (!domainName.trim() || !createProjectId || !bindPortValid) return;
     createMutation.mutate({
       domain: domainName.trim().toLowerCase(),
       projectId: createProjectId,
       ...(applicationId ? { applicationId } : {}),
+      ...(applicationId && bindPortNumber ? { port: bindPortNumber } : {}),
       autoSsl,
     });
   }
@@ -931,6 +950,27 @@ export default function DomainsPage() {
               </Select>
               <p className="text-xs text-muted-foreground">
                 {t('domains.appHint')}
+              </p>
+            </div>
+          )}
+
+          {applicationId && (
+            <div className="space-y-2">
+              <Label>{t('domains.customPortOptional')}</Label>
+              <Input
+                type="number"
+                min={1024}
+                max={65535}
+                placeholder="8443"
+                value={bindPort}
+                onChange={(e) => setBindPort(e.target.value)}
+                className="font-mono"
+              />
+              {!bindPortValid && (
+                <p className="text-xs text-destructive">{t('domains.customPortInvalid')}</p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {t('domains.customPortHint')}
               </p>
             </div>
           )}

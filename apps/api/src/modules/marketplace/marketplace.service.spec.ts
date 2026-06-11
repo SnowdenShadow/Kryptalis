@@ -265,6 +265,40 @@ describe('install — port resolution', () => {
     expect(compose).not.toContain('__HOST_PORT__');
   });
 
+  it('hostPort (unified deploy dialog field) is honored: stamped into row + compose, customPort=true', async () => {
+    const { service, prisma } = makeService();
+    await service.install(
+      { appSlug: 'wordpress', projectId: 'p1', hostPort: 12345 },
+      'u1',
+    );
+    expect(prisma.application.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ port: 12345, customPort: true }),
+      }),
+    );
+    const compose = writtenFile('docker-compose.yml')!;
+    expect(compose).toContain('"12345:80"');
+  });
+
+  it('hostPort already published by docker → 409 (same validation as port)', async () => {
+    const { service, prisma } = makeService();
+    mockExec({ busyPorts: [12345] });
+    await expect(
+      service.install({ appSlug: 'wordpress', projectId: 'p1', hostPort: 12345 }, 'u1'),
+    ).rejects.toThrow(ConflictException);
+    expect(prisma.application.create).not.toHaveBeenCalled();
+  });
+
+  it('legacy port field still wins over the template default', async () => {
+    const { service, prisma } = makeService();
+    await service.install({ appSlug: 'wordpress', projectId: 'p1', port: 23456 }, 'u1');
+    expect(prisma.application.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ port: 23456, customPort: true }),
+      }),
+    );
+  });
+
   it('name collision → auto-suffix "<name> 2" and auto-allocate a fresh port (+10 walk)', async () => {
     const { service, prisma } = makeService();
     mockExec({ busyPorts: [8080] });

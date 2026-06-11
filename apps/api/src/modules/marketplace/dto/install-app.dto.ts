@@ -42,9 +42,14 @@ export class InstallAppDto {
   @Max(65535)
   hostPort?: number;
 
-  @ApiProperty({ required: false, description: 'Internal container port (template default if absent)' })
+  @ApiProperty({
+    required: false,
+    description: 'Legacy alias of hostPort — custom HOST port for the install (template default if absent)',
+  })
   @IsOptional()
   @IsInt()
+  @Min(1024)
+  @Max(65535)
   port?: number;
 
   @ApiProperty({ required: false })

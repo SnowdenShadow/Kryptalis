@@ -5,6 +5,13 @@ export interface CreateDomainRequest {
   projectId?: string;
   applicationId?: string;
   autoSsl?: boolean;
+  /**
+   * Optional — bind the app on http://<domain>:<port> (port binding)
+   * instead of the clean-URL :443 slot. Requires applicationId. The port
+   * must be one the app container publishes on the host (Caddy only
+   * listens on 80/443).
+   */
+  port?: number;
 }
 
 /**
@@ -38,6 +45,12 @@ export interface DomainResponse {
   } | null;
   /** Attached mail server, appended by GET /domains (null when none). */
   mailServer?: { domainId: string; status: string; hostname: string } | null;
+  /** Port-pinned apps on this domain (http://<domain>:<port>), GET /domains. */
+  portBindings?: {
+    id: string;
+    port: number;
+    application: { id: string; name: string };
+  }[];
 }
 
 export interface DNSRecord {
