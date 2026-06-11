@@ -1,10 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Loader2, ShieldCheck, FolderPlus, Sparkles, Server, Globe2, Store } from 'lucide-react';
+import {
+  Loader2, ShieldCheck, FolderPlus, Sparkles, Server, Globe2, Store,
+  Copy, Check, Terminal, Network,
+} from 'lucide-react';
 
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -30,21 +33,22 @@ interface LocalPublicServer {
  *   AND /auth/me/onboarding -> completed === false
  *   AND /projects -> []
  *
- * Three steps:
- *   1. Welcome + choose deployment mode (LOCAL vs MULTI) — persists via
- *      PATCH /admin/settings/deployment_mode (same endpoint settings
- *      page uses, so the platform-wide source of truth stays single).
- *   2. Create first project — name only; serverId auto-resolved from
- *      /servers/local-public (the sanitized bootstrap server row that
- *      was created during the SUPERADMIN bootstrap path).
- *   3. All set — links to /dashboard/marketplace and /dashboard/domains,
- *      then POST /auth/me/onboarding/complete and close.
+ * Step flow (dynamic — MULTI inserts a server step):
  *
- * "Don't show after dismissal" is enforced by completing onboarding on
- * the Finish button (the close button on the dialog also marks it
- * complete; otherwise SUPERADMIN gets the wizard on every reload until
- * they finish it, which is the right behavior — we only suppress if
- * they explicitly walked through the flow).
+ *   1. Welcome + deployment mode (LOCAL vs MULTI). Persisted on Next
+ *      only when it CHANGED (PATCH /admin/settings/deployment_mode).
+ *   2. (MULTI only) Add your first remote server: name -> POST /servers
+ *      -> install command with a copy button. Skippable — the Servers
+ *      page does the same thing later.
+ *   3. Create first project — name only; serverId auto-resolved from
+ *      /servers/local-public. Skippable. Re-entering this step after a
+ *      successful create shows "created" state instead of re-creating
+ *      (Back/Next can't mint duplicates).
+ *   4. All set — links to Marketplace and Domains, then
+ *      POST /auth/me/onboarding/complete.
+ *
+ * Esc / clicking outside dismisses for THIS session only; the wizard
+ * returns on next login until Finish is clicked.
  */
 export function OnboardingWizard({
   open,
@@ -57,10 +61,20 @@ export function OnboardingWizard({
 }) {
   const { t } = useTranslation();
   const qc = useQueryClient();
-  const [step, setStep] = useState<1 | 2 | 3>(1);
-  const [mode, setMode] = useState<DeploymentMode>('LOCAL');
-  const [projectName, setProjectName] = useState('');
 
+  const [mode, setMode] = useState<DeploymentMode>('LOCAL');
+  /** Mode actually persisted server-side — avoids re-PATCHing on Back/Next. */
+  const [savedMode, setSavedMode] = useState<DeploymentMode | null>(null);
+
+  // Dynamic step list: MULTI inserts the add-server step.
+  const steps = useMemo(
+    () => (mode === 'MULTI' ? (['mode', 'server', 'project', 'done'] as const) : (['mode', 'project', 'done'] as const)),
+    [mode],
+  );
+  const [stepIndex, setStepIndex] = useState(0);
+  const step = steps[Math.min(stepIndex, steps.length - 1)];
+
+  // ── step: mode ────────────────────────────────────────────────────
   const setModeMutation = useMutation({
     mutationFn: (next: DeploymentMode) =>
       api.patch('/admin/settings/deployment_mode', { value: next }),
@@ -69,41 +83,72 @@ export function OnboardingWizard({
     },
   });
 
+  async function handleNextFromMode() {
+    try {
+      if (savedMode !== mode) {
+        await setModeMutation.mutateAsync(mode);
+        setSavedMode(mode);
+      }
+      setStepIndex(1);
+    } catch (err) {
+      toastError(err, 'Mode');
+    }
+  }
+
+  // ── step: server (MULTI) ──────────────────────────────────────────
+  const [serverName, setServerName] = useState('');
+  const [installCommand, setInstallCommand] = useState<string | null>(null);
+  const [copiedInstall, setCopiedInstall] = useState(false);
+
+  const createServerMutation = useMutation({
+    mutationFn: (body: { name: string }) =>
+      api.post<{ id: string; installCommand: string }>('/servers', body),
+    onSuccess: (data) => {
+      setInstallCommand(data.installCommand);
+      qc.invalidateQueries({ queryKey: ['servers'] });
+    },
+    onError: (err: Error) => toastError(err, 'Server'),
+  });
+
+  async function copyInstall() {
+    if (!installCommand) return;
+    try {
+      await navigator.clipboard.writeText(installCommand);
+      setCopiedInstall(true);
+      setTimeout(() => setCopiedInstall(false), 1500);
+    } catch {
+      toast.error(t('toast.failedToCopy'));
+    }
+  }
+
+  // ── step: project ─────────────────────────────────────────────────
+  const [projectName, setProjectName] = useState('');
+  /** Set after a successful create — Back/Next must NOT create twice. */
+  const [createdProjectName, setCreatedProjectName] = useState<string | null>(null);
+
   const createProjectMutation = useMutation({
     mutationFn: async (name: string) => {
-      // local-public is unauthenticated-sanitized but the SUPERADMIN
-      // we're onboarding has full access — we just use it because it's
-      // the simplest way to grab the bootstrap server id without
-      // exposing tokens.
+      // local-public is the sanitized bootstrap server row — simplest way
+      // to grab the local server id without exposing tokens. In MULTI the
+      // local server is also a valid (ONLINE) target for a first project.
       const local = await api.get<LocalPublicServer | null>('/servers/local-public');
       if (!local?.id) {
         throw new Error('No local server available — refresh and try again.');
       }
       return api.post('/projects', { name, serverId: local.id });
     },
-    onSuccess: () => {
+    onSuccess: (_data, name) => {
+      setCreatedProjectName(name);
       qc.invalidateQueries({ queryKey: ['projects'] });
     },
   });
 
-  const completeMutation = useMutation({
-    mutationFn: () => api.post('/auth/me/onboarding/complete'),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['onboarding'] });
-      onComplete();
-    },
-  });
-
-  async function handleNextFromStep1() {
-    try {
-      await setModeMutation.mutateAsync(mode);
-      setStep(2);
-    } catch (err) {
-      toastError(err, 'Mode');
+  async function handleNextFromProject() {
+    // Already created on a previous pass — just advance.
+    if (createdProjectName) {
+      setStepIndex(stepIndex + 1);
+      return;
     }
-  }
-
-  async function handleNextFromStep2() {
     const name = projectName.trim();
     if (!name) {
       toast.error(t('onboarding.projectName'));
@@ -111,11 +156,20 @@ export function OnboardingWizard({
     }
     try {
       await createProjectMutation.mutateAsync(name);
-      setStep(3);
+      setStepIndex(stepIndex + 1);
     } catch (err) {
       toastError(err, 'Project');
     }
   }
+
+  // ── step: done ────────────────────────────────────────────────────
+  const completeMutation = useMutation({
+    mutationFn: () => api.post('/auth/me/onboarding/complete'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['onboarding'] });
+      onComplete();
+    },
+  });
 
   async function handleFinish() {
     try {
@@ -125,14 +179,14 @@ export function OnboardingWizard({
     }
   }
 
-  // Clicking outside / pressing Esc dismisses the wizard for THIS
-  // session only. The server-side completion flag stays false so it
-  // re-appears on the next login until the user clicks Finish.
+  const back = () => setStepIndex(Math.max(0, stepIndex - 1));
+  const skip = () => setStepIndex(stepIndex + 1);
+
   return (
     <Dialog open={open} onClose={() => onDismiss?.()} className="max-w-xl">
-      <StepIndicator current={step} />
+      <StepIndicator total={steps.length} current={stepIndex} />
 
-      {step === 1 && (
+      {step === 'mode' && (
         <>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -157,18 +211,16 @@ export function OnboardingWizard({
               <ModeCard
                 active={mode === 'MULTI'}
                 onClick={() => setMode('MULTI')}
-                icon={<Server size={18} />}
+                icon={<Network size={18} />}
                 title={t('settings.multiMode')}
                 description={t('settings.multiModeDesc')}
               />
             </div>
+            <p className="text-[11px] text-muted-foreground">{t('onboarding.modeHint')}</p>
           </div>
 
           <DialogFooter>
-            <Button
-              onClick={handleNextFromStep1}
-              disabled={setModeMutation.isPending}
-            >
+            <Button onClick={handleNextFromMode} disabled={setModeMutation.isPending}>
               {setModeMutation.isPending && <Loader2 size={14} className="animate-spin" />}
               {t('onboarding.next')}
             </Button>
@@ -176,7 +228,71 @@ export function OnboardingWizard({
         </>
       )}
 
-      {step === 2 && (
+      {step === 'server' && (
+        <>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Terminal size={20} className="text-primary" />
+              {t('onboarding.addServer')}
+            </DialogTitle>
+            <DialogDescription className="mt-2">
+              {t('onboarding.addServerBody')}
+            </DialogDescription>
+          </DialogHeader>
+
+          {!installCommand ? (
+            <div className="space-y-2">
+              <Label htmlFor="onboarding-server-name">{t('onboarding.serverName')}</Label>
+              <Input
+                id="onboarding-server-name"
+                value={serverName}
+                onChange={(e) => setServerName(e.target.value)}
+                placeholder="vps-1"
+                autoFocus
+              />
+              <Button
+                size="sm"
+                className="mt-1"
+                disabled={!serverName.trim() || createServerMutation.isPending}
+                onClick={() => createServerMutation.mutate({ name: serverName.trim() })}
+              >
+                {createServerMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+                {t('onboarding.generateInstall')}
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <Label>{t('onboarding.installCmdLabel')}</Label>
+              <div className="relative">
+                <pre className="whitespace-pre-wrap break-all rounded-md border border-border bg-zinc-950 p-3 pr-10 font-mono text-xs text-green-300">
+                  {installCommand}
+                </pre>
+                <button
+                  type="button"
+                  onClick={copyInstall}
+                  className="absolute right-2 top-2 rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  title={t('common.copy')}
+                >
+                  {copiedInstall ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+                </button>
+              </div>
+              <p className="text-[11px] text-muted-foreground">{t('onboarding.installCmdHint')}</p>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="ghost" onClick={back}>{t('onboarding.back')}</Button>
+            {!installCommand && (
+              <Button variant="outline" onClick={skip}>{t('onboarding.skip')}</Button>
+            )}
+            <Button onClick={skip} disabled={createServerMutation.isPending}>
+              {t('onboarding.next')}
+            </Button>
+          </DialogFooter>
+        </>
+      )}
+
+      {step === 'project' && (
         <>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -188,28 +304,39 @@ export function OnboardingWizard({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-2">
-            <Label htmlFor="onboarding-project-name">{t('onboarding.projectName')}</Label>
-            <Input
-              id="onboarding-project-name"
-              value={projectName}
-              onChange={(e) => setProjectName(e.target.value)}
-              placeholder="my-first-project"
-              autoFocus
-            />
-          </div>
+          {createdProjectName ? (
+            <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm">
+              <Check size={16} className="shrink-0 text-emerald-500" />
+              <span>
+                {t('onboarding.projectCreated')}{' '}
+                <span className="font-mono font-medium">{createdProjectName}</span>
+              </span>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <Label htmlFor="onboarding-project-name">{t('onboarding.projectName')}</Label>
+              <Input
+                id="onboarding-project-name"
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                placeholder="my-first-project"
+                autoFocus
+              />
+            </div>
+          )}
 
           <DialogFooter>
-            <Button
-              variant="ghost"
-              onClick={() => setStep(1)}
-              disabled={createProjectMutation.isPending}
-            >
+            <Button variant="ghost" onClick={back} disabled={createProjectMutation.isPending}>
               {t('onboarding.back')}
             </Button>
+            {!createdProjectName && (
+              <Button variant="outline" onClick={skip} disabled={createProjectMutation.isPending}>
+                {t('onboarding.skip')}
+              </Button>
+            )}
             <Button
-              onClick={handleNextFromStep2}
-              disabled={createProjectMutation.isPending || !projectName.trim()}
+              onClick={handleNextFromProject}
+              disabled={createProjectMutation.isPending || (!createdProjectName && !projectName.trim())}
             >
               {createProjectMutation.isPending && <Loader2 size={14} className="animate-spin" />}
               {t('onboarding.next')}
@@ -218,7 +345,7 @@ export function OnboardingWizard({
         </>
       )}
 
-      {step === 3 && (
+      {step === 'done' && (
         <>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -252,17 +379,10 @@ export function OnboardingWizard({
           </div>
 
           <DialogFooter>
-            <Button
-              variant="ghost"
-              onClick={() => setStep(2)}
-              disabled={completeMutation.isPending}
-            >
+            <Button variant="ghost" onClick={back} disabled={completeMutation.isPending}>
               {t('onboarding.back')}
             </Button>
-            <Button
-              onClick={handleFinish}
-              disabled={completeMutation.isPending}
-            >
+            <Button onClick={handleFinish} disabled={completeMutation.isPending}>
               {completeMutation.isPending && <Loader2 size={14} className="animate-spin" />}
               {t('onboarding.finish')}
             </Button>
@@ -273,15 +393,15 @@ export function OnboardingWizard({
   );
 }
 
-function StepIndicator({ current }: { current: 1 | 2 | 3 }) {
+function StepIndicator({ total, current }: { total: number; current: number }) {
   return (
     <div className="mb-4 flex items-center gap-2">
-      {[1, 2, 3].map((n) => (
+      {Array.from({ length: total }, (_, i) => (
         <div
-          key={n}
+          key={i}
           className={cn(
             'h-1.5 flex-1 rounded-full transition-colors',
-            n <= current ? 'bg-primary' : 'bg-border',
+            i <= current ? 'bg-primary' : 'bg-border',
           )}
         />
       ))}

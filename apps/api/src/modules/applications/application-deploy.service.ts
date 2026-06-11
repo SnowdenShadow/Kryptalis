@@ -98,6 +98,10 @@ export class ApplicationDeployService {
     appId: string,
     name: string,
     payload: Record<string, unknown>,
+    /** Container coordinates to persist on success — feeds the heartbeat
+     *  status sync (matches on containerName) and the dashboard. Without
+     *  this, remote image/compose/Dockerfile apps never get a live dot. */
+    meta?: { containerName?: string | null; containerPort?: number | null },
   ) {
     // Per-instance slug — must match what lifecycle ops + remove() compute
     // (remoteAppSlug). Bare slugify(name) would collide for same-named apps
@@ -130,7 +134,11 @@ export class ApplicationDeployService {
       if (task.status === 'FAILED') throw new Error(task.error || 'agent deploy failed');
       await this.prisma.application.update({
         where: { id: appId },
-        data: { status: AppStatus.RUNNING },
+        data: {
+          status: AppStatus.RUNNING,
+          ...(meta?.containerName ? { containerName: meta.containerName } : {}),
+          ...(meta?.containerPort ? { containerPort: meta.containerPort } : {}),
+        },
       });
       this.proxy.regenerate().catch(() => {});
       await this.prisma.deployment.update({
@@ -200,9 +208,14 @@ export class ApplicationDeployService {
         },
         networks: { kryptalis_apps: { external: true, name: 'kryptalis-apps' } },
       };
-      await this.dispatchRemoteDeploy(remoteForImage, deploymentId, appId, name, {
-        compose: yaml.dump(composeDoc, { lineWidth: 200 }),
-      });
+      await this.dispatchRemoteDeploy(
+        remoteForImage,
+        deploymentId,
+        appId,
+        name,
+        { compose: yaml.dump(composeDoc, { lineWidth: 200 }) },
+        { containerName: containerName(slugR), containerPort: publishContainer },
+      );
       return;
     }
 
@@ -389,10 +402,17 @@ export class ApplicationDeployService {
     // Remote project → the agent writes + runs the user's compose on its host.
     const remoteForCompose = await this.resolveRemoteServer(appId);
     if (remoteForCompose) {
-      await this.dispatchRemoteDeploy(remoteForCompose, deploymentId, appId, name, {
-        compose: composeYaml,
-        envVars: opts.envVars || undefined,
-      });
+      // Container coordinates from the user's compose — same extraction the
+      // local path does, so heartbeat status sync + Caddy targeting work.
+      const info = readComposeContainerInfo(composeYaml, containerName(slugify(name)));
+      await this.dispatchRemoteDeploy(
+        remoteForCompose,
+        deploymentId,
+        appId,
+        name,
+        { compose: composeYaml, envVars: opts.envVars || undefined },
+        { containerName: info.containerName, containerPort: info.containerPort },
+      );
       return;
     }
 
@@ -561,11 +581,18 @@ export class ApplicationDeployService {
         },
         networks: { kryptalis_apps: { external: true, name: 'kryptalis-apps' } },
       };
-      await this.dispatchRemoteDeploy(remoteForDockerfile, deploymentId, appId, name, {
-        compose: yaml.dump(composeDoc, { lineWidth: 200 }),
-        dockerfileOverride: dockerfile,
-        sideFiles: opts.contextFiles || undefined,
-      });
+      await this.dispatchRemoteDeploy(
+        remoteForDockerfile,
+        deploymentId,
+        appId,
+        name,
+        {
+          compose: yaml.dump(composeDoc, { lineWidth: 200 }),
+          dockerfileOverride: dockerfile,
+          sideFiles: opts.contextFiles || undefined,
+        },
+        { containerName: containerName(slugR), containerPort: publishContainer },
+      );
       return;
     }
 

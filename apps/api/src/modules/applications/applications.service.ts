@@ -670,14 +670,21 @@ export class ApplicationsService {
           const volumes = stdout.trim().split('\n').filter(Boolean).filter((v) => v.startsWith(prefix));
           if (volumes.length > 0) {
             // Export locally into transfers/<id>/, then have the target
-            // import them. The import is enqueued BEFORE the redeploy task
-            // below, and the agent works its queue in order — volumes land
-            // before the stack comes up.
+            // import them. AWAIT the import: the agent claims tasks in
+            // batches and runs them CONCURRENTLY (semaphore + goroutines),
+            // so merely enqueueing import-before-deploy does NOT order them
+            // — the stack could come up on empty volumes while the import
+            // is still streaming. Serializing here is the only safe order.
             const transferId = await this.exportLocalVolumesForMove(volumes);
-            await this.agent.enqueueTask(targetServerId, 'VOLUME_IMPORT', {
-              volumes,
-              sourceTaskId: transferId,
-            });
+            const importTask = await this.agent.enqueueAndWait(
+              targetServerId,
+              'VOLUME_IMPORT',
+              { volumes, sourceTaskId: transferId },
+              15 * 60_000,
+            );
+            if (importTask.status === 'FAILED') {
+              throw new Error(importTask.error || 'volume import failed on the target');
+            }
             volumesShipped = true;
           }
         } catch (e: any) {

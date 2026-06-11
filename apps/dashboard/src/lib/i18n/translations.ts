@@ -694,6 +694,15 @@ export const translations: Record<string, Record<string, string>> = {
     'onboarding.finish': 'Finish',
     'onboarding.next': 'Next',
     'onboarding.back': 'Back',
+    'onboarding.skip': 'Skip',
+    'onboarding.modeHint': 'You can change this later in Settings — MULTI just adds the ability to attach remote servers.',
+    'onboarding.addServer': 'Add your first remote server',
+    'onboarding.addServerBody': 'Name the server, copy the install command, and run it as root on the machine. The agent registers itself — you can also do this later from the Servers page.',
+    'onboarding.serverName': 'Server name',
+    'onboarding.generateInstall': 'Generate install command',
+    'onboarding.installCmdLabel': 'Run this on your server (as root)',
+    'onboarding.installCmdHint': 'The server appears as ONLINE in the dashboard once the agent has registered (usually under a minute).',
+    'onboarding.projectCreated': 'Project created:',
 
     // ── toast notifications (user-facing actions) ──────────────────
     'toast.appCreated': 'Application created',
@@ -1828,6 +1837,15 @@ export const translations: Record<string, Record<string, string>> = {
     'onboarding.finish': 'Terminer',
     'onboarding.next': 'Suivant',
     'onboarding.back': 'Retour',
+    'onboarding.skip': 'Passer',
+    'onboarding.modeHint': 'Modifiable plus tard dans les Paramètres — MULTI ajoute simplement la possibilité d\'attacher des serveurs distants.',
+    'onboarding.addServer': 'Ajoutez votre premier serveur distant',
+    'onboarding.addServerBody': 'Nommez le serveur, copiez la commande d\'installation et exécutez-la en root sur la machine. L\'agent s\'enregistre tout seul — vous pourrez aussi le faire plus tard depuis la page Serveurs.',
+    'onboarding.serverName': 'Nom du serveur',
+    'onboarding.generateInstall': 'Générer la commande d\'installation',
+    'onboarding.installCmdLabel': 'À exécuter sur votre serveur (en root)',
+    'onboarding.installCmdHint': 'Le serveur apparaît ONLINE dans le dashboard une fois l\'agent enregistré (généralement moins d\'une minute).',
+    'onboarding.projectCreated': 'Projet créé :',
 
     // ── toast notifications (user-facing actions) ──────────────────
     'toast.appCreated': 'Application créée',
