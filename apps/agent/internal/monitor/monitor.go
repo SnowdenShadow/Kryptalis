@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -30,6 +31,35 @@ type SystemMetrics struct {
 	MemoryTotal uint64  `json:"memoryTotal"`
 	DiskUsed    uint64  `json:"diskUsed"`
 	DiskTotal   uint64  `json:"diskTotal"`
+}
+
+// ContainerState is one kryptalis-managed container's live docker state,
+// shipped with every heartbeat so the API can mirror real RUNNING/STOPPED
+// status for remote apps without per-request agent round-trips.
+type ContainerState struct {
+	Name  string `json:"name"`
+	State string `json:"state"` // running | exited | restarting | ...
+}
+
+// collectContainers lists kryptalis-managed containers (name prefix) with
+// their current state. Best-effort: docker missing/down → empty list.
+func collectContainers(ctx context.Context) []ContainerState {
+	c := exec.CommandContext(ctx, "docker", "ps", "-a",
+		"--filter", "name=kryptalis-",
+		"--format", "{{.Names}}\t{{.State}}")
+	out, err := c.Output()
+	if err != nil {
+		return nil
+	}
+	var states []ContainerState
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		name, state, ok := strings.Cut(line, "\t")
+		if !ok || name == "" {
+			continue
+		}
+		states = append(states, ContainerState{Name: name, State: state})
+	}
+	return states
 }
 
 type Monitor struct {
@@ -141,6 +171,9 @@ func (m *Monitor) sendHeartbeat(ctx context.Context) {
 		"arch":         runtime.GOARCH,
 		"uptime":       uptime,
 		"metrics":      metrics,
+		// Live container states → the API mirrors real app status for this
+		// server's apps (dashboard green/grey dot) without polling us.
+		"containers": collectContainers(ctx),
 	})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,

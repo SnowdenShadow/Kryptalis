@@ -930,13 +930,15 @@ export class MarketplaceService implements OnModuleInit {
       try {
         const appRow = await this.prisma.application.findUnique({
           where: { id: applicationId },
-          select: { projectId: true, project: { select: { serverId: true } } },
+          // serverId: per-app placement wins over the project default.
+          select: { projectId: true, serverId: true, project: { select: { serverId: true } } },
         });
-        if (appRow?.project?.serverId) {
+        const dbServerId = appRow?.serverId ?? appRow?.project?.serverId;
+        if (appRow && dbServerId) {
           await this.databases.importFromAppCompose({
             applicationId,
             projectId: appRow.projectId,
-            serverId: appRow.project.serverId,
+            serverId: dbServerId,
             composeYaml: compose,
           });
         }

@@ -222,14 +222,6 @@ export class ApplicationOpsService {
       throw new BadRequestException('Target deployment has no commit SHA to roll back to');
     }
 
-    // Remote (agent) deploys always build the branch tip — the agent
-    // protocol has no commit-pinning yet. Refuse instead of silently
-    // deploying the wrong code.
-    const server = await resolveAppServer(this.prisma, id);
-    if (!isAppLocal(server)) {
-      throw new BadRequestException('Rollback to a specific commit is not supported for apps on remote servers yet');
-    }
-
     await this.assertNoInflightDeployment(id);
 
     const cloneHeader = await this.resolveCloneHeader(app);

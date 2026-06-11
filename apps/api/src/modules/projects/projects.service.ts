@@ -234,7 +234,9 @@ export class ProjectsService implements OnModuleInit {
       where: { id },
       include: {
         server: { select: { id: true, host: true } },
-        applications: { select: { id: true, name: true } },
+        // app.server: per-app placement — cleanup must run on the server
+        // each app ACTUALLY lives on, not blindly on the project default.
+        applications: { select: { id: true, name: true, server: { select: { id: true, host: true } } } },
         databases: { select: { id: true, name: true } },
         domains: { select: { id: true, domain: true } },
       },
@@ -261,7 +263,11 @@ export class ProjectsService implements OnModuleInit {
     // project, no recovery path expected.
     for (const app of project.applications) {
       const slug = slugify(app.name);
-      if (isLocal) {
+      // Per-app placement: clean up on the server the app RESOLVES to
+      // (app.server wins over the project default).
+      const appServer = app.server ?? project.server;
+      const appIsLocal = isLocalHost(appServer?.host);
+      if (appIsLocal) {
         // Marketplace multi-install apps live in <slug>-<id12>; legacy installs
         // in <slug>. Try the per-instance dir first, then fall back.
         const id12 = app.id.slice(0, 12);
@@ -279,12 +285,12 @@ export class ProjectsService implements OnModuleInit {
         // belt + suspenders: kill orphan containers under both naming schemes
         try { await execFileAsync('docker', ['rm', '-f', `kryptalis-${slug}`], { timeout: 10_000 }); } catch {}
         try { await execFileAsync('docker', ['rm', '-f', `kryptalis-${slug}-${id12}`], { timeout: 10_000 }); } catch {}
-      } else {
+      } else if (appServer) {
         try {
           // slug: per-instance convention (new remote deploys);
           // legacySlug: bare slug for pre-convention installs. The agent's
           // resolveTaskDir tries slug first, then legacySlug.
-          await this.agent.enqueueTask(project.serverId, 'REMOVE', {
+          await this.agent.enqueueTask(appServer.id, 'REMOVE', {
             slug: `${slug}-${app.id.slice(0, 12)}`,
             legacySlug: slug,
             containerName: `kryptalis-${slug}`,
@@ -377,15 +383,24 @@ export class ProjectsService implements OnModuleInit {
   async migrate(projectId: string, userId: string, targetServerId: string) {
     await assertProjectAccess(this.prisma, userId, projectId, 'ADMIN');
 
-    const project = await this.prisma.project.findUnique({
+    const projectFull = await this.prisma.project.findUnique({
       where: { id: projectId },
       include: {
         server: { select: { id: true, host: true, name: true } },
-        applications: { select: { id: true, name: true, status: true } },
+        applications: { select: { id: true, name: true, status: true, serverId: true } },
         databases: { select: { id: true, name: true, autoImported: true } },
       },
     });
-    if (!project) throw new NotFoundException('Project not found');
+    if (!projectFull) throw new NotFoundException('Project not found');
+
+    // Per-app placement: apps EXPLICITLY pinned to another server are NOT
+    // part of the migration — they stay where the user put them. Only
+    // inherit-apps (serverId NULL) follow the project's server.
+    const pinnedApps = projectFull.applications.filter((a) => a.serverId && a.serverId !== projectFull.serverId);
+    const project = {
+      ...projectFull,
+      applications: projectFull.applications.filter((a) => !a.serverId || a.serverId === projectFull.serverId),
+    };
 
     if (project.serverId === targetServerId) {
       throw new BadRequestException('Project is already on this server');
@@ -536,6 +551,11 @@ export class ProjectsService implements OnModuleInit {
       message = `Project migrated from ${project.server?.name || oldServerId} → ${target.name}. Docker volumes are being transferred asynchronously — apps and databases will deploy on the target once the data arrives. Source volumes are preserved on the old server for recovery.`;
     } else {
       message = `Project migrated from ${project.server?.name || oldServerId} → ${target.name}. NOTE: no Docker volumes were transferred; databases and uploads will start empty on the target. Source volumes are preserved on the old server for recovery.`;
+    }
+    if (pinnedApps.length > 0) {
+      teardownErrors.push(
+        `${pinnedApps.length} app(s) pinned to other servers were not migrated (their placement is explicit): ${pinnedApps.map((a) => a.name).join(', ')}`,
+      );
     }
     return { status, message, queued, warnings: teardownErrors };
   }

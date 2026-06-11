@@ -218,9 +218,24 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     }
     const memberships = await this.prisma.projectMember.findMany({
       where: { userId },
-      select: { project: { select: { serverId: true } } },
+      select: {
+        project: {
+          select: {
+            serverId: true,
+            // Per-app placement: include servers where the member's apps run.
+            applications: { select: { serverId: true } },
+          },
+        },
+      },
     });
-    return Array.from(new Set(memberships.map((m) => m.project.serverId).filter(Boolean))) as string[];
+    const ids = new Set<string>();
+    for (const m of memberships) {
+      if (m.project.serverId) ids.add(m.project.serverId);
+      for (const a of m.project.applications ?? []) {
+        if (a.serverId) ids.add(a.serverId);
+      }
+    }
+    return Array.from(ids);
   }
 
   private async assertBackupAccess(userId: string, backupId: string) {
@@ -261,18 +276,13 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         const last = tpl.lastRunAt ?? tpl.createdAt;
         if (last.getTime() >= occurrence.getTime()) continue;
 
-        // Scheduled runs stay local-only for now: remote dumps are async
-        // agent tasks and the double-run guard below can't see an agent
-        // task still in flight. On-demand remote backups work (runBackupJob).
-        if (!isLocalHost(tpl.server.host)) {
-          this.logger.warn(
-            `Scheduled backup "${tpl.name}" skipped — schedules on remote (agent-managed) servers are not supported yet.`,
-          );
-          continue;
-        }
-
         // Double-run guard: skip while the template's own initial dump or a
-        // previously spawned child is still PENDING / IN_PROGRESS.
+        // previously spawned child is still PENDING / IN_PROGRESS. For
+        // remote servers this also covers in-flight agent dumps — the
+        // Backup row stays IN_PROGRESS until onRemoteBackupTaskResult
+        // flips it, so the same status check suffices. Belt-and-braces:
+        // also skip while a BACKUP agent task is QUEUED/RUNNING on the
+        // server (covers a row/task state divergence after an API crash).
         const running = await this.prisma.backup.findFirst({
           where: {
             serverId: tpl.serverId,
@@ -282,6 +292,13 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
           select: { id: true },
         });
         if (running) continue;
+        if (!isLocalHost(tpl.server.host)) {
+          const inflightTask = await this.prisma.agentTask.findFirst({
+            where: { serverId: tpl.serverId, type: 'BACKUP', status: { in: ['QUEUED', 'RUNNING'] } },
+            select: { id: true },
+          });
+          if (inflightTask) continue;
+        }
 
         // Mark the occurrence as honoured BEFORE launching the job so a
         // slow dump can't be re-triggered by the next tick.

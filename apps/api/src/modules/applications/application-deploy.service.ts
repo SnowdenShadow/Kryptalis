@@ -486,13 +486,16 @@ export class ApplicationDeployService {
       try {
         const appRowForImport = await this.prisma.application.findUnique({
           where: { id: appId },
-          select: { projectId: true, project: { select: { serverId: true } } },
+          // serverId: per-app placement wins — the DB sidecar runs in the
+          // app's compose stack, i.e. on the app's RESOLVED server.
+          select: { projectId: true, serverId: true, project: { select: { serverId: true } } },
         });
-        if (appRowForImport?.project?.serverId) {
+        const dbServerId = appRowForImport?.serverId ?? appRowForImport?.project?.serverId;
+        if (appRowForImport && dbServerId) {
           await this.databases.importFromAppCompose({
             applicationId: appId,
             projectId: appRowForImport.projectId,
-            serverId: appRowForImport.project.serverId,
+            serverId: dbServerId,
             composeYaml: finalCompose,
           });
         }
@@ -815,6 +818,9 @@ export class ApplicationDeployService {
             dockerfileOverride: opts.dockerfileOverride,
             portMapping: opts.portMapping,
             port: opts.port,
+            // Rollback to a pinned commit — the agent does a full clone +
+            // detached checkout when this is set.
+            gitRef: opts.gitRef,
             projectNetwork: appRow ? projectNetworkName(appRow.projectId) : null,
           },
           15 * 60_000,

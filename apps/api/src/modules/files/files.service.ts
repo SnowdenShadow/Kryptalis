@@ -14,6 +14,9 @@ import { assertProjectAccess } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
 import * as dockerFs from './docker-fs';
 import { pickRootForImage, type DockerFsTarget } from './docker-fs';
+import { AgentService } from '../agent/agent.service';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
+import { remoteAppSlug, slugify as appSlugify } from '../applications/applications.helpers';
 
 /**
  * Files module — multi-tenant browser/editor for app & database sandboxes.
@@ -151,7 +154,10 @@ export class FilesService {
   // under-count between full re-walks.
   private quotaCache = new Map<string, QuotaCacheEntry>();
 
-  constructor(private prisma: PrismaService) {
+  constructor(
+    private prisma: PrismaService,
+    private agent: AgentService,
+  ) {
     if (!fs.existsSync(ROOT_DIR)) fs.mkdirSync(ROOT_DIR, { recursive: true });
     if (!fs.existsSync(APPS_DIR)) fs.mkdirSync(APPS_DIR, { recursive: true });
     if (!fs.existsSync(DBS_DIR)) fs.mkdirSync(DBS_DIR, { recursive: true });
@@ -665,6 +671,35 @@ export class FilesService {
     }
   }
 
+  // ── remote-app routing ────────────────────────────────────────────
+
+  /**
+   * When the app is placed on a REMOTE server, file ops must go through
+   * the agent (the local disk has nothing). Returns the routing info or
+   * null for local apps / db scope.
+   */
+  private async resolveRemoteFsTarget(
+    scope: 'app' | 'db',
+    scopeId: string,
+  ): Promise<{ serverId: string; slug: string; legacySlug: string } | null> {
+    if (scope !== 'app') return null; // standalone DBs keep host-fs for now
+    const app = await this.prisma.application.findUnique({
+      where: { id: scopeId },
+      select: {
+        name: true,
+        server: { select: { id: true, host: true } },
+        project: { select: { server: { select: { id: true, host: true } } } },
+      },
+    });
+    const server = app?.server ?? app?.project?.server;
+    if (!app || !server || isLocalHost(server.host)) return null;
+    return {
+      serverId: server.id,
+      slug: remoteAppSlug(app.name, scopeId),
+      legacySlug: appSlugify(app.name),
+    };
+  }
+
   // ── listing ───────────────────────────────────────────────────────
 
   async list(
@@ -677,6 +712,47 @@ export class FilesService {
     // RBAC + scope existence (the path comparison itself is dummy here —
     // we re-check inside the dispatcher).
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'VIEWER');
+
+    // Remote app → list via the agent's FILE_LIST task. Same sensitive-
+    // dotfile filtering as local listing.
+    const remote = await this.resolveRemoteFsTarget(scope, scopeId);
+    if (remote) {
+      const task = await this.agent.enqueueAndWait(
+        remote.serverId,
+        'FILE_LIST' as any,
+        { slug: remote.slug, legacySlug: remote.legacySlug, path: resolved.relPath || '.' },
+        30_000,
+      );
+      if (task.status === 'FAILED') {
+        throw new BadRequestException(task.error || 'Remote file listing failed');
+      }
+      const r: any = task.result || {};
+      if (!r.exists) throw new NotFoundException('Path not found');
+      const entries = ((r.entries || []) as Array<{ name: string; isDir: boolean; size: number; mtime: string }>)
+        .filter((e) => opts.showSensitive || !this.isSensitiveDotfile(e.name))
+        .filter((e) => !this.isManaged(e.name))
+        .map((e) => ({
+          name: e.name,
+          path: path.posix.join(resolved.relPath || '.', e.name).replace(/^\.\//, ''),
+          type: (e.isDir ? 'directory' : 'file') as FileEntry['type'],
+          size: e.size,
+          modifiedAt: e.mtime || new Date(0).toISOString(),
+          permissions: '644',
+          isHidden: e.name.startsWith('.'),
+        }))
+        .sort((a, b) => {
+          if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+      return {
+        scope: resolved.scope,
+        scopeName: resolved.scopeName,
+        path: resolved.relPath,
+        breadcrumbs: this.buildBreadcrumbs(resolved.relPath),
+        entries,
+        remote: true,
+      };
+    }
 
     // Docker-fs path for apps with no host source dir (marketplace,
     // image-only). RBAC has already cleared via resolvePath().
@@ -768,6 +844,43 @@ export class FilesService {
   async readFile(userId: string, scope: 'app' | 'db', scopeId: string, relPath: string) {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'VIEWER');
     this.assertNotManaged(resolved.relPath);
+
+    // Remote app → FILE_READ via the agent. Dotenv secret-gating applies
+    // the same as local (project ADMIN required for raw .env reads).
+    const remoteRead = await this.resolveRemoteFsTarget(scope, scopeId);
+    if (remoteRead) {
+      if (isDotenvName(path.basename(resolved.relPath))) {
+        await this.resolvePath(userId, scope, scopeId, relPath, 'ADMIN');
+      }
+      await this.assertSensitiveOrAdmin(userId, resolved.relPath);
+      const task = await this.agent.enqueueAndWait(
+        remoteRead.serverId,
+        'FILE_READ',
+        { slug: remoteRead.slug, legacySlug: remoteRead.legacySlug, file: resolved.relPath },
+        30_000,
+      );
+      if (task.status === 'FAILED') {
+        throw new BadRequestException(task.error || 'Remote file read failed');
+      }
+      const r: any = task.result || {};
+      if (!r.exists) throw new NotFoundException('File not found');
+      const content = String(r.content ?? '');
+      if (Buffer.byteLength(content, 'utf-8') > MAX_TEXT_FILE_BYTES) {
+        return {
+          path: resolved.relPath,
+          binary: true,
+          size: Buffer.byteLength(content, 'utf-8'),
+          message: 'File too large to edit in-browser (>2 MB)',
+        };
+      }
+      return {
+        path: resolved.relPath,
+        binary: false,
+        size: Buffer.byteLength(content, 'utf-8'),
+        content,
+        sha256: crypto.createHash('sha256').update(content).digest('hex'),
+      };
+    }
 
     // Docker-fs path — read directly from inside the container.
     if (scope === 'app') {
@@ -861,6 +974,29 @@ export class FilesService {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
     this.assertNotManaged(resolved.relPath);
     if (typeof content !== 'string') throw new BadRequestException('content must be a string');
+
+    // Remote app → FILE_WRITE via the agent.
+    const remoteWrite = await this.resolveRemoteFsTarget(scope, scopeId);
+    if (remoteWrite) {
+      if (Buffer.byteLength(content, 'utf-8') > MAX_TEXT_FILE_BYTES) {
+        throw new BadRequestException('File too large (>2MB). Use upload instead.');
+      }
+      const task = await this.agent.enqueueAndWait(
+        remoteWrite.serverId,
+        'FILE_WRITE',
+        { slug: remoteWrite.slug, legacySlug: remoteWrite.legacySlug, file: resolved.relPath, content },
+        30_000,
+      );
+      if (task.status === 'FAILED') {
+        throw new BadRequestException(task.error || 'Remote file write failed');
+      }
+      await this.audit(userId, scope, scopeId, 'write', resolved.relPath);
+      return {
+        path: resolved.relPath,
+        size: Buffer.byteLength(content, 'utf-8'),
+        sha256: crypto.createHash('sha256').update(content).digest('hex'),
+      };
+    }
 
     // Docker-fs path.
     if (scope === 'app') {
@@ -1287,15 +1423,53 @@ export class FilesService {
     const project = await this.prisma.project.findUnique({
       where: { id: projectId },
       include: {
-        applications: { select: { id: true, name: true } },
+        applications: {
+          select: {
+            id: true, name: true,
+            server: { select: { id: true, host: true } },
+            project: { select: { server: { select: { id: true, host: true } } } },
+          },
+        },
         databases: { select: { id: true } },
       },
     });
     if (!project) return 0n;
-    const used = this.computeProjectUsage(
-      project.applications,
+    // Split local vs remote apps: local dirs are walked on this disk;
+    // remote app dirs are summed by their agent (DISK_USAGE), grouped per
+    // server so one task covers all that server's apps. Agent failures
+    // degrade to 0 for that server (don't block writes on a flaky agent).
+    const localApps: Array<{ id: string; name: string }> = [];
+    const remoteByServer = new Map<string, Array<{ id: string; name: string }>>();
+    for (const a of project.applications) {
+      const server = (a as any).server ?? (a as any).project?.server;
+      if (server && !isLocalHost(server.host)) {
+        const arr = remoteByServer.get(server.id) ?? [];
+        arr.push({ id: a.id, name: a.name });
+        remoteByServer.set(server.id, arr);
+      } else {
+        localApps.push({ id: a.id, name: a.name });
+      }
+    }
+    let used = this.computeProjectUsage(
+      localApps,
       project.databases.map((d) => d.id),
     );
+    for (const [serverId, apps] of remoteByServer) {
+      try {
+        const task = await this.agent.enqueueAndWait(
+          serverId,
+          'DISK_USAGE' as any,
+          { slugs: apps.flatMap((a) => [remoteAppSlug(a.name, a.id), appSlugify(a.name)]) },
+          20_000,
+        );
+        const total = (task.result as any)?.totalBytes;
+        if (task.status === 'COMPLETED' && typeof total === 'number') {
+          used += BigInt(Math.max(0, Math.floor(total)));
+        }
+      } catch {
+        // agent unreachable — count 0 for that server this TTL window
+      }
+    }
     this.quotaCache.set(projectId, {
       used,
       expiresAt: now + QUOTA_CACHE_TTL_MS,

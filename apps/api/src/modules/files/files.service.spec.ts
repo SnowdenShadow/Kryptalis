@@ -306,8 +306,12 @@ function makeService(opts: { quota?: bigint; userRole?: string } = {}) {
     projectMember: { findMany: vi.fn().mockResolvedValue([]) },
     auditLog: { create: vi.fn().mockResolvedValue({}) },
   };
-  const service = new FilesService(prisma as any);
-  return { service, prisma };
+  const agent = {
+    enqueueAndWait: vi.fn().mockResolvedValue({ status: 'COMPLETED', result: {} }),
+    registerTaskCompletionHandler: vi.fn(),
+  };
+  const service = new FilesService(prisma as any, agent as any);
+  return { service, prisma, agent };
 }
 
 beforeEach(() => {

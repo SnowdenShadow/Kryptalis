@@ -208,6 +208,10 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.runFileRead(task)
 	case "FILE_WRITE":
 		result, taskErr = p.runFileWrite(task)
+	case "FILE_LIST":
+		result, taskErr = p.runFileList(task)
+	case "DISK_USAGE":
+		result, taskErr = p.runDiskUsage(task)
 	case "VOLUME_EXPORT":
 		result, taskErr = p.tasks.VolumeExport(tctx, task.ID, task.Payload)
 	case "VOLUME_IMPORT":
@@ -240,6 +244,19 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 
 func appDir(slug string) string {
 	return filepath.Join("/opt/kryptalis/apps", slug)
+}
+
+// isHexRef: 7-64 hex chars — a git commit SHA (abbreviated or full).
+func isHexRef(s string) bool {
+	if len(s) < 7 || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // writeProjectNetworkOverride drops a docker-compose.override.yml next to
@@ -388,16 +405,34 @@ func (p *Poller) runDeploy(ctx context.Context, task Task) (map[string]interface
 		if branch == "" {
 			branch = "main"
 		}
+		// gitRef: deploy a SPECIFIC commit instead of the branch tip (manual
+		// rollback). Needs a full clone — a shallow one only carries the tip.
+		gitRef, _ := task.Payload["gitRef"].(string)
 		// fresh clone — wipe any previous content
 		_ = os.RemoveAll(dir)
 		_ = os.MkdirAll(dir, 0755)
-		cloneArgs := []string{"clone", "--depth", "1", "--branch", branch}
+		cloneArgs := []string{"clone"}
+		if gitRef == "" {
+			cloneArgs = append(cloneArgs, "--depth", "1")
+		}
+		cloneArgs = append(cloneArgs, "--branch", branch)
 		if header, ok := task.Payload["cloneHeader"].(string); ok && header != "" {
 			cloneArgs = append([]string{"-c", "http.extraheader=" + header}, cloneArgs...)
 		}
 		cloneArgs = append(cloneArgs, gitUrl, dir)
 		if err := runIn(".", "git", cloneArgs...); err != nil {
 			return map[string]interface{}{"logs": logs.String()}, err.Error()
+		}
+		if gitRef != "" {
+			// Detached checkout of the rollback target. Refuse garbage refs:
+			// only full/abbreviated hex SHAs are accepted (no branch names —
+			// the API already resolved the deployment's commitSha).
+			if !isHexRef(gitRef) {
+				return map[string]interface{}{"logs": logs.String()}, "invalid gitRef (expected a commit SHA): " + gitRef
+			}
+			if err := runIn(dir, "git", "checkout", "--detach", gitRef); err != nil {
+				return map[string]interface{}{"logs": logs.String()}, "gitRef checkout failed: " + err.Error()
+			}
 		}
 		// scrub any token persisted via extraheader
 		_ = runIn(dir, "git", "remote", "set-url", "origin", gitUrl)
@@ -668,17 +703,92 @@ func (p *Poller) runStatus(ctx context.Context, task Task) (map[string]interface
 	return map[string]interface{}{"output": string(out)}, ""
 }
 
-func (p *Poller) runFileRead(task Task) (map[string]interface{}, string) {
+// runFileList lists a directory inside the app dir (remote file manager).
+// Returns name/size/mtime/isDir per entry. Path traversal rejected.
+func (p *Poller) runFileList(task Task) (map[string]interface{}, string) {
 	slug, _ := task.Payload["slug"].(string)
+	rel, _ := task.Payload["path"].(string)
+	if slug == "" {
+		return nil, "missing slug"
+	}
+	if rel == "" {
+		rel = "."
+	}
+	safe := filepath.Clean(rel)
+	if strings.HasPrefix(safe, "..") || filepath.IsAbs(safe) {
+		return nil, "path traversal rejected"
+	}
+	base, errStr := resolveTaskDir(task.Payload)
+	if errStr != "" {
+		return nil, errStr
+	}
+	_ = slug
+	dir := filepath.Join(base, safe)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]interface{}{"exists": false, "entries": []interface{}{}}, ""
+		}
+		return nil, err.Error()
+	}
+	out := make([]map[string]interface{}, 0, len(entries))
+	for _, e := range entries {
+		info, ierr := e.Info()
+		var size int64
+		var mtime string
+		if ierr == nil {
+			size = info.Size()
+			mtime = info.ModTime().UTC().Format(time.RFC3339)
+		}
+		out = append(out, map[string]interface{}{
+			"name":  e.Name(),
+			"isDir": e.IsDir(),
+			"size":  size,
+			"mtime": mtime,
+		})
+	}
+	return map[string]interface{}{"exists": true, "entries": out}, ""
+}
+
+// runDiskUsage reports the byte size of one or more app dirs — feeds the
+// project storage quota for apps placed on this server.
+func (p *Poller) runDiskUsage(task Task) (map[string]interface{}, string) {
+	slugsRaw, _ := task.Payload["slugs"].([]interface{})
+	usage := map[string]interface{}{}
+	var total int64
+	for _, raw := range slugsRaw {
+		slug, ok := raw.(string)
+		if !ok || slug == "" {
+			continue
+		}
+		dir := appDir(slug)
+		var size int64
+		_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil // unreadable entries don't kill the walk
+			}
+			if info.Mode().IsRegular() {
+				size += info.Size()
+			}
+			return nil
+		})
+		usage[slug] = size
+		total += size
+	}
+	return map[string]interface{}{"perSlug": usage, "totalBytes": total}, ""
+}
+
+func (p *Poller) runFileRead(task Task) (map[string]interface{}, string) {
 	name, _ := task.Payload["file"].(string)
-	if slug == "" || name == "" {
+	dir, errStr := resolveTaskDir(task.Payload)
+	if errStr != "" || name == "" {
 		return nil, "missing slug or file"
 	}
 	safe := filepath.Clean(name)
-	if strings.HasPrefix(safe, "..") || strings.Contains(safe, "..") {
+	if strings.HasPrefix(safe, "..") || strings.Contains(safe, "..") || filepath.IsAbs(safe) {
 		return nil, "path traversal rejected"
 	}
-	full := filepath.Join(appDir(slug), safe)
+	full := filepath.Join(dir, safe)
 	data, err := os.ReadFile(full)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -690,17 +800,17 @@ func (p *Poller) runFileRead(task Task) (map[string]interface{}, string) {
 }
 
 func (p *Poller) runFileWrite(task Task) (map[string]interface{}, string) {
-	slug, _ := task.Payload["slug"].(string)
 	name, _ := task.Payload["file"].(string)
 	content, _ := task.Payload["content"].(string)
-	if slug == "" || name == "" {
+	dir, errStr := resolveTaskDir(task.Payload)
+	if errStr != "" || name == "" {
 		return nil, "missing slug or file"
 	}
 	safe := filepath.Clean(name)
-	if strings.HasPrefix(safe, "..") || strings.Contains(safe, "..") {
+	if strings.HasPrefix(safe, "..") || strings.Contains(safe, "..") || filepath.IsAbs(safe) {
 		return nil, "path traversal rejected"
 	}
-	full := filepath.Join(appDir(slug), safe)
+	full := filepath.Join(dir, safe)
 	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
 		return nil, err.Error()
 	}

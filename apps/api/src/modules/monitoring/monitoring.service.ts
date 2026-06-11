@@ -161,7 +161,7 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
     const ids = new Set<string>();
     for (const m of memberships) {
       if (m.project.serverId) ids.add(m.project.serverId);
-      for (const a of m.project.applications) {
+      for (const a of m.project.applications ?? []) {
         if (a.serverId) ids.add(a.serverId);
       }
     }

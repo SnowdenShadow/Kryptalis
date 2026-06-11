@@ -385,7 +385,17 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
   async heartbeat(
     serverId: string,
     token: string,
-    data: { agentVersion: string; os: string; arch: string; uptime: number; metrics: any },
+    data: {
+      agentVersion: string;
+      os: string;
+      arch: string;
+      uptime: number;
+      metrics: any;
+      /** Live docker states of kryptalis-managed containers (agent ≥ this
+       *  release). Lets the dashboard show real RUNNING/STOPPED for remote
+       *  apps without per-request agent round-trips. */
+      containers?: Array<{ name: string; state: string }>;
+    },
   ) {
     await this.validateToken(serverId, token);
     await this.prisma.server.update({
@@ -412,7 +422,50 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
         },
       });
     }
+    if (Array.isArray(data.containers)) {
+      await this.syncRemoteAppStatuses(serverId, data.containers).catch((e) =>
+        this.logger.warn(`heartbeat status sync failed: ${(e as Error).message}`),
+      );
+    }
     return { ok: true };
+  }
+
+  /**
+   * Mirror live container states from a heartbeat onto the Application rows
+   * of apps resolved to this server. Status mapping: running → RUNNING,
+   * anything else (exited/dead/restarting) → STOPPED. Apps mid-deploy are
+   * left alone (DEPLOYING is owned by the deploy pipeline). A container
+   * missing from the list = stack is down → STOPPED.
+   */
+  private async syncRemoteAppStatuses(
+    serverId: string,
+    containers: Array<{ name: string; state: string }>,
+  ): Promise<void> {
+    const apps = await this.prisma.application.findMany({
+      where: {
+        status: { in: ['RUNNING', 'STOPPED', 'ERROR'] },
+        OR: [
+          { serverId },
+          { serverId: null, project: { serverId } },
+        ],
+      },
+      select: { id: true, status: true, containerName: true },
+    });
+    if (apps.length === 0) return;
+    const stateByName = new Map(containers.map((c) => [c.name, c.state.toLowerCase()]));
+    for (const app of apps) {
+      if (!app.containerName) continue;
+      const state = stateByName.get(app.containerName);
+      // ERROR rows only flip when we SEE the container running (a recovery)
+      // — absence keeps the ERROR so the user still sees the failed deploy.
+      const real = state === 'running' ? 'RUNNING' : app.status === 'ERROR' && state === undefined ? 'ERROR' : 'STOPPED';
+      if (real !== app.status) {
+        await this.prisma.application.update({
+          where: { id: app.id },
+          data: { status: real as any },
+        }).catch(() => {});
+      }
+    }
   }
 
   async taskResult(

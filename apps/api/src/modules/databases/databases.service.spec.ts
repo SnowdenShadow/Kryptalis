@@ -101,6 +101,9 @@ function makePrisma() {
     project: { findUnique: vi.fn() },
     application: { findUnique: vi.fn() },
     user: { findUnique: vi.fn() },
+    // create() resolves the DB's target server row (per-DB placement) —
+    // default: the project's local server. Remote tests override.
+    server: { findUnique: vi.fn().mockResolvedValue({ id: 'srv1', host: 'localhost' }) },
   };
 }
 
@@ -183,12 +186,42 @@ describe('create', () => {
   it("pins the DB to the project's server: a foreign serverId is rejected", async () => {
     const { service, prisma } = makeService();
     prisma.project.findUnique.mockResolvedValue({ serverId: 'srv1' });
+    // Per-DB placement: an explicit serverId is validated against the
+    // servers table — unknown id → 404, nothing created.
+    prisma.server.findUnique.mockResolvedValue(null);
 
     await expect(
       service.create('u1', {
-        name: 'x', type: 'POSTGRESQL', projectId: 'p1', serverId: 'srv-other-tenant',
+        name: 'x', type: 'POSTGRESQL', projectId: 'p1', serverId: 'srv-unknown',
       } as any),
-    ).rejects.toThrow("serverId must match the project's server");
+    ).rejects.toThrow('Server not found');
+    expect(prisma.database.create).not.toHaveBeenCalled();
+  });
+
+  it('per-DB placement: an ONLINE serverId different from the project default is honored', async () => {
+    const { service, prisma } = makeService();
+    prisma.project.findUnique.mockResolvedValue({ serverId: 'srv1' });
+    prisma.server.findUnique.mockResolvedValue({ id: 'srv2', name: 'Second', status: 'ONLINE', host: 'localhost' });
+
+    await service.create('u1', {
+      name: 'x', type: 'POSTGRESQL', projectId: 'p1', serverId: 'srv2',
+    } as any);
+
+    expect(prisma.database.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ serverId: 'srv2' }) }),
+    );
+  });
+
+  it('per-DB placement: a non-ONLINE server is refused', async () => {
+    const { service, prisma } = makeService();
+    prisma.project.findUnique.mockResolvedValue({ serverId: 'srv1' });
+    prisma.server.findUnique.mockResolvedValue({ id: 'srv2', name: 'Off', status: 'OFFLINE', host: 'x' });
+
+    await expect(
+      service.create('u1', {
+        name: 'x', type: 'POSTGRESQL', projectId: 'p1', serverId: 'srv2',
+      } as any),
+    ).rejects.toThrow(/is OFFLINE/);
     expect(prisma.database.create).not.toHaveBeenCalled();
   });
 
@@ -327,6 +360,7 @@ describe('create', () => {
         ? { serverId: 'srv-remote' }
         : { server: { id: 'srv-remote', host: '203.0.113.9' } },
     );
+    prisma.server.findUnique.mockResolvedValue({ id: 'srv-remote', host: '203.0.113.9' });
 
     await service.create('u1', { name: 'pgdb', type: 'POSTGRESQL', projectId: 'p1' } as any);
     await flushAsync();
@@ -346,6 +380,7 @@ describe('create', () => {
         ? { serverId: 'srv-remote' }
         : { server: { id: 'srv-remote', host: '203.0.113.9' } },
     );
+    prisma.server.findUnique.mockResolvedValue({ id: 'srv-remote', host: '203.0.113.9' });
 
     const res = await service.create('u1', { name: 'pgdb', type: 'POSTGRESQL', projectId: 'p1' } as any);
     await flushAsync();

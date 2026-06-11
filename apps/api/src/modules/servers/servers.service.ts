@@ -180,9 +180,25 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
   async findAccessible(userId: string) {
     const memberships = await this.prisma.projectMember.findMany({
       where: { userId },
-      select: { project: { select: { serverId: true } } },
+      select: {
+        project: {
+          select: {
+            serverId: true,
+            // Per-app placement: apps can run on servers other than the
+            // project default — surface those too.
+            applications: { select: { serverId: true } },
+          },
+        },
+      },
     });
-    const ids = Array.from(new Set(memberships.map((m) => m.project.serverId).filter(Boolean)));
+    const idSet = new Set<string>();
+    for (const m of memberships) {
+      if (m.project.serverId) idSet.add(m.project.serverId);
+      for (const a of m.project.applications ?? []) {
+        if (a.serverId) idSet.add(a.serverId);
+      }
+    }
+    const ids = Array.from(idSet);
     if (ids.length === 0) return [];
     const rows = await this.prisma.server.findMany({
       where: { id: { in: ids as string[] } },

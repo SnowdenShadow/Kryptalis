@@ -58,6 +58,7 @@ function makePrisma() {
     projectMember: { findMany: vi.fn() },
     database: { findMany: vi.fn(), findUnique: vi.fn() },
     application: { findMany: vi.fn() },
+    agentTask: { findFirst: vi.fn().mockResolvedValue(null) },
   };
 }
 
@@ -394,11 +395,26 @@ describe('runScheduledBackups', () => {
     expect(job).not.toHaveBeenCalled();
   });
 
-  it('skips remote (agent-managed) servers — schedules stay local-only', async () => {
+  it('remote (agent-managed) servers: scheduled runs fire (delegated to the agent at job time)', async () => {
     const { service, prisma } = makeService();
     prisma.backup.findMany.mockResolvedValue([
       template({ server: { host: '10.0.0.5' } }),
     ]);
+    prisma.backup.findFirst.mockResolvedValue(null);
+    prisma.backup.create.mockResolvedValue({ id: 'child1' });
+    prisma.backup.update.mockResolvedValue({});
+
+    await service.runScheduledBackups(NOW);
+    expect(prisma.backup.create).toHaveBeenCalled();
+  });
+
+  it('remote schedules skip while a BACKUP agent task is already in flight', async () => {
+    const { service, prisma } = makeService();
+    prisma.backup.findMany.mockResolvedValue([
+      template({ server: { host: '10.0.0.5' } }),
+    ]);
+    prisma.backup.findFirst.mockResolvedValue(null);
+    prisma.agentTask.findFirst.mockResolvedValue({ id: 'inflight-task' });
 
     await service.runScheduledBackups(NOW);
     expect(prisma.backup.create).not.toHaveBeenCalled();
