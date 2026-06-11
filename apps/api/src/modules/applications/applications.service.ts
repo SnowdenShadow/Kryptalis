@@ -218,7 +218,11 @@ export class ApplicationsService {
     const firstMappedHost = portMapping
       ? Object.values(portMapping).find((n) => Number.isFinite(n))
       : undefined;
-    const userPickedPort = !!(firstMappedHost || dbData.port);
+    // hostPort counts as "user picked a port" too: domain + hostPort from
+    // the unified deploy dialog means a port-pinned attach
+    // (http://domain:hostPort via DomainPortBinding), NOT the clean-URL
+    // :443 slot — same semantics as the marketplace install path.
+    const userPickedPort = !!(firstMappedHost || dbData.port || dtoHostPort);
 
     // 5) Up-front port collision check for legacy port/portMapping
     // (advanced wizard path). Done BEFORE the transaction.
@@ -294,7 +298,9 @@ export class ApplicationsService {
           domainId,
           projectId: dto.projectId,
           customPort: userPickedPort,
-          port: app.port ?? 80,
+          // Port-pinned attach binds the host-side port the user reaches the
+          // app at: hostPort (unified dialog) or the legacy port field.
+          port: dtoHostPort ?? app.port ?? 80,
         });
       } catch (err) {
         await this.prisma.application.delete({ where: { id: app.id } }).catch(() => undefined);

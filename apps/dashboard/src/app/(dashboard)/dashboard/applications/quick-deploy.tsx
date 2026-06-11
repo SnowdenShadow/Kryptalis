@@ -143,8 +143,11 @@ export function QuickDeployDialog({
   const [projectId, setProjectId] = useState('');
   const [name, setName] = useState('');
 
-  // ── Networking — exclusive: domain OR host port ─────────────────
-  const [exposeMode, setExposeMode] = useState<'domain' | 'port' | 'none'>('domain');
+  // ── Networking — exclusive: domain, host port, or domain+port ───
+  // 'domain-port' = port-pinned attach: the container publishes the port
+  // AND the domain points at it (http://domain:port). https://domain
+  // 308-redirects there.
+  const [exposeMode, setExposeMode] = useState<'domain' | 'port' | 'domain-port' | 'none'>('domain');
   const [domainChoice, setDomainChoice] = useState<'new' | string>('new');
   const [newDomain, setNewDomain] = useState('');
   const [hostPort, setHostPort] = useState('');
@@ -180,7 +183,7 @@ export function QuickDeployDialog({
   const { data: nextFreePort } = useQuery<{ port: number }>({
     queryKey: ['next-free-port', projectId],
     queryFn: () => api.get(`/applications/next-free-port/${projectId}`),
-    enabled: open && exposeMode === 'port' && !!projectId,
+    enabled: open && (exposeMode === 'port' || exposeMode === 'domain-port') && !!projectId,
   });
 
   const { data: repos = [], isLoading: reposLoading } = useQuery<Repo[]>({
@@ -241,7 +244,7 @@ export function QuickDeployDialog({
 
   // When the suggestion arrives and the user hasn't typed yet, fill it in.
   useEffect(() => {
-    if (exposeMode === 'port' && nextFreePort?.port && !hostPort.trim()) {
+    if ((exposeMode === 'port' || exposeMode === 'domain-port') && nextFreePort?.port && !hostPort.trim()) {
       setHostPort(String(nextFreePort.port));
     }
   }, [exposeMode, nextFreePort, hostPort]);
@@ -334,15 +337,17 @@ export function QuickDeployDialog({
     (mode === 'marketplace' && !!marketplaceApp);
 
   const hostPortNumber = hostPort.trim() ? parseInt(hostPort.trim(), 10) : null;
+  const needsPort = exposeMode === 'port' || exposeMode === 'domain-port';
+  const needsDomain = exposeMode === 'domain' || exposeMode === 'domain-port';
   const hostPortValid =
-    exposeMode !== 'port' ||
+    !needsPort ||
     (Number.isFinite(hostPortNumber!) &&
       hostPortNumber! >= 1024 &&
       hostPortNumber! <= 65535 &&
       !RESERVED_PORTS.has(hostPortNumber!));
 
   const domainValid =
-    exposeMode !== 'domain' ||
+    !needsDomain ||
     (domainChoice === 'new' ? DOMAIN_RE.test(newDomain.trim()) : !!domainChoice);
 
   // Required env vars satisfied?
@@ -376,11 +381,11 @@ export function QuickDeployDialog({
           projectId,
           envVars,
         };
-        if (exposeMode === 'domain') {
+        if (needsDomain) {
           if (domainChoice === 'new') body.newDomain = newDomain.trim();
           else body.domainId = domainChoice;
         }
-        if (exposeMode === 'port' && hostPortNumber) body.hostPort = hostPortNumber;
+        if (needsPort && hostPortNumber) body.hostPort = hostPortNumber;
         return api.post('/marketplace/install', body);
       }
 
@@ -412,10 +417,11 @@ export function QuickDeployDialog({
         body.framework = 'DOCKER';
         body.dockerfileContent = dockerfileContent;
       }
-      if (exposeMode === 'domain') {
+      if (needsDomain) {
         if (domainChoice === 'new') body.domain = newDomain.trim();
         else body.domainId = domainChoice;
-      } else if (exposeMode === 'port' && hostPortNumber) {
+      }
+      if (needsPort && hostPortNumber) {
         body.hostPort = hostPortNumber;
       }
       return api.post('/applications', body);
@@ -671,7 +677,7 @@ export function QuickDeployDialog({
             <Label className="text-sm flex items-center gap-2">
               <Globe size={14} /> {t('quickDeploy.howToReach') || 'How will people reach it?'}
             </Label>
-            <div className="grid sm:grid-cols-2 gap-2">
+            <div className="grid sm:grid-cols-3 gap-2">
               <ExposeOption
                 active={exposeMode === 'domain'}
                 onClick={() => setExposeMode('domain')}
@@ -684,9 +690,15 @@ export function QuickDeployDialog({
                 title={t('quickDeploy.optPort') || 'A host port'}
                 desc={t('quickDeploy.optPortDesc') || 'Reach at http://server-ip:port.'}
               />
+              <ExposeOption
+                active={exposeMode === 'domain-port'}
+                onClick={() => setExposeMode('domain-port')}
+                title={t('quickDeploy.optDomainPort') || 'Domain + port'}
+                desc={t('quickDeploy.optDomainPortDesc') || 'Reach at http://domain:port.'}
+              />
             </div>
 
-            {exposeMode === 'domain' && (
+            {needsDomain && (
               <div className="space-y-2 pt-2">
                 <Select value={domainChoice} onChange={(e) => setDomainChoice(e.target.value)}>
                   <option value="new">{t('quickDeploy.domainNew') || '+ Add a new domain'}</option>
@@ -714,7 +726,7 @@ export function QuickDeployDialog({
               </div>
             )}
 
-            {exposeMode === 'port' && (
+            {needsPort && (
               <div className="space-y-2 pt-2">
                 <Input
                   type="number"
@@ -736,8 +748,11 @@ export function QuickDeployDialog({
                   </p>
                 )}
                 <p className="text-[11px] text-muted-foreground">
-                  {t('quickDeploy.hostPortHint') ||
-                    'App reachable at http://<server-ip>:<port>. If the port you pick is taken, the platform refuses and tells you which app already has it.'}
+                  {exposeMode === 'domain-port'
+                    ? (t('quickDeploy.domainPortHint') ||
+                       'App reachable at http://<domain>:<port> (plain HTTP — Caddy only terminates TLS on :443; https://<domain> redirects here).')
+                    : (t('quickDeploy.hostPortHint') ||
+                       'App reachable at http://<server-ip>:<port>. If the port you pick is taken, the platform refuses and tells you which app already has it.')}
                 </p>
               </div>
             )}
