@@ -157,13 +157,14 @@ export class ApplicationsController {
   }
 
   @Post(':id/move-server')
-  @ApiOperation({ summary: 'Move this app to another server (volumes are NOT transferred)' })
+  @ApiOperation({ summary: 'Move this app to another server (transferVolumes=true ships docker volumes, local→remote only)' })
   moveServer(
     @CurrentUser('id') userId: string,
     @Param('id') id: string,
     @Body('targetServerId') targetServerId: string,
+    @Body('transferVolumes') transferVolumes?: boolean,
   ) {
-    return this.svc.moveServer(userId, id, targetServerId);
+    return this.svc.moveServer(userId, id, targetServerId, !!transferVolumes);
   }
 
   // Port bindings — for apps co-hosted on a domain on a custom port. See

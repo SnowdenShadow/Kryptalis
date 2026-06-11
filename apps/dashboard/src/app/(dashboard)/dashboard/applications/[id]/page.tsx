@@ -438,6 +438,7 @@ export default function ApplicationDetailPage() {
   // ── per-app server move (MULTI mode) ──────────────────────────────
   const [showMoveServer, setShowMoveServer] = useState(false);
   const [moveTargetId, setMoveTargetId] = useState('');
+  const [moveWithVolumes, setMoveWithVolumes] = useState(true);
   const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
     queryKey: ['public-settings'],
     queryFn: () => api.get('/settings/public'),
@@ -451,7 +452,7 @@ export default function ApplicationDetailPage() {
   });
   const moveServerMutation = useMutation({
     mutationFn: (targetServerId: string) =>
-      api.post(`/applications/${id}/move-server`, { targetServerId }) as Promise<{ message: string }>,
+      api.post(`/applications/${id}/move-server`, { targetServerId, transferVolumes: moveWithVolumes }) as Promise<{ message: string }>,
     onSuccess: (data) => {
       toast.success(data.message);
       queryClient.invalidateQueries({ queryKey: ['application', id] });
@@ -1848,17 +1849,30 @@ export default function ApplicationDetailPage() {
           <DialogTitle>{t('apps.moveServerTitle')}</DialogTitle>
           <DialogDescription>{t('apps.moveServerWarn')}</DialogDescription>
         </DialogHeader>
-        <div className="space-y-2">
-          <Label>{t('apps.moveServerTarget')}</Label>
-          <Select value={moveTargetId} onChange={(e) => setMoveTargetId(e.target.value)}>
-            <option value="">—</option>
-            {allServers
-              .filter((s) => s.status === 'ONLINE')
-              .filter((s) => s.id !== (app.server?.id ?? app.project?.server?.id))
-              .map((s) => (
-                <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
-              ))}
-          </Select>
+        <div className="space-y-3">
+          <div className="space-y-2">
+            <Label>{t('apps.moveServerTarget')}</Label>
+            <Select value={moveTargetId} onChange={(e) => setMoveTargetId(e.target.value)}>
+              <option value="">—</option>
+              {allServers
+                .filter((s) => s.status === 'ONLINE')
+                .filter((s) => s.id !== (app.server?.id ?? app.project?.server?.id))
+                .map((s) => (
+                  <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+                ))}
+            </Select>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              id="move-volumes"
+              type="checkbox"
+              checked={moveWithVolumes}
+              onChange={(e) => setMoveWithVolumes(e.target.checked)}
+              className="h-4 w-4 rounded border-input"
+            />
+            <Label htmlFor="move-volumes">{t('apps.moveServerVolumes')}</Label>
+          </div>
+          <p className="text-[11px] text-muted-foreground">{t('apps.moveServerVolumesHint')}</p>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => { setShowMoveServer(false); setMoveTargetId(''); }}>

@@ -677,6 +677,14 @@ export default function ApplicationsPage() {
                           <Badge variant="outline" className="text-[11px]">
                             {FRAMEWORK_LABELS[app.framework] || app.framework}
                           </Badge>
+                          {/* Per-app server placement — only shown when it
+                              differs from the project default (the common
+                              inherit case stays uncluttered). */}
+                          {app.server?.name && (
+                            <Badge variant="secondary" className="text-[11px] font-mono">
+                              {app.server.name}
+                            </Badge>
+                          )}
                           <span className={`text-xs font-medium ${isRunning ? 'text-emerald-500' : app.status === 'ERROR' ? 'text-red-500' : isDeploying ? 'text-orange-500' : 'text-muted-foreground'}`}>
                             {statusLabel}
                           </span>

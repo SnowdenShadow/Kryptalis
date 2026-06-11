@@ -3,6 +3,7 @@ package poller
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -210,6 +211,8 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.runFileWrite(task)
 	case "FILE_LIST":
 		result, taskErr = p.runFileList(task)
+	case "FILE_DELETE":
+		result, taskErr = p.runFileDelete(task)
 	case "DISK_USAGE":
 		result, taskErr = p.runDiskUsage(task)
 	case "VOLUME_EXPORT":
@@ -750,6 +753,32 @@ func (p *Poller) runFileList(task Task) (map[string]interface{}, string) {
 	return map[string]interface{}{"exists": true, "entries": out}, ""
 }
 
+// runFileDelete removes a file or directory INSIDE the app dir (remote file
+// manager delete). Confined to the resolved app dir; traversal rejected;
+// deleting the app dir itself ('.') is refused — that's REMOVE's job.
+func (p *Poller) runFileDelete(task Task) (map[string]interface{}, string) {
+	rel, _ := task.Payload["path"].(string)
+	dir, errStr := resolveTaskDir(task.Payload)
+	if errStr != "" || rel == "" {
+		return nil, "missing slug or path"
+	}
+	safe := filepath.Clean(rel)
+	if safe == "." || safe == "/" || strings.HasPrefix(safe, "..") || strings.Contains(safe, "..") || filepath.IsAbs(safe) {
+		return nil, "path traversal rejected"
+	}
+	full := filepath.Join(dir, safe)
+	if _, err := os.Lstat(full); err != nil {
+		if os.IsNotExist(err) {
+			return nil, "path not found"
+		}
+		return nil, err.Error()
+	}
+	if err := os.RemoveAll(full); err != nil {
+		return nil, err.Error()
+	}
+	return map[string]interface{}{"deleted": true}, ""
+}
+
 // runDiskUsage reports the byte size of one or more app dirs — feeds the
 // project storage quota for apps placed on this server.
 func (p *Poller) runDiskUsage(task Task) (map[string]interface{}, string) {
@@ -810,14 +839,23 @@ func (p *Poller) runFileWrite(task Task) (map[string]interface{}, string) {
 	if strings.HasPrefix(safe, "..") || strings.Contains(safe, "..") || filepath.IsAbs(safe) {
 		return nil, "path traversal rejected"
 	}
+	// encoding=base64 → binary upload (remote file-manager upload path).
+	data := []byte(content)
+	if enc, _ := task.Payload["encoding"].(string); enc == "base64" {
+		decoded, err := base64.StdEncoding.DecodeString(content)
+		if err != nil {
+			return nil, "invalid base64 content: " + err.Error()
+		}
+		data = decoded
+	}
 	full := filepath.Join(dir, safe)
 	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
 		return nil, err.Error()
 	}
-	if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(full, data, 0644); err != nil {
 		return nil, err.Error()
 	}
-	return map[string]interface{}{"written": len(content)}, ""
+	return map[string]interface{}{"written": len(data)}, ""
 }
 
 // sanitize must stay byte-for-byte equivalent to apps/api/.../applications.service.ts:slugify.

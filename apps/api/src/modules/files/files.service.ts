@@ -1086,6 +1086,38 @@ export class FilesService {
     const resolved = await this.resolvePath(userId, scope, scopeId, targetRel, 'DEVELOPER');
     this.assertNotManaged(resolved.relPath);
 
+    // Remote app → ship via FILE_WRITE. Payload travels base64 inside the
+    // task JSON, so cap remote uploads at 8 MB (config files, dumps, certs
+    // — fine; big artifacts should ride git/registry, not the file manager).
+    const remoteUp = await this.resolveRemoteFsTarget(scope, scopeId);
+    if (remoteUp) {
+      const REMOTE_UPLOAD_MAX = 8 * 1024 * 1024;
+      if (uploadSize > REMOTE_UPLOAD_MAX) {
+        throw new BadRequestException(
+          'Uploads to apps on remote servers are limited to 8MB (config files). Use git or a registry image for larger artifacts.',
+        );
+      }
+      const buf = await fs.promises.readFile(tempFilePath);
+      const task = await this.agent.enqueueAndWait(
+        remoteUp.serverId,
+        'FILE_WRITE',
+        {
+          slug: remoteUp.slug,
+          legacySlug: remoteUp.legacySlug,
+          file: resolved.relPath,
+          content: buf.toString('base64'),
+          encoding: 'base64',
+        },
+        60_000,
+      );
+      await fs.promises.unlink(tempFilePath).catch(() => {});
+      if (task.status === 'FAILED') {
+        throw new BadRequestException(task.error || 'Remote upload failed');
+      }
+      await this.audit(userId, scope, scopeId, 'upload', resolved.relPath);
+      return { path: resolved.relPath, size: uploadSize };
+    }
+
     // Docker-fs path — stream the temp file into `docker cp -`.
     if (scope === 'app') {
       const target = await this.resolveDockerTarget(scopeId);
@@ -1305,6 +1337,24 @@ export class FilesService {
     }
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'ADMIN');
     this.assertNotManaged(resolved.relPath);
+
+    // Remote app → FILE_DELETE via the agent (confined to the app dir,
+    // traversal re-checked agent-side).
+    const remoteRm = await this.resolveRemoteFsTarget(scope, scopeId);
+    if (remoteRm) {
+      const task = await this.agent.enqueueAndWait(
+        remoteRm.serverId,
+        'FILE_DELETE' as any,
+        { slug: remoteRm.slug, legacySlug: remoteRm.legacySlug, path: resolved.relPath },
+        30_000,
+      );
+      if (task.status === 'FAILED') {
+        if ((task.error || '').includes('not found')) throw new NotFoundException('Path not found');
+        throw new BadRequestException(task.error || 'Remote delete failed');
+      }
+      await this.audit(userId, scope, scopeId, 'remove', resolved.relPath);
+      return { path: resolved.relPath, deleted: true };
+    }
 
     // Docker-fs path.
     if (scope === 'app') {

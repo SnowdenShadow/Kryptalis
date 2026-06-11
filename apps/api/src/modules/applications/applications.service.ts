@@ -33,6 +33,10 @@ import {
   resolveAppServer,
   isAppLocal,
 } from './applications.helpers';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
+import { appVolumePrefix } from '../agent/volume-naming.util';
+import { spawn } from 'child_process';
+import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import * as yaml from 'js-yaml';
@@ -631,11 +635,13 @@ export class ApplicationsService {
    * Application.serverId (NULL when the target is the project default so
    * the app re-inherits), redeploys on the target, refreshes Caddy.
    *
-   * NOTE: docker volumes are NOT transferred — that's the project-level
-   * migrate flow. This endpoint is for stateless/redeployable apps; the
-   * dashboard warns accordingly.
+   * `transferVolumes` (default false) additionally ships the app's docker
+   * volumes to the target before redeploying — same VOLUME_EXPORT/IMPORT
+   * machinery as the project-level migrate. Local→remote only for now
+   * (the common case: moving an app off the platform host); other
+   * combinations redeploy with empty volumes and say so.
    */
-  async moveServer(userId: string, id: string, targetServerId: string) {
+  async moveServer(userId: string, id: string, targetServerId: string, transferVolumes = false) {
     const app = await this.assertOwnership(userId, id, 'ADMIN');
     const target = await this.prisma.server.findUnique({ where: { id: targetServerId } });
     if (!target) throw new NotFoundException('Target server not found');
@@ -648,8 +654,42 @@ export class ApplicationsService {
     }
 
     const slug = slugify(app.name);
+    const currentLocal = isAppLocal(current);
+    const targetLocal = isLocalHost(target.host);
+
+    // Optional volume transfer — BEFORE teardown so the export reads live
+    // volumes. Only local→remote is wired here; other combos fall through
+    // with a warning in the response message.
+    let volumesShipped = false;
+    let volumeWarning = '';
+    if (transferVolumes) {
+      if (currentLocal && !targetLocal) {
+        try {
+          const { stdout } = await execFileAsync('docker', ['volume', 'ls', '--format', '{{.Name}}'], { timeout: 15_000 });
+          const prefix = appVolumePrefix(app.name, id);
+          const volumes = stdout.trim().split('\n').filter(Boolean).filter((v) => v.startsWith(prefix));
+          if (volumes.length > 0) {
+            // Export locally into transfers/<id>/, then have the target
+            // import them. The import is enqueued BEFORE the redeploy task
+            // below, and the agent works its queue in order — volumes land
+            // before the stack comes up.
+            const transferId = await this.exportLocalVolumesForMove(volumes);
+            await this.agent.enqueueTask(targetServerId, 'VOLUME_IMPORT', {
+              volumes,
+              sourceTaskId: transferId,
+            });
+            volumesShipped = true;
+          }
+        } catch (e: any) {
+          volumeWarning = ` Volume transfer failed (${e?.message || e}) — continuing with empty volumes.`;
+        }
+      } else {
+        volumeWarning = ' Volume transfer is only supported local→remote for now — continuing with empty volumes.';
+      }
+    }
+
     // Tear down on the CURRENT server, volumes kept.
-    if (isAppLocal(current)) {
+    if (currentLocal) {
       const appDir = resolveAppDir(slug, id);
       if (fs.existsSync(appDir)) {
         try { await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 90_000); } catch {}
@@ -689,10 +729,36 @@ export class ApplicationsService {
       throw err;
     });
     this.proxy.regenerate().catch(() => {});
+    const volumeNote = volumesShipped
+      ? ' Docker volumes are being transferred — data appears once the import lands.'
+      : ` Volumes were NOT transferred — databases/uploads start empty on the new server (the old server keeps them).${volumeWarning}`;
     return {
-      message: `App moving to ${target.name}. Volumes were NOT transferred — databases/uploads start empty on the new server (the old server keeps them).`,
+      message: `App moving to ${target.name}.${volumeNote}`,
       deployment: result,
     };
+  }
+
+  /** Export local docker volumes into transfers/<id>/ for a remote import.
+   *  Streamed (`docker run busybox tar` → file), never buffered in memory. */
+  private async exportLocalVolumesForMove(volumes: string[]): Promise<string> {
+    const transferId = this.agent.newLocalTransferId();
+    const dir = this.agent.transferDir(transferId);
+    await fs.promises.mkdir(dir, { recursive: true });
+    for (const vol of volumes) {
+      const outPath = path.join(dir, `${path.basename(vol)}.tar.gz`);
+      await new Promise<void>((resolve, reject) => {
+        const out = fs.createWriteStream(outPath);
+        const child = spawn('docker', ['run', '--rm', '-v', `${vol}:/data:ro`, 'busybox', 'tar', '-czf', '-', '-C', '/data', '.']);
+        const timer = setTimeout(() => child.kill('SIGKILL'), 1_800_000);
+        child.stdout.pipe(out);
+        child.once('error', (err) => { clearTimeout(timer); out.destroy(); reject(err); });
+        child.once('close', (code) => {
+          clearTimeout(timer);
+          out.close(() => (code === 0 ? resolve() : reject(new Error(`volume export exited ${code}`))));
+        });
+      });
+    }
+    return transferId;
   }
 
   addPortBinding(userId: string, appId: string, domainId: string, port: number) {
