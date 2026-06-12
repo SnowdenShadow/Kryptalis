@@ -1015,6 +1015,10 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     containerName: string,
     image: string | null,
   ): Promise<string | null> {
+    // Keep in sync with files/docker-fs.ts IMAGE_ROOTS. SFTP reads the
+    // VOLUME directly (no in-container shell needed), so shell-less images
+    // like Portainer are browsable HERE even though the web file manager
+    // can't exec into them.
     const ROOT_MAP: Array<[RegExp, string]> = [
       [/prestashop/, '/var/www/html'],
       [/wordpress/, '/var/www/html'],
@@ -1022,6 +1026,10 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       [/nextcloud/, '/var/www/html'],
       [/gitea/, '/data'],
       [/nginx/, '/usr/share/nginx/html'],
+      [/portainer/, '/data'],
+      [/grafana/, '/var/lib/grafana'],
+      [/n8n/, '/home/node/.n8n'],
+      [/code-server|coder/, '/home/coder'],
     ];
     const lc = (image || containerName).toLowerCase();
     const match = ROOT_MAP.find(([re]) => re.test(lc));

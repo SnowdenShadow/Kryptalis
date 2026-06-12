@@ -128,6 +128,19 @@ export class NoShellError extends Error {
   }
 }
 
+/** Thrown when the container doesn't exist (yet) — app still deploying,
+ *  stopped+removed, or crashed before creation. */
+export class ContainerNotRunningError extends Error {
+  constructor(containerName: string, state: 'missing' | 'stopped') {
+    super(
+      state === 'missing'
+        ? `Container '${containerName}' does not exist yet — the app is probably still deploying (image pull + first boot can take a few minutes). Check the app's status and retry once it's RUNNING.`
+        : `Container '${containerName}' is stopped — start the app to browse its files.`,
+    );
+    this.name = 'ContainerNotRunningError';
+  }
+}
+
 async function dockerSh(
   containerName: string,
   shellCmd: string,
@@ -143,12 +156,24 @@ async function dockerSh(
     });
   } catch (err: any) {
     const blob = `${err?.stderr || ''} ${err?.message || ''}`.toLowerCase();
-    // dockerd's phrasing for a missing exec binary varies WIDELY by
-    // version/runtime:
-    //   "exec: \"sh\": executable file not found in $PATH"
-    //   "OCI runtime exec failed: ... no such file or directory"
-    //   "exec /bin/sh: no such file or directory"          (docker 23+)
-    //   "unable to start container process: exec: \"sh\"..." (containerd)
+    // Container doesn't exist (app mid-deploy / removed) or isn't running
+    // — distinct, actionable stories vs "image has no shell".
+    if (blob.includes('no such container')) {
+      throw new ContainerNotRunningError(containerName, 'missing');
+    }
+    if (blob.includes('is not running') || blob.includes('container is paused')) {
+      throw new ContainerNotRunningError(containerName, 'stopped');
+    }
+    // Exit codes are the RELIABLE signal — dockerd's error phrasing varies
+    // wildly by version (and some builds emit nothing on stderr at all,
+    // leaving only "Command failed: …"):
+    //   126 = found but not executable / cannot invoke
+    //   127 = command not found (no `sh` in the image — scratch/distroless)
+    if (err?.code === 126 || err?.code === 127) {
+      throw new NoShellError(containerName);
+    }
+    // String fallback for docker versions that exit differently but do
+    // phrase the problem on stderr.
     if (
       blob.includes('executable file not found') ||
       blob.includes('unable to start container process') ||
