@@ -66,9 +66,13 @@ export function OnboardingWizard({
   /** Mode actually persisted server-side — avoids re-PATCHing on Back/Next. */
   const [savedMode, setSavedMode] = useState<DeploymentMode | null>(null);
 
-  // Dynamic step list: MULTI inserts the add-server step.
+  // Dynamic step list: a panel-domain step always follows mode; MULTI also
+  // inserts the add-server step.
   const steps = useMemo(
-    () => (mode === 'MULTI' ? (['mode', 'server', 'project', 'done'] as const) : (['mode', 'project', 'done'] as const)),
+    () =>
+      mode === 'MULTI'
+        ? (['mode', 'domain', 'server', 'project', 'done'] as const)
+        : (['mode', 'domain', 'project', 'done'] as const),
     [mode],
   );
   const [stepIndex, setStepIndex] = useState(0);
@@ -92,6 +96,42 @@ export function OnboardingWizard({
       setStepIndex(1);
     } catch (err) {
       toastError(err, 'Mode');
+    }
+  }
+
+  // ── step: domain (panel hosting) ──────────────────────────────────
+  // Lets the operator serve THIS dashboard at https://<domain> (Caddy +
+  // Let's Encrypt) instead of http://ip:3000. Persists the system_domain
+  // setting — same one as Admin → Settings.
+  const [panelDomain, setPanelDomain] = useState('');
+  /** Domain actually persisted — idempotent on Back/Next. */
+  const [savedPanelDomain, setSavedPanelDomain] = useState<string | null>(null);
+  const DOMAIN_RE = /^(?=.{1,253}$)(?:(?!-)[a-z0-9-]{1,63}(?<!-)\.)+[a-z]{2,63}$/;
+  const panelDomainValid = panelDomain.trim() === '' || DOMAIN_RE.test(panelDomain.trim().toLowerCase());
+
+  const setDomainMutation = useMutation({
+    mutationFn: (value: string) =>
+      api.patch('/admin/settings/system_domain', { value }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['public-settings'] });
+    },
+  });
+
+  async function handleNextFromDomain() {
+    const value = panelDomain.trim().toLowerCase();
+    if (value && !DOMAIN_RE.test(value)) {
+      toast.error(t('onboarding.domainInvalid'));
+      return;
+    }
+    try {
+      if (value && savedPanelDomain !== value) {
+        await setDomainMutation.mutateAsync(value);
+        setSavedPanelDomain(value);
+        toast.success(t('onboarding.domainSaved'));
+      }
+      setStepIndex(stepIndex + 1);
+    } catch (err) {
+      toastError(err, 'Domain');
     }
   }
 
@@ -222,6 +262,67 @@ export function OnboardingWizard({
           <DialogFooter>
             <Button onClick={handleNextFromMode} disabled={setModeMutation.isPending}>
               {setModeMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+              {t('onboarding.next')}
+            </Button>
+          </DialogFooter>
+        </>
+      )}
+
+      {step === 'domain' && (
+        <>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Globe2 size={20} className="text-primary" />
+              {t('onboarding.panelDomain')}
+            </DialogTitle>
+            <DialogDescription className="mt-2">
+              {t('onboarding.panelDomainBody')}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-2">
+            <Label htmlFor="onboarding-panel-domain">{t('onboarding.panelDomainLabel')}</Label>
+            <Input
+              id="onboarding-panel-domain"
+              value={panelDomain}
+              onChange={(e) => setPanelDomain(e.target.value.toLowerCase().trim())}
+              placeholder="panel.acme.com"
+              autoFocus
+            />
+            {!panelDomainValid && (
+              <p className="text-xs text-destructive">{t('onboarding.domainInvalid')}</p>
+            )}
+            {savedPanelDomain && (
+              <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-2.5 text-xs">
+                <Check size={14} className="shrink-0 text-emerald-500" />
+                <span>
+                  {t('onboarding.domainSavedNote')}{' '}
+                  <a
+                    href={`https://${savedPanelDomain}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-mono font-medium text-primary hover:underline"
+                  >
+                    https://{savedPanelDomain}
+                  </a>
+                </span>
+              </div>
+            )}
+            <p className="text-[11px] text-muted-foreground">{t('onboarding.panelDomainHint')}</p>
+          </div>
+
+          <DialogFooter>
+            <Button variant="ghost" onClick={back} disabled={setDomainMutation.isPending}>
+              {t('onboarding.back')}
+            </Button>
+            <Button variant="outline" onClick={skip} disabled={setDomainMutation.isPending}>
+              {t('onboarding.skip')}
+            </Button>
+            <Button
+              onClick={handleNextFromDomain}
+              disabled={setDomainMutation.isPending || !panelDomainValid || (!panelDomain.trim() && !savedPanelDomain)}
+            >
+              {setDomainMutation.isPending && <Loader2 size={14} className="animate-spin" />}
               {t('onboarding.next')}
             </Button>
           </DialogFooter>

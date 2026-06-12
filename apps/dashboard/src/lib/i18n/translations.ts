@@ -704,6 +704,13 @@ export const translations: Record<string, Record<string, string>> = {
     'onboarding.installCmdLabel': 'Run this on your server (as root)',
     'onboarding.installCmdHint': 'The server appears as ONLINE in the dashboard once the agent has registered (usually under a minute).',
     'onboarding.projectCreated': 'Project created:',
+    'onboarding.panelDomain': 'Host this panel on a domain',
+    'onboarding.panelDomainBody': 'Serve the dashboard at https://your-domain (auto-TLS via Let\'s Encrypt) instead of http://ip:3000. Point the domain\'s A record at this server first, then enter it below. Skippable — also configurable later in Admin → Settings.',
+    'onboarding.panelDomainLabel': 'Panel domain',
+    'onboarding.panelDomainHint': 'The certificate is issued automatically on the first visit. Direct ip:3000 access keeps working until you lock it down (DASHBOARD_BIND=127.0.0.1 in .env).',
+    'onboarding.domainInvalid': 'Enter a valid domain (e.g. panel.acme.com).',
+    'onboarding.domainSaved': 'Panel domain saved — Caddy is configuring it now.',
+    'onboarding.domainSavedNote': 'Saved. Once DNS propagates, the panel answers at',
 
     // ── toast notifications (user-facing actions) ──────────────────
     'toast.appCreated': 'Application created',
@@ -1848,6 +1855,13 @@ export const translations: Record<string, Record<string, string>> = {
     'onboarding.installCmdLabel': 'À exécuter sur votre serveur (en root)',
     'onboarding.installCmdHint': 'Le serveur apparaît ONLINE dans le dashboard une fois l\'agent enregistré (généralement moins d\'une minute).',
     'onboarding.projectCreated': 'Projet créé :',
+    'onboarding.panelDomain': 'Héberger ce panel sur un domaine',
+    'onboarding.panelDomainBody': 'Servez le dashboard sur https://votre-domaine (TLS auto via Let\'s Encrypt) au lieu de http://ip:3000. Pointez d\'abord l\'enregistrement A du domaine vers ce serveur, puis saisissez-le ci-dessous. Passable — aussi configurable plus tard dans Admin → Paramètres.',
+    'onboarding.panelDomainLabel': 'Domaine du panel',
+    'onboarding.panelDomainHint': 'Le certificat est émis automatiquement à la première visite. L\'accès direct ip:3000 continue de fonctionner tant que vous ne le verrouillez pas (DASHBOARD_BIND=127.0.0.1 dans .env).',
+    'onboarding.domainInvalid': 'Saisissez un domaine valide (ex. panel.acme.com).',
+    'onboarding.domainSaved': 'Domaine du panel enregistré — Caddy le configure maintenant.',
+    'onboarding.domainSavedNote': 'Enregistré. Une fois le DNS propagé, le panel répond sur',
 
     // ── toast notifications (user-facing actions) ──────────────────
     'toast.appCreated': 'Application créée',
