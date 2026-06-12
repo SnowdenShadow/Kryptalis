@@ -759,7 +759,19 @@ export class FilesService {
     if (scope === 'app') {
       const target = await this.resolveDockerTarget(scopeId);
       if (target) {
-        const entries = await dockerFs.listDir(target, resolved.relPath);
+        let entries: Awaited<ReturnType<typeof dockerFs.listDir>>;
+        try {
+          entries = await dockerFs.listDir(target, resolved.relPath);
+        } catch (e) {
+          // Scratch/distroless images (Portainer, many Go binaries) ship
+          // no shell — exec'ing `sh` is impossible. Surface the human
+          // explanation as a 400 instead of bubbling a 500; the dashboard
+          // renders it in place of the listing.
+          if (e instanceof dockerFs.NoShellError) {
+            throw new BadRequestException(e.message);
+          }
+          throw e;
+        }
         return {
           scope: resolved.scope,
           scopeName: resolved.scopeName,

@@ -244,10 +244,18 @@ export default function FilesPage() {
   }, [scopes]);
 
   // ── listing (right panel) ──────────────────────────────────────────
-  const { data: listing, isLoading: listingLoading, refetch: refetchListing } = useQuery<ListResp>({
+  const {
+    data: listing,
+    isLoading: listingLoading,
+    refetch: refetchListing,
+    error: listingError,
+  } = useQuery<ListResp>({
     queryKey: ['file-list', selected?.scope, selected?.id, currentPath],
     queryFn: () => api.get(`/files/${selected!.scope}/${selected!.id}?path=${encodeURIComponent(currentPath)}`),
     enabled: !!selected,
+    // 4xx are deterministic (no-shell container, missing path) — retrying
+    // just delays the explanation.
+    retry: false,
   });
 
   // ── per-project storage usage / quota progress bar ────────────────
@@ -739,6 +747,14 @@ export default function FilesPage() {
                   {listingLoading ? (
                     <div className="p-8 flex justify-center">
                       <Loader2 size={20} className="animate-spin text-muted-foreground" />
+                    </div>
+                  ) : listingError ? (
+                    <div className="py-12 px-6 text-center text-sm">
+                      <AlertTriangle size={20} className="mx-auto mb-3 text-orange-500" />
+                      <p className="font-medium">{t('files.listingError')}</p>
+                      <p className="mt-1.5 text-xs text-muted-foreground max-w-md mx-auto">
+                        {(listingError as Error).message}
+                      </p>
                     </div>
                   ) : filteredEntries.length === 0 ? (
                     <div className="py-16 text-center text-muted-foreground text-sm">

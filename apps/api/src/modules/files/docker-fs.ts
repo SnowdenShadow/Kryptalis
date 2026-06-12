@@ -116,6 +116,18 @@ function joinAndValidate(rootDir: string, relPath: string): string {
  * pass a compound command (`ls -la ... | head -N` etc.) without having
  * to spawn a separate sh ourselves.
  */
+/** Thrown when the container image ships no shell (scratch/distroless —
+ *  Portainer, many Go binaries). Callers surface a human explanation
+ *  instead of a generic exec failure. */
+export class NoShellError extends Error {
+  constructor(containerName: string) {
+    super(
+      `Container '${containerName}' has no shell (scratch/distroless image) — in-container file browsing is not possible. Its data lives in a docker volume; use the app's own UI to manage it.`,
+    );
+    this.name = 'NoShellError';
+  }
+}
+
 async function dockerSh(
   containerName: string,
   shellCmd: string,
@@ -124,10 +136,24 @@ async function dockerSh(
   // execFile guards us from arg-list injection on the host side. The
   // injection-sensitive value lives INSIDE shellCmd which we build
   // with single-quoted paths after `joinAndValidate`.
-  return execFileAsync('docker', ['exec', containerName, 'sh', '-c', shellCmd], {
-    timeout,
-    maxBuffer: 4 * 1024 * 1024,
-  });
+  try {
+    return await execFileAsync('docker', ['exec', containerName, 'sh', '-c', shellCmd], {
+      timeout,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch (err: any) {
+    const blob = `${err?.stderr || ''} ${err?.message || ''}`.toLowerCase();
+    // dockerd's phrasing for a missing exec binary varies by version:
+    //   "exec: \"sh\": executable file not found in $PATH"
+    //   "OCI runtime exec failed: ... no such file or directory"
+    if (
+      blob.includes('executable file not found') ||
+      (blob.includes('oci runtime exec failed') && blob.includes('no such file'))
+    ) {
+      throw new NoShellError(containerName);
+    }
+    throw err;
+  }
 }
 
 /**
