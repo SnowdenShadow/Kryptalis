@@ -61,6 +61,8 @@ interface RepoDetection {
   framework?: string;
   hasDockerfile?: boolean;
   hasCompose?: boolean;
+  /** Env vars declared by the repo's .env.example (or committed .env). */
+  envVars?: Array<{ key: string; defaultValue: string }>;
 }
 interface MarketplaceApp {
   id: string;
@@ -288,6 +290,25 @@ export function QuickDeployDialog({
       if (found) setMarketplaceApp(found);
     }
   }, [open, mode, initialMarketplaceSlug, catalog, marketplaceApp]);
+
+  // Preload the repo's declared env vars (.env.example) when detection
+  // completes, so the user configures everything before the first deploy
+  // instead of discovering missing vars from a broken build. Only fills
+  // an untouched editor — never clobbers rows the user already typed.
+  useEffect(() => {
+    if (mode === 'git' && detection?.envVars?.length && envRows.length === 0) {
+      setEnvRows(
+        detection.envVars.map((e) => ({
+          key: e.key,
+          value: e.defaultValue || '',
+          hidden: /password|secret|token|key/i.test(e.key),
+        })),
+      );
+      setShowAdvanced(true);
+    }
+    // envRows.length intentionally omitted: fill-once guard, not a dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, detection]);
 
   // Preload marketplace env vars into the editor when an app is picked.
   useEffect(() => {

@@ -140,6 +140,29 @@ export class GitProvidersService {
       port = 8000;
     }
 
+    // Surface the repo's declared env vars so the deploy dialog can prefill
+    // the Advanced editor — the user configures everything BEFORE the first
+    // deploy instead of discovering missing vars from a broken build.
+    // .env.example is the convention for "here's what you must set"; fall
+    // back to a committed .env when there's no example file.
+    const envVars: Array<{ key: string; defaultValue: string }> = [];
+    for (const candidate of ['.env.example', '.env.sample', '.env']) {
+      const file = await this.fetchFile(id, userId, repoFullName, branch, candidate);
+      if (!file.exists || !file.content) continue;
+      for (const rawLine of file.content.split('\n')) {
+        const line = rawLine.replace(/\r$/, '');
+        if (!line || line.trimStart().startsWith('#')) continue;
+        const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+        if (!m) continue;
+        let val = m[2].trim();
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1);
+        }
+        envVars.push({ key: m[1], defaultValue: val });
+      }
+      break; // first file found wins — don't merge example with committed .env
+    }
+
     return {
       framework,
       buildCommand,
@@ -149,6 +172,7 @@ export class GitProvidersService {
       hasDockerfile,
       hasPackageJson,
       detectedFiles: Object.keys(found),
+      envVars,
     };
   }
 
