@@ -369,6 +369,53 @@ func writeEnvFile(path string, envVars map[string]interface{}) error {
 	return os.WriteFile(path, []byte(b.String()), 0600)
 }
 
+// mergeRepoEnv reads the repo's committed env files (lowest → highest:
+// .env.example, .env.local.example, .env.production, .env, .env.local) and
+// merges the user-supplied envVars on top (user always wins). Mirrors the
+// API's ApplicationEnvService.loadRepoEnvFiles priority so local and remote
+// deploys bake the same values.
+func mergeRepoEnv(dir string, userEnv map[string]interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+	for _, name := range []string{".env.example", ".env.local.example", ".env.production", ".env", ".env.local"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		for _, raw := range strings.Split(string(data), "\n") {
+			line := strings.TrimSuffix(raw, "\r")
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			line = strings.TrimPrefix(line, "export ")
+			eq := strings.Index(line, "=")
+			if eq <= 0 {
+				continue
+			}
+			key := strings.TrimSpace(line[:eq])
+			if !isValidEnvKey(key) {
+				continue
+			}
+			val := strings.TrimSpace(line[eq+1:])
+			quoted := false
+			if len(val) >= 2 && ((val[0] == '"' && val[len(val)-1] == '"') || (val[0] == '\'' && val[len(val)-1] == '\'')) {
+				val = val[1 : len(val)-1]
+				quoted = true
+			}
+			if !quoted {
+				if hash := strings.Index(val, " #"); hash != -1 {
+					val = strings.TrimRight(val[:hash], " \t")
+				}
+			}
+			out[key] = val
+		}
+	}
+	for k, v := range userEnv {
+		out[k] = v
+	}
+	return out
+}
+
 // strconv_QuoteCompat double-quotes a value for .env consumption, escaping
 // backslashes, double quotes, dollars and newlines (docker compose reads
 // double-quoted values with standard escapes).
@@ -512,7 +559,21 @@ func (p *Poller) runDeploy(ctx context.Context, task Task) (map[string]interface
 		if envVars == nil {
 			envVars = map[string]interface{}{}
 		}
-		if err := writeEnvFile(filepath.Join(dir, ".env"), envVars); err != nil {
+		if gitUrl != "" {
+			// Source build (git clone) — mirror the API's local-deploy logic:
+			// merge the repo's .env* files (lowest priority) under the user's
+			// envVars, then write the result to EVERY env file Next/Vite/CRA
+			// read at build time. Writing only .env is not enough: Next.js
+			// gives .env.production and .env.local committed in the repo
+			// priority OVER .env, so user-set NEXT_PUBLIC_* values were
+			// silently losing to stale repo values.
+			merged := mergeRepoEnv(dir, envVars)
+			for _, name := range []string{".env", ".env.local", ".env.production"} {
+				if err := writeEnvFile(filepath.Join(dir, name), merged); err != nil {
+					return map[string]interface{}{"logs": logs.String()}, "writing " + name + ": " + err.Error()
+				}
+			}
+		} else if err := writeEnvFile(filepath.Join(dir, ".env"), envVars); err != nil {
 			return map[string]interface{}{"logs": logs.String()}, "writing .env: " + err.Error()
 		}
 	}

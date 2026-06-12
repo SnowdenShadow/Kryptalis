@@ -187,6 +187,25 @@ export function injectComposeEnv(content: string, env: Record<string, string>): 
   if (!doc?.services) return content;
   for (const val of Object.values<any>(doc.services)) {
     val.environment = { ...(val.environment || {}), ...env };
+    // Services built from source also get the env as build args — frameworks
+    // that inline at build time (Next NEXT_PUBLIC_*, Vite VITE_*) read
+    // process.env during `npm run build`, which a Dockerfile maps from ARG.
+    // Without this, args hardcoded in the repo's compose win over the
+    // dashboard's env tab and "save then redeploy" silently keeps old values.
+    if (val.build) {
+      if (typeof val.build === 'string') val.build = { context: val.build };
+      const args = val.build.args;
+      if (Array.isArray(args)) {
+        // list form: ["KEY=value", ...] — replace overridden keys, append new
+        const kept = args.filter((a: any) => {
+          const key = String(a).split('=')[0];
+          return !(key in env);
+        });
+        val.build.args = [...kept, ...Object.entries(env).map(([k, v]) => `${k}=${v}`)];
+      } else {
+        val.build.args = { ...(args || {}), ...env };
+      }
+    }
   }
   return yaml.dump(doc, { lineWidth: 200 });
 }

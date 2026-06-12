@@ -1161,18 +1161,21 @@ export class ApplicationDeployService {
         // Defensive: nuke any container squatting the explicit names this
         // compose declares (leftovers from a failed deploy, etc).
         await removeCollidingContainers(content, log);
-        // Force a fresh build so frameworks that inline env vars at build
-        // time (Next.js NEXT_PUBLIC_*, Vite VITE_*, Angular fileReplacements)
-        // pick up the latest values. Without --no-cache, Docker reuses
-        // cached layers based on COPY/RUN steps — which don't see env
-        // file changes — and the rebuilt image bakes in stale values.
+        // Rebuild so frameworks that inline env vars at build time (Next.js
+        // NEXT_PUBLIC_*, Vite VITE_*) pick up the latest values. A plain
+        // `build` is enough: BuildKit's cache is content-addressed — changed
+        // source files / .env files invalidate COPY layers, and changed
+        // build args invalidate from the first ARG-consuming layer. Deps
+        // layers (npm ci) stay cached when the lockfile is unchanged, which
+        // is most of the build time. (--no-cache here used to make every
+        // redeploy reinstall everything for no correctness gain.)
         //
         // Unlike `pull`, a BUILD failure is fatal. Swallowing it here used to
         // let `up -d` relaunch a stale pre-existing image and mark the deploy
         // RUNNING with the OLD code — a silent non-deploy.
-        log('> docker compose build --no-cache');
+        log('> docker compose build');
         try {
-          const rb = await dockerCompose(appDir, ['build', '--no-cache', '--pull'], envFile, 900_000);
+          const rb = await dockerCompose(appDir, ['build'], envFile, 900_000);
           log(rb.stdout + rb.stderr);
         } catch (e: any) {
           const stderr = (e?.stderr || e?.message || 'compose build failed').toString();

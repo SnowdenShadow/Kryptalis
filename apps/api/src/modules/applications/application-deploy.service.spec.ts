@@ -627,14 +627,17 @@ describe('runDeploy — compose path', () => {
     );
   });
 
-  it('runs build --no-cache --pull and up -d --force-recreate with exact argv', async () => {
+  it('runs a cached build and up -d --force-recreate with exact argv', async () => {
     const { service } = makeService();
     await service.runDeploy('dep1', APP_ID, APP_NAME, GIT_URL, 'main', {
       composeOverride: USER_COMPOSE,
     });
 
+    // Plain `build` (no --no-cache): BuildKit's content-addressed cache
+    // already invalidates on source/.env/build-arg changes; deps layers
+    // stay cached so redeploys are fast.
     expect(
-      findExec((c) => c.cmd === 'docker' && c.args.join(' ') === 'compose build --no-cache --pull'),
+      findExec((c) => c.cmd === 'docker' && c.args.join(' ') === 'compose build'),
     ).toBeTruthy();
     expect(
       findExec(
