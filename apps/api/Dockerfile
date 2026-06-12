@@ -4,7 +4,7 @@ RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 # Cross-compile the kryptalis-agent for both archs the API serves at
 # GET /api/agent/binary?arch=amd64|arm64 — agent.controller.ts resolves
 # /app/apps/agent/bin/kryptalis-agent-linux-<arch> inside the container.
-FROM golang:1.22-alpine AS agent-builder
+FROM golang:1.25-alpine AS agent-builder
 WORKDIR /src
 COPY apps/agent/go.mod apps/agent/go.sum ./
 RUN go mod download
