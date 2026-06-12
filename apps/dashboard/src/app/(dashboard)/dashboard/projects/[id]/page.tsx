@@ -106,12 +106,16 @@ export default function ProjectDetailPage() {
     [t],
   );
 
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
+  const { data: publicSettings } = useQuery<{ deployment_mode?: string; public_ip?: string }>({
     queryKey: ['public-settings'],
     queryFn: () => api.get('/settings/public'),
     staleTime: 60_000,
   });
   const isMulti = publicSettings?.deployment_mode === 'MULTI';
+  // Direct-IP app links use the server's address, not the panel's hostname.
+  const serverIp = publicSettings?.public_ip && publicSettings.public_ip !== 'localhost'
+    ? publicSettings.public_ip
+    : undefined;
 
   const { data: servers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
     queryKey: ['servers'],
@@ -517,10 +521,10 @@ export default function ProjectDetailPage() {
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {apps.map(app => {
                 const isRunning = app.status === 'RUNNING';
-                // publicAppUrl resolves domain → binding → host:port; the old
-                // hardcoded localhost URL opened the VISITOR's machine on any
-                // remote install.
-                const openUrl = publicAppUrl(app);
+                // publicAppUrl resolves domain → binding → host:port. The
+                // direct-IP fallback targets the server's public_ip — not the
+                // hostname the panel is browsed through.
+                const openUrl = publicAppUrl(app, serverIp);
                 return (
                   <Link key={app.id} href={`/dashboard/applications/${app.id}`} className="block">
                     <Card className="hover:border-primary/50 transition-colors cursor-pointer overflow-hidden">

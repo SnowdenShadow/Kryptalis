@@ -439,7 +439,7 @@ export default function ApplicationDetailPage() {
   const [showMoveServer, setShowMoveServer] = useState(false);
   const [moveTargetId, setMoveTargetId] = useState('');
   const [moveWithVolumes, setMoveWithVolumes] = useState(true);
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
+  const { data: publicSettings } = useQuery<{ deployment_mode?: string; public_ip?: string }>({
     queryKey: ['public-settings'],
     queryFn: () => api.get('/settings/public'),
     staleTime: 60_000,
@@ -684,7 +684,16 @@ export default function ApplicationDetailPage() {
 
   const isRunning = app.status === 'RUNNING';
   const isStopped = app.status === 'STOPPED';
-  const hostname = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+  // "Direct IP" URLs must use the SERVER's address, not whatever hostname
+  // the dashboard happens to be browsed through. With the panel hosted on
+  // a domain, window.location.hostname is that domain — and direct-IP
+  // links would read http://<panel-domain>:8080 (works via DNS, but
+  // mislabeled and breaks the moment the panel moves behind a CDN/another
+  // box). public_ip comes from the API's PUBLIC_API_URL.
+  const browserHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+  const hostname = publicSettings?.public_ip && publicSettings.public_ip !== 'localhost'
+    ? publicSettings.public_ip
+    : browserHost;
   const statusBarColor = STATUS_COLOR[app.status] || 'bg-zinc-400';
 
   return (

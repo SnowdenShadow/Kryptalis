@@ -126,6 +126,17 @@ export default function ApplicationsPage() {
     queryFn: () => api.get('/applications'),
   });
 
+  // Direct-IP fallback URLs target the server's real address, not the
+  // hostname the panel is browsed through (see app detail page).
+  const { data: publicSettings } = useQuery<{ public_ip?: string }>({
+    queryKey: ['public-settings'],
+    queryFn: () => api.get('/settings/public'),
+    staleTime: 60_000,
+  });
+  const serverIp = publicSettings?.public_ip && publicSettings.public_ip !== 'localhost'
+    ? publicSettings.public_ip
+    : undefined;
+
   const filtered = useMemo(() => {
     let result = applications;
     if (filterProject) {
@@ -690,7 +701,7 @@ export default function ApplicationsPage() {
                           </span>
                         </div>
                       </div>
-                      {publicAppUrl(app) && (
+                      {publicAppUrl(app, serverIp) && (
                         <Button
                           size="sm"
                           className="shrink-0"
@@ -698,7 +709,7 @@ export default function ApplicationsPage() {
                           title={isRunning ? t('apps.openTooltip') : t('apps.openDisabledTooltip')}
                           onClick={(e) => {
                             stop(e);
-                            const url = publicAppUrl(app);
+                            const url = publicAppUrl(app, serverIp);
                             if (url) window.open(url, '_blank');
                           }}
                         >
