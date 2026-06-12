@@ -1,14 +1,10 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { Lock, Mail, Sparkles } from 'lucide-react';
 
-// Next 15 refuses to statically prerender a page that calls
-// useSearchParams() without an enclosing <Suspense>. Same fix as
-// verify-email — opt the page out of static rendering and wrap the
-// body in Suspense.
 export const dynamic = 'force-dynamic';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -19,17 +15,7 @@ import { api } from '@/lib/api';
 import { toast } from 'sonner';
 import { useTranslation } from '@/lib/i18n';
 
-// Wrapper — keeps Next.js happy about useSearchParams() needing a
-// Suspense boundary. The real body lives in RegisterPageInner.
 export default function RegisterPage() {
-  return (
-    <Suspense fallback={null}>
-      <RegisterPageInner />
-    </Suspense>
-  );
-}
-
-function RegisterPageInner() {
   const { t } = useTranslation();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -50,12 +36,12 @@ function RegisterPageInner() {
   const [resending, setResending] = useState(false);
   const { setAuth } = useAuthStore();
   const router = useRouter();
-  const searchParams = useSearchParams();
-  // `?setup=1` is appended by the landing page when the API reports
-  // `needsSetup`. We use it ONLY to show a welcome banner — the actual
-  // "becomes SUPERADMIN" decision is server-side at register time, so a
-  // stale link or hand-typed query can't escalate privileges.
-  const isSetup = searchParams.get('setup') === '1';
+  // Bootstrap banner driven by the SERVER's setup-status — not a query
+  // param. The old `?setup=1` approach showed the "you'll become
+  // SUPERADMIN" banner on stale/hand-typed links long after bootstrap,
+  // and HID it when someone landed on /register directly during a fresh
+  // install. null = still loading (banner hidden until resolved).
+  const [isSetup, setIsSetup] = useState<boolean | null>(null);
 
   const strengthScore = (pw: string) => {
     let s = 0;
@@ -86,6 +72,10 @@ function RegisterPageInner() {
         if (s.platform_name) setPlatformName(s.platform_name);
       })
       .catch(() => setRegEnabled(true));
+    // Server-authoritative bootstrap detection (see isSetup comment above).
+    api.get<{ needsSetup: boolean }>('/auth/setup-status')
+      .then((r) => setIsSetup(r.needsSetup))
+      .catch(() => setIsSetup(false));
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -207,7 +197,11 @@ function RegisterPageInner() {
     );
   }
 
-  if (regEnabled === false) {
+  // "Registration disabled" never applies to the bootstrap path — the
+  // server lets the FIRST account through regardless of the setting (it
+  // has to, or a fresh install with registration_enabled=false would be
+  // unusable). Mirror that here instead of dead-ending the operator.
+  if (regEnabled === false && isSetup !== true) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background p-4">
         <Card className="w-full max-w-md">

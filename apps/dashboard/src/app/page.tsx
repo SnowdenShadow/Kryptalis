@@ -9,7 +9,8 @@ import { useAuthStore } from '@/lib/store';
  * Landing page — fans out to the right starting screen for the current
  * install state.
  *
- *   needsSetup = true → /register?setup=1  (fresh install, no users yet)
+ *   needsSetup = true → /register  (fresh install, no users yet — the page
+ *                       detects bootstrap itself via /auth/setup-status)
  *   logged in        → /dashboard
  *   default          → /login
  *
@@ -30,7 +31,7 @@ export default function Home() {
     api
       .get<{ needsSetup: boolean }>('/auth/setup-status')
       .then((r) => {
-        router.replace(r.needsSetup ? '/register?setup=1' : '/login');
+        router.replace(r.needsSetup ? '/register' : '/login');
       })
       .catch(() => {
         // API unreachable — fall back to /login. Operator's setup script

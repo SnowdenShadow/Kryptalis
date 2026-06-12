@@ -1027,6 +1027,9 @@ export const translations: Record<string, Record<string, string>> = {
     'auth.setupDesc': 'Welcome — this is the first account on this install. It will be promoted to SUPERADMIN automatically.',
     'auth.setupBootstrapTitle': 'First-install bootstrap',
     'auth.setupBootstrapDesc': "After this account is created, the setup wizard goes away and every later signup becomes a regular USER. Pick a strong password — you can't downgrade or rotate this account without root DB access.",
+    'auth.noAccountsYetTitle': 'No accounts exist yet',
+    'auth.noAccountsYetDesc': 'This is a fresh install — there is nothing to sign in to. Create the first account (it becomes SUPERADMIN automatically).',
+    'auth.goToSetup': 'Create the admin account',
 
     // ── project detail page ────────────────────────────────────────
     'projects.tab.mesh': 'Service mesh',
@@ -2178,6 +2181,9 @@ export const translations: Record<string, Record<string, string>> = {
     'auth.setupDesc': 'Bienvenue — ceci est le premier compte de cette installation. Il sera promu SUPERADMIN automatiquement.',
     'auth.setupBootstrapTitle': 'Initialisation de la première installation',
     'auth.setupBootstrapDesc': "Une fois ce compte créé, l'assistant de configuration disparaît et toute inscription ultérieure devient un USER classique. Choisissez un mot de passe fort — impossible de rétrograder ou changer ce compte sans accès root à la base de données.",
+    'auth.noAccountsYetTitle': 'Aucun compte n\'existe encore',
+    'auth.noAccountsYetDesc': 'Installation fraîche — il n\'y a rien à quoi se connecter. Créez le premier compte (il devient SUPERADMIN automatiquement).',
+    'auth.goToSetup': 'Créer le compte admin',
 
     // ── page détail projet ─────────────────────────────────────────
     'projects.tab.mesh': 'Maillage de services',

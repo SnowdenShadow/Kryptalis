@@ -30,6 +30,10 @@ export default function LoginPage() {
   const [totpCode, setTotpCode] = useState('');
   const [useBackup, setUseBackup] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Fresh install (no accounts yet) → logging in is impossible. Show a
+  // banner pointing at /register instead of letting the user fail blind.
+  // The page itself stays fully usable — no forced redirect.
+  const [needsSetup, setNeedsSetup] = useState(false);
   const { setAuth } = useAuthStore();
   const isAuthed = useAuthStore((s) => !!s.accessToken);
   const router = useRouter();
@@ -39,6 +43,12 @@ export default function LoginPage() {
   useEffect(() => {
     if (isAuthed) router.replace('/dashboard');
   }, [isAuthed, router]);
+
+  useEffect(() => {
+    api.get<{ needsSetup: boolean }>('/auth/setup-status')
+      .then((r) => setNeedsSetup(r.needsSetup))
+      .catch(() => {});
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -91,6 +101,15 @@ export default function LoginPage() {
           <CardDescription>{t('auth.loginDesc')}</CardDescription>
         </CardHeader>
         <CardContent>
+          {needsSetup && (
+            <div className="mb-4 rounded-md border border-primary/30 bg-primary/5 p-3 text-xs space-y-1.5">
+              <p className="font-medium">{t('auth.noAccountsYetTitle')}</p>
+              <p className="text-muted-foreground">{t('auth.noAccountsYetDesc')}</p>
+              <Link href="/register" className="inline-block text-primary font-medium hover:underline">
+                {t('auth.goToSetup')} →
+              </Link>
+            </div>
+          )}
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="email">{t('auth.email')}</Label>

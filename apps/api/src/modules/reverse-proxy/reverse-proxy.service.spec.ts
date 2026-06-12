@@ -253,6 +253,29 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
     expect(caddyfile).toContain('reverse_proxy kryptalis-dashboard:3000');
   });
 
+  it('a Domain row colliding with system_domain is SKIPPED (one site block per host or Caddy refuses the whole config)', async () => {
+    const { service, prisma } = makeService([
+      domainRow({
+        domain: 'panel.acme.com',
+        applicationId: 'a1',
+        application: {
+          id: 'a1',
+          name: 'Grafana',
+          port: 3001,
+          customPort: false,
+          containerName: 'kryptalis-grafana-abc123def456',
+          containerPort: 3000,
+        },
+      }),
+    ]);
+    prisma.systemSetting.findUnique.mockResolvedValue({ key: 'system_domain', value: 'panel.acme.com' });
+    const { caddyfile } = await service.regenerate();
+    // Exactly ONE site block for the host — the platform one.
+    expect(caddyfile.match(/^panel\.acme\.com \{/gm)?.length).toBe(1);
+    expect(caddyfile).toContain('reverse_proxy kryptalis-dashboard:3000');
+    expect(caddyfile).not.toContain('kryptalis-grafana-abc123def456');
+  });
+
   it('system_domain with an unsafe value is ignored (no Caddy block)', async () => {
     const { service, prisma } = makeService([]);
     prisma.systemSetting.findUnique.mockResolvedValue({ key: 'system_domain', value: 'evil{injection}.com' });

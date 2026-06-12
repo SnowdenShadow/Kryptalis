@@ -358,10 +358,29 @@ ${email ? `  email ${email}\n` : ''}}
       return `  reverse_proxy ${scheme}${target} {\n${transport}\n  }`;
     };
 
+    // Platform domain — fetched BEFORE the loop so domain rows that
+    // collide with it can be skipped (two site blocks for the same host
+    // make the whole Caddyfile invalid → Caddy refuses to load → every
+    // domain goes down with ERR_CONNECTION_REFUSED).
+    const systemDomain = await this.prisma.systemSetting
+      .findUnique({ where: { key: 'system_domain' } })
+      .then((r) => (typeof r?.value === 'string' ? r.value : null))
+      .catch(() => null);
+
     for (const d of allDomains) {
       const host = d.domain;
       if (!SAFE_DOMAIN_RE.test(host)) {
         this.logger.warn(`Refusing to render Caddyfile block for unsafe domain '${host}'`);
+        continue;
+      }
+      if (systemDomain && host === systemDomain) {
+        // The platform block (below) owns this hostname — rendering the
+        // app block too would duplicate the site definition.
+        this.logger.warn(
+          `Domain '${host}' is also the platform domain (system_domain) — serving the dashboard there; the app attachment is ignored. Use a different domain for the app.`,
+        );
+        newStatusByDomainId[d.id] = 'ACTIVE';
+        activeCount++;
         continue;
       }
       // App and binding names also reach the Caddyfile via the 'respond'
@@ -460,10 +479,8 @@ ${email ? `  email ${email}\n` : ''}}
     // URL. The dashboard's runtime API resolution (api.ts) detects the
     // standard-port origin and goes same-origin, so /api lands here.
     // Validated at write time (updateSetting) + re-checked here.
-    const systemDomain = await this.prisma.systemSetting
-      .findUnique({ where: { key: 'system_domain' } })
-      .then((r) => (typeof r?.value === 'string' ? r.value : null))
-      .catch(() => null);
+    // (systemDomain itself is fetched above the domain loop — colliding
+    // Domain rows are skipped there to keep the site definition unique.)
     if (systemDomain && SAFE_DOMAIN_RE.test(systemDomain) && !this.isLocalHostname(systemDomain)) {
       blocks.push(`# ${systemDomain} :443 → Kryptalis dashboard + API (platform domain)`);
       blocks.push(`${systemDomain} {`);
@@ -514,7 +531,35 @@ ${email ? `  email ${email}\n` : ''}}
     blocks.push('}');
 
     const caddyfile = blocks.join('\n');
-    fs.writeFileSync(path.join(PROXY_DIR, 'Caddyfile'), caddyfile);
+    const caddyfilePath = path.join(PROXY_DIR, 'Caddyfile');
+    // Keep the previous (known-good) config for rollback: an invalid
+    // Caddyfile makes `caddy reload` fail AND a container restart loop —
+    // every hosted domain drops with ERR_CONNECTION_REFUSED until fixed.
+    let previousCaddyfile: string | null = null;
+    try {
+      previousCaddyfile = fs.readFileSync(caddyfilePath, 'utf-8');
+    } catch {}
+    fs.writeFileSync(caddyfilePath, caddyfile);
+
+    // Validate INSIDE the container (same binary/version that will load
+    // it — the file is bind-mounted, so the new content is already
+    // visible there). On failure: restore the previous config and bail
+    // out of the reload — serving yesterday's routes beats serving none.
+    try {
+      await execFileAsync(
+        'docker',
+        ['exec', CONTAINER_NAME, 'caddy', 'validate', '--config', '/etc/caddy/Caddyfile'],
+        { timeout: 15_000 },
+      );
+    } catch (e: any) {
+      this.logger.error(
+        `Generated Caddyfile failed validation — rolling back to the previous config. Error: ${e?.stderr || e?.message}`,
+      );
+      if (previousCaddyfile !== null) {
+        fs.writeFileSync(caddyfilePath, previousCaddyfile);
+      }
+      return { domains: activeCount, caddyfile, error: 'caddyfile validation failed — previous config kept' };
+    }
 
     // Caddy ONLY binds 80/443. Port-pinned URLs (https://domain:port) are
     // NOT proxied — the user opens http://domain:port directly to the
