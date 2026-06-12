@@ -7,6 +7,7 @@ import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
 import { DatabasesService } from '../databases/databases.service';
 import { AgentService } from '../agent/agent.service';
+import { ApplicationEnvService } from '../applications/application-env.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
@@ -111,6 +112,7 @@ export class MarketplaceService implements OnModuleInit {
     private domainAttach: DomainAttachService,
     private databases: DatabasesService,
     private agent: AgentService,
+    private appEnv: ApplicationEnvService,
   ) {
     if (!fs.existsSync(APPS_DIR)) {
       fs.mkdirSync(APPS_DIR, { recursive: true });
@@ -462,6 +464,46 @@ export class MarketplaceService implements OnModuleInit {
     // the runtime container env at the same time.
     Object.assign(envOverride, randomPasswords);
 
+    // Effective env snapshot → persisted (encrypted) on the Application row
+    // so the dashboard's "Variables d'environnement" tab shows what the
+    // container ACTUALLY got — including auto-generated admin passwords.
+    // Without this, marketplace installs showed an empty env tab and the
+    // user had no way to learn the generated Grafana/MinIO/… password.
+    //
+    // Sources, later wins:
+    //   1. every `${KEY:-default}` the rendered compose declares (the
+    //      default already contains the substituted random password)
+    //   2. the user's explicit envVars from the install dialog
+    const effectiveEnv: Record<string, string> = {};
+    const generatedCredentials: Record<string, string> = {};
+    const generatedValues = new Set(Object.values(randomPasswords));
+    const defaultRe = /\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}\s]*)\}/g;
+    let dm: RegExpExecArray | null;
+    while ((dm = defaultRe.exec(composeContent)) !== null) {
+      effectiveEnv[dm[1]] = dm[2];
+      if (generatedValues.has(dm[2])) generatedCredentials[dm[1]] = dm[2];
+    }
+    // Hardcoded creds (templates with literal env values, e.g. WordPress's
+    // bundled-DB password) — surface the generated ones so the user can
+    // find them in the env tab too. Matches both `KEY: value` map form and
+    // `- KEY=value` list form.
+    const literalRe = /^\s*(?:- )?([A-Za-z_][A-Za-z0-9_]*)[:=]\s*"?([A-Za-z0-9_-]+)"?\s*$/gm;
+    while ((dm = literalRe.exec(composeContent)) !== null) {
+      if (generatedValues.has(dm[2])) {
+        effectiveEnv[dm[1]] = dm[2];
+        generatedCredentials[dm[1]] = dm[2];
+      }
+    }
+    for (const [k, v] of Object.entries(data.envVars || {})) {
+      if (String(v).trim() === '') continue; // empty input → template default wins (`:-`)
+      effectiveEnv[k] = v;
+      delete generatedCredentials[k]; // user picked their own value
+    }
+    await this.prisma.application.update({
+      where: { id: application.id },
+      data: { envVars: this.appEnv.encryptEnvVars(effectiveEnv) as any },
+    });
+
     // Templates already declare:
     //   - networks: kryptalis-apps (external) at top-level
     //   - the service joined to that network
@@ -566,6 +608,10 @@ export class MarketplaceService implements OnModuleInit {
       taskId,
       applicationId: application.id,
       app,
+      // Auto-generated credentials (admin passwords etc.) the user did NOT
+      // pick themselves. Shown ONCE in the post-install dialog; afterwards
+      // they're retrievable from the app's env tab (persisted encrypted).
+      generatedCredentials,
     };
   }
 
@@ -757,7 +803,9 @@ export class MarketplaceService implements OnModuleInit {
         port: hostPort,
         customPort: !!data.hostPort,
         containerPort: data.containerPort,
-        envVars: (data.envVars || {}) as any,
+        // Encrypted like every other path — the env tab's getEnv() decrypts.
+        // Plaintext here leaked secrets into DB dumps.
+        envVars: this.appEnv.encryptEnvVars(data.envVars || {}) as any,
       },
     });
 
@@ -890,13 +938,13 @@ export class MarketplaceService implements OnModuleInit {
     }
     fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), compose);
 
-    // user-supplied envVars → written as .env (picked up by docker compose at runtime)
-    if (Object.keys(envOverride).length > 0) {
-      const envContent = Object.entries(envOverride)
-        .map(([k, v]) => `${k}=${String(v).replace(/\n/g, '\\n')}`)
-        .join('\n') + '\n';
-      fs.writeFileSync(path.join(appDir, '.env'), envContent);
-    }
+    // user-supplied envVars → written as .env (picked up by docker compose at
+    // runtime). ALWAYS written, even empty: every template declares
+    // `env_file: - .env`, and compose hard-fails on a missing env file.
+    const envContent = Object.entries(envOverride)
+      .map(([k, v]) => `${k}=${String(v).replace(/\n/g, '\\n')}`)
+      .join('\n') + '\n';
+    fs.writeFileSync(path.join(appDir, '.env'), envContent);
 
     // Companion files some templates bind-mount into the container
     // (e.g. PrestaShop's Apache proxy-trust conf). The compose body

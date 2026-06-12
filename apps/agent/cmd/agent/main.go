@@ -11,7 +11,27 @@ import (
 	"github.com/kryptalis/agent/internal/config"
 	"github.com/kryptalis/agent/internal/monitor"
 	"github.com/kryptalis/agent/internal/poller"
+	"github.com/kryptalis/agent/internal/sftpserver"
 )
+
+// sftpAdapter bridges poller.SftpSyncer (payload structs) to the
+// sftpserver implementation without coupling the two packages.
+type sftpAdapter struct{ srv *sftpserver.Server }
+
+func (a sftpAdapter) Sync(accounts []poller.SftpAccountPayload) int {
+	converted := make([]sftpserver.Account, 0, len(accounts))
+	for _, acc := range accounts {
+		converted = append(converted, sftpserver.Account{
+			Username:     acc.Username,
+			PasswordHash: acc.PasswordHash,
+			PublicKeys:   acc.PublicKeys,
+			Permission:   acc.Permission,
+			Disabled:     acc.Disabled,
+			Roots:        acc.Roots,
+		})
+	}
+	return a.srv.Sync(converted)
+}
 
 func main() {
 	cfg, err := config.Load()
@@ -23,6 +43,26 @@ func main() {
 	defer cancel()
 
 	p := poller.New(cfg)
+
+	// Embedded SFTP server — serves THIS host's app files to accounts the
+	// API pushes via SFTP_SYNC. Failure to start (port busy) is non-fatal:
+	// deploys still work; SFTP_SYNC tasks fail with a clear error.
+	sftpAddr := os.Getenv("KRYPTALIS_SFTP_ADDR")
+	if sftpAddr == "" {
+		sftpAddr = ":2522"
+	}
+	if srv, err := sftpserver.New("/opt/kryptalis/sftp-state", sftpAddr); err != nil {
+		log.Printf("sftp: disabled (%v)", err)
+	} else {
+		p.Sftp = sftpAdapter{srv: srv}
+		go func() {
+			if err := srv.Serve(); err != nil {
+				log.Printf("sftp: server stopped: %v", err)
+			}
+		}()
+		defer srv.Close()
+	}
+
 	go p.Start(ctx)
 
 	m := monitor.New(cfg)

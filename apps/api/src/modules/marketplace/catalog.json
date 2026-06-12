@@ -30,7 +30,7 @@
       "defaultPort": 3001,
       "envVars": [
         { "key": "GF_SECURITY_ADMIN_USER", "defaultValue": "admin", "required": false, "description": "Initial admin username" },
-        { "key": "GF_SECURITY_ADMIN_PASSWORD", "defaultValue": "admin", "required": true, "description": "Initial admin password (CHANGE ME)" }
+        { "key": "GF_SECURITY_ADMIN_PASSWORD", "defaultValue": "", "required": false, "description": "Initial admin password — leave empty to auto-generate a strong one (shown after install)" }
       ]
     },
     {
@@ -62,9 +62,8 @@
       "containerPort": 5678,
       "defaultPort": 5678,
       "envVars": [
-        { "key": "N8N_BASIC_AUTH_ACTIVE", "defaultValue": "true", "required": false, "description": "Enable basic auth on the web UI" },
-        { "key": "N8N_BASIC_AUTH_USER", "defaultValue": "admin", "required": false, "description": "Basic auth username" },
-        { "key": "N8N_BASIC_AUTH_PASSWORD", "defaultValue": "", "required": true, "description": "Basic auth password" }
+        { "key": "GENERIC_TIMEZONE", "defaultValue": "Europe/Paris", "required": false, "description": "Timezone for schedules/cron nodes" },
+        { "key": "N8N_HOST", "defaultValue": "", "required": false, "description": "Public hostname (set when behind a domain)" }
       ]
     },
     {
@@ -80,12 +79,7 @@
       "ports": [8080],
       "containerPort": 80,
       "defaultPort": 8080,
-      "envVars": [
-        { "key": "WORDPRESS_DB_HOST", "defaultValue": "db", "required": true, "description": "MySQL host" },
-        { "key": "WORDPRESS_DB_USER", "defaultValue": "wordpress", "required": true, "description": "MySQL user" },
-        { "key": "WORDPRESS_DB_PASSWORD", "defaultValue": "", "required": true, "description": "MySQL password" },
-        { "key": "WORDPRESS_DB_NAME", "defaultValue": "wordpress", "required": true, "description": "MySQL database name" }
-      ]
+      "envVars": []
     },
     {
       "id": "7",
@@ -101,8 +95,7 @@
       "containerPort": 2368,
       "defaultPort": 2368,
       "envVars": [
-        { "key": "url", "defaultValue": "http://localhost:2368", "required": true, "description": "Public site URL" },
-        { "key": "NODE_ENV", "defaultValue": "production", "required": false, "description": "Node environment" }
+        { "key": "url", "defaultValue": "", "required": false, "description": "Public site URL (leave empty to default to http://localhost:<port>)" }
       ]
     },
     {
@@ -119,8 +112,8 @@
       "containerPort": 9001,
       "defaultPort": 9001,
       "envVars": [
-        { "key": "MINIO_ROOT_USER", "defaultValue": "minioadmin", "required": true, "description": "Root username" },
-        { "key": "MINIO_ROOT_PASSWORD", "defaultValue": "minioadmin", "required": true, "description": "Root password (min 8 chars)" }
+        { "key": "MINIO_ROOT_USER", "defaultValue": "minioadmin", "required": false, "description": "Root username" },
+        { "key": "MINIO_ROOT_PASSWORD", "defaultValue": "", "required": false, "description": "Root password (min 8 chars) — leave empty to auto-generate (shown after install)" }
       ]
     },
     {
@@ -137,8 +130,8 @@
       "containerPort": 80,
       "defaultPort": 8081,
       "envVars": [
-        { "key": "NEXTCLOUD_ADMIN_USER", "defaultValue": "admin", "required": false, "description": "Admin username" },
-        { "key": "NEXTCLOUD_ADMIN_PASSWORD", "defaultValue": "", "required": true, "description": "Admin password" }
+        { "key": "NEXTCLOUD_ADMIN_USER", "defaultValue": "admin", "required": false, "description": "Admin username (set with password to skip the web installer)" },
+        { "key": "NEXTCLOUD_ADMIN_PASSWORD", "defaultValue": "", "required": false, "description": "Admin password — leave empty to create the admin via the web installer on first visit" }
       ]
     },
     {
@@ -155,9 +148,9 @@
       "containerPort": 5432,
       "defaultPort": 5433,
       "envVars": [
-        { "key": "POSTGRES_USER", "defaultValue": "postgres", "required": true, "description": "Superuser name" },
-        { "key": "POSTGRES_PASSWORD", "defaultValue": "", "required": true, "description": "Superuser password" },
-        { "key": "POSTGRES_DB", "defaultValue": "postgres", "required": false, "description": "Initial database name" }
+        { "key": "POSTGRES_USER", "defaultValue": "kryptalis", "required": false, "description": "Superuser name" },
+        { "key": "POSTGRES_PASSWORD", "defaultValue": "", "required": false, "description": "Superuser password — leave empty to auto-generate (shown after install)" },
+        { "key": "POSTGRES_DB", "defaultValue": "kryptalis", "required": false, "description": "Initial database name" }
       ]
     },
     {
@@ -234,10 +227,10 @@
       "containerPort": 3306,
       "defaultPort": 3306,
       "envVars": [
-        { "key": "MYSQL_ROOT_PASSWORD", "defaultValue": "", "required": true, "description": "Root password" },
+        { "key": "MYSQL_ROOT_PASSWORD", "defaultValue": "", "required": false, "description": "Root password — leave empty to auto-generate (shown after install)" },
         { "key": "MYSQL_DATABASE", "defaultValue": "app", "required": false, "description": "Initial database name" },
-        { "key": "MYSQL_USER", "defaultValue": "app", "required": false, "description": "Initial username" },
-        { "key": "MYSQL_PASSWORD", "defaultValue": "", "required": false, "description": "Initial user password" }
+        { "key": "MYSQL_USER", "defaultValue": "", "required": false, "description": "Optional extra user" },
+        { "key": "MYSQL_PASSWORD", "defaultValue": "", "required": false, "description": "Password for the extra user" }
       ]
     },
     {
@@ -254,8 +247,8 @@
       "containerPort": 27017,
       "defaultPort": 27017,
       "envVars": [
-        { "key": "MONGO_INITDB_ROOT_USERNAME", "defaultValue": "root", "required": true, "description": "Root username" },
-        { "key": "MONGO_INITDB_ROOT_PASSWORD", "defaultValue": "", "required": true, "description": "Root password" }
+        { "key": "MONGO_INITDB_ROOT_USERNAME", "defaultValue": "kryptalis", "required": false, "description": "Root username" },
+        { "key": "MONGO_INITDB_ROOT_PASSWORD", "defaultValue": "", "required": false, "description": "Root password — leave empty to auto-generate (shown after install)" }
       ]
     },
     {
@@ -308,8 +301,8 @@
       "containerPort": 8000,
       "defaultPort": 8086,
       "envVars": [
-        { "key": "BASE_URL", "defaultValue": "http://localhost:8088", "required": true, "description": "Public base URL of the install" },
-        { "key": "SECRET_KEY_BASE", "defaultValue": "", "required": true, "description": "64-char random secret (generate with openssl rand -base64 64)" }
+        { "key": "BASE_URL", "defaultValue": "", "required": false, "description": "Public base URL (leave empty to default to http://localhost:<port>)" },
+        { "key": "SECRET_KEY_BASE", "defaultValue": "", "required": false, "description": "64-char secret — leave empty to auto-generate" }
       ]
     },
     {
@@ -326,7 +319,7 @@
       "containerPort": 8080,
       "defaultPort": 8087,
       "envVars": [
-        { "key": "PASSWORD", "defaultValue": "", "required": true, "description": "Login password for the IDE" },
+        { "key": "PASSWORD", "defaultValue": "", "required": false, "description": "Login password for the IDE — leave empty to auto-generate (shown after install)" },
         { "key": "SUDO_PASSWORD", "defaultValue": "", "required": false, "description": "Optional sudo password inside the container" }
       ]
     },
@@ -348,7 +341,7 @@
         { "key": "PS_LANGUAGE", "defaultValue": "en", "required": false, "description": "Default store language (en, fr, es, de…)" },
         { "key": "PS_COUNTRY", "defaultValue": "FR", "required": false, "description": "Default country ISO code" },
         { "key": "ADMIN_MAIL", "defaultValue": "admin@example.com", "required": true, "description": "Back-office admin email (login)" },
-        { "key": "ADMIN_PASSWD", "defaultValue": "", "required": true, "description": "Back-office admin password (≥ 8 chars)" },
+        { "key": "ADMIN_PASSWD", "defaultValue": "", "required": false, "description": "Back-office admin password (≥ 8 chars) — leave empty to auto-generate (shown after install)" },
         { "key": "PS_INSTALL_AUTO", "defaultValue": "1", "required": false, "description": "Run the installer automatically on first boot (set 0 to install via the web UI)" }
       ]
     },
@@ -422,7 +415,7 @@
       "defaultPort": 5050,
       "envVars": [
         { "key": "PGADMIN_DEFAULT_EMAIL", "defaultValue": "admin@example.com", "required": true, "description": "Admin login email" },
-        { "key": "PGADMIN_DEFAULT_PASSWORD", "defaultValue": "", "required": true, "description": "Admin login password (≥ 8 chars)" },
+        { "key": "PGADMIN_DEFAULT_PASSWORD", "defaultValue": "", "required": false, "description": "Admin login password — leave empty to auto-generate (shown after install)" },
         { "key": "PGADMIN_LISTEN_PORT", "defaultValue": "80", "required": false, "description": "Internal port pgAdmin listens on" }
       ]
     },

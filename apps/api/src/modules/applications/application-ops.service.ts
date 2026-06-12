@@ -22,6 +22,7 @@ import {
   resolveAppServer,
   isAppLocal,
   assertAppOwnership,
+  APPS_DIR,
 } from './applications.helpers';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -166,6 +167,14 @@ export class ApplicationOpsService {
       return { message: 'Image re-pulled and stack recreated', deploymentId: deployment.id };
     }
 
+    // Marketplace / compose-only app: no git URL, no docker image, but a
+    // compose dir on disk. Redeploy = rewrite .env from the saved envVars
+    // + `docker compose up -d --force-recreate`. This is what makes the
+    // env tab's "save then redeploy" promise actually work for installs.
+    if (!app.gitUrl && !app.dockerImage && app.framework === 'DOCKER_COMPOSE') {
+      return this.redeployComposeDir(userId, app);
+    }
+
     if (!app.gitUrl) {
       throw new BadRequestException('Application has no git URL or docker image to redeploy from');
     }
@@ -189,6 +198,86 @@ export class ApplicationOpsService {
       portMapping: (app.portMapping as Record<string, number>) || undefined,
     }).catch(() => {});
     return { message: 'Redeploy triggered', deploymentId: deployment.id };
+  }
+
+  /**
+   * Redeploy a compose-dir-only app (marketplace install / pasted compose
+   * with no git source). The compose file on disk is the source of truth;
+   * we refresh .env from the app's saved (encrypted) envVars and recreate
+   * the stack so env changes take effect.
+   */
+  private async redeployComposeDir(userId: string, app: any) {
+    const server = await resolveAppServer(this.prisma, app.id);
+    if (!this.deploymentTarget.isLocal(server)) {
+      throw new BadRequestException(
+        'Env-only redeploy for marketplace apps on remote servers is not supported yet — use Restart, or uninstall/reinstall with the new values.',
+      );
+    }
+
+    // Marketplace installs write into <catalogSlug>-<id12>, which diverges
+    // from slugify(app.name) for renamed/suffixed installs ("WordPress 2").
+    // Custom-image installs use custom-<id12>. Scan for the per-instance
+    // suffix first; resolveAppDir covers the plain cases.
+    const id12 = app.id.slice(0, 12);
+    let appDir = resolveAppDir(slugify(app.name), app.id);
+    if (!findComposePath(appDir) && fs.existsSync(APPS_DIR)) {
+      const match = fs
+        .readdirSync(APPS_DIR)
+        .find((d) => d.endsWith(`-${id12}`) && findComposePath(path.join(APPS_DIR, d)));
+      if (match) appDir = path.join(APPS_DIR, match);
+    }
+    if (!findComposePath(appDir)) {
+      throw new BadRequestException(
+        'No compose file found for this app on the server — it may have been removed. Reinstall it from the marketplace.',
+      );
+    }
+
+    const deployment = await this.prisma.deployment.create({
+      data: {
+        applicationId: app.id,
+        status: 'DEPLOYING',
+        commitMessage: 'Redeploy (env refresh)',
+        triggeredById: userId,
+        startedAt: new Date(),
+      },
+    });
+
+    // .env refresh: saved envVars are the user-editable layer. We merge them
+    // OVER the existing .env (which holds the install-time generated
+    // passwords) so deleting a row in the UI doesn't wipe a generated
+    // credential the compose still references via ${VAR:-default}.
+    const saved = this.env.decryptEnvVars(app.envVars);
+    const envPath = path.join(appDir, '.env');
+    const existing: Record<string, string> = {};
+    if (fs.existsSync(envPath)) {
+      for (const line of fs.readFileSync(envPath, 'utf-8').split('\n')) {
+        const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+        if (m) existing[m[1]] = m[2];
+      }
+    }
+    const merged = { ...existing, ...Object.fromEntries(
+      Object.entries(saved).map(([k, v]) => [k, String(v).replace(/\n/g, '\\n')]),
+    ) };
+    fs.writeFileSync(envPath, Object.entries(merged).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
+
+    try {
+      // --force-recreate: env changes alone don't alter the compose hash,
+      // so a plain `up -d` would conclude "nothing to do".
+      await dockerCompose(appDir, ['up', '-d', '--force-recreate'], undefined, 300_000);
+      await this.prisma.deployment.update({
+        where: { id: deployment.id },
+        data: { status: 'RUNNING', finishedAt: new Date() },
+      });
+      await this.prisma.application.update({ where: { id: app.id }, data: { status: 'RUNNING' } });
+      return { message: 'Stack recreated with the updated environment', deploymentId: deployment.id };
+    } catch (err: any) {
+      await this.prisma.deployment.update({
+        where: { id: deployment.id },
+        data: { status: 'FAILED', finishedAt: new Date(), buildLogs: String(err?.message || err).slice(0, 50_000) },
+      });
+      await this.prisma.application.update({ where: { id: app.id }, data: { status: 'ERROR' } });
+      throw new BadRequestException(`Redeploy failed: ${String(err?.message || err).slice(0, 500)}`);
+    }
   }
 
   /**

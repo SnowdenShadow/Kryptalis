@@ -185,7 +185,11 @@ export class FilesService {
             id: true,
             name: true,
             applications: {
-              select: { id: true, name: true, framework: true, status: true, containerName: true, dockerImage: true },
+              select: {
+                id: true, name: true, framework: true, status: true, containerName: true, dockerImage: true,
+                server: { select: { host: true } },
+                project: { select: { server: { select: { host: true } } } },
+              },
             },
             databases: {
               select: { id: true, name: true, type: true, applicationId: true },
@@ -204,7 +208,11 @@ export class FilesService {
         id: true,
         name: true,
         applications: {
-          select: { id: true, name: true, framework: true, status: true, containerName: true, dockerImage: true },
+          select: {
+            id: true, name: true, framework: true, status: true, containerName: true, dockerImage: true,
+            server: { select: { host: true } },
+            project: { select: { server: { select: { host: true } } } },
+          },
         },
         databases: {
           select: { id: true, name: true, type: true, applicationId: true },
@@ -223,7 +231,9 @@ export class FilesService {
       role: p.role,
       applications: p.applications
         .map((a) => {
-          const hostHasFiles = fs.existsSync(this.appRootDir(a.id, this.slugify(a.name)));
+          const serverHost = (a as any).server?.host ?? (a as any).project?.server?.host;
+          const isRemote = !!serverHost && !isLocalHost(serverHost);
+          const hostHasFiles = !isRemote && fs.existsSync(this.appRootDir(a.id, this.slugify(a.name)));
           const hasContainer = !!(a as any).containerName;
           // Shell-less images (Portainer & friends) can't be exec'd into —
           // the web browser would fail on every click. Detected by image
@@ -231,13 +241,19 @@ export class FilesService {
           // distroless. Their data is still reachable over SFTP.
           const imageHint = `${(a as any).dockerImage || ''} ${(a as any).containerName || ''}`.toLowerCase();
           const shellLess = /portainer/.test(imageHint);
+          // Strip the nested relations from the response (UI doesn't need
+          // them and they leak server hosts to project members).
+          const { server: _s, project: _p, ...rest } = a as any;
           return {
-            ...a,
-            hasFiles: hostHasFiles || hasContainer,
+            ...rest,
+            // Remote apps are browsed through the agent (FILE_LIST) — the
+            // agent-side dir always exists once deployed.
+            hasFiles: isRemote || hostHasFiles || hasContainer,
+            remote: isRemote,
             // browsable=false → the dashboard hides the entry entirely.
             // Host files always win (compose/.env are editable even for a
             // shell-less app's host dir).
-            browsable: hostHasFiles || (hasContainer && !shellLess),
+            browsable: isRemote || hostHasFiles || (hasContainer && !shellLess),
           };
         })
         .filter((a) => a.browsable),

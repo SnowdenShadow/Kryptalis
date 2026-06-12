@@ -36,6 +36,26 @@ type Poller struct {
 	tasks  *tasks.Runner
 	sem    chan struct{}
 	wg     sync.WaitGroup
+	// Embedded SFTP server — accounts pushed via SFTP_SYNC tasks. Nil
+	// when the server failed to start (port busy); SFTP_SYNC then fails
+	// loudly instead of silently dropping accounts.
+	Sftp SftpSyncer
+}
+
+// SftpSyncer is implemented by sftpserver.Server. Interface (not the
+// concrete type) so poller tests don't need the ssh/sftp dependencies.
+type SftpSyncer interface {
+	Sync(accounts []SftpAccountPayload) int
+}
+
+// SftpAccountPayload mirrors sftpserver.Account field-for-field.
+type SftpAccountPayload struct {
+	Username     string            `json:"username"`
+	PasswordHash string            `json:"passwordHash,omitempty"`
+	PublicKeys   []string          `json:"publicKeys,omitempty"`
+	Permission   string            `json:"permission"`
+	Disabled     bool              `json:"disabled"`
+	Roots        map[string]string `json:"roots"`
 }
 
 const maxConcurrentTasks = 4
@@ -51,6 +71,7 @@ var taskTimeouts = map[string]time.Duration{
 	"STOP":       5 * time.Minute,
 	"REMOVE":     5 * time.Minute,
 	"LOGS":       1 * time.Minute,
+	"SFTP_SYNC":  1 * time.Minute,
 	"EXEC":       2 * time.Minute,
 	"STATUS":     1 * time.Minute,
 	"FILE_READ":  30 * time.Second,
@@ -215,6 +236,8 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.runFileDelete(task)
 	case "DISK_USAGE":
 		result, taskErr = p.runDiskUsage(task)
+	case "SFTP_SYNC":
+		result, taskErr = p.runSftpSync(task)
 	case "VOLUME_EXPORT":
 		result, taskErr = p.tasks.VolumeExport(tctx, task.ID, task.Payload)
 	case "VOLUME_IMPORT":
@@ -482,7 +505,13 @@ func (p *Poller) runDeploy(ctx context.Context, task Task) (map[string]interface
 		}
 	}
 
-	if envVars, ok := task.Payload["envVars"].(map[string]interface{}); ok && len(envVars) > 0 {
+	// .env is ALWAYS written, even empty — marketplace templates declare
+	// `env_file: - .env` and docker compose hard-fails on a missing file.
+	{
+		envVars, _ := task.Payload["envVars"].(map[string]interface{})
+		if envVars == nil {
+			envVars = map[string]interface{}{}
+		}
 		if err := writeEnvFile(filepath.Join(dir, ".env"), envVars); err != nil {
 			return map[string]interface{}{"logs": logs.String()}, "writing .env: " + err.Error()
 		}
@@ -777,6 +806,31 @@ func (p *Poller) runFileDelete(task Task) (map[string]interface{}, string) {
 		return nil, err.Error()
 	}
 	return map[string]interface{}{"deleted": true}, ""
+}
+
+// runSftpSync replaces the embedded SFTP server's full account set with
+// the payload's `accounts` array (API = source of truth, idempotent).
+func (p *Poller) runSftpSync(task Task) (map[string]interface{}, string) {
+	if p.Sftp == nil {
+		return nil, "embedded SFTP server is not running on this agent (port busy at startup?)"
+	}
+	raw, ok := task.Payload["accounts"]
+	if !ok {
+		return nil, "missing accounts"
+	}
+	// Round-trip through JSON: the payload arrives as []interface{} of
+	// map[string]interface{} — re-marshal is simpler and safer than
+	// hand-walking the nesting.
+	blob, err := json.Marshal(raw)
+	if err != nil {
+		return nil, "invalid accounts payload: " + err.Error()
+	}
+	var accounts []SftpAccountPayload
+	if err := json.Unmarshal(blob, &accounts); err != nil {
+		return nil, "invalid accounts payload: " + err.Error()
+	}
+	n := p.Sftp.Sync(accounts)
+	return map[string]interface{}{"synced": n}, ""
 }
 
 // runDiskUsage reports the byte size of one or more app dirs — feeds the

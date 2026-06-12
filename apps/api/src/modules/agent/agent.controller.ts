@@ -348,6 +348,8 @@ UNITEOF
   echo "  Server ID: \$SERVER_ID"
   echo "  Status:    systemctl status kryptalis-agent"
   echo "  Logs:      journalctl -u kryptalis-agent -f"
+  echo "  SFTP:      port 2522 (embedded server — open it in your firewall"
+  echo "             if you plan to use SFTP accounts on this server)"
 else
   # No systemd (container / WSL / Cloud Shell) — run the agent with nohup
   # and drop a start script so it can be relaunched after a reboot.

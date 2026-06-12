@@ -160,6 +160,12 @@ export function QuickDeployDialog({
   // '' = inherit the project's default server.
   const [serverChoice, setServerChoice] = useState('');
 
+  // ── Post-install generated credentials ─────────────────────────
+  // Marketplace installs auto-generate admin passwords when the user
+  // leaves the field empty. The install response returns them ONCE —
+  // we hold the dialog open on a reveal screen instead of closing.
+  const [generatedCreds, setGeneratedCreds] = useState<Record<string, string> | null>(null);
+
   // ── Loaders ─────────────────────────────────────────────────────
   const { data: projects = [] } = useQuery<Project[]>({
     queryKey: ['projects'],
@@ -339,6 +345,7 @@ export function QuickDeployDialog({
     setEnvRows([]);
     setGitSource('provider');
     setServerChoice('');
+    setGeneratedCreds(null);
   }
 
   function handleClose() {
@@ -447,11 +454,19 @@ export function QuickDeployDialog({
       if (serverChoice) body.serverId = serverChoice;
       return api.post('/applications', body);
     },
-    onSuccess: () => {
+    onSuccess: (res: any) => {
       qc.invalidateQueries({ queryKey: ['applications'] });
       qc.invalidateQueries({ queryKey: ['domains'] });
       toast.success(t('toast.appCreated'));
-      handleClose();
+      // Marketplace installs may auto-generate admin credentials — show
+      // them once instead of closing. They stay retrievable in the app's
+      // env tab afterwards.
+      const creds = res?.generatedCredentials;
+      if (creds && Object.keys(creds).length > 0) {
+        setGeneratedCreds(creds);
+      } else {
+        handleClose();
+      }
     },
     onError: (err: Error) => toastError(err),
   });
@@ -472,6 +487,46 @@ export function QuickDeployDialog({
           a.slug.toLowerCase().includes(marketplaceSearch.toLowerCase()),
       )
     : catalog;
+
+  // ── Layout: post-install generated credentials reveal ──────────
+  if (generatedCreds) {
+    return (
+      <Dialog open={open} onClose={handleClose} className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Sparkles size={18} />
+            {t('quickDeploy.credsTitle') || 'Generated credentials'}
+          </DialogTitle>
+          <DialogDescription>
+            {t('quickDeploy.credsDesc') ||
+              'These passwords were auto-generated for this install. Copy them now — you can also find them later in the app\'s Environment Variables tab.'}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2 py-2">
+          {Object.entries(generatedCreds).map(([k, v]) => (
+            <div key={k} className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+              <code className="text-xs font-semibold shrink-0">{k}</code>
+              <code className="text-xs font-mono truncate flex-1 text-muted-foreground">{v}</code>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2 shrink-0"
+                onClick={() => {
+                  navigator.clipboard.writeText(v);
+                  toast.success(t('common.copied') || 'Copied');
+                }}
+              >
+                {t('common.copy') || 'Copy'}
+              </Button>
+            </div>
+          ))}
+        </div>
+        <DialogFooter>
+          <Button onClick={handleClose}>{t('common.done') || 'Done'}</Button>
+        </DialogFooter>
+      </Dialog>
+    );
+  }
 
   // ── Layout: Mode picker first ──────────────────────────────────
   if (!mode) {

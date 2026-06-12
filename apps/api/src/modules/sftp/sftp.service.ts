@@ -12,6 +12,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
+import { AgentService } from '../agent/agent.service';
+import { remoteAppSlug, slugify as appSlugify } from '../applications/applications.helpers';
 import * as crypto from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { execFile } from 'child_process';
@@ -116,6 +118,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private prisma: PrismaService,
     private encryption: EncryptionService,
+    private agent: AgentService,
   ) {}
 
   // ── Lifecycle ─────────────────────────────────────────────────────
@@ -146,12 +149,25 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
 
   // ── Read paths ────────────────────────────────────────────────────
 
-  async list(userId: string, scope: 'app' | 'project', scopeId: string): Promise<SftpAccount[]> {
+  async list(
+    userId: string,
+    scope: 'app' | 'project',
+    scopeId: string,
+  ): Promise<Array<SftpAccount & { remoteHost?: string | null; remotePort?: number | null }>> {
     await this.assertScopeAccess(userId, scope, scopeId, 'VIEWER');
-    return this.prisma.sftpAccount.findMany({
+    const rows = await this.prisma.sftpAccount.findMany({
       where: scope === 'app' ? { applicationId: scopeId } : { projectId: scopeId },
       orderBy: { createdAt: 'desc' },
     });
+    // Annotate with the connection target: remote-placed scopes connect
+    // to the agent's embedded server (their server's host, port 2522);
+    // local scopes use the platform host on 2222 (UI default).
+    const remote = await this.resolveRemoteSftpServer(scope, scopeId).catch(() => null);
+    return rows.map((r) => ({
+      ...r,
+      remoteHost: remote?.host ?? null,
+      remotePort: remote ? 2522 : null,
+    }));
   }
 
   // ── Mutating paths ────────────────────────────────────────────────
@@ -168,7 +184,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       expiresAt?: Date;
       allowShell?: boolean;
     },
-  ): Promise<{ account: SftpAccount; plainPassword: string | null }> {
+  ): Promise<{ account: SftpAccount; plainPassword: string | null; remoteHost?: string | null }> {
     // Read-only callers need DEVELOPER; anything that can write to the
     // app's data needs ADMIN. (READ is enforced at the sshd layer; the
     // role gate is a separate, conservative check on who can issue
@@ -204,10 +220,13 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       passwordEnc = this.encryption.encrypt(plainPassword);
     }
 
-    // Resolve chroot binds BEFORE creating the row — if the app has
-    // never been deployed there's nothing to FTP into, and we don't
-    // want a phantom DB row blocking the username.
-    const chrootBinds = await this.resolveChrootBinds(scope, scopeId);
+    // Routing: apps on a remote server are served by THAT server's agent
+    // (embedded SFTP on :2522). Local apps go through the platform's SFTP
+    // container as before. Resolved BEFORE creating the row.
+    const remoteServer = await this.resolveRemoteSftpServer(scope, scopeId);
+    // Local chroot binds only make sense for the local path — and double
+    // as the "has this ever been deployed" check.
+    const chrootBinds = remoteServer ? [] : await this.resolveChrootBinds(scope, scopeId);
 
     const account = await this.prisma.sftpAccount.create({
       data: {
@@ -219,35 +238,106 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
         projectId: scope === 'project' ? scopeId : null,
         permission: dto.permission ?? 'WRITE',
         expiresAt: dto.expiresAt,
-        allowShell: !!dto.allowShell,
+        // Shell chroots only exist in the local SFTP container.
+        allowShell: remoteServer ? false : !!dto.allowShell,
         createdById: userId,
       },
     });
 
     try {
-      await this.applyAccountToContainer({
-        username,
-        plainPassword,
-        publicKeys,
-        chrootBinds,
-        permission: account.permission,
-        disabled: false,
-        allowShell: account.allowShell,
-      });
+      if (remoteServer) {
+        await this.syncRemoteSftpAccounts(remoteServer.id);
+      } else {
+        await this.applyAccountToContainer({
+          username,
+          plainPassword,
+          publicKeys,
+          chrootBinds,
+          permission: account.permission,
+          disabled: false,
+          allowShell: account.allowShell,
+        });
+      }
     } catch (err: any) {
       // Roll back the DB row so the username doesn't get stuck. We log
       // ABOVE the rollback so the failed apply is captured even if the
       // delete also throws.
-      this.logger.error(`Container apply failed for ${username}: ${err?.message || err}`);
+      this.logger.error(`SFTP apply failed for ${username}: ${err?.message || err}`);
       await this.prisma.sftpAccount.delete({ where: { id: account.id } }).catch(() => {});
-      throw new BadRequestException(`SFTP container rejected the account: ${err?.message || err}`);
+      throw new BadRequestException(`SFTP backend rejected the account: ${err?.message || err}`);
     }
 
     await this.audit(userId, 'create', account.id, username, {
       scope, scopeId, permission: account.permission, hasKeys: publicKeys.length,
+      ...(remoteServer ? { remoteServerId: remoteServer.id } : {}),
     });
 
-    return { account, plainPassword };
+    return { account, plainPassword, remoteHost: remoteServer?.host ?? null };
+  }
+
+  /**
+   * Push the FULL desired account set for a remote server to its agent
+   * (SFTP_SYNC). Full-state + idempotent: every call rebuilds the list
+   * from the DB, so create/update/delete/rotate all share this one sync
+   * path and a lost task self-heals on the next call.
+   */
+  private async syncRemoteSftpAccounts(serverId: string): Promise<void> {
+    // Accounts whose scope resolves to this server: app-scoped accounts
+    // on apps placed there + project-scoped accounts on projects whose
+    // default server is there.
+    const accounts = await this.prisma.sftpAccount.findMany({
+      where: {
+        OR: [
+          { application: { serverId } },
+          { application: { serverId: null, project: { serverId } } },
+          { project: { serverId } },
+        ],
+      },
+      include: {
+        application: { select: { id: true, name: true } },
+        project: {
+          select: {
+            serverId: true,
+            applications: { select: { id: true, name: true, serverId: true } },
+          },
+        },
+      },
+    });
+
+    const payload = accounts.map((acc) => {
+      const roots: Record<string, string> = {};
+      if (acc.application) {
+        roots['app'] = `/opt/kryptalis/apps/${remoteAppSlug(acc.application.name, acc.application.id)}`;
+      } else if (acc.project) {
+        for (const app of acc.project.applications) {
+          // Only this server's apps — a project may span machines.
+          const appServer = app.serverId ?? acc.project.serverId;
+          if (appServer !== serverId) continue;
+          roots[`${appSlugify(app.name)}-${app.id.slice(0, 12)}`] =
+            `/opt/kryptalis/apps/${remoteAppSlug(app.name, app.id)}`;
+        }
+      }
+      return {
+        username: acc.username,
+        passwordHash: acc.passwordHash ?? undefined,
+        publicKeys: (acc.publicKeys as string[] | null) ?? [],
+        permission: acc.permission,
+        disabled: acc.disabled || (acc.expiresAt ? acc.expiresAt < new Date() : false),
+        roots,
+      };
+    });
+
+    const task = await this.agent.enqueueAndWait(serverId, 'SFTP_SYNC' as any, { accounts: payload }, 60_000);
+    if (task.status === 'FAILED') {
+      throw new Error(task.error || 'remote SFTP sync failed');
+    }
+  }
+
+  /** The remote server an account's files live on, or null for local. */
+  private async remoteServerForAccount(acc: SftpAccount): Promise<{ id: string; host: string } | null> {
+    if (acc.applicationId) return this.resolveRemoteSftpServer('app', acc.applicationId);
+    if (acc.projectId) return this.resolveRemoteSftpServer('project', acc.projectId);
+    return null;
   }
 
   async rotatePassword(userId: string, id: string): Promise<{ plainPassword: string }> {
@@ -256,14 +346,26 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     const passwordHash = await bcrypt.hash(plainPassword, 10);
     const passwordEnc = this.encryption.encrypt(plainPassword);
 
-    // Order matters: apply to container FIRST, then persist. If the
-    // container fails, the old password keeps working — better than
-    // a DB out of sync with sshd (user thinks the rotation worked).
-    await this.execChpasswd(acc.username, plainPassword);
-    await this.prisma.sftpAccount.update({
-      where: { id: acc.id },
-      data: { passwordHash, passwordEnc },
-    });
+    const remoteServer = await this.remoteServerForAccount(acc);
+    if (remoteServer) {
+      // Remote: persist first, then full-state sync (the agent's auth
+      // reads the bcrypt hash from the synced set — there is no separate
+      // chpasswd step).
+      await this.prisma.sftpAccount.update({
+        where: { id: acc.id },
+        data: { passwordHash, passwordEnc },
+      });
+      await this.syncRemoteSftpAccounts(remoteServer.id);
+    } else {
+      // Local: apply to container FIRST, then persist. If the container
+      // fails, the old password keeps working — better than a DB out of
+      // sync with sshd (user thinks the rotation worked).
+      await this.execChpasswd(acc.username, plainPassword);
+      await this.prisma.sftpAccount.update({
+        where: { id: acc.id },
+        data: { passwordHash, passwordEnc },
+      });
+    }
 
     await this.audit(userId, 'rotate', acc.id, acc.username);
     return { plainPassword };
@@ -289,6 +391,26 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     if (patch.allowShell !== undefined) data.allowShell = patch.allowShell;
     if (patch.publicKeys !== undefined) {
       data.publicKeys = this.normalizePublicKeys(patch.publicKeys) as any;
+    }
+
+    // Remote account → persist, then one full-state sync covers every
+    // patched field (the agent reads permission/disabled/keys from the
+    // synced set). allowShell is local-only — force false.
+    const remoteForUpdate = await this.remoteServerForAccount(acc);
+    if (remoteForUpdate) {
+      if (patch.allowShell) data.allowShell = false;
+      const updatedRemote = await this.prisma.sftpAccount.update({
+        where: { id: acc.id },
+        data,
+      });
+      await this.syncRemoteSftpAccounts(remoteForUpdate.id);
+      await this.audit(
+        userId,
+        patch.disabled === true ? 'disable' : patch.disabled === false ? 'enable' : 'update',
+        acc.id, acc.username,
+        { remoteServerId: remoteForUpdate.id },
+      );
+      return updatedRemote;
     }
 
     // Compute the desired final state by overlaying the patch on the
@@ -360,8 +482,18 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
 
   async remove(userId: string, id: string): Promise<{ message: string }> {
     const acc = await this.assertAccountAccess(userId, id, 'ADMIN');
-    await this.removeAccountFromContainer(acc.username);
-    await this.prisma.sftpAccount.delete({ where: { id: acc.id } });
+    const remoteServer = await this.remoteServerForAccount(acc).catch(() => null);
+    if (remoteServer) {
+      // Delete the row first, then sync — the full-state push simply no
+      // longer contains the account, so the agent drops it.
+      await this.prisma.sftpAccount.delete({ where: { id: acc.id } });
+      await this.syncRemoteSftpAccounts(remoteServer.id).catch((e) =>
+        this.logger.warn(`remote SFTP sync after delete failed (heals on next sync): ${e?.message || e}`),
+      );
+    } else {
+      await this.removeAccountFromContainer(acc.username);
+      await this.prisma.sftpAccount.delete({ where: { id: acc.id } });
+    }
     await this.audit(userId, 'delete', acc.id, acc.username);
     return { message: 'SFTP account deleted' };
   }
@@ -374,7 +506,15 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    * always rewritten so any drift is corrected.
    */
   private async resyncFromDb(): Promise<void> {
-    const rows = await this.prisma.sftpAccount.findMany();
+    const allRows = await this.prisma.sftpAccount.findMany();
+    if (!allRows.length) return;
+    // Remote accounts live on their agent's embedded server — applying
+    // them to the LOCAL container would create chroots onto empty dirs.
+    const rows: typeof allRows = [];
+    for (const row of allRows) {
+      const remote = await this.remoteServerForAccount(row).catch(() => null);
+      if (!remote) rows.push(row);
+    }
     if (!rows.length) return;
     this.logger.log(`Resyncing ${rows.length} SFTP account(s) to container`);
     for (const row of rows) {
@@ -939,62 +1079,87 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    * access. The chroot leaf stays the sterile root-owned /home/<user>
    * either way.
    */
-  /** SFTP mounts LOCAL paths (host dirs / docker volumes on this box) —
-   *  an app placed on a remote server has neither here. Selecting it
-   *  would chroot the account onto an empty dir that never fills. */
+  /** Apps placed on a remote server are served by THAT server's agent —
+   *  its embedded SFTP server (port 2522) — not by the platform's SFTP
+   *  container. resolveRemoteSftpServer() picks the routing. */
   private isRemoteApp(app: { server?: { host: string | null } | null; project?: { server?: { host: string | null } | null } | null }): boolean {
     const host = app.server?.host ?? app.project?.server?.host;
     return !!host && !isLocalHost(host);
+  }
+
+  /**
+   * Resolve where an SFTP account's files actually live: null = the
+   * platform host (local SFTP container path), otherwise the remote
+   * server whose agent will serve them. Mixed-placement projects refuse
+   * — one chroot cannot span machines.
+   */
+  private async resolveRemoteSftpServer(
+    scope: 'app' | 'project',
+    scopeId: string,
+  ): Promise<{ id: string; host: string } | null> {
+    if (scope === 'app') {
+      const app = await this.prisma.application.findUnique({
+        where: { id: scopeId },
+        select: {
+          server: { select: { id: true, host: true } },
+          project: { select: { server: { select: { id: true, host: true } } } },
+        },
+      });
+      if (!app) throw new NotFoundException('Application not found');
+      const server = app.server ?? app.project?.server;
+      return server && !isLocalHost(server.host) ? (server as { id: string; host: string }) : null;
+    }
+    const project = await this.prisma.project.findUnique({
+      where: { id: scopeId },
+      select: {
+        server: { select: { id: true, host: true } },
+        applications: { select: { server: { select: { id: true, host: true } } } },
+      },
+    });
+    if (!project) throw new NotFoundException('Project not found');
+    const hosts = new Set<string>();
+    const resolved: Array<{ id: string; host: string }> = [];
+    for (const a of project.applications) {
+      const server = (a.server ?? project.server) as { id: string; host: string } | null;
+      const key = server && !isLocalHost(server.host) ? server.id : 'local';
+      if (!hosts.has(key)) {
+        hosts.add(key);
+        if (key !== 'local' && server) resolved.push(server);
+      }
+    }
+    if (hosts.size > 1) {
+      throw new BadRequestException(
+        'Apps in this project are split across servers — a single SFTP account cannot span machines. Create app-scoped accounts instead.',
+      );
+    }
+    return resolved[0] ?? null;
   }
 
   private async resolveChrootBinds(scope: 'app' | 'project', scopeId: string): Promise<ChrootBind[]> {
     if (scope === 'app') {
       const app = await this.prisma.application.findUnique({
         where: { id: scopeId },
-        select: {
-          name: true, id: true, dockerImage: true, containerName: true,
-          server: { select: { host: true } },
-          project: { select: { server: { select: { host: true } } } },
-        },
+        select: { name: true, id: true, dockerImage: true, containerName: true },
       });
       if (!app) throw new NotFoundException('Application not found');
-      if (this.isRemoteApp(app)) {
-        throw new BadRequestException(
-          'This app runs on a remote server — its files are not on this host, so SFTP (which serves from the platform host) cannot expose them. Use the web file manager instead (it reaches remote apps through the agent).',
-        );
-      }
       return [{ dir: 'app', source: await this.computeChrootSourceForApp(app) }];
     }
     const project = await this.prisma.project.findUnique({
       where: { id: scopeId },
       select: {
-        server: { select: { host: true } },
         applications: {
-          select: {
-            name: true, id: true, dockerImage: true, containerName: true,
-            server: { select: { host: true } },
-          },
+          select: { name: true, id: true, dockerImage: true, containerName: true },
         },
       },
     });
     if (!project) throw new NotFoundException('Project not found');
-    // Project scope: expose only the apps that live on THIS host. A
-    // project whose apps are all remote has nothing SFTP can serve.
-    const localApps = project.applications.filter(
-      (a) => !this.isRemoteApp({ ...a, project: { server: project.server } }),
-    );
     if (!project.applications.length) {
       throw new BadRequestException(
         'Project has no applications — nothing to expose over SFTP.',
       );
     }
-    if (!localApps.length) {
-      throw new BadRequestException(
-        'Every app in this project runs on a remote server — SFTP serves files from the platform host only. Use the web file manager for remote apps.',
-      );
-    }
     const binds: ChrootBind[] = [];
-    for (const app of localApps) {
+    for (const app of project.applications) {
       const source = await this.computeChrootSourceForApp(app);
       binds.push({ dir: `${this.slugify(app.name)}-${app.id.slice(0, 12)}`, source });
     }

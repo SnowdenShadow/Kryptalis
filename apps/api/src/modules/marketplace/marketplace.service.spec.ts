@@ -106,14 +106,22 @@ function makeService() {
       ({ id: 'task-remote-1', serverId, type, status: 'QUEUED', payload })),
     registerTaskCompletionHandler: vi.fn(),
   };
+  // Pass-through "encryption": tests can assert on the wrapped plaintext.
+  const appEnv = {
+    encryptEnvVars: vi.fn((env: any) =>
+      env && Object.keys(env).length ? { __k: 1, v: JSON.stringify(env) } : env),
+    decryptEnvVars: vi.fn((raw: any) =>
+      raw && raw.__k === 1 ? JSON.parse(raw.v) : raw || {}),
+  };
   const service = new MarketplaceService(
     prisma as any,
     proxy as any,
     domainAttach as any,
     databases as any,
     agent as any,
+    appEnv as any,
   );
-  return { service, prisma, proxy, domainAttach, databases, agent };
+  return { service, prisma, proxy, domainAttach, databases, agent, appEnv };
 }
 
 /** Drain the fire-and-forget runDockerCompose() chain. */
@@ -179,9 +187,14 @@ describe('catalog (listApps / getApp)', () => {
     expect(app.name).toBe('WordPress');
     expect(app.ports[0]).toBe(8080);
     expect(app.containerPort).toBe(80);
-    // Declared env vars surface for the install wizard, required ones flagged.
-    const dbPass = app.envVars?.find((e) => e.key === 'WORDPRESS_DB_PASSWORD');
-    expect(dbPass?.required).toBe(true);
+    // WordPress bundles its own DB — the catalog must NOT surface DB env
+    // vars (the template hardcodes them; user input there was a lie).
+    expect(app.envVars ?? []).toHaveLength(0);
+    // Declared env vars surface for the install wizard (PrestaShop keeps a
+    // required one: the back-office admin email).
+    const ps = service.getApp('prestashop');
+    const adminMail = ps.envVars?.find((e) => e.key === 'ADMIN_MAIL');
+    expect(adminMail?.required).toBe(true);
   });
 
   it('getApp on an unknown slug → 404', () => {
@@ -507,6 +520,75 @@ describe('install — compose rendering and per-instance naming', () => {
     const env = writtenFile('.env')!;
     expect(env).toContain('FOO=bar');
     expect(env).toContain('MULTI=a\\nb');
+  });
+
+  it('.env is written even with no env vars (templates declare env_file: .env)', async () => {
+    const { service } = makeService();
+    await service.install({ appSlug: 'uptime-kuma', projectId: 'p1' }, 'u1');
+    expect(writtenFile('.env')).toBeDefined();
+  });
+
+  it('grafana: auto-generated admin password lands in compose default, persisted env snapshot, and the install response', async () => {
+    const { service, prisma, appEnv } = makeService();
+    const res = await service.install({ appSlug: 'grafana', projectId: 'p1' }, 'u1');
+
+    const compose = writtenFile('docker-compose.yml')!;
+    expect(compose).not.toContain('__RANDOM_PASSWORD__');
+    const pass = compose.match(/GF_SECURITY_ADMIN_PASSWORD:-(\S+)\}/)![1];
+    expect(pass.length).toBeGreaterThanOrEqual(24);
+
+    // Returned once so the UI can show it.
+    expect((res as any).generatedCredentials.GF_SECURITY_ADMIN_PASSWORD).toBe(pass);
+
+    // Persisted (encrypted) on the row so the env tab shows it later.
+    expect(appEnv.encryptEnvVars).toHaveBeenCalled();
+    const persisted = prisma.application.update.mock.calls
+      .map((c: any) => c[0]?.data?.envVars)
+      .find(Boolean);
+    expect(JSON.parse(persisted.v).GF_SECURITY_ADMIN_PASSWORD).toBe(pass);
+    expect(JSON.parse(persisted.v).GF_SECURITY_ADMIN_USER).toBe('admin');
+  });
+
+  it('grafana: user-supplied admin password wins over generation and is NOT reported as generated', async () => {
+    const { service, prisma } = makeService();
+    const res = await service.install(
+      { appSlug: 'grafana', projectId: 'p1', envVars: { GF_SECURITY_ADMIN_PASSWORD: 'MyOwnPass123' } },
+      'u1',
+    );
+    expect((res as any).generatedCredentials.GF_SECURITY_ADMIN_PASSWORD).toBeUndefined();
+    const env = writtenFile('.env')!;
+    expect(env).toContain('GF_SECURITY_ADMIN_PASSWORD=MyOwnPass123');
+    const persisted = prisma.application.update.mock.calls
+      .map((c: any) => c[0]?.data?.envVars)
+      .find(Boolean);
+    expect(JSON.parse(persisted.v).GF_SECURITY_ADMIN_PASSWORD).toBe('MyOwnPass123');
+  });
+
+  it('wordpress: hardcoded bundled-DB password surfaces in generatedCredentials', async () => {
+    const { service } = makeService();
+    const res = await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
+    const creds = (res as any).generatedCredentials;
+    expect(creds.WORDPRESS_DB_PASSWORD).toBeDefined();
+    expect(creds.MYSQL_ROOT_PASSWORD).toBeDefined();
+    expect(creds.WORDPRESS_DB_PASSWORD).not.toBe(creds.MYSQL_ROOT_PASSWORD);
+  });
+
+  it('wordpress: DB host is the instance-suffixed container_name (no cross-install collisions on the shared network)', async () => {
+    const { service } = makeService();
+    await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
+    const compose = writtenFile('docker-compose.yml')!;
+    expect(compose).toContain(`WORDPRESS_DB_HOST: kryptalis-wordpress-db-${INSTANCE_ID}`);
+  });
+
+  it('plausible: DATABASE_URL password matches the db service password (install used to be dead on boot)', async () => {
+    const { service } = makeService();
+    await service.install({ appSlug: 'plausible', projectId: 'p1' }, 'u1');
+    const compose = writtenFile('docker-compose.yml')!;
+    const dbPass = compose.match(/POSTGRES_PASSWORD: (\S+)/)![1];
+    expect(compose).toContain(`DATABASE_URL: postgres://postgres:${dbPass}@kryptalis-plausible-db-${INSTANCE_ID}:5432/plausible_db`);
+    // SECRET_KEY_BASE default = 2 concatenated 32-char values ≥ 64 chars.
+    const skb = compose.match(/SECRET_KEY_BASE: \$\{SECRET_KEY_BASE:-(\S+)\}/)![1];
+    expect(skb.length).toBeGreaterThanOrEqual(64);
   });
 });
 

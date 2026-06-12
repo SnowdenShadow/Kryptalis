@@ -31,6 +31,8 @@ export const COMPOSE_TEMPLATES: Record<string, { compose: string; healthCheck?: 
       # HTTPS server".
       - "__HOST_PORT__:9000"
       - "8000:8000"
+    env_file:
+      - .env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data___INSTANCE_ID__:/data
@@ -52,8 +54,11 @@ networks:
       - "__HOST_PORT__:3000"
     volumes:
       - grafana_data___INSTANCE_ID__:/var/lib/grafana
+    env_file:
+      - .env
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=__RANDOM_PASSWORD__
+      - GF_SECURITY_ADMIN_USER=\${GF_SECURITY_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=\${GF_SECURITY_ADMIN_PASSWORD:-__RANDOM_PASSWORD__}
 volumes:
   grafana_data___INSTANCE_ID__:
 networks:
@@ -70,6 +75,8 @@ networks:
       - kryptalis-apps
     ports:
       - "__HOST_PORT__:3001"
+    env_file:
+      - .env
     volumes:
       - uptime_data___INSTANCE_ID__:/app/data
 volumes:
@@ -88,10 +95,12 @@ networks:
       - kryptalis-apps
     ports:
       - "__HOST_PORT__:5678"
+    env_file:
+      - .env
     volumes:
       - n8n_data___INSTANCE_ID__:/home/node/.n8n
     environment:
-      - N8N_SECURE_COOKIE=false
+      - N8N_SECURE_COOKIE=\${N8N_SECURE_COOKIE:-false}
 volumes:
   n8n_data___INSTANCE_ID__:
 networks:
@@ -109,7 +118,12 @@ networks:
     ports:
       - "__HOST_PORT__:80"
     environment:
-      WORDPRESS_DB_HOST: wordpress-db
+      # container_name, NOT the bare service name: the service-name alias
+      # lives on the SHARED kryptalis-apps network, so two WordPress
+      # installs would both answer to "wordpress-db" and round-robin
+      # each other's DB traffic. The instance-suffixed container_name is
+      # unique per install.
+      WORDPRESS_DB_HOST: kryptalis-wordpress-db-__INSTANCE_ID__
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: __RANDOM_PASSWORD__
       WORDPRESS_DB_NAME: wordpress
@@ -147,8 +161,11 @@ networks:
       - kryptalis-apps
     ports:
       - "__HOST_PORT__:2368"
+    env_file:
+      - .env
     environment:
-      url: http://localhost:__HOST_PORT__
+      url: \${url:-http://localhost:__HOST_PORT__}
+      NODE_ENV: \${NODE_ENV:-production}
     volumes:
       - ghost_data___INSTANCE_ID__:/var/lib/ghost/content
 volumes:
@@ -169,9 +186,11 @@ networks:
       - "__HOST_PORT__:9001"
       - "9000:9000"
     command: server /data --console-address ":9001"
+    env_file:
+      - .env
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: __RANDOM_PASSWORD__
+      MINIO_ROOT_USER: \${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: \${MINIO_ROOT_PASSWORD:-__RANDOM_PASSWORD__}
     volumes:
       - minio_data___INSTANCE_ID__:/data
 volumes:
@@ -190,6 +209,8 @@ networks:
       - kryptalis-apps
     ports:
       - "__HOST_PORT__:80"
+    env_file:
+      - .env
     volumes:
       - nextcloud_data___INSTANCE_ID__:/var/www/html
 volumes:
@@ -208,10 +229,12 @@ networks:
       - kryptalis-apps
     ports:
       - "__HOST_PORT__:5432"
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: kryptalis
-      POSTGRES_PASSWORD: __RANDOM_PASSWORD__
-      POSTGRES_DB: kryptalis
+      POSTGRES_USER: \${POSTGRES_USER:-kryptalis}
+      POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:-__RANDOM_PASSWORD__}
+      POSTGRES_DB: \${POSTGRES_DB:-kryptalis}
     volumes:
       - pg_data___INSTANCE_ID__:/var/lib/postgresql/data
 volumes:
@@ -363,10 +386,17 @@ networks:
     env_file:
       - .env
     environment:
-      BASE_URL: \${BASE_URL:-http://localhost:8000}
-      SECRET_KEY_BASE: \${SECRET_KEY_BASE:-please-change-me-to-a-long-random-string}
-      DATABASE_URL: postgres://postgres:plausible@plausible-db:5432/plausible_db
-      CLICKHOUSE_DATABASE_URL: http://plausible-events:8123/plausible_events_db
+      BASE_URL: \${BASE_URL:-http://localhost:__HOST_PORT__}
+      # Two concatenated 32-char random values = 64 chars, the minimum
+      # Plausible accepts for SECRET_KEY_BASE.
+      SECRET_KEY_BASE: \${SECRET_KEY_BASE:-__RANDOM_PASSWORD_2____RANDOM_PASSWORD_3__}
+      # MUST match plausible-db's POSTGRES_PASSWORD (same placeholder →
+      # same generated value). The previous hardcoded "plausible" password
+      # never matched the random one the db got — install was dead on boot.
+      # Hosts use the instance-suffixed container_name (unique on the
+      # shared kryptalis-apps network), not the bare service alias.
+      DATABASE_URL: postgres://postgres:__RANDOM_PASSWORD__@kryptalis-plausible-db-__INSTANCE_ID__:5432/plausible_db
+      CLICKHOUSE_DATABASE_URL: http://kryptalis-plausible-events-__INSTANCE_ID__:8123/plausible_events_db
 volumes:
   plausible_db___INSTANCE_ID__:
   plausible_events___INSTANCE_ID__:
@@ -387,7 +417,7 @@ networks:
     env_file:
       - .env
     environment:
-      PASSWORD: \${PASSWORD:-please-change-me}
+      PASSWORD: \${PASSWORD:-__RANDOM_PASSWORD__}
     volumes:
       - code_data___INSTANCE_ID__:/home/coder
 volumes:
@@ -621,7 +651,7 @@ networks:
       PS_LANGUAGE: \${PS_LANGUAGE:-en}
       PS_COUNTRY: \${PS_COUNTRY:-FR}
       ADMIN_MAIL: \${ADMIN_MAIL:-admin@example.com}
-      ADMIN_PASSWD: \${ADMIN_PASSWD:-changeme-now-please}
+      ADMIN_PASSWD: \${ADMIN_PASSWD:-__RANDOM_PASSWORD_3__}
       PS_DOMAIN: \${PS_DOMAIN:-}
       PS_ENABLE_SSL: 1
       PS_FOLDER_ADMIN: admin
@@ -755,6 +785,9 @@ networks:
       - "__HOST_PORT__:80"
     env_file:
       - .env
+    environment:
+      PGADMIN_DEFAULT_EMAIL: \${PGADMIN_DEFAULT_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: \${PGADMIN_DEFAULT_PASSWORD:-__RANDOM_PASSWORD__}
     volumes:
       - pgadmin_data___INSTANCE_ID__:/var/lib/pgadmin
 volumes:

@@ -172,6 +172,8 @@ export default function SftpPage() {
             appName={selectedApp.name}
             firstUsername={accounts.find((a) => !a.disabled)?.username}
             hasShellAccount={accounts.some((a) => !a.disabled && a.allowShell)}
+            remoteHost={(accounts[0] as any)?.remoteHost ?? null}
+            remotePort={(accounts[0] as any)?.remotePort ?? null}
             copy={copy}
             copied={copied}
             t={t}
@@ -345,17 +347,22 @@ export default function SftpPage() {
 
 // ── Connection info card ─────────────────────────────────────────────
 function ConnectionInfoCard({
-  appName, firstUsername, hasShellAccount, copy, copied, t,
+  appName, firstUsername, hasShellAccount, remoteHost, remotePort, copy, copied, t,
 }: {
   appName: string;
   firstUsername?: string;
   hasShellAccount: boolean;
+  /** Set when the app runs on a remote server — connect to ITS agent's
+   *  embedded SFTP (host = that server, port 2522), not the platform. */
+  remoteHost?: string | null;
+  remotePort?: number | null;
   copy: (text: string, label: string) => void;
   copied: string | null;
   t: (key: string, vars?: Record<string, string | number>) => string;
 }) {
-  const host = typeof window !== 'undefined' ? window.location.hostname : 'your-server';
-  const port = 2222;
+  const host = remoteHost
+    || (typeof window !== 'undefined' ? window.location.hostname : 'your-server');
+  const port = remotePort || 2222;
   const username = firstUsername || '<username>';
   const sftpUrl = `sftp://${username}@${host}:${port}`;
   const cliExample = `sftp -P ${port} ${username}@${host}`;
