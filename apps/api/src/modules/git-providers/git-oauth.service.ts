@@ -35,15 +35,14 @@ type Provider = 'GITHUB';
  * Public client_id:
  *   The GitHub-issued client_id IS public — see GitHub's own docs. It's
  *   just an identifier, not a credential. The credential equivalent (the
- *   client secret) is NOT used in device flow at all.
+ *   client secret) is NOT used in device flow at all, so committing the
+ *   client_id is safe.
  *
- *   Configuration: set GITHUB_OAUTH_CLIENT_ID in env to the OAuth App you
- *   registered on github.com/settings/developers. There is deliberately no
- *   baked-in default: shipping a placeholder client_id would point every
- *   install's GitHub login at an OAuth app the operator doesn't control.
- *   When unset, /git-providers/oauth/github/status reports
- *   configured:false and the device-flow endpoints refuse with a 400.
+ *   The baked-in default is the official Kryptalis OAuth App ("Kryptalis"
+ *   on github.com, Device Flow enabled). Operators who want their own
+ *   branding/app can override it with GITHUB_OAUTH_CLIENT_ID in env.
  */
+const DEFAULT_GITHUB_OAUTH_CLIENT_ID = 'Ov23liGhrCZJ2hB4ILtX';
 @Injectable()
 export class GitOAuthService {
   private readonly logger = new Logger(GitOAuthService.name);
@@ -59,7 +58,7 @@ export class GitOAuthService {
   }
 
   private githubClientId(): string {
-    return process.env.GITHUB_OAUTH_CLIENT_ID || '';
+    return process.env.GITHUB_OAUTH_CLIENT_ID || DEFAULT_GITHUB_OAUTH_CLIENT_ID;
   }
 
   /**

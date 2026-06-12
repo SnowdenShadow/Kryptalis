@@ -76,29 +76,42 @@ afterEach(() => {
 // ── GitOAuthService: configuration gate ──────────────────────────────
 
 describe('GitOAuthService configuration', () => {
-  it('isConfigured reflects GITHUB_OAUTH_CLIENT_ID presence', () => {
+  it('GITHUB is always configured: the official client_id is baked in, no env needed', () => {
     const { service } = makeOAuthService();
     expect(service.isConfigured('GITHUB')).toBe(true);
+    // No env var → falls back to the committed default (device flow uses
+    // no client secret, so shipping the public client_id is safe).
     delete process.env.GITHUB_OAUTH_CLIENT_ID;
-    expect(service.isConfigured('GITHUB')).toBe(false);
+    expect(service.isConfigured('GITHUB')).toBe(true);
   });
 
-  it('startGithubDeviceFlow 400s explicitly when the client id is absent (no fetch)', async () => {
-    delete process.env.GITHUB_OAUTH_CLIENT_ID;
-    const { service } = makeOAuthService();
-    await expect(service.startGithubDeviceFlow()).rejects.toThrow(
-      'GitHub OAuth is not configured — set GITHUB_OAUTH_CLIENT_ID',
-    );
-    expect(fetchMock).not.toHaveBeenCalled();
+  it('GITHUB_OAUTH_CLIENT_ID env var overrides the baked-in default in the device-code request', async () => {
+    const { service } = makeOAuthService(); // beforeEach sets Iv1.testclient
+    onUrl('github.com/login/device/code', {
+      user_code: 'X',
+      device_code: 'dc',
+      verification_uri: 'https://github.com/login/device',
+      expires_in: 900,
+      interval: 5,
+    });
+    await service.startGithubDeviceFlow();
+    const call = fetchMock.mock.calls.find(([u]: any[]) => String(u).includes('login/device/code'))!;
+    expect(JSON.parse((call[1] as any).body).client_id).toBe('Iv1.testclient');
   });
 
-  it('pollGithubDeviceFlow 400s the same way when unconfigured', async () => {
+  it('without the env override, the baked-in default client_id is sent', async () => {
     delete process.env.GITHUB_OAUTH_CLIENT_ID;
     const { service } = makeOAuthService();
-    await expect(service.pollGithubDeviceFlow('u1', 'dc')).rejects.toThrow(
-      /GITHUB_OAUTH_CLIENT_ID/,
-    );
-    expect(fetchMock).not.toHaveBeenCalled();
+    onUrl('github.com/login/device/code', {
+      user_code: 'X',
+      device_code: 'dc',
+      verification_uri: 'https://github.com/login/device',
+      expires_in: 900,
+      interval: 5,
+    });
+    await service.startGithubDeviceFlow();
+    const call = fetchMock.mock.calls.find(([u]: any[]) => String(u).includes('login/device/code'))!;
+    expect(JSON.parse((call[1] as any).body).client_id).toBe('Ov23liGhrCZJ2hB4ILtX');
   });
 
   it('pollGithubDeviceFlow requires a device_code', async () => {
