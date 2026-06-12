@@ -711,6 +711,11 @@ export const translations: Record<string, Record<string, string>> = {
     'onboarding.domainInvalid': 'Enter a valid domain (e.g. panel.acme.com).',
     'onboarding.domainSaved': 'Panel domain saved — Caddy is configuring it now.',
     'onboarding.domainSavedNote': 'Saved. Once DNS propagates, the panel answers at',
+    'setup.title': 'Kryptalis setup',
+    'setup.subtitle': 'First-install configuration — a few steps and you\'re in.',
+    'setup.accountCreated': 'Admin account created — you\'re signed in.',
+    'setup.createAndContinue': 'Create account & continue',
+    'setup.enterDashboard': 'Enter the dashboard',
 
     // ── toast notifications (user-facing actions) ──────────────────
     'toast.appCreated': 'Application created',
@@ -1865,6 +1870,11 @@ export const translations: Record<string, Record<string, string>> = {
     'onboarding.domainInvalid': 'Saisissez un domaine valide (ex. panel.acme.com).',
     'onboarding.domainSaved': 'Domaine du panel enregistré — Caddy le configure maintenant.',
     'onboarding.domainSavedNote': 'Enregistré. Une fois le DNS propagé, le panel répond sur',
+    'setup.title': 'Configuration de Kryptalis',
+    'setup.subtitle': 'Première installation — quelques étapes et c\'est parti.',
+    'setup.accountCreated': 'Compte admin créé — vous êtes connecté.',
+    'setup.createAndContinue': 'Créer le compte et continuer',
+    'setup.enterDashboard': 'Entrer dans le dashboard',
 
     // ── toast notifications (user-facing actions) ──────────────────
     'toast.appCreated': 'Application créée',

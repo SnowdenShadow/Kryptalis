@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Lock, Mail, Sparkles } from 'lucide-react';
+import { Lock, Mail } from 'lucide-react';
 
 export const dynamic = 'force-dynamic';
 import { Button } from '@/components/ui/button';
@@ -36,12 +36,9 @@ export default function RegisterPage() {
   const [resending, setResending] = useState(false);
   const { setAuth } = useAuthStore();
   const router = useRouter();
-  // Bootstrap banner driven by the SERVER's setup-status — not a query
-  // param. The old `?setup=1` approach showed the "you'll become
-  // SUPERADMIN" banner on stale/hand-typed links long after bootstrap,
-  // and HID it when someone landed on /register directly during a fresh
-  // install. null = still loading (banner hidden until resolved).
-  const [isSetup, setIsSetup] = useState<boolean | null>(null);
+  // Fresh install → the dedicated /setup flow owns the first account
+  // (full-screen, no auth pages). Hard redirect, mirroring /login.
+  // This page is ONLY for post-bootstrap signups.
 
   const strengthScore = (pw: string) => {
     let s = 0;
@@ -72,11 +69,12 @@ export default function RegisterPage() {
         if (s.platform_name) setPlatformName(s.platform_name);
       })
       .catch(() => setRegEnabled(true));
-    // Server-authoritative bootstrap detection (see isSetup comment above).
     api.get<{ needsSetup: boolean }>('/auth/setup-status')
-      .then((r) => setIsSetup(r.needsSetup))
-      .catch(() => setIsSetup(false));
-  }, []);
+      .then((r) => {
+        if (r.needsSetup) router.replace('/setup');
+      })
+      .catch(() => {});
+  }, [router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -197,11 +195,9 @@ export default function RegisterPage() {
     );
   }
 
-  // "Registration disabled" never applies to the bootstrap path — the
-  // server lets the FIRST account through regardless of the setting (it
-  // has to, or a fresh install with registration_enabled=false would be
-  // unusable). Mirror that here instead of dead-ending the operator.
-  if (regEnabled === false && isSetup !== true) {
+  // Bootstrap installs never reach this screen (redirected to /setup
+  // above), so the disabled-registrations gate applies unconditionally.
+  if (regEnabled === false) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background p-4">
         <Card className="w-full max-w-md">
@@ -231,23 +227,10 @@ export default function RegisterPage() {
           <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground text-xl font-bold">
             K
           </div>
-          <CardTitle>
-            {isSetup ? t('auth.setupTitle') : t('auth.registerTitle')}
-          </CardTitle>
-          <CardDescription>
-            {isSetup ? t('auth.setupDesc') : t('auth.registerDesc')}
-          </CardDescription>
+          <CardTitle>{t('auth.registerTitle')}</CardTitle>
+          <CardDescription>{t('auth.registerDesc')}</CardDescription>
         </CardHeader>
         <CardContent>
-          {isSetup && (
-            <div className="mb-4 rounded-md border border-primary/30 bg-primary/5 p-3 flex items-start gap-2">
-              <Sparkles size={16} className="text-primary mt-0.5 shrink-0" />
-              <div className="text-xs space-y-1">
-                <p className="font-medium">{t('auth.setupBootstrapTitle')}</p>
-                <p className="text-muted-foreground">{t('auth.setupBootstrapDesc')}</p>
-              </div>
-            </div>
-          )}
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="name">{t('auth.name')}</Label>

@@ -6,7 +6,6 @@ import { useQuery } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
-import { OnboardingWizard } from '@/components/onboarding-wizard';
 import { useSidebarStore, useAuthStore } from '@/lib/store';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -33,11 +32,7 @@ export default function DashboardLayout({
   const { collapsed } = useSidebarStore();
   const router = useRouter();
   const accessToken = useAuthStore((s) => s.accessToken);
-  const user = useAuthStore((s) => s.user);
   const [hydrated, setHydrated] = useState(false);
-  // Local override so closing the wizard takes effect this render even
-  // before the /auth/me/onboarding refetch lands.
-  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     // After zustand's persist has had a chance to rehydrate from localStorage
@@ -51,31 +46,32 @@ export default function DashboardLayout({
     }
   }, [hydrated, accessToken, router]);
 
-  // Onboarding eligibility — every authenticated user gets the wizard
-  // on first login if they haven't dismissed it. Was previously
-  // SUPERADMIN-only, which left regular USERs landing on an empty
-  // dashboard with no guidance.
-  const enabled = hydrated && !!accessToken && !!user && !dismissed;
-
+  // First-run onboarding lives at /setup (full-screen, pre-dashboard) —
+  // the old in-dashboard wizard popup is gone. A SUPERADMIN who created
+  // the account but bailed out of /setup mid-flow (closed the tab, typed
+  // /dashboard by hand) is sent back there. The zero-projects condition
+  // keeps pre-existing installs out: an admin who configured everything
+  // before this flow existed (flag never flipped) must not be bounced
+  // into setup on a working install.
+  const user = useAuthStore((s) => s.user);
+  const onboardingEnabled = hydrated && !!accessToken && user?.role === 'SUPERADMIN';
   const { data: onboarding } = useQuery<{ completed: boolean }>({
     queryKey: ['onboarding'],
     queryFn: () => api.get('/auth/me/onboarding'),
-    enabled,
+    enabled: onboardingEnabled,
     staleTime: 60_000,
   });
-
   const { data: projects } = useQuery<unknown[]>({
     queryKey: ['projects'],
     queryFn: () => api.get('/projects'),
-    enabled,
+    enabled: onboardingEnabled && onboarding?.completed === false,
     staleTime: 60_000,
   });
-
-  const showWizard =
-    enabled &&
-    onboarding?.completed === false &&
-    Array.isArray(projects) &&
-    projects.length === 0;
+  useEffect(() => {
+    if (onboarding?.completed === false && Array.isArray(projects) && projects.length === 0) {
+      router.replace('/setup');
+    }
+  }, [onboarding, projects, router]);
 
   if (!hydrated || !accessToken) {
     return (
@@ -97,13 +93,6 @@ export default function DashboardLayout({
       >
         {children}
       </main>
-      {showWizard && (
-        <OnboardingWizard
-          open={showWizard}
-          onComplete={() => setDismissed(true)}
-          onDismiss={() => setDismissed(true)}
-        />
-      )}
     </div>
   );
 }
