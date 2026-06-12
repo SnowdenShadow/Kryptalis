@@ -185,7 +185,7 @@ export class FilesService {
             id: true,
             name: true,
             applications: {
-              select: { id: true, name: true, framework: true, status: true, containerName: true },
+              select: { id: true, name: true, framework: true, status: true, containerName: true, dockerImage: true },
             },
             databases: {
               select: { id: true, name: true, type: true, applicationId: true },
@@ -204,7 +204,7 @@ export class FilesService {
         id: true,
         name: true,
         applications: {
-          select: { id: true, name: true, framework: true, status: true },
+          select: { id: true, name: true, framework: true, status: true, containerName: true, dockerImage: true },
         },
         databases: {
           select: { id: true, name: true, type: true, applicationId: true },
@@ -221,20 +221,35 @@ export class FilesService {
       id: p.id,
       name: p.name,
       role: p.role,
-      applications: p.applications.map((a) => ({
-        ...a,
-        // hasFiles=true if the host dir has user files (git deploys,
-        // compose-empty) OR the app has a container we can introspect
-        // (marketplace, image-only). Either way the file manager has
-        // SOMETHING to show.
-        hasFiles:
-          fs.existsSync(this.appRootDir(a.id, this.slugify(a.name))) ||
-          !!(a as any).containerName,
-      })),
-      databases: p.databases.map((d) => ({
-        ...d,
-        hasFiles: fs.existsSync(this.dbRootDir(d.id)),
-      })),
+      applications: p.applications
+        .map((a) => {
+          const hostHasFiles = fs.existsSync(this.appRootDir(a.id, this.slugify(a.name)));
+          const hasContainer = !!(a as any).containerName;
+          // Shell-less images (Portainer & friends) can't be exec'd into —
+          // the web browser would fail on every click. Detected by image
+          // name: the curated list mirrors what we actually know ships
+          // distroless. Their data is still reachable over SFTP.
+          const imageHint = `${(a as any).dockerImage || ''} ${(a as any).containerName || ''}`.toLowerCase();
+          const shellLess = /portainer/.test(imageHint);
+          return {
+            ...a,
+            hasFiles: hostHasFiles || hasContainer,
+            // browsable=false → the dashboard hides the entry entirely.
+            // Host files always win (compose/.env are editable even for a
+            // shell-less app's host dir).
+            browsable: hostHasFiles || (hasContainer && !shellLess),
+          };
+        })
+        .filter((a) => a.browsable),
+      databases: p.databases
+        .map((d) => ({
+          ...d,
+          hasFiles: fs.existsSync(this.dbRootDir(d.id)),
+        }))
+        // DB engines keep their state in docker volumes (binary formats —
+        // nothing a file browser can usefully show). Only list the rare
+        // DB that actually has an on-disk config dir.
+        .filter((d) => d.hasFiles),
     }));
   }
 

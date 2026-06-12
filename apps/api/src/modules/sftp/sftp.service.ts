@@ -11,6 +11,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
 import * as crypto from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { execFile } from 'child_process';
@@ -938,31 +939,62 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    * access. The chroot leaf stays the sterile root-owned /home/<user>
    * either way.
    */
+  /** SFTP mounts LOCAL paths (host dirs / docker volumes on this box) —
+   *  an app placed on a remote server has neither here. Selecting it
+   *  would chroot the account onto an empty dir that never fills. */
+  private isRemoteApp(app: { server?: { host: string | null } | null; project?: { server?: { host: string | null } | null } | null }): boolean {
+    const host = app.server?.host ?? app.project?.server?.host;
+    return !!host && !isLocalHost(host);
+  }
+
   private async resolveChrootBinds(scope: 'app' | 'project', scopeId: string): Promise<ChrootBind[]> {
     if (scope === 'app') {
       const app = await this.prisma.application.findUnique({
         where: { id: scopeId },
-        select: { name: true, id: true, dockerImage: true, containerName: true },
+        select: {
+          name: true, id: true, dockerImage: true, containerName: true,
+          server: { select: { host: true } },
+          project: { select: { server: { select: { host: true } } } },
+        },
       });
       if (!app) throw new NotFoundException('Application not found');
+      if (this.isRemoteApp(app)) {
+        throw new BadRequestException(
+          'This app runs on a remote server — its files are not on this host, so SFTP (which serves from the platform host) cannot expose them. Use the web file manager instead (it reaches remote apps through the agent).',
+        );
+      }
       return [{ dir: 'app', source: await this.computeChrootSourceForApp(app) }];
     }
     const project = await this.prisma.project.findUnique({
       where: { id: scopeId },
       select: {
+        server: { select: { host: true } },
         applications: {
-          select: { name: true, id: true, dockerImage: true, containerName: true },
+          select: {
+            name: true, id: true, dockerImage: true, containerName: true,
+            server: { select: { host: true } },
+          },
         },
       },
     });
     if (!project) throw new NotFoundException('Project not found');
+    // Project scope: expose only the apps that live on THIS host. A
+    // project whose apps are all remote has nothing SFTP can serve.
+    const localApps = project.applications.filter(
+      (a) => !this.isRemoteApp({ ...a, project: { server: project.server } }),
+    );
     if (!project.applications.length) {
       throw new BadRequestException(
         'Project has no applications — nothing to expose over SFTP.',
       );
     }
+    if (!localApps.length) {
+      throw new BadRequestException(
+        'Every app in this project runs on a remote server — SFTP serves files from the platform host only. Use the web file manager for remote apps.',
+      );
+    }
     const binds: ChrootBind[] = [];
-    for (const app of project.applications) {
+    for (const app of localApps) {
       const source = await this.computeChrootSourceForApp(app);
       binds.push({ dir: `${this.slugify(app.name)}-${app.id.slice(0, 12)}`, source });
     }

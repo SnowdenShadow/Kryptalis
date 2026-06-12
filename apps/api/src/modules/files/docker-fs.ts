@@ -122,7 +122,7 @@ function joinAndValidate(rootDir: string, relPath: string): string {
 export class NoShellError extends Error {
   constructor(containerName: string) {
     super(
-      `Container '${containerName}' has no shell (scratch/distroless image) — in-container file browsing is not possible. Its data lives in a docker volume; use the app's own UI to manage it.`,
+      `Container '${containerName}' has no shell (scratch/distroless image) — web file browsing needs to run \`ls\` inside the container, which this image cannot do. Its data is safe in a docker volume: manage it through the app's own UI, or create an SFTP account for this app (SFTP mounts the volume directly, no shell needed).`,
     );
     this.name = 'NoShellError';
   }
