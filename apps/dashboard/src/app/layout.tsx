@@ -36,7 +36,7 @@ export default async function RootLayout({
         <script
           nonce={nonce}
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var l=localStorage.getItem('kryptalis-lang');if(l==='fr'||l==='en'){document.documentElement.lang=l;}}catch(e){}})();`,
+            __html: `(function(){try{var l=localStorage.getItem('kryptalis-lang');if(l!=='fr'&&l!=='en'){l=((navigator.languages&&navigator.languages[0])||navigator.language||'').toLowerCase().indexOf('fr')===0?'fr':'en';}document.documentElement.lang=l;}catch(e){}})();`,
           }}
         />
       </head>

@@ -48,7 +48,7 @@ const DOMAIN_RE = /^(?=.{1,253}$)(?:(?!-)[a-z0-9-]{1,63}(?<!-)\.)+[a-z]{2,63}$/;
  * a second SUPERADMIN (the server refuses anyway; the redirect is UX).
  */
 export default function SetupPage() {
-  const { t } = useTranslation();
+  const { t, locale, setLocale } = useTranslation();
   const router = useRouter();
   const { setAuth } = useAuthStore();
   const isAuthed = useAuthStore((s) => !!s.accessToken);
@@ -271,11 +271,50 @@ export default function SetupPage() {
     !!savedPanelDomain &&
     typeof window !== 'undefined' &&
     window.location.hostname !== savedPanelDomain;
+
+  // TLS readiness probe. Caddy needs 10–60s after the domain is saved to
+  // obtain the Let's Encrypt certificate; redirecting before that lands
+  // the user on ERR_SSL_PROTOCOL_ERROR. We probe with a no-cors fetch to
+  // https://<domain> — when the TLS handshake succeeds the promise
+  // resolves (opaque response), when the cert isn't ready it rejects.
+  // 'pending' = still probing, 'ready' = handshake OK, 'timeout' = gave
+  // up after ~90s (DNS not pointed yet, firewall, …).
+  const [domainTls, setDomainTls] = useState<'pending' | 'ready' | 'timeout'>('pending');
+  useEffect(() => {
+    if (!finishesOnDomain || step !== 'done') return;
+    if (domainTls === 'ready') return;
+    let cancelled = false;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 30; // × 3s = ~90s
+    setDomainTls('pending');
+    const probe = async () => {
+      while (!cancelled && attempts < MAX_ATTEMPTS) {
+        attempts++;
+        try {
+          await fetch(`https://${savedPanelDomain}/`, { mode: 'no-cors', cache: 'no-store' });
+          if (!cancelled) setDomainTls('ready');
+          return;
+        } catch {
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      }
+      if (!cancelled) setDomainTls('timeout');
+    };
+    void probe();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [finishesOnDomain, step, savedPanelDomain]);
+
+  // Only redirect to the domain when its TLS actually answers; otherwise
+  // (probe timed out / still pending and the user insists) finish locally
+  // — the domain keeps working the moment the cert lands, nothing is lost.
+  const redirectToDomain = finishesOnDomain && domainTls === 'ready';
+
   const qc = useQueryClient();
   const finishMutation = useMutation({
     mutationFn: () => api.post('/auth/me/onboarding/complete'),
     onSuccess: () => {
-      if (finishesOnDomain) {
+      if (redirectToDomain) {
         window.location.href = `https://${savedPanelDomain}/dashboard`;
         return;
       }
@@ -309,6 +348,25 @@ export default function SetupPage() {
           <div>
             <p className="text-sm font-semibold">{t('setup.title')}</p>
             <p className="text-xs text-muted-foreground">{t('setup.subtitle')}</p>
+          </div>
+          {/* Language picker — auto-detected from the browser on first
+              visit; this lets the operator override before anything else. */}
+          <div className="ml-auto flex gap-1 rounded-lg border border-border bg-muted/50 p-0.5">
+            {(['en', 'fr'] as const).map((l) => (
+              <button
+                key={l}
+                type="button"
+                onClick={() => setLocale(l)}
+                className={cn(
+                  'rounded-md px-2.5 py-1 text-xs font-medium uppercase transition-colors',
+                  locale === l
+                    ? 'bg-primary text-primary-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
+                {l}
+              </button>
+            ))}
           </div>
         </div>
       </div>
@@ -566,20 +624,41 @@ export default function SetupPage() {
               </h1>
               <p className="text-sm text-muted-foreground">{t('onboarding.allSetBody')}</p>
             </header>
-            {finishesOnDomain && (
-              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 text-xs space-y-1">
-                <p className="font-medium">{t('setup.domainHandoffTitle')}</p>
-                <p className="text-muted-foreground">
-                  {t('setup.domainHandoffDesc')}{' '}
-                  <span className="font-mono font-medium">https://{savedPanelDomain}</span>
-                </p>
+            {finishesOnDomain && domainTls === 'pending' && (
+              <div className="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 p-3 text-xs">
+                <Loader2 size={14} className="mt-0.5 shrink-0 animate-spin text-primary" />
+                <div className="space-y-1">
+                  <p className="font-medium">{t('setup.tlsWaitingTitle')}</p>
+                  <p className="text-muted-foreground">
+                    {t('setup.tlsWaitingDesc')}{' '}
+                    <span className="font-mono font-medium">https://{savedPanelDomain}</span>
+                  </p>
+                </div>
+              </div>
+            )}
+            {finishesOnDomain && domainTls === 'ready' && (
+              <div className="flex items-start gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-xs">
+                <Check size={14} className="mt-0.5 shrink-0 text-emerald-500" />
+                <div className="space-y-1">
+                  <p className="font-medium">{t('setup.domainHandoffTitle')}</p>
+                  <p className="text-muted-foreground">
+                    {t('setup.domainHandoffDesc')}{' '}
+                    <span className="font-mono font-medium">https://{savedPanelDomain}</span>
+                  </p>
+                </div>
+              </div>
+            )}
+            {finishesOnDomain && domainTls === 'timeout' && (
+              <div className="rounded-md border border-orange-500/30 bg-orange-500/5 p-3 text-xs space-y-1">
+                <p className="font-medium">{t('setup.tlsTimeoutTitle')}</p>
+                <p className="text-muted-foreground">{t('setup.tlsTimeoutDesc')}</p>
               </div>
             )}
             <div className="flex justify-between">
               <Button variant="ghost" onClick={back} disabled={finishMutation.isPending}>{t('onboarding.back')}</Button>
               <Button onClick={() => finishMutation.mutate()} disabled={finishMutation.isPending}>
                 {finishMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-                {finishesOnDomain ? t('setup.continueOnDomain') : t('setup.enterDashboard')} <ArrowRight size={14} />
+                {redirectToDomain ? t('setup.continueOnDomain') : t('setup.enterDashboard')} <ArrowRight size={14} />
               </Button>
             </div>
           </section>

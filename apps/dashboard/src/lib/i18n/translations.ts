@@ -719,6 +719,10 @@ export const translations: Record<string, Record<string, string>> = {
     'setup.continueOnDomain': 'Continue on the domain',
     'setup.domainHandoffTitle': 'Your panel now lives on its domain',
     'setup.domainHandoffDesc': 'You\'ll be taken to the secure URL — sign in there once and you\'re done:',
+    'setup.tlsWaitingTitle': 'Issuing the TLS certificate…',
+    'setup.tlsWaitingDesc': 'Let\'s Encrypt usually takes 10–60 seconds. The button switches to the secure URL once it answers:',
+    'setup.tlsTimeoutTitle': 'The domain isn\'t answering over HTTPS yet',
+    'setup.tlsTimeoutDesc': 'Most often the DNS A record hasn\'t propagated, or ports 80/443 are firewalled. No problem — finish on the current address; the domain starts working by itself once reachable (the certificate retries automatically).',
 
     // ── toast notifications (user-facing actions) ──────────────────
     'toast.appCreated': 'Application created',
@@ -1881,6 +1885,10 @@ export const translations: Record<string, Record<string, string>> = {
     'setup.continueOnDomain': 'Continuer sur le domaine',
     'setup.domainHandoffTitle': 'Votre panel vit maintenant sur son domaine',
     'setup.domainHandoffDesc': 'Vous allez être redirigé vers l\'URL sécurisée — connectez-vous une fois là-bas et c\'est terminé :',
+    'setup.tlsWaitingTitle': 'Émission du certificat TLS…',
+    'setup.tlsWaitingDesc': 'Let\'s Encrypt prend généralement 10 à 60 secondes. Le bouton basculera vers l\'URL sécurisée dès qu\'elle répond :',
+    'setup.tlsTimeoutTitle': 'Le domaine ne répond pas encore en HTTPS',
+    'setup.tlsTimeoutDesc': 'Le plus souvent : l\'enregistrement A n\'a pas fini de se propager, ou les ports 80/443 sont filtrés. Pas de souci — terminez sur l\'adresse actuelle ; le domaine fonctionnera tout seul dès qu\'il sera joignable (le certificat réessaie automatiquement).',
 
     // ── toast notifications (user-facing actions) ──────────────────
     'toast.appCreated': 'Application créée',

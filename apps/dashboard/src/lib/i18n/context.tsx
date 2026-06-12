@@ -23,12 +23,21 @@ const I18nContext = createContext<I18nContextType>({
  * root layout already set document.documentElement.lang before React boots,
  * and on the client we lazy-init useState from localStorage so the very
  * first hydrated render uses the right strings. No EN→FR flash.
+ *
+ * First visit (nothing saved): honor the BROWSER's language — a French
+ * operator landing on the setup flow gets French without having to find
+ * a language switcher first. Their explicit pick (setLocale) wins forever
+ * after.
  */
 function initialLocale(): Locale {
   if (typeof window === 'undefined') return 'en';
   try {
     const saved = localStorage.getItem('kryptalis-lang') as Locale | null;
     if (saved && translations[saved]) return saved;
+  } catch {}
+  try {
+    const nav = (navigator.languages?.[0] || navigator.language || '').toLowerCase();
+    if (nav.startsWith('fr')) return 'fr';
   } catch {}
   return 'en';
 }
