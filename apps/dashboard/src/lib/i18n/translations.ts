@@ -716,6 +716,9 @@ export const translations: Record<string, Record<string, string>> = {
     'setup.accountCreated': 'Admin account created — you\'re signed in.',
     'setup.createAndContinue': 'Create account & continue',
     'setup.enterDashboard': 'Enter the dashboard',
+    'setup.continueOnDomain': 'Continue on the domain',
+    'setup.domainHandoffTitle': 'Your panel now lives on its domain',
+    'setup.domainHandoffDesc': 'You\'ll be taken to the secure URL — sign in there once and you\'re done:',
 
     // ── toast notifications (user-facing actions) ──────────────────
     'toast.appCreated': 'Application created',
@@ -1875,6 +1878,9 @@ export const translations: Record<string, Record<string, string>> = {
     'setup.accountCreated': 'Compte admin créé — vous êtes connecté.',
     'setup.createAndContinue': 'Créer le compte et continuer',
     'setup.enterDashboard': 'Entrer dans le dashboard',
+    'setup.continueOnDomain': 'Continuer sur le domaine',
+    'setup.domainHandoffTitle': 'Votre panel vit maintenant sur son domaine',
+    'setup.domainHandoffDesc': 'Vous allez être redirigé vers l\'URL sécurisée — connectez-vous une fois là-bas et c\'est terminé :',
 
     // ── toast notifications (user-facing actions) ──────────────────
     'toast.appCreated': 'Application créée',

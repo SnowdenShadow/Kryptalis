@@ -251,8 +251,23 @@ export class MarketplaceService implements OnModuleInit {
     // Domain row + use its id from here on. The downstream attach() call
     // performs cross-server / cross-project validation.
     if (!data.domainId && data.newDomain) {
+      // Platform domain serves the dashboard — never attachable to an app
+      // (the Caddyfile renderer would skip it anyway; fail loudly here).
+      const sysDomain = await this.prisma.systemSetting
+        .findUnique({ where: { key: 'system_domain' } })
+        .then((r) => (typeof r?.value === 'string' ? r.value : null))
+        .catch(() => null);
+      if (sysDomain && data.newDomain === sysDomain) {
+        throw new ConflictException(
+          `"${data.newDomain}" is the platform domain (it serves this dashboard). Use a subdomain like app.${data.newDomain} instead.`,
+        );
+      }
       const existing = await this.prisma.domain.findUnique({ where: { domain: data.newDomain } });
-      if (existing) {
+      if (existing && !existing.projectId) {
+        // Orphan from a deleted project (FK SetNull) — reclaim it.
+        await this.prisma.domain.delete({ where: { id: existing.id } });
+      }
+      if (existing && existing.projectId) {
         if (existing.projectId !== data.projectId) {
           throw new BadRequestException(`Domain "${data.newDomain}" belongs to another project.`);
         }

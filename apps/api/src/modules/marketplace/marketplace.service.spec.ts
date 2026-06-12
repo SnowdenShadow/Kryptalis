@@ -67,6 +67,8 @@ function makePrisma() {
     // Per-app placement: install() validates an explicit serverId against
     // the servers table. Default: unknown id → null (404 path).
     server: { findUnique: vi.fn().mockResolvedValue(null) },
+    // system_domain guard on newDomain — null = no platform domain set.
+    systemSetting: { findUnique: vi.fn().mockResolvedValue(null) },
     application: {
       findFirst: vi.fn().mockResolvedValue(null),
       findUnique: vi.fn().mockResolvedValue(null),

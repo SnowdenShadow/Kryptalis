@@ -224,10 +224,23 @@ export class ApplicationsService {
     // happens inside the transaction below.
     let existingDomainId: string | null = null;
     if (!dtoDomainId && dtoDomainString) {
+      // The platform domain serves the dashboard — never attachable to apps.
+      const sysDomain = await this.prisma.systemSetting
+        .findUnique({ where: { key: 'system_domain' } })
+        .then((r) => (typeof r?.value === 'string' ? r.value : null))
+        .catch(() => null);
+      if (sysDomain && dtoDomainString === sysDomain) {
+        throw new ConflictException(
+          `"${dtoDomainString}" is the platform domain (it serves this dashboard). Use a subdomain like app.${dtoDomainString} instead.`,
+        );
+      }
       const existing = await this.prisma.domain.findUnique({
         where: { domain: dtoDomainString },
       });
-      if (existing) {
+      if (existing && !existing.projectId) {
+        // Orphan from a deleted project (FK SetNull) — reclaim the slot.
+        await this.prisma.domain.delete({ where: { id: existing.id } });
+      } else if (existing) {
         if (existing.projectId !== dto.projectId) {
           throw new BadRequestException(
             `Domain "${dtoDomainString}" already belongs to another project.`,

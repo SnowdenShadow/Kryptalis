@@ -261,10 +261,24 @@ export default function SetupPage() {
   }
 
   // ── step 6: done ──────────────────────────────────────────────────
+  // When a panel domain was configured AND we're not already browsing
+  // through it, finishing hands over to https://<domain>/dashboard — the
+  // clean URL the operator just set up, instead of leaving them on
+  // ip:3000. Full page load (not router.push): the session token lives in
+  // localStorage which is per-origin, so the domain origin needs its own
+  // login — expected, and the login there immediately works.
+  const finishesOnDomain =
+    !!savedPanelDomain &&
+    typeof window !== 'undefined' &&
+    window.location.hostname !== savedPanelDomain;
   const qc = useQueryClient();
   const finishMutation = useMutation({
     mutationFn: () => api.post('/auth/me/onboarding/complete'),
     onSuccess: () => {
+      if (finishesOnDomain) {
+        window.location.href = `https://${savedPanelDomain}/dashboard`;
+        return;
+      }
       // Drop the cached onboarding/projects answers BEFORE navigating —
       // a stale `completed:false` in the dashboard layout would bounce
       // the user straight back here (redirect ping-pong until staleTime).
@@ -552,11 +566,20 @@ export default function SetupPage() {
               </h1>
               <p className="text-sm text-muted-foreground">{t('onboarding.allSetBody')}</p>
             </header>
+            {finishesOnDomain && (
+              <div className="rounded-md border border-primary/30 bg-primary/5 p-3 text-xs space-y-1">
+                <p className="font-medium">{t('setup.domainHandoffTitle')}</p>
+                <p className="text-muted-foreground">
+                  {t('setup.domainHandoffDesc')}{' '}
+                  <span className="font-mono font-medium">https://{savedPanelDomain}</span>
+                </p>
+              </div>
+            )}
             <div className="flex justify-between">
               <Button variant="ghost" onClick={back} disabled={finishMutation.isPending}>{t('onboarding.back')}</Button>
               <Button onClick={() => finishMutation.mutate()} disabled={finishMutation.isPending}>
                 {finishMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-                {t('setup.enterDashboard')} <ArrowRight size={14} />
+                {finishesOnDomain ? t('setup.continueOnDomain') : t('setup.enterDashboard')} <ArrowRight size={14} />
               </Button>
             </div>
           </section>

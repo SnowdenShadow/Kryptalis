@@ -42,6 +42,8 @@ function makeService() {
     application: makeModel(),
     mailServer: makeModel(),
     user: makeModel(),
+    // system_domain guard in create() — null = no platform domain set.
+    systemSetting: { findUnique: vi.fn().mockResolvedValue(null) },
   };
   const proxy = { regenerate: vi.fn().mockResolvedValue(undefined) };
   const mailServer = { removeForDomain: vi.fn().mockResolvedValue(undefined) };
@@ -132,6 +134,27 @@ describe('create', () => {
     await expect(
       service.create('u1', { domain: 'example.com', projectId: 'p1' } as any),
     ).rejects.toThrow(ConflictException);
+  });
+
+  it('reclaims an ORPHANED row (project deleted → projectId null) instead of erroring', async () => {
+    const { service, prisma } = makeService();
+    prisma.domain.findUnique.mockResolvedValue({ ...DOMAIN, projectId: null });
+    prisma.domain.create.mockResolvedValue({ id: 'd-new' });
+
+    await service.create('u1', { domain: 'example.com', projectId: 'p1' } as any);
+
+    expect(prisma.domain.delete).toHaveBeenCalledWith({ where: { id: 'd1' } });
+    expect(prisma.domain.create).toHaveBeenCalled();
+  });
+
+  it('refuses to create the PLATFORM domain (system_domain) as an app domain', async () => {
+    const { service, prisma } = makeService();
+    prisma.systemSetting.findUnique.mockResolvedValue({ key: 'system_domain', value: 'panel.acme.com' });
+
+    await expect(
+      service.create('u1', { domain: 'panel.acme.com', projectId: 'p1' } as any),
+    ).rejects.toThrow(/platform domain/);
+    expect(prisma.domain.create).not.toHaveBeenCalled();
   });
 
   it('requires a projectId when no app is linked', async () => {

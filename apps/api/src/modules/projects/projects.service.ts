@@ -335,6 +335,16 @@ export class ProjectsService implements OnModuleInit {
       try { await this.mailServer.removeForDomain(d.id); } catch {}
     }
 
+    // Delete the project's Domain rows explicitly. The FK is SetNull (a
+    // domain row must survive its app being deleted), but on PROJECT
+    // deletion a kept row is a trap: it disappears from every list (all
+    // scoped by project) while its @unique(domain) still blocks
+    // re-creating the same hostname — "it exists already" with nothing
+    // visible to delete.
+    try {
+      await this.prisma.domain.deleteMany({ where: { projectId: id } });
+    } catch {}
+
     // Drop the project's dedicated docker network now that every app/db
     // in it is gone. Otherwise `docker network ls` keeps showing
     // kryptalis_proj_<id> forever and we leak networks on every

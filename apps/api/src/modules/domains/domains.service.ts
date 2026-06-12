@@ -29,10 +29,33 @@ export class DomainsService {
   ) {}
 
   async create(userId: string, dto: CreateDomainDto) {
+    // The PLATFORM domain (system_domain) serves the dashboard itself —
+    // creating it as an app domain would put two site blocks for one host
+    // in the Caddyfile (the renderer skips the app one, so the attach
+    // would silently never route). Refuse with a pointer instead.
+    const systemDomain = await this.prisma.systemSetting
+      .findUnique({ where: { key: 'system_domain' } })
+      .then((r) => (typeof r?.value === 'string' ? r.value : null))
+      .catch(() => null);
+    if (systemDomain && dto.domain === systemDomain) {
+      throw new ConflictException(
+        `"${dto.domain}" is the platform domain (it serves this dashboard). Use a subdomain like app.${dto.domain} for apps, or change the platform domain in Admin → Settings first.`,
+      );
+    }
+
     const existing = await this.prisma.domain.findUnique({
       where: { domain: dto.domain },
     });
-    if (existing) throw new ConflictException('Domain already exists');
+    // Orphaned row (its project was deleted → FK SetNull): invisible in
+    // every project-scoped list but still holding the @unique(domain)
+    // slot — without this reclaim, re-adding the hostname fails with
+    // "already exists" against a row nobody can see or delete. Reclaim =
+    // drop the ghost and fall through to a fresh create.
+    if (existing && !existing.projectId) {
+      await this.prisma.domain.delete({ where: { id: existing.id } });
+    } else if (existing) {
+      throw new ConflictException('Domain already exists');
+    }
     // `port` is routed through DomainAttachService below — it must NOT land
     // in the prisma.domain.create payload (no such column on Domain).
     const { autoSsl, port, ...data } = dto;
