@@ -143,12 +143,16 @@ async function dockerSh(
     });
   } catch (err: any) {
     const blob = `${err?.stderr || ''} ${err?.message || ''}`.toLowerCase();
-    // dockerd's phrasing for a missing exec binary varies by version:
+    // dockerd's phrasing for a missing exec binary varies WIDELY by
+    // version/runtime:
     //   "exec: \"sh\": executable file not found in $PATH"
     //   "OCI runtime exec failed: ... no such file or directory"
+    //   "exec /bin/sh: no such file or directory"          (docker 23+)
+    //   "unable to start container process: exec: \"sh\"..." (containerd)
     if (
       blob.includes('executable file not found') ||
-      (blob.includes('oci runtime exec failed') && blob.includes('no such file'))
+      blob.includes('unable to start container process') ||
+      (blob.includes('exec') && blob.includes('no such file'))
     ) {
       throw new NoShellError(containerName);
     }

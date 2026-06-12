@@ -762,7 +762,7 @@ export class FilesService {
         let entries: Awaited<ReturnType<typeof dockerFs.listDir>>;
         try {
           entries = await dockerFs.listDir(target, resolved.relPath);
-        } catch (e) {
+        } catch (e: any) {
           // Scratch/distroless images (Portainer, many Go binaries) ship
           // no shell — exec'ing `sh` is impossible. Surface the human
           // explanation as a 400 instead of bubbling a 500; the dashboard
@@ -770,7 +770,15 @@ export class FilesService {
           if (e instanceof dockerFs.NoShellError) {
             throw new BadRequestException(e.message);
           }
-          throw e;
+          if (e instanceof NotFoundException || e instanceof BadRequestException) throw e;
+          // Any other docker-exec failure (container stopped, dockerd
+          // hiccup, unexpected error phrasing) → still a 400 with the
+          // actual reason. A raw 500 reads as "platform broken" when the
+          // real story is "this container can't be browsed right now".
+          this.logger.warn(`docker-fs listing failed for ${target.containerName}: ${e?.stderr || e?.message}`);
+          throw new BadRequestException(
+            `Cannot browse inside container '${target.containerName}': ${String(e?.stderr || e?.message || 'docker exec failed').slice(0, 300)}`,
+          );
         }
         return {
           scope: resolved.scope,
