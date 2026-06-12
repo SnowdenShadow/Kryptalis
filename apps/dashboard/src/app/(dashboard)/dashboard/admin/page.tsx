@@ -443,6 +443,12 @@ export default function AdminPage() {
               type: 'text',
             },
             {
+              key: 'system_domain',
+              label: t('admin.settings.systemDomainLabel'),
+              desc: t('admin.settings.systemDomainDesc'),
+              type: 'text',
+            },
+            {
               key: 'default_user_role',
               label: t('admin.settings.defaultRoleLabel'),
               desc: t('admin.settings.defaultRoleDesc'),

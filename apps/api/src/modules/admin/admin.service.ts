@@ -12,6 +12,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { Role, UserStatus } from '@prisma/client';
 import { SystemConfigService } from '../system/system-config.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 
 const AUDIT_LOG_RETENTION_DAYS = 365;
 const AUDIT_LOG_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
@@ -23,6 +24,10 @@ const SETTING_KEYS = [
   'platform_name',
   'maintenance_mode',
   'deployment_mode',
+  // Public hostname the DASHBOARD itself is served on (e.g.
+  // panel.acme.com). When set, Caddy renders a block serving the dashboard
+  // + proxying /api/* — https://<domain> replaces http://ip:3000.
+  'system_domain',
 ] as const;
 type SettingKey = (typeof SETTING_KEYS)[number];
 
@@ -35,6 +40,9 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
     private prisma: PrismaService,
     private systemConfig: SystemConfigService,
     private notifications: NotificationsService,
+    // @Global ReverseProxyModule — system_domain changes re-render the
+    // Caddyfile so the dashboard block appears/disappears immediately.
+    private proxy: ReverseProxyService,
   ) {}
 
   /** Snapshot of runtime config for the Admin UI. Secrets are masked. */
@@ -157,11 +165,27 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
     if (!SETTING_KEYS.includes(key as SettingKey)) {
       throw new BadRequestException(`Unknown setting: ${key}`);
     }
-    return this.prisma.systemSetting.upsert({
+    // system_domain lands verbatim in the Caddyfile — validate the hostname
+    // shape here so a crafted value can't inject directives. Empty string
+    // clears the domain (back to ip:3000-only).
+    if (key === 'system_domain' && value) {
+      const v = String(value).trim().toLowerCase();
+      if (!/^(?=.{1,253}$)(?:(?!-)[a-z0-9-]{1,63}(?<!-)\.)+[a-z]{2,63}$/.test(v)) {
+        throw new BadRequestException('system_domain must be a valid hostname (e.g. panel.acme.com)');
+      }
+      value = v;
+    }
+    const result = await this.prisma.systemSetting.upsert({
       where: { key },
       create: { key, value: value as any, updatedBy: actorId },
       update: { value: value as any, updatedBy: actorId },
     });
+    // The platform-domain Caddy block reads this setting at render time —
+    // refresh immediately so the operator doesn't wait for the next regen.
+    if (key === 'system_domain') {
+      this.proxy.regenerate().catch(() => {});
+    }
+    return result;
   }
 
   async getPublicSettings() {

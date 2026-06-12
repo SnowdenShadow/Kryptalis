@@ -48,6 +48,10 @@ function makePrisma(domains: any[] = []) {
     mailServer: {
       findMany: vi.fn().mockResolvedValue([]),
     },
+    // system_domain platform-domain block — null = no platform domain set.
+    systemSetting: {
+      findUnique: vi.fn().mockResolvedValue(null),
+    },
   };
 }
 
@@ -238,6 +242,23 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
     ]);
     const { caddyfile } = await service.regenerate();
     expect(caddyfile).toContain('redir http://athexis.xyz:12000{uri} 308');
+  });
+
+  it('system_domain set → Caddy serves the dashboard + proxies /api/* on that host', async () => {
+    const { service, prisma } = makeService([]);
+    prisma.systemSetting.findUnique.mockResolvedValue({ key: 'system_domain', value: 'panel.acme.com' });
+    const { caddyfile } = await service.regenerate();
+    expect(caddyfile).toContain('panel.acme.com {');
+    expect(caddyfile).toContain('reverse_proxy kryptalis-api:4000');
+    expect(caddyfile).toContain('reverse_proxy kryptalis-dashboard:3000');
+  });
+
+  it('system_domain with an unsafe value is ignored (no Caddy block)', async () => {
+    const { service, prisma } = makeService([]);
+    prisma.systemSetting.findUnique.mockResolvedValue({ key: 'system_domain', value: 'evil{injection}.com' });
+    const { caddyfile } = await service.regenerate();
+    expect(caddyfile).not.toContain('evil{injection}.com');
+    expect(caddyfile).not.toContain('kryptalis-dashboard:3000');
   });
 
   it('plain HTTP app (grafana) keeps an http upstream without TLS transport', async () => {

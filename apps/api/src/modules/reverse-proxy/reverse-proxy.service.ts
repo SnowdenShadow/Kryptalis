@@ -454,6 +454,41 @@ ${email ? `  email ${email}\n` : ''}}
       }
     }
 
+    // ── platform domain (system_domain) ───────────────────────────
+    // Serves the DASHBOARD itself on https://<domain> and proxies /api/*
+    // to the API container — replaces http://<ip>:3000 with a clean TLS
+    // URL. The dashboard's runtime API resolution (api.ts) detects the
+    // standard-port origin and goes same-origin, so /api lands here.
+    // Validated at write time (updateSetting) + re-checked here.
+    const systemDomain = await this.prisma.systemSetting
+      .findUnique({ where: { key: 'system_domain' } })
+      .then((r) => (typeof r?.value === 'string' ? r.value : null))
+      .catch(() => null);
+    if (systemDomain && SAFE_DOMAIN_RE.test(systemDomain) && !this.isLocalHostname(systemDomain)) {
+      blocks.push(`# ${systemDomain} :443 → Kryptalis dashboard + API (platform domain)`);
+      blocks.push(`${systemDomain} {`);
+      // API first — more specific matcher wins in Caddy, but keep the
+      // explicit handle ordering anyway for readability.
+      blocks.push(`  handle /api/* {`);
+      blocks.push(`    reverse_proxy kryptalis-api:4000 {`);
+      blocks.push(`      transport http {`);
+      blocks.push(`        dial_timeout 5s`);
+      blocks.push(`        resolvers 127.0.0.11`);
+      blocks.push(`      }`);
+      blocks.push(`    }`);
+      blocks.push(`  }`);
+      blocks.push(`  handle {`);
+      blocks.push(`    reverse_proxy kryptalis-dashboard:3000 {`);
+      blocks.push(`      transport http {`);
+      blocks.push(`        dial_timeout 5s`);
+      blocks.push(`        resolvers 127.0.0.11`);
+      blocks.push(`      }`);
+      blocks.push(`    }`);
+      blocks.push(`  }`);
+      blocks.push(`}`);
+      blocks.push('');
+    }
+
     // mail.<apex> routes — only purpose is to obtain Let's Encrypt certs for the mail server.
     // The mail server itself reads the cert files from the shared Caddy volume.
     // Same SAFE_DOMAIN_RE gate as the main loop — legacy rows that predate

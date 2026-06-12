@@ -1,6 +1,38 @@
 import { useAuthStore, consumeLegacyRefreshToken } from './store';
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+/**
+ * API base URL — RUNTIME-resolved, not baked at build time.
+ *
+ * Why: NEXT_PUBLIC_API_URL is frozen into the JS bundle at `docker build`.
+ * One image therefore worked for exactly one origin — browse the dashboard
+ * through a domain (https://panel.acme.com) and every API call still went
+ * to http://<ip>:4000: mixed-content + CORS + hardcoded IP. The fix:
+ * derive the API origin from where the browser actually loaded the app.
+ *
+ *   - https://<domain>        → same-origin '' (Caddy serves dashboard and
+ *     proxies /api/* to the API container — single clean URL, no CORS)
+ *   - http://<host>:3000      → http://<host>:4000 (direct-port install,
+ *     LAN/IP access — the API is its sibling port)
+ *   - anything else           → NEXT_PUBLIC_API_URL, then localhost:4000
+ *     (dev server, tests, SSR)
+ */
+function resolveApiUrl(): string {
+  if (typeof window !== 'undefined') {
+    const { protocol, hostname, port } = window.location;
+    // Served through a reverse proxy on standard ports → same-origin.
+    // Caddy routes /api/* to the API container.
+    if (port === '' || port === '443' || port === '80') {
+      return '';
+    }
+    // Direct dashboard port → API is the sibling :4000 on the same host.
+    if (port === '3000') {
+      return `${protocol}//${hostname}:4000`;
+    }
+  }
+  return process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+}
+
+export const API_URL = resolveApiUrl();
 
 type RequestOptions = {
   method?: string;

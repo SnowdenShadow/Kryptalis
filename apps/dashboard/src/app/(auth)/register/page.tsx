@@ -101,6 +101,7 @@ function RegisterPageInner() {
         accessToken?: string;
         message?: string;
         pendingApproval?: boolean;
+        active?: boolean;
       }>('/auth/register', { name, email, password });
       if (res.accessToken && res.user.role) {
         setAuth(
@@ -112,6 +113,11 @@ function RegisterPageInner() {
       } else if (res.pendingApproval) {
         setPendingApproval(true);
         toast.success(res.message || t('auth.pendingApprovalDesc'));
+      } else if (res.active) {
+        // No SMTP on this install → the account is immediately ACTIVE,
+        // no verification email exists. Straight to login.
+        toast.success(res.message || t('auth.accountCreated'));
+        router.push('/login');
       } else {
         setPendingVerification(true);
         toast.success(res.message || t('auth.checkEmailToast'));

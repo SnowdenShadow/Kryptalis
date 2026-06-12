@@ -181,6 +181,13 @@ export class AuthService {
       const requireApproval =
         !isBootstrapPath && this.systemConfig.getBool('require_admin_approval');
       const defaultRole = resolveDefaultRole(this.systemConfig.get('default_user_role'));
+      // Email verification only makes sense when outbound mail EXISTS.
+      // Without SMTP, PENDING_VERIFICATION dead-ends the account: the
+      // "check your inbox" screen shows but no mail ever leaves (the
+      // notifications service no-ops). On unconfigured installs new
+      // accounts go straight to ACTIVE — operators who want gating
+      // without SMTP have require_admin_approval for exactly that.
+      const smtpConfigured = !!this.systemConfig.get<string>('smtp_host', 'SMTP_HOST');
 
       const hashedPassword = await bcrypt.hash(dto.password, 12);
       const user = await tx.user.create({
@@ -192,10 +199,11 @@ export class AuthService {
           // Bootstrap path stays auto-ACTIVE — it's the install flow with no
           // SMTP wired yet, so an email round-trip is structurally impossible.
           // With require_admin_approval on, the account waits for an admin
-          // (PENDING_APPROVAL). Every other registration starts
+          // (PENDING_APPROVAL). With SMTP configured, registrations start
           // PENDING_VERIFICATION until the user proves inbox control via
-          // /auth/verify-email.
-          status: isBootstrapPath
+          // /auth/verify-email. WITHOUT SMTP, verification is impossible —
+          // auto-ACTIVE instead of dead-ending the account.
+          status: isBootstrapPath || (!requireApproval && !smtpConfigured)
             ? 'ACTIVE'
             : requireApproval
               ? 'PENDING_APPROVAL'
@@ -267,6 +275,22 @@ export class AuthService {
           },
           // Keeps the discriminated union shape aligned with the
           // verification branch below (post-commit code reads this field).
+          pendingVerification: undefined,
+        };
+      }
+
+      // No SMTP → the account was created ACTIVE above; no verification
+      // token to mint, the user can sign in immediately.
+      if (!smtpConfigured) {
+        return {
+          bootstrap: false as const,
+          response: {
+            message: 'Account created — you can sign in now.',
+            // Frontend switch: skip the "check your inbox" screen and send
+            // the user straight to /login.
+            active: true,
+            user: { id: user.id, name: user.name, email: user.email },
+          },
           pendingVerification: undefined,
         };
       }
