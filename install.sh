@@ -86,14 +86,33 @@ fi
 # ─── 3. handle KRYPTALIS_RESET=1 BEFORE touching files ──────────────
 # This is the "uninstall + reinstall fresh" path. We do it BEFORE the clone
 # so that even a corrupted /opt/kryptalis directory is recovered.
+#
+# caddy_data is deliberately PRESERVED: it holds the Let's Encrypt
+# certificates + ACME account. Wiping it forces a fresh issuance on every
+# reset, and LE rate-limits at 5 certs per exact domain per 7 days — a few
+# test resets in a row used to brick the panel domain with
+# ERR_SSL_PROTOCOL_ERROR until the window expired (Caddy falls back to a
+# staging cert browsers reject). Certs carry no user data; reusing them
+# across resets is safe AND keeps the domain working immediately.
+# KRYPTALIS_RESET_CERTS=1 opts into the full wipe if ever needed.
 if [ "$RESET" = "1" ]; then
   warn "KRYPTALIS_RESET=1 — wiping all data (this is destructive)"
   if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
-    ( cd "$INSTALL_DIR" && docker compose down -v --remove-orphans 2>/dev/null || true )
+    ( cd "$INSTALL_DIR" && docker compose down --remove-orphans 2>/dev/null || true )
   fi
-  # Catch any stray volumes that survived (e.g. project name mismatch from older installs)
   for v in $(docker volume ls --quiet --filter "name=kryptalis" 2>/dev/null); do
-    docker volume rm "$v" 2>/dev/null || true
+    case "$v" in
+      *caddy_data*)
+        if [ "${KRYPTALIS_RESET_CERTS:-0}" = "1" ]; then
+          docker volume rm "$v" 2>/dev/null || true
+        else
+          ok "Keeping TLS certificates volume ($v) — avoids Let's Encrypt rate limits"
+        fi
+        ;;
+      *)
+        docker volume rm "$v" 2>/dev/null || true
+        ;;
+    esac
   done
   rm -rf "$INSTALL_DIR"
   ok "Cleaned previous state"
@@ -372,7 +391,10 @@ Useful commands:
   docker compose ps                   # container health
   docker compose restart api          # restart just the API
   docker compose down                 # stop everything
-  docker compose down -v              # stop + wipe DB (destructive)
+  docker compose down -v              # stop + wipe DB (destructive — also
+                                      # deletes TLS certs: prefer the
+                                      # KRYPTALIS_RESET=1 installer flow,
+                                      # which keeps them)
 
 Update later — re-run the installer:
   curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/$BRANCH/install.sh | sudo sh
