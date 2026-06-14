@@ -207,15 +207,14 @@ ${email ? `  email ${email}\n` : ''}}
   /**
    * Write `content` to the Caddyfile.
    *
-   * CRITICAL: the Caddyfile is a SINGLE-FILE bind mount
-   * (`./.dockcontrol/reverse-proxy/Caddyfile:/etc/caddy/Caddyfile`). Docker
-   * binds it by INODE, so a write-tmp-then-rename — which replaces the inode —
-   * leaves the Caddy container pinned to the ORIGINAL (seed) inode: the API
-   * writes the real config on the host while Caddy keeps reading the empty
-   * seed → no domains, no certs. We therefore write IN PLACE (truncate +
-   * write the same inode), which the bind mount sees immediately. A partial
-   * write is acceptable here: `caddy validate` runs right after and any bad
-   * content is rolled back by the caller.
+   * Caddy mounts the reverse-proxy DIRECTORY (`./.dockcontrol/reverse-proxy →
+   * /etc/caddy`), so a rewrite is always visible to the container. We write IN
+   * PLACE (truncate + write) rather than tmp+rename: the in-place write is
+   * correct for both the current directory mount AND any legacy single-file
+   * mount still present on not-yet-recreated installs (a tmp+rename would swap
+   * the inode and break the single-file case). A partial write is harmless —
+   * `caddy validate` runs immediately after and the caller rolls back on
+   * failure.
    */
   private atomicWriteCaddyfile(targetPath: string, content: string): void {
     fs.writeFileSync(targetPath, content);

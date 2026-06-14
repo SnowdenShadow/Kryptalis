@@ -55,7 +55,14 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
-      - ./.dockcontrol/reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Mount the DIRECTORY, not the single Caddyfile. A single-file bind mount
+      # is bound by inode, so when the API rewrites the Caddyfile (every domain
+      # change) the new inode is invisible to Caddy and it keeps serving the
+      # stale seed → no domains, no certs. Mounting the directory makes every
+      # rewrite visible immediately. Caddy reads /etc/caddy/Caddyfile by default.
+      # NOTE: existing installs on the old single-file mount need ONE
+      # `docker compose up -d` (compose recreates caddy on the volume change).
+      - ./.dockcontrol/reverse-proxy:/etc/caddy:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

@@ -152,7 +152,9 @@
       "Bash(grep -nE \"</div>\\\\s*$|</Dialog>|DialogFooter\" \"app/\\(dashboard\\)/dashboard/domains/page.tsx\")",
       "Bash(awk 'NR>=506 && /^        \\\\\\)\\\\}/ {print NR\": \"$0; c++} c>=1 && NR>506 {exit}' \"app/\\(dashboard\\)/dashboard/domains/page.tsx\")",
       "Bash(sed -n '600,640p' \"app/\\(dashboard\\)/dashboard/domains/page.tsx\")",
-      "Bash(awk 'NR>=455 && NR<=620 && \\(/for \\\\\\(/ || /continue/ || /isLocalHostname|isLocalOnly|\\\\.local|skip/ || /blocks.push/ || /reverse_proxy|respond/ || /reservedCount|activeCount/ || /system_domain|systemDomain/\\)' reverse-proxy/reverse-proxy.service.ts)"
+      "Bash(awk 'NR>=455 && NR<=620 && \\(/for \\\\\\(/ || /continue/ || /isLocalHostname|isLocalOnly|\\\\.local|skip/ || /blocks.push/ || /reverse_proxy|respond/ || /reservedCount|activeCount/ || /system_domain|systemDomain/\\)' reverse-proxy/reverse-proxy.service.ts)",
+      "Bash(python -c \"import yaml,sys; yaml.safe_load\\(open\\('docker-compose.yml'\\)\\); print\\('YAML OK'\\)\")",
+      "Bash(python3 -c \"import yaml; yaml.safe_load\\(open\\('docker-compose.yml'\\)\\); print\\('YAML OK'\\)\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\Snowden\\Desktop\\Kryptalis-dev\\apps\\agent\\internal\\poller",
