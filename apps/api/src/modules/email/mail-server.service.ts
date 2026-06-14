@@ -18,14 +18,14 @@ import { assertProjectAccess } from '../../common/rbac/project-access';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 
 const execFileAsync = promisify(execFile);
-const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
 const MAIL_DIR = path.join(DATA_DIR, 'mail');
 // When the API runs in a container, the docker daemon on the host resolves
 // bind-mount source paths against the HOST filesystem, not the API container's
-// filesystem. Set KRYPTALIS_HOST_DATA_DIR to the host path that the API's
-// .kryptalis volume mounts FROM (e.g. /opt/kryptalis/.kryptalis) so generated
+// filesystem. Set DOCKCONTROL_HOST_DATA_DIR to the host path that the API's
+// .dockcontrol volume mounts FROM (e.g. /opt/dockcontrol/.dockcontrol) so generated
 // compose files use the correct absolute host paths.
-const HOST_DATA_DIR = process.env.KRYPTALIS_HOST_DATA_DIR || DATA_DIR;
+const HOST_DATA_DIR = process.env.DOCKCONTROL_HOST_DATA_DIR || DATA_DIR;
 const HOST_MAIL_DIR = path.posix.join(HOST_DATA_DIR.replace(/\\/g, '/'), 'mail');
 
 /**
@@ -189,7 +189,7 @@ export class MailServerService implements OnApplicationBootstrap {
     if (!server) return null;
 
     // also probe docker for live state
-    const containerName = `kryptalis-mail-${server.domain.domain.replace(/\./g, '-')}`;
+    const containerName = `dockcontrol-mail-${server.domain.domain.replace(/\./g, '-')}`;
     let liveStatus = server.status as string;
     try {
       const { stdout } = await execFileAsync(
@@ -319,7 +319,7 @@ export class MailServerService implements OnApplicationBootstrap {
         smtpsPort: ports.smtps,
         imapPort: ports.imap,
         imapsPort: ports.imaps,
-        dkimSelector: 'kryptalis',
+        dkimSelector: 'dockcontrol',
         dkimPrivateKey: dkimKeyEncrypted,
         dkimPublicKey: dkimPub,
       },
@@ -404,7 +404,7 @@ export class MailServerService implements OnApplicationBootstrap {
     // 127.0.0.1 wouldn't work because the API runs inside its own container
     // (loopback ≠ host). The mail server's internal port is always 25 — the
     // host-mapped port (server.smtpPort) is irrelevant for in-cluster traffic.
-    const host = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    const host = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
     const port = 25;
     const from = `${mailbox.localPart}@${domain.domain}`;
 
@@ -442,7 +442,7 @@ export class MailServerService implements OnApplicationBootstrap {
           if (line.length >= 4 && line[3] === '-') continue; // multi-line continuation
           const code = parseInt(line.slice(0, 3), 10);
 
-          if (step === 0 && code === 220) { out(`EHLO kryptalis.local\r\n`); step = 1; return; }
+          if (step === 0 && code === 220) { out(`EHLO dockcontrol.local\r\n`); step = 1; return; }
           if (step === 1 && code === 250) { out(`MAIL FROM:<${from}>\r\n`); step = 2; return; }
           if (step === 2 && code === 250) { out(`RCPT TO:<${to}>\r\n`); step = 3; return; }
           if (step === 3) {
@@ -450,7 +450,7 @@ export class MailServerService implements OnApplicationBootstrap {
             return finish(false, `Recipient rejected by local Postfix (${code} ${line.slice(4)}). The mail server isn't configured to relay to external addresses — check that mynetworks includes 127.0.0.0/8.`);
           }
           if (step === 4 && code === 354) {
-            const subject = `Kryptalis test email from ${domain.domain}`;
+            const subject = `DockControl test email from ${domain.domain}`;
             const body = [
               `From: ${from}`,
               `To: ${to}`,
@@ -459,13 +459,13 @@ export class MailServerService implements OnApplicationBootstrap {
               `Message-ID: <${Date.now()}.${Math.random().toString(36).slice(2)}@${domain.domain}>`,
               `Content-Type: text/plain; charset=utf-8`,
               ``,
-              `This is a test message sent from your Kryptalis mail server.`,
+              `This is a test message sent from your DockControl mail server.`,
               ``,
               `If you received it, outbound delivery from ${domain.domain} works end-to-end.`,
               `If it landed in spam: DKIM/SPF/DMARC/PTR likely need attention.`,
               `If it never arrived: outbound tcp/25 may be blocked at your VPS provider.`,
               ``,
-              `-- Kryptalis`,
+              `-- DockControl`,
               `.`,
               ``,
             ].join('\r\n');
@@ -508,7 +508,7 @@ export class MailServerService implements OnApplicationBootstrap {
     const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     const containerName = domain
-      ? `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`
+      ? `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`
       : null;
 
     if (server) {
@@ -593,7 +593,7 @@ export class MailServerService implements OnApplicationBootstrap {
     // proper cert-renewal reload behind accidental side-effects.
     if (!accountsChanged && !virtualChanged) return;
 
-    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
     try {
       await execFileAsync('docker', ['exec', containerName, 'postfix', 'reload'], { timeout: 5_000 });
     } catch {}
@@ -622,7 +622,7 @@ export class MailServerService implements OnApplicationBootstrap {
     await this.assertDomainAccess(userId, domainId, 'DEVELOPER');
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) throw new NotFoundException('Domain not found');
-    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
     const lines = Math.min(Math.max(opts.lines || 200, 10), 5000);
     const service = opts.service || 'all';
     try {
@@ -663,7 +663,7 @@ export class MailServerService implements OnApplicationBootstrap {
     await this.assertDomainAccess(userId, domainId, 'DEVELOPER');
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) throw new NotFoundException('Domain not found');
-    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
     try {
       const { stdout: statusOut } = await execFileAsync(
         'docker',
@@ -702,7 +702,7 @@ export class MailServerService implements OnApplicationBootstrap {
     }
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) throw new NotFoundException('Domain not found');
-    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
     try {
       await execFileAsync(
         'docker',
@@ -724,7 +724,7 @@ export class MailServerService implements OnApplicationBootstrap {
   async reloadMailServer(domainId: string): Promise<void> {
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) return;
-    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
     try {
       await execFileAsync('docker', ['exec', containerName, 'postfix', 'reload'], { timeout: 5_000 });
       await execFileAsync('docker', ['exec', containerName, 'doveadm', 'reload'], { timeout: 5_000 });
@@ -764,16 +764,16 @@ export class MailServerService implements OnApplicationBootstrap {
     fs.mkdirSync(dkimKeyDir, { recursive: true });
     // Trim accidental BOM/whitespace + ensure trailing newline (OpenDKIM is strict).
     const cleanKey = dkimPrivateKey.replace(/^﻿/, '').trimEnd() + '\n';
-    fs.writeFileSync(path.join(dkimKeyDir, 'kryptalis.private'), cleanKey);
-    try { fs.chmodSync(path.join(dkimKeyDir, 'kryptalis.private'), 0o600); } catch {}
+    fs.writeFileSync(path.join(dkimKeyDir, 'dockcontrol.private'), cleanKey);
+    try { fs.chmodSync(path.join(dkimKeyDir, 'dockcontrol.private'), 0o600); } catch {}
 
     fs.writeFileSync(
       path.join(opendkimDir, 'KeyTable'),
-      `kryptalis._domainkey.${domain} ${domain}:kryptalis:/etc/opendkim/keys/${domain}/kryptalis.private\n`,
+      `dockcontrol._domainkey.${domain} ${domain}:dockcontrol:/etc/opendkim/keys/${domain}/dockcontrol.private\n`,
     );
     fs.writeFileSync(
       path.join(opendkimDir, 'SigningTable'),
-      `*@${domain} kryptalis._domainkey.${domain}\n`,
+      `*@${domain} dockcontrol._domainkey.${domain}\n`,
     );
     // Trust localhost + every RFC1918 range so postfix→opendkim signing works
     // from any docker network (DMS sometimes lands on 172.16/12, 172.17/16, …).
@@ -794,7 +794,7 @@ export class MailServerService implements OnApplicationBootstrap {
     fs.writeFileSync(path.join(cfgDir, 'postfix-accounts.cf'), '');
     fs.writeFileSync(path.join(cfgDir, 'postfix-virtual.cf'), '');
 
-    const containerName = `kryptalis-mail-${domain.replace(/\./g, '-')}`;
+    const containerName = `dockcontrol-mail-${domain.replace(/\./g, '-')}`;
     const isLocal =
       domain.endsWith('.local') ||
       domain.endsWith('.localhost') ||
@@ -815,16 +815,16 @@ export class MailServerService implements OnApplicationBootstrap {
         ].join('\n      ');
     const sslVolume = isLocal
       ? ''
-      : `      - kryptalis_caddy_data:/caddy-certs:ro\n`;
+      : `      - dockcontrol_caddy_data:/caddy-certs:ro\n`;
     // The Caddy data volume is created by the root docker-compose. Its real
     // name is <project>_caddy_data where <project> is the compose project
-    // (usually the parent dir name: "kryptalis" on /opt/kryptalis, but could
-    // be "kryptalis-dev" in dev). Resolve it dynamically by introspecting the
-    // running kryptalis-caddy container, with sensible env-var override.
+    // (usually the parent dir name: "dockcontrol" on /opt/dockcontrol, but could
+    // be "dockcontrol-dev" in dev). Resolve it dynamically by introspecting the
+    // running dockcontrol-caddy container, with sensible env-var override.
     const caddyDataVolumeName = isLocal ? '' : await this.resolveCaddyDataVolume();
     const sslExternalVolumes = isLocal
       ? ''
-      : `\nvolumes:\n  kryptalis_caddy_data:\n    external: true\n    name: ${caddyDataVolumeName}\n`;
+      : `\nvolumes:\n  dockcontrol_caddy_data:\n    external: true\n    name: ${caddyDataVolumeName}\n`;
 
     const compose = `services:
   mailserver:
@@ -837,7 +837,7 @@ export class MailServerService implements OnApplicationBootstrap {
       - default
       # join the shared bridge so the API container can talk to us by name
       # for the 'Send test email' loopback (container-to-container SMTP).
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "${ports.smtp}:25"
       - "${ports.submission}:587"
@@ -876,9 +876,9 @@ ${sslVolume}    cap_add:
       timeout: 10s
       retries: 3
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true
-    name: kryptalis-apps
+    name: dockcontrol-apps
 ${sslExternalVolumes}`;
     fs.writeFileSync(path.join(dir, 'docker-compose.yml'), compose);
 
@@ -932,19 +932,19 @@ ${sslExternalVolumes}`;
   /**
    * Find the real name of the Caddy data volume created by the root compose.
    * Default name = <project>_caddy_data; <project> defaults to the parent dir
-   * (e.g. "kryptalis" on /opt/kryptalis, "kryptalis-dev" on a dev checkout).
+   * (e.g. "dockcontrol" on /opt/dockcontrol, "dockcontrol-dev" on a dev checkout).
    * Resolution priority:
    *   1. CADDY_DATA_VOLUME env var (explicit operator override)
-   *   2. The volume currently mounted at /data inside the kryptalis-caddy container
+   *   2. The volume currently mounted at /data inside the dockcontrol-caddy container
    *   3. First matching docker volume ending in _caddy_data
-   *   4. Fallback to kryptalis_caddy_data
+   *   4. Fallback to dockcontrol_caddy_data
    */
   private async resolveCaddyDataVolume(): Promise<string> {
     if (process.env.CADDY_DATA_VOLUME) return process.env.CADDY_DATA_VOLUME;
     try {
       const { stdout } = await execFileAsync(
         'docker',
-        ['inspect', 'kryptalis-caddy', '--format',
+        ['inspect', 'dockcontrol-caddy', '--format',
          '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}'],
         { timeout: 5000 },
       );
@@ -959,7 +959,7 @@ ${sslExternalVolumes}`;
       const first = stdout.trim().split('\n').find(Boolean);
       if (first) return first;
     } catch {}
-    return 'kryptalis_caddy_data';
+    return 'dockcontrol_caddy_data';
   }
 
   /**
@@ -994,7 +994,7 @@ ${sslExternalVolumes}`;
   async kickMailboxSessions(domainId: string, address: string): Promise<void> {
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) return;
-    const containerName = `kryptalis-mail-${domain.domain.replace(/\./g, '-')}`;
+    const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
     try {
       await execFileAsync(
         'docker',

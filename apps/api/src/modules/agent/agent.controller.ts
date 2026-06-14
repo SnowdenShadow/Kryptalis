@@ -27,7 +27,7 @@ const AGENT_VERSION = '0.1.0';
 const ALLOWED_ARCHS = new Set(['amd64', 'arm64']);
 
 function findBinary(arch: string): string | null {
-  const name = `kryptalis-agent-linux-${arch}`;
+  const name = `dockcontrol-agent-linux-${arch}`;
   const cwd = process.cwd();
   const candidates = [
     // when API runs from the monorepo root: ./apps/agent/bin/...
@@ -54,7 +54,7 @@ export class AgentController {
   // ─── public bootstrap routes (no JWT — agent runs on a fresh VPS) ──
 
   @Get('binary')
-  @ApiOperation({ summary: 'Download the kryptalis-agent binary for a given arch (linux/amd64|arm64)' })
+  @ApiOperation({ summary: 'Download the dockcontrol-agent binary for a given arch (linux/amd64|arm64)' })
   binary(@Query('arch') arch: string, @Res() res: Response) {
     if (!arch || !ALLOWED_ARCHS.has(arch)) {
       res.status(400).type('text/plain').send('Unsupported arch (expected amd64 or arm64)\n');
@@ -63,13 +63,13 @@ export class AgentController {
     const binPath = findBinary(arch);
     if (!binPath) {
       res.status(503).type('text/plain').send(
-        '# kryptalis-agent binary not built yet for arch=' + arch + '\n' +
-          '# Build it from apps/agent and copy to apps/agent/bin/kryptalis-agent-linux-' + arch + '\n',
+        '# dockcontrol-agent binary not built yet for arch=' + arch + '\n' +
+          '# Build it from apps/agent and copy to apps/agent/bin/dockcontrol-agent-linux-' + arch + '\n',
       );
       return;
     }
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', 'attachment; filename="kryptalis-agent"');
+    res.setHeader('Content-Disposition', 'attachment; filename="dockcontrol-agent"');
     res.sendFile(binPath);
   }
 
@@ -77,7 +77,7 @@ export class AgentController {
   @ApiOperation({ summary: 'Install script for a brand-new server' })
   @Header('Content-Type', 'text/x-shellscript')
   installScript(@Query('token') token: string, @Res() res: Response) {
-    // Tight regex: every install token Kryptalis issues is 64 hex chars
+    // Tight regex: every install token DockControl issues is 64 hex chars
     // (32 random bytes). Accept the canonical shape only — defends against
     // anyone trying to brute-force /agent/register with short tokens.
     if (!token || !/^[a-zA-Z0-9_-]{32,128}$/.test(token)) {
@@ -237,21 +237,21 @@ export class AgentController {
 // values we DO want JS to interpolate are TOKEN (`${tk}`) and the API URL.
 function renderInstallScript(tk: string, apiUrl: string): string {
   return `#!/bin/sh
-# Kryptalis agent installer
+# DockControl agent installer
 # Run as:  curl -fsSL ${apiUrl}/api/agent/install.sh?token=<token> | sudo sh
 
 set -eu
 
 TOKEN="${tk}"
 API_URL="${apiUrl}"
-AGENT_DIR=/opt/kryptalis
-AGENT_BIN="\$AGENT_DIR/kryptalis-agent"
+AGENT_DIR=/opt/dockcontrol
+AGENT_BIN="\$AGENT_DIR/dockcontrol-agent"
 
 if [ "\$(id -u)" -ne 0 ]; then
   echo "✖ run as root (sudo)"; exit 1
 fi
 
-echo "▶ Kryptalis agent installer"
+echo "▶ DockControl agent installer"
 echo "  API:  \$API_URL"
 echo "  Dir:  \$AGENT_DIR"
 
@@ -287,7 +287,7 @@ case "\$ARCH" in
   *) echo "✖ Unsupported arch: \$ARCH"; exit 1 ;;
 esac
 
-echo "▶ Downloading kryptalis-agent (linux/\$ARCH)..."
+echo "▶ Downloading dockcontrol-agent (linux/\$ARCH)..."
 curl -fsSL "\$API_URL/api/agent/binary?arch=\$ARCH" -o "\$AGENT_BIN"
 chmod +x "\$AGENT_BIN"
 
@@ -315,16 +315,16 @@ fi
 
 # ─── 4. Write config + service ────────────────────────────────────
 cat > "\$AGENT_DIR/agent.env" <<ENVEOF
-KRYPTALIS_API_URL=\$API_URL
-KRYPTALIS_SERVER_ID=\$SERVER_ID
-KRYPTALIS_TOKEN=\$NEW_TOKEN
+DOCKCONTROL_API_URL=\$API_URL
+DOCKCONTROL_SERVER_ID=\$SERVER_ID
+DOCKCONTROL_TOKEN=\$NEW_TOKEN
 ENVEOF
 chmod 600 "\$AGENT_DIR/agent.env"
 
 if [ "\$HAS_SYSTEMD" = 1 ]; then
-  cat > /etc/systemd/system/kryptalis-agent.service <<UNITEOF
+  cat > /etc/systemd/system/dockcontrol-agent.service <<UNITEOF
 [Unit]
-Description=Kryptalis Agent
+Description=DockControl Agent
 After=docker.service network-online.target
 Wants=docker.service network-online.target
 
@@ -341,13 +341,13 @@ WantedBy=multi-user.target
 UNITEOF
 
   systemctl daemon-reload
-  systemctl enable --now kryptalis-agent
+  systemctl enable --now dockcontrol-agent
 
   echo ""
   echo "✓ Installation complete (agent v${AGENT_VERSION})"
   echo "  Server ID: \$SERVER_ID"
-  echo "  Status:    systemctl status kryptalis-agent"
-  echo "  Logs:      journalctl -u kryptalis-agent -f"
+  echo "  Status:    systemctl status dockcontrol-agent"
+  echo "  Logs:      journalctl -u dockcontrol-agent -f"
   echo "  SFTP:      port 2522 (embedded server — open it in your firewall"
   echo "             if you plan to use SFTP accounts on this server)"
 else
@@ -358,16 +358,16 @@ else
   # own startup mechanism).
   cat > "\$AGENT_DIR/start-agent.sh" <<'STARTEOF'
 #!/bin/sh
-AGENT_DIR=/opt/kryptalis
+AGENT_DIR=/opt/dockcontrol
 set -a; . "\$AGENT_DIR/agent.env"; set +a
 # already running?
 if [ -f "\$AGENT_DIR/agent.pid" ] && kill -0 "\$(cat "\$AGENT_DIR/agent.pid")" 2>/dev/null; then
-  echo "kryptalis-agent already running (pid \$(cat "\$AGENT_DIR/agent.pid"))"
+  echo "dockcontrol-agent already running (pid \$(cat "\$AGENT_DIR/agent.pid"))"
   exit 0
 fi
-nohup "\$AGENT_DIR/kryptalis-agent" >> "\$AGENT_DIR/agent.log" 2>&1 &
+nohup "\$AGENT_DIR/dockcontrol-agent" >> "\$AGENT_DIR/agent.log" 2>&1 &
 echo \$! > "\$AGENT_DIR/agent.pid"
-echo "kryptalis-agent started (pid \$(cat "\$AGENT_DIR/agent.pid"))"
+echo "dockcontrol-agent started (pid \$(cat "\$AGENT_DIR/agent.pid"))"
 STARTEOF
   chmod +x "\$AGENT_DIR/start-agent.sh"
   "\$AGENT_DIR/start-agent.sh"

@@ -27,7 +27,7 @@ import { isLocalHost } from '../deployment-target/deployment-target.service';
 const execFileAsync = promisify(execFile);
 const compose = (args: string[], opts: { cwd?: string; timeout?: number } = {}) =>
   execFileAsync('docker', ['compose', ...args], opts);
-const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
 const DBS_DIR = path.join(DATA_DIR, 'databases');
 
 const DB_CONFIGS: Record<string, { image: string; defaultPort: number; portBase: number; compose: (name: string, user: string, pass: string, port: number) => string }> = {
@@ -38,7 +38,7 @@ const DB_CONFIGS: Record<string, { image: string; defaultPort: number; portBase:
     compose: (name, user, pass, port) => `services:
   ${name}:
     image: postgres:16-alpine
-    container_name: kryptalis-db-${name}
+    container_name: dockcontrol-db-${name}
     restart: unless-stopped
     ports:
       - "${port}:5432"
@@ -63,7 +63,7 @@ volumes:
     compose: (name, user, pass, port) => `services:
   ${name}:
     image: mysql:8
-    container_name: kryptalis-db-${name}
+    container_name: dockcontrol-db-${name}
     restart: unless-stopped
     ports:
       - "${port}:3306"
@@ -84,7 +84,7 @@ volumes:
     compose: (name, user, pass, port) => `services:
   ${name}:
     image: mariadb:11
-    container_name: kryptalis-db-${name}
+    container_name: dockcontrol-db-${name}
     restart: unless-stopped
     ports:
       - "${port}:3306"
@@ -105,7 +105,7 @@ volumes:
     compose: (name, _user, pass, port) => `services:
   ${name}:
     image: redis:7-alpine
-    container_name: kryptalis-db-${name}
+    container_name: dockcontrol-db-${name}
     restart: unless-stopped
     ports:
       - "${port}:6379"
@@ -122,7 +122,7 @@ volumes:
     compose: (name, user, pass, port) => `services:
   ${name}:
     image: mongo:7
-    container_name: kryptalis-db-${name}
+    container_name: dockcontrol-db-${name}
     restart: unless-stopped
     ports:
       - "${port}:27017"
@@ -142,7 +142,7 @@ volumes:
     compose: (name, _user, pass, port) => `services:
   ${name}:
     image: eqalpha/keydb:latest
-    container_name: kryptalis-db-${name}
+    container_name: dockcontrol-db-${name}
     restart: unless-stopped
     ports:
       - "${port}:6379"
@@ -159,7 +159,7 @@ volumes:
     compose: (name, _user, pass, port) => `services:
   ${name}:
     image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
-    container_name: kryptalis-db-${name}
+    container_name: dockcontrol-db-${name}
     restart: unless-stopped
     ports:
       - "${port}:6379"
@@ -178,7 +178,7 @@ volumes:
     compose: (name, user, pass, port) => `services:
   ${name}:
     image: clickhouse/clickhouse-server:latest
-    container_name: kryptalis-db-${name}
+    container_name: dockcontrol-db-${name}
     restart: unless-stopped
     ports:
       - "${port}:8123"
@@ -339,7 +339,7 @@ export class DatabasesService {
     const username = dto.username || dto.name.replace(/-/g, '_');
     // CSPRNG — Math.random() is predictable and was a credential-guessing
     // vector for DB containers whose host port is published.
-    const password = dto.password || `kryptalis_${randomBytes(12).toString('base64url')}`;
+    const password = dto.password || `dockcontrol_${randomBytes(12).toString('base64url')}`;
     const hostPort = await this.allocateHostPort(config.portBase);
 
     const db = await this.prisma.database.create({
@@ -416,7 +416,7 @@ export class DatabasesService {
     return Promise.all(dbs.map(async (db) => {
       // Auto-imported rows store the real container_name in `host` (it's
       // the address other services use). Manually-provisioned rows use
-      // the legacy `kryptalis-db-<name>` scheme.
+      // the legacy `dockcontrol-db-<name>` scheme.
       const status = await this.getContainerStatus(
         (db as any).autoImported ? db.host : db.name,
         (db as any).autoImported,
@@ -497,7 +497,7 @@ export class DatabasesService {
         'This database is managed by its parent application. Delete the application to remove it.',
       );
     }
-    const containerName = `kryptalis-db-${db.name}`;
+    const containerName = `dockcontrol-db-${db.name}`;
     const slug = `db-${db.name}`;
     const server = await this.resolveDbServer(id);
 
@@ -612,8 +612,8 @@ export class DatabasesService {
 
   private async getContainerStatus(nameOrContainer: string, isAutoImported = false): Promise<string> {
     // Auto-imported rows pass the literal container_name; manual rows pass
-    // the DB name and we prepend the legacy kryptalis-db- prefix.
-    const target = isAutoImported ? nameOrContainer : `kryptalis-db-${nameOrContainer}`;
+    // the DB name and we prepend the legacy dockcontrol-db- prefix.
+    const target = isAutoImported ? nameOrContainer : `dockcontrol-db-${nameOrContainer}`;
     try {
       // execFile: arbitrary container_name strings from auto-imported rows
       // never touch a shell.

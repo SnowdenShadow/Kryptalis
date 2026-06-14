@@ -32,7 +32,7 @@ const I18nContext = createContext<I18nContextType>({
 function initialLocale(): Locale {
   if (typeof window === 'undefined') return 'en';
   try {
-    const saved = localStorage.getItem('kryptalis-lang') as Locale | null;
+    const saved = localStorage.getItem('dockcontrol-lang') as Locale | null;
     if (saved && translations[saved]) return saved;
   } catch {}
   try {
@@ -51,7 +51,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
   const setLocale = useCallback((newLocale: Locale) => {
     setLocaleState(newLocale);
-    localStorage.setItem('kryptalis-lang', newLocale);
+    localStorage.setItem('dockcontrol-lang', newLocale);
     document.documentElement.lang = newLocale;
   }, []);
 

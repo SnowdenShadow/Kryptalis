@@ -31,10 +31,10 @@ export interface AgentTaskCompletion {
 export type AgentTaskCompletionHandler = (task: AgentTaskCompletion) => Promise<void>;
 
 // Same runtime-dir convention as backups/databases/files services. Transfer
-// staging lives in .kryptalis/transfers/<taskId>/<fileName> — written by the
+// staging lives in .dockcontrol/transfers/<taskId>/<fileName> — written by the
 // authenticated agent upload endpoint (or staged locally by the API for
 // downloads) and removed when the task chain terminates.
-const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
 const TRANSFERS_DIR = path.join(DATA_DIR, 'transfers');
 
 /** Per-file transfer size cap. Generous by default (10 GB) — volume tars and
@@ -62,7 +62,7 @@ const TRANSFER_MAX_BYTES = (() => {
  * agents use to move data between servers:
  *
  *   - POST /agent/transfers/:taskId/upload streams a raw binary body into
- *     .kryptalis/transfers/<taskId>/<name> (validated in
+ *     .dockcontrol/transfers/<taskId>/<name> (validated in
  *     validateTransferUpload(); the controller does the actual streaming).
  *   - GET /agent/transfers/:taskId/download streams it back out — to the
  *     same server, or to a server holding a QUEUED/RUNNING task whose
@@ -391,7 +391,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
       arch: string;
       uptime: number;
       metrics: any;
-      /** Live docker states of kryptalis-managed containers (agent ≥ this
+      /** Live docker states of dockcontrol-managed containers (agent ≥ this
        *  release). Lets the dashboard show real RUNNING/STOPPED for remote
        *  apps without per-request agent round-trips. */
       containers?: Array<{ name: string; state: string }>;
@@ -631,7 +631,7 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  // ─── file transfers (.kryptalis/transfers/<taskId>/<name>) ─────────
+  // ─── file transfers (.dockcontrol/transfers/<taskId>/<name>) ─────────
 
   /** Max bytes a single transfer upload may carry (configurable via env). */
   get transferMaxBytes(): number {

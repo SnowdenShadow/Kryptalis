@@ -38,8 +38,8 @@ const SERVER_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 // env so the same image can be used in environments that name things
 // differently.
 const PROTECTED_CONTAINERS = new Set(
-  (process.env.KRYPTALIS_PROTECTED_CONTAINERS ||
-    'kryptalis-api,kryptalis-dashboard,kryptalis-postgres,kryptalis-redis,kryptalis-caddy,kryptalis-agent')
+  (process.env.DOCKCONTROL_PROTECTED_CONTAINERS ||
+    'dockcontrol-api,dockcontrol-dashboard,dockcontrol-postgres,dockcontrol-redis,dockcontrol-caddy,dockcontrol-agent')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean),

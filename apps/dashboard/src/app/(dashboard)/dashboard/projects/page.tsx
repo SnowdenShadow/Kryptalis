@@ -35,7 +35,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import type { ProjectResponse } from '@kryptalis/types';
+import type { ProjectResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';

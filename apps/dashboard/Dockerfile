@@ -22,8 +22,8 @@ COPY --from=deps /app/packages/types/node_modules ./packages/types/node_modules
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
 COPY packages ./packages
 COPY apps/dashboard ./apps/dashboard
-RUN pnpm --filter @kryptalis/types build
-RUN pnpm --filter @kryptalis/dashboard build
+RUN pnpm --filter @dockcontrol/types build
+RUN pnpm --filter @dockcontrol/dashboard build
 
 FROM node:20-alpine AS runner
 WORKDIR /app

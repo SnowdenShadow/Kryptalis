@@ -1,5 +1,5 @@
 /**
- * Inline-CSS HTML email scaffolding for Kryptalis transactional mail.
+ * Inline-CSS HTML email scaffolding for DockControl transactional mail.
  *
  * Why inline CSS only? Outlook/Gmail/Apple Mail strip <style> blocks
  * inconsistently — inline is the only reliably portable styling. We also
@@ -100,7 +100,7 @@ export function renderEmail({
                 <span class="muted"
                       style="margin-left:10px;color:#6b6b78;font-weight:600;
                              font-size:14px;letter-spacing:0.3px;vertical-align:middle;">
-                  Kryptalis
+                  DockControl
                 </span>
               </td>
             </tr>
@@ -125,7 +125,7 @@ export function renderEmail({
             <tr>
               <td class="muted"
                   style="padding:14px 28px 24px 28px;color:#8a8a99;font-size:12px;line-height:1.5;">
-                You're receiving this email from your Kryptalis instance. If you
+                You're receiving this email from your DockControl instance. If you
                 didn't expect it, you can safely ignore this message.
               </td>
             </tr>

@@ -126,7 +126,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     const user = this.systemConfig.get<string>('smtp_user', 'SMTP_USER');
     const pass = this.systemConfig.get<string>('smtp_pass', 'SMTP_PASS');
     this.smtpFrom =
-      this.systemConfig.get<string>('smtp_from', 'SMTP_FROM') ?? user ?? 'no-reply@kryptalis.local';
+      this.systemConfig.get<string>('smtp_from', 'SMTP_FROM') ?? user ?? 'no-reply@dockcontrol.local';
 
     try {
       // Lazy-require so missing optional dep doesn't crash the app at
@@ -165,7 +165,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       );
     }
     const html = renderEmail({
-      title: 'Kryptalis test email',
+      title: 'DockControl test email',
       preheader: 'If you can read this, SMTP works.',
       body: `
         <p style="margin:0 0 12px 0;">Hi ${escapeHtml(actorName)},</p>
@@ -174,7 +174,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
           received it, your SMTP transport is healthy.
         </p>`,
     });
-    await this.sendMail({ to, subject: 'Kryptalis SMTP test', html });
+    await this.sendMail({ to, subject: 'DockControl SMTP test', html });
   }
 
   async sendPasswordReset(email: string, token: string, userName: string): Promise<void> {
@@ -204,7 +204,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
       body: `
         <p style="margin:0 0 12px 0;">Hi ${escapeHtml(userName)},</p>
         <p style="margin:0 0 12px 0;">
-          We received a request to reset the password for your Kryptalis
+          We received a request to reset the password for your DockControl
           account. Click the button below to choose a new one. This link
           expires in 1 hour and can only be used once.
         </p>
@@ -214,7 +214,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     });
     await this.sendMail({
       to: email,
-      subject: 'Reset your Kryptalis password',
+      subject: 'Reset your DockControl password',
       html,
     });
   }
@@ -235,14 +235,14 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         <p style="margin:0 0 12px 0;">Hi ${escapeHtml(userName)},</p>
         <p style="margin:0;">
           Please confirm your email address by clicking the button below.
-          This helps keep your Kryptalis account secure.
+          This helps keep your DockControl account secure.
         </p>`,
       ctaLabel: 'Verify email',
       ctaUrl: url,
     });
     await this.sendMail({
       to: email,
-      subject: 'Verify your Kryptalis email',
+      subject: 'Verify your DockControl email',
       html,
     });
   }
@@ -262,12 +262,12 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     }
     const html = renderEmail({
       title: `You've been invited to ${projectName}`,
-      preheader: `${inviterName} invited you to collaborate on Kryptalis.`,
+      preheader: `${inviterName} invited you to collaborate on DockControl.`,
       body: `
         <p style="margin:0 0 12px 0;">Hi,</p>
         <p style="margin:0 0 12px 0;">
           <strong>${escapeHtml(inviterName)}</strong> invited you to join the
-          <strong>${escapeHtml(projectName)}</strong> project on Kryptalis.
+          <strong>${escapeHtml(projectName)}</strong> project on DockControl.
         </p>
         <p style="margin:0;">Accept the invitation to get started.</p>`,
       ctaLabel: 'Accept invitation',
@@ -275,7 +275,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     });
     await this.sendMail({
       to: email,
-      subject: `${inviterName} invited you to ${projectName} on Kryptalis`,
+      subject: `${inviterName} invited you to ${projectName} on DockControl`,
       html,
     });
   }
@@ -468,7 +468,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
 
     await this.sendMail({
       to: recipients.join(', '),
-      subject: `[Kryptalis] Alert: ${rule.name}`,
+      subject: `[DockControl] Alert: ${rule.name}`,
       html,
     });
   }
@@ -554,7 +554,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
 
       await this.sendMail({
         to: recipients.join(', '),
-        subject: `[Kryptalis] ${title}`,
+        subject: `[DockControl] ${title}`,
         html,
       });
     } catch (err) {
@@ -638,7 +638,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
 
       await this.sendMail({
         to: recipients.join(', '),
-        subject: `[Kryptalis] ${title}`,
+        subject: `[DockControl] ${title}`,
         html,
       });
     } catch (err) {
@@ -730,7 +730,7 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
 
       await this.sendMail({
         to: recipients.join(', '),
-        subject: `[Kryptalis] ${title}`,
+        subject: `[DockControl] ${title}`,
         html,
       });
     } catch (err) {

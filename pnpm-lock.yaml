@@ -20,7 +20,7 @@ importers:
       '@aws-sdk/client-s3':
         specifier: ^3.1065.0
         version: 3.1065.0
-      '@kryptalis/types':
+      '@dockcontrol/types':
         specifier: workspace:*
         version: link:../../packages/types
       '@nestjs/common':
@@ -135,7 +135,7 @@ importers:
 
   apps/dashboard:
     dependencies:
-      '@kryptalis/types':
+      '@dockcontrol/types':
         specifier: workspace:*
         version: link:../../packages/types
       '@tanstack/react-query':

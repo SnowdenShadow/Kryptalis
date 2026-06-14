@@ -1,6 +1,6 @@
 # Configuration
 
-Kryptalis splits configuration into two layers:
+DockControl splits configuration into two layers:
 
 1. **`.env` bootstrap secrets** — read once at API startup. Must be set on disk *before* `docker compose up` or the stack refuses to start.
 2. **`SystemSetting` rows in Postgres** — everything operational. Editable from **Admin → System Config** in the dashboard, no API restart needed.
@@ -25,12 +25,12 @@ These four are **required** — `docker-compose.yml` uses the `${VAR:?error}` pa
 
 | Key | What it is | How to generate |
 | --- | --- | --- |
-| `POSTGRES_PASSWORD` | Postgres `kryptalis` user password. Baked into the Postgres data volume on first init — changing it later requires wiping the volume. | `openssl rand -hex 16` |
+| `POSTGRES_PASSWORD` | Postgres `dockcontrol` user password. Baked into the Postgres data volume on first init — changing it later requires wiping the volume. | `openssl rand -hex 16` |
 | `JWT_SECRET` | HMAC key for access tokens. Rotating it invalidates every active session. | `openssl rand -hex 32` |
 | `JWT_REFRESH_SECRET` | HMAC key for refresh tokens. Rotating it forces every user to log in again. | `openssl rand -hex 32` |
 | `ENCRYPTION_KEY` | AES-256-GCM key for `SystemSetting` secrets and credential fields on `Server` / `GitProvider` / `Database` rows. **If you lose this, the encrypted SMTP password, webhook secrets, and similar are unrecoverable.** | `openssl rand -hex 16` (16 bytes / 32 hex chars) |
 
-`DATABASE_URL` is composed in `docker-compose.yml` from the Postgres values; it is not set directly in `.env`. If you run the API outside Docker (dev mode), set it explicitly: `postgresql://kryptalis:<pass>@127.0.0.1:5432/kryptalis`.
+`DATABASE_URL` is composed in `docker-compose.yml` from the Postgres values; it is not set directly in `.env`. If you run the API outside Docker (dev mode), set it explicitly: `postgresql://dockcontrol:<pass>@127.0.0.1:5432/dockcontrol`.
 
 Two more `.env` keys are optional but commonly set:
 
@@ -55,8 +55,8 @@ Advanced env-only knobs (rarely needed):
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `CADDY_DATA_VOLUME` | autodetected | Explicit name of the Caddy data volume (mail-server certificate lookups). |
-| `KRYPTALIS_PROTECTED_CONTAINERS` | built-in list | Extra comma-separated container names the API refuses to stop/remove. |
-| `KRYPTALIS_COMPOSE_OVERRIDE` | `/app/install-root/docker-compose.override.yml` | Path of the override file the reverse-proxy writes for extra published Caddy ports. |
+| `DOCKCONTROL_PROTECTED_CONTAINERS` | built-in list | Extra comma-separated container names the API refuses to stop/remove. |
+| `DOCKCONTROL_COMPOSE_OVERRIDE` | `/app/install-root/docker-compose.override.yml` | Path of the override file the reverse-proxy writes for extra published Caddy ports. |
 
 ## `SystemSetting` keys
 
@@ -70,7 +70,7 @@ Every key below is editable from **Admin → System Config**. The `env fallback`
 | `smtp_port` | `SMTP_PORT` | `587` | SMTP server port. |
 | `smtp_user` | `SMTP_USER` | — | SMTP username. |
 | `smtp_pass` | `SMTP_PASS` | — | SMTP password. **Encrypted at rest.** Blank field in the UI keeps the existing value (so you can edit other SMTP fields without re-entering it). |
-| `smtp_from` | `SMTP_FROM` | falls back to `smtp_user`, then `no-reply@kryptalis.local` | `From:` header on outgoing mail. |
+| `smtp_from` | `SMTP_FROM` | falls back to `smtp_user`, then `no-reply@dockcontrol.local` | `From:` header on outgoing mail. |
 
 ### Public URLs
 
@@ -100,7 +100,7 @@ The audit log has a hardcoded retention of 365 days (cleaned hourly), tracked in
 
 > **Note on the `S3_*` env fallbacks:** the provided `docker-compose.yml` does **not** pass any `S3_*` variable into the API container, so setting them in `.env` has no effect on a standard install — they only work for bare-metal / custom-compose deployments that inject them explicitly. On a standard install, configure S3 storage via **Admin → System Config** (which is the recommended path anyway).
 
-Remote backup targets (`S3` / `R2` / `B2` in the create-backup dialog) only become selectable once `s3_endpoint`, `s3_bucket`, `s3_access_key` and `s3_secret_key` are all set (`GET /backups/targets` reports `s3Configured`). Dumps are uploaded under `kryptalis-backups/<backupId>/<filename>` (post-encryption bytes — the recorded sha256 still matches), the local file is deleted after a successful upload, and restores download to a temp file before running the usual integrity/decryption gate. Deleting a backup removes its remote objects best-effort.
+Remote backup targets (`S3` / `R2` / `B2` in the create-backup dialog) only become selectable once `s3_endpoint`, `s3_bucket`, `s3_access_key` and `s3_secret_key` are all set (`GET /backups/targets` reports `s3Configured`). Dumps are uploaded under `dockcontrol-backups/<backupId>/<filename>` (post-encryption bytes — the recorded sha256 still matches), the local file is deleted after a successful upload, and restores download to a temp file before running the usual integrity/decryption gate. Deleting a backup removes its remote objects best-effort.
 
 ### Admin / user policy
 
@@ -110,7 +110,7 @@ Remote backup targets (`S3` / `R2` / `B2` in the create-backup dialog) only beco
 | `require_admin_approval` | — | `false` | When `true`, every non-bootstrap signup is created with status `PENDING_APPROVAL` (no verification email is sent). Login answers 403 until an ADMIN/SUPERADMIN flips the user to `ACTIVE` via `PATCH /admin/users/:id/status` (Admin → Users). |
 | `default_user_role` | — | `USER` | Role granted to non-bootstrap signups. Allowed values: `USER` or `VIEWER` — anything else silently falls back to `USER` so a tampered row can never mint privileged accounts. |
 | `maintenance_mode` | — | `false` | When `true`, write requests (POST/PATCH/PUT/DELETE) from non-admins get a 503 with a `MAINTENANCE_MODE` code. GETs always pass; `/api/auth/*`, `/api/health`, `/api/agent/*` and `/api/webhooks/*` stay open; ADMIN/SUPERADMIN bearer tokens bypass the gate. Enforced by a global guard (`apps/api/src/common/guards/maintenance.guard.ts`) that caches the flag in memory via `SystemConfigService.onChange` — no DB query per request. |
-| `platform_name` | — | `Kryptalis` | Branding in dashboard header + email subjects. |
+| `platform_name` | — | `DockControl` | Branding in dashboard header + email subjects. |
 | `deployment_mode` | — | `LOCAL` | `LOCAL` (single VPS) or `MULTI` (additional servers via the agent). Switching `LOCAL → MULTI` is reversible until you add a non-local server. |
 
 

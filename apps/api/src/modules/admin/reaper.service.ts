@@ -9,7 +9,7 @@ const exec = promisify(execFile);
  * Docker reaper.
  *
  * Garbage-collects docker artefacts (images, volumes, networks, stopped
- * containers) that USED to belong to a Kryptalis app/db/project but whose
+ * containers) that USED to belong to a DockControl app/db/project but whose
  * owning DB row no longer exists. The compose `down -v --rmi local` we
  * now run on delete handles the happy path; the reaper exists for:
  *
@@ -23,15 +23,15 @@ const exec = promisify(execFile);
  *
  * Strategy: **inventory live state, intersect with the DB, delete the
  * difference.** We NEVER remove anything we can't tie back to a known
- * Kryptalis naming convention — leaves user-launched containers alone.
+ * DockControl naming convention — leaves user-launched containers alone.
  *
  * Naming conventions matched (all from applications.service.ts /
  * marketplace templates.ts):
  *
- *   containers:  kryptalis-<slug>(-<appId12>)? | kryptalis-db-<dbname>
- *   images:      <slug>-<appId12>-* | kryptalis-<slug>(-<appId12>)?
+ *   containers:  dockcontrol-<slug>(-<appId12>)? | dockcontrol-db-<dbname>
+ *   images:      <slug>-<appId12>-* | dockcontrol-<slug>(-<appId12>)?
  *   volumes:     <slug>-<appId12>_* | wordpress-<id>_wp_* etc.
- *   networks:    kryptalis_proj_<projectId-stripped> | <slug>-<id>_default
+ *   networks:    dockcontrol_proj_<projectId-stripped> | <slug>-<id>_default
  *
  * The `appId12` is the prefix DB primary keys share — knowing it lets us
  * answer "is this artefact owned by a still-alive row?" without any
@@ -145,8 +145,8 @@ export class ReaperService {
     for (const line of stdout.trim().split('\n').filter(Boolean)) {
       const [id, names, image, status] = line.split('\t');
       const name = (names || '').split(',')[0];
-      // App containers: kryptalis-<slug>-<appId12> or kryptalis-<slug>
-      const appMatch = name.match(/^kryptalis-(?!db-)([a-z0-9-]+?)(?:-([a-z0-9]{12}))?$/);
+      // App containers: dockcontrol-<slug>-<appId12> or dockcontrol-<slug>
+      const appMatch = name.match(/^dockcontrol-(?!db-)([a-z0-9-]+?)(?:-([a-z0-9]{12}))?$/);
       if (appMatch) {
         const idPart = appMatch[2];
         // No id suffix → legacy slug-only deploy. We can't safely link
@@ -158,8 +158,8 @@ export class ReaperService {
         }
         continue;
       }
-      // DB containers: kryptalis-db-<dbname>
-      const dbMatch = name.match(/^kryptalis-db-(.+)$/);
+      // DB containers: dockcontrol-db-<dbname>
+      const dbMatch = name.match(/^dockcontrol-db-(.+)$/);
       if (dbMatch && !liveDbNames.has(dbMatch[1])) {
         out.push({ id, name, image, status, reason: `db ${dbMatch[1]} not in DB` });
       }
@@ -178,8 +178,8 @@ export class ReaperService {
         out.push({ id, repo, tag, size, reason: `appId ${m[1]} not in DB` });
         continue;
       }
-      // Custom-deploy images: kryptalis-<anything>
-      const k = repo.match(/^kryptalis\/([a-z0-9-]+):/);
+      // Custom-deploy images: dockcontrol-<anything>
+      const k = repo.match(/^dockcontrol\/([a-z0-9-]+):/);
       if (k) {
         // We don't currently track these by id — skip unless explicitly
         // dangling. Adds a safety floor: never remove images that aren't
@@ -219,8 +219,8 @@ export class ReaperService {
         out.push({ name, reason: `appId ${m[1]} not in DB` });
         continue;
       }
-      // Project networks: kryptalis_proj_<projectIdStripped>
-      const p = name.match(/^kryptalis_proj_([a-z0-9]+)$/);
+      // Project networks: dockcontrol_proj_<projectIdStripped>
+      const p = name.match(/^dockcontrol_proj_([a-z0-9]+)$/);
       if (p && !liveProjectIds.has(p[1])) {
         out.push({ name, reason: `projectId ${p[1]} not in DB` });
       }

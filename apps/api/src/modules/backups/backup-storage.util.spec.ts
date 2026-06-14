@@ -20,28 +20,28 @@ describe('backup-storage.util', () => {
   });
 
   describe('buildS3Key', () => {
-    it('builds kryptalis-backups/<id>/<filename> from a plain filename', () => {
+    it('builds dockcontrol-backups/<id>/<filename> from a plain filename', () => {
       expect(buildS3Key('ckabc123', 'dump.sql.gz')).toBe(
-        'kryptalis-backups/ckabc123/dump.sql.gz',
+        'dockcontrol-backups/ckabc123/dump.sql.gz',
       );
     });
 
     it('keeps only the basename of full paths (posix and windows)', () => {
       expect(buildS3Key('id1', '/var/backups/db/dump.sql')).toBe(
-        'kryptalis-backups/id1/dump.sql',
+        'dockcontrol-backups/id1/dump.sql',
       );
       expect(buildS3Key('id1', 'C:\\backups\\dump.sql')).toBe(
-        'kryptalis-backups/id1/dump.sql',
+        'dockcontrol-backups/id1/dump.sql',
       );
     });
 
     it('sanitizes hostile filenames so they cannot escape the prefix', () => {
       const key = buildS3Key('id1', '../../etc/passwd');
       expect(key.startsWith(backupS3Prefix('id1'))).toBe(true);
-      expect(key).toBe('kryptalis-backups/id1/passwd');
+      expect(key).toBe('dockcontrol-backups/id1/passwd');
       // Weird chars are flattened, never empty.
-      expect(buildS3Key('id1', '??? ***')).toBe('kryptalis-backups/id1/_______');
-      expect(buildS3Key('id1', '')).toBe('kryptalis-backups/id1/backup.dump');
+      expect(buildS3Key('id1', '??? ***')).toBe('dockcontrol-backups/id1/_______');
+      expect(buildS3Key('id1', '')).toBe('dockcontrol-backups/id1/backup.dump');
     });
   });
 

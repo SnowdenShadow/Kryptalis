@@ -3,4 +3,4 @@ dist
 .next
 graphify-out
 pnpm-lock.yaml
-apps/api/.kryptalis
+apps/api/.dockcontrol

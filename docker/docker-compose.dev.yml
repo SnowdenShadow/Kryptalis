@@ -1,20 +1,20 @@
 services:
   postgres:
     image: postgres:16.6-alpine
-    container_name: kryptalis-postgres
+    container_name: dockcontrol-postgres
     restart: unless-stopped
     ports:
-      # Loopback only — dev credentials are fixed ('kryptalis'), publishing
+      # Loopback only — dev credentials are fixed ('dockcontrol'), publishing
       # on all interfaces exposed the DB to the local network.
       - "127.0.0.1:5432:5432"
     environment:
-      POSTGRES_USER: kryptalis
-      POSTGRES_PASSWORD: kryptalis
-      POSTGRES_DB: kryptalis
+      POSTGRES_USER: dockcontrol
+      POSTGRES_PASSWORD: dockcontrol
+      POSTGRES_DB: dockcontrol
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U kryptalis"]
+      test: ["CMD-SHELL", "pg_isready -U dockcontrol"]
       interval: 5s
       timeout: 5s
       retries: 5

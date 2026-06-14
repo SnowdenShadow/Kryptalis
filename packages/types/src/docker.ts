@@ -8,7 +8,7 @@
 export interface ContainerResponse {
   /** Container ID (short 12-char form from `docker ps`). */
   id: string;
-  /** Container name(s), e.g. "kryptalis-api". */
+  /** Container name(s), e.g. "dockcontrol-api". */
   name: string;
   image: string;
   /**

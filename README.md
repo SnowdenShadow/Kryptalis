@@ -1,10 +1,10 @@
-# Kryptalis
+# DockControl
 
-Kryptalis is a self-hosted Platform-as-a-Service that turns one or more Linux VPSes into a managed deployment target — the open-source alternative to Heroku, Vercel, or Render. You install it on your own hardware, point a domain at it, and get a dashboard for deploying apps from Git, managing databases, mailboxes, SSL, monitoring, and backups, all without ever SSHing in again.
+DockControl is a self-hosted Platform-as-a-Service that turns one or more Linux VPSes into a managed deployment target — the open-source alternative to Heroku, Vercel, or Render. You install it on your own hardware, point a domain at it, and get a dashboard for deploying apps from Git, managing databases, mailboxes, SSL, monitoring, and backups, all without ever SSHing in again.
 
 ## Key features
 
-- **Marketplace apps** — one-click install of curated stacks (WordPress, Ghost, n8n, MinIO, Postgres, Redis, …) generated as Docker Compose under `.kryptalis/apps/`.
+- **Marketplace apps** — one-click install of curated stacks (WordPress, Ghost, n8n, MinIO, Postgres, Redis, …) generated as Docker Compose under `.dockcontrol/apps/`.
 - **Custom git deploys** — connect a GitHub / GitLab / Bitbucket repo, pick a branch, get a build + deploy pipeline triggered by webhooks (HMAC-verified on the raw body).
 - **Automatic SSL via Caddy** — attach a domain, Caddy provisions a Let's Encrypt cert on the next request, including custom-port HTTPS via an auto-managed `docker-compose.override.yml`.
 - **Monitoring + alerts** — per-server CPU / RAM / disk / network metrics with configurable retention, threshold alerts dispatched over SMTP, Discord, Slack, or arbitrary webhooks.
@@ -17,7 +17,7 @@ Kryptalis is a self-hosted Platform-as-a-Service that turns one or more Linux VP
 On a fresh Ubuntu / Debian VPS as root:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/DockControl/main/install.sh | sudo sh
 ```
 
 The installer is idempotent — re-running it pulls latest, preserves `.env`, and only rebuilds what changed.

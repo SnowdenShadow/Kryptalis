@@ -23,7 +23,7 @@ export default function RegisterPage() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [regEnabled, setRegEnabled] = useState<boolean | null>(null);
-  const [platformName, setPlatformName] = useState('Kryptalis');
+  const [platformName, setPlatformName] = useState('DockControl');
   // After a successful non-bootstrap register the server doesn't issue
   // tokens — it asks the user to verify by email. We flip into this state
   // to show the "check your inbox" view + a "Resend" button instead of

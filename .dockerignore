@@ -8,8 +8,8 @@
 **/tsconfig.tsbuildinfo
 
 # Local state created by the API at runtime (compose stacks, mail data, Caddy state).
-.kryptalis
-apps/api/.kryptalis
+.dockcontrol
+apps/api/.dockcontrol
 
 # IDE / VCS noise
 .git

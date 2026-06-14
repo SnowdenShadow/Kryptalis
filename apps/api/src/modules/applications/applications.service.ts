@@ -198,7 +198,7 @@ export class ApplicationsService {
     if (dtoHostPort) {
       if (RESERVED_HOST_PORTS.has(dtoHostPort)) {
         throw new ConflictException(
-          `Port ${dtoHostPort} is reserved by Kryptalis (dashboard/api/proxy/db). Pick another.`,
+          `Port ${dtoHostPort} is reserved by DockControl (dashboard/api/proxy/db). Pick another.`,
         );
       }
       const project = await this.prisma.project.findUnique({
@@ -553,8 +553,8 @@ export class ApplicationsService {
       // defaults to keeping volumes (safe for migration); flip it on here.
       // slug: per-instance naming (new remote deploys); legacySlug: bare-slug
       // dirs from pre-convention installs. containerName: prefer the STORED
-      // name (marketplace stamps kryptalis-<slug>-<id12>, custom installs
-      // kryptalis-custom-<id12>) — the kryptalis-<slug> guess only as fallback.
+      // name (marketplace stamps dockcontrol-<slug>-<id12>, custom installs
+      // dockcontrol-custom-<id12>) — the dockcontrol-<slug> guess only as fallback.
       await this.agent.enqueueTask(server.id, 'REMOVE', {
         slug: remoteAppSlug(app.name, id),
         legacySlug: slug,

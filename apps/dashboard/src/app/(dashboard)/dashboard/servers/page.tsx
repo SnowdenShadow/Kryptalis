@@ -37,7 +37,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import type { ServerResponse } from '@kryptalis/types';
+import type { ServerResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
@@ -466,7 +466,7 @@ export default function ServersPage() {
                 )}
               </div>
 
-              {/* Reset Button — hidden for local server (cannot delete the host running Kryptalis) */}
+              {/* Reset Button — hidden for local server (cannot delete the host running DockControl) */}
               {server.host !== '127.0.0.1' && (
                 <div className="flex justify-end pt-2">
                   <Button

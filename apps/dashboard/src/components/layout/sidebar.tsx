@@ -117,7 +117,7 @@ export function Sidebar() {
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground text-sm font-bold">
               K
             </div>
-            <span className="text-lg font-bold">Kryptalis</span>
+            <span className="text-lg font-bold">DockControl</span>
           </Link>
         )}
         <button

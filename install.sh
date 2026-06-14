@@ -1,16 +1,16 @@
 #!/bin/sh
-# Kryptalis — first-boot installer / updater
+# DockControl — first-boot installer / updater
 # ─────────────────────────────────────────────────────────────────────
 # Usage on a fresh Ubuntu / Debian VPS (as root):
 #
-#   curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/main/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/DockControl/main/install.sh | sudo sh
 #
 # Special flags (via env var):
-#   KRYPTALIS_RESET=1   wipe the .env + all docker volumes and reinstall fresh
+#   DOCKCONTROL_RESET=1   wipe the .env + all docker volumes and reinstall fresh
 #                       (DESTRUCTIVE — drops Postgres data, sessions, agent tokens)
-#   KRYPTALIS_REPO      override the source repo
-#   KRYPTALIS_DIR       override the install dir
-#   KRYPTALIS_BRANCH    track a non-main branch
+#   DOCKCONTROL_REPO      override the source repo
+#   DOCKCONTROL_DIR       override the install dir
+#   DOCKCONTROL_BRANCH    track a non-main branch
 #   PUBLIC_API_URL      force the public URL the dashboard calls
 #
 # Re-running it is safe — it preserves .env + DB + auto-rebuilds only what's needed.
@@ -18,10 +18,10 @@
 
 set -eu
 
-REPO_URL="${KRYPTALIS_REPO:-https://github.com/SnowdenShadow/Kryptalis.git}"
-INSTALL_DIR="${KRYPTALIS_DIR:-/opt/kryptalis}"
-BRANCH="${KRYPTALIS_BRANCH:-main}"
-RESET="${KRYPTALIS_RESET:-0}"
+REPO_URL="${DOCKCONTROL_REPO:-https://github.com/SnowdenShadow/DockControl.git}"
+INSTALL_DIR="${DOCKCONTROL_DIR:-/opt/dockcontrol}"
+BRANCH="${DOCKCONTROL_BRANCH:-main}"
+RESET="${DOCKCONTROL_RESET:-0}"
 
 # ─── helpers ────────────────────────────────────────────────────────
 say()  { printf '\033[1;36m▶\033[0m %s\n' "$*"; }
@@ -83,9 +83,9 @@ else
   die "docker compose plugin missing — please install it"
 fi
 
-# ─── 3. handle KRYPTALIS_RESET=1 BEFORE touching files ──────────────
+# ─── 3. handle DOCKCONTROL_RESET=1 BEFORE touching files ──────────────
 # This is the "uninstall + reinstall fresh" path. We do it BEFORE the clone
-# so that even a corrupted /opt/kryptalis directory is recovered.
+# so that even a corrupted /opt/dockcontrol directory is recovered.
 #
 # caddy_data is deliberately PRESERVED: it holds the Let's Encrypt
 # certificates + ACME account. Wiping it forces a fresh issuance on every
@@ -94,16 +94,16 @@ fi
 # ERR_SSL_PROTOCOL_ERROR until the window expired (Caddy falls back to a
 # staging cert browsers reject). Certs carry no user data; reusing them
 # across resets is safe AND keeps the domain working immediately.
-# KRYPTALIS_RESET_CERTS=1 opts into the full wipe if ever needed.
+# DOCKCONTROL_RESET_CERTS=1 opts into the full wipe if ever needed.
 if [ "$RESET" = "1" ]; then
-  warn "KRYPTALIS_RESET=1 — wiping all data (this is destructive)"
+  warn "DOCKCONTROL_RESET=1 — wiping all data (this is destructive)"
   if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
     ( cd "$INSTALL_DIR" && docker compose down --remove-orphans 2>/dev/null || true )
   fi
-  for v in $(docker volume ls --quiet --filter "name=kryptalis" 2>/dev/null); do
+  for v in $(docker volume ls --quiet --filter "name=dockcontrol" 2>/dev/null); do
     case "$v" in
       *caddy_data*)
-        if [ "${KRYPTALIS_RESET_CERTS:-0}" = "1" ]; then
+        if [ "${DOCKCONTROL_RESET_CERTS:-0}" = "1" ]; then
           docker volume rm "$v" 2>/dev/null || true
         else
           ok "Keeping TLS certificates volume ($v) — avoids Let's Encrypt rate limits"
@@ -125,7 +125,7 @@ if [ -d "$INSTALL_DIR/.git" ]; then
   git fetch --depth=1 origin "$BRANCH"
   git reset --hard "origin/$BRANCH"
 else
-  say "Cloning Kryptalis to $INSTALL_DIR"
+  say "Cloning DockControl to $INSTALL_DIR"
   mkdir -p "$(dirname "$INSTALL_DIR")"
   git clone --depth=1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
   cd "$INSTALL_DIR"
@@ -176,24 +176,24 @@ fi
 # CRITICAL: the Postgres volume bakes POSTGRES_PASSWORD on first init only.
 # If we drop the .env without dropping the volume, the API will then mint a
 # NEW password and Postgres rejects it forever (P1000 auth failure).
-# Solution: if .env is missing BUT a kryptalis_postgres_data volume exists,
+# Solution: if .env is missing BUT a dockcontrol_postgres_data volume exists,
 # we wipe the volume too so Postgres re-init with the new password.
 NEEDS_DASHBOARD_REBUILD=0
 
 if [ ! -f .env ]; then
-  # The kryptalis_ prefix is guaranteed by `name: kryptalis` at the top of
+  # The dockcontrol_ prefix is guaranteed by `name: dockcontrol` at the top of
   # docker-compose.yml (project name no longer depends on the cwd basename).
-  STALE_PG_VOLUME=$(docker volume ls --quiet --filter "name=kryptalis_postgres_data" 2>/dev/null)
+  STALE_PG_VOLUME=$(docker volume ls --quiet --filter "name=dockcontrol_postgres_data" 2>/dev/null)
   if [ -n "$STALE_PG_VOLUME" ]; then
     # A Postgres volume WITHOUT a .env means the new random password won't
     # match the one baked into the volume (P1000). The fix is wiping the
     # volume — but that destroys the database, so never do it silently:
     # a merely-misplaced .env would otherwise cost the operator all data.
-    if [ "${KRYPTALIS_RESET:-0}" = "1" ]; then
-      warn "KRYPTALIS_RESET=1 — wiping stale Postgres volume (ALL DATA LOST)"
+    if [ "${DOCKCONTROL_RESET:-0}" = "1" ]; then
+      warn "DOCKCONTROL_RESET=1 — wiping stale Postgres volume (ALL DATA LOST)"
       docker volume rm "$STALE_PG_VOLUME" 2>/dev/null || true
     else
-      die "Found a Postgres data volume but no .env. If the old .env is recoverable, restore it to $INSTALL_DIR/.env and re-run. To start FRESH and DELETE ALL DATA, re-run with KRYPTALIS_RESET=1."
+      die "Found a Postgres data volume but no .env. If the old .env is recoverable, restore it to $INSTALL_DIR/.env and re-run. To start FRESH and DELETE ALL DATA, re-run with DOCKCONTROL_RESET=1."
     fi
   fi
 
@@ -204,7 +204,7 @@ if [ ! -f .env ]; then
   POSTGRES_PASSWORD=$(openssl rand -hex 16)
 
   cat > .env <<EOF
-# Kryptalis runtime config — generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# DockControl runtime config — generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 JWT_SECRET=$JWT_SECRET
 JWT_REFRESH_SECRET=$JWT_REFRESH_SECRET
@@ -252,17 +252,17 @@ set_env_var() {
     printf '%s=%s\n' "$1" "$2" >> .env
   fi
 }
-set_env_var KRYPTALIS_HOST_INSTALL_DIR "$INSTALL_DIR"
-set_env_var KRYPTALIS_HOST_DATA_DIR "$INSTALL_DIR/.kryptalis"
+set_env_var DOCKCONTROL_HOST_INSTALL_DIR "$INSTALL_DIR"
+set_env_var DOCKCONTROL_HOST_DATA_DIR "$INSTALL_DIR/.dockcontrol"
 rm -f .env.bak
-ok "Host paths pinned: KRYPTALIS_HOST_INSTALL_DIR=$INSTALL_DIR"
+ok "Host paths pinned: DOCKCONTROL_HOST_INSTALL_DIR=$INSTALL_DIR"
 
 # ─── 7. seed the Caddyfile so Caddy can mount it on first boot ──────
 # The API regenerates this file on every domain change, but the file MUST exist
 # (and be a regular file, not a directory) before `docker compose up` mounts it
 # into the Caddy container — otherwise Docker creates an empty dir at that path
 # and Caddy crashes with "not a directory".
-CADDY_DIR="$INSTALL_DIR/.kryptalis/reverse-proxy"
+CADDY_DIR="$INSTALL_DIR/.dockcontrol/reverse-proxy"
 CADDY_FILE="$CADDY_DIR/Caddyfile"
 mkdir -p "$CADDY_DIR"
 if [ -d "$CADDY_FILE" ] && [ ! -f "$CADDY_FILE" ]; then
@@ -273,10 +273,10 @@ if [ ! -f "$CADDY_FILE" ]; then
 # Seeded by install.sh — the API rewrites this once domains are created.
 {
   admin :2019
-  email kryptalis@localhost
+  email dockcontrol@localhost
 }
 :80 {
-  respond "Kryptalis: no domain configured yet." 404
+  respond "DockControl: no domain configured yet." 404
 }
 CADDYEOF
 fi
@@ -292,7 +292,7 @@ if [ -d "$OVERRIDE_FILE" ] && [ ! -f "$OVERRIDE_FILE" ]; then
 fi
 if [ ! -f "$OVERRIDE_FILE" ]; then
   cat > "$OVERRIDE_FILE" <<'OVEREOF'
-# Auto-managed by Kryptalis API — extra Caddy port publications go here.
+# Auto-managed by DockControl API — extra Caddy port publications go here.
 # Edit nothing; the file is rewritten on every domain/port change.
 services:
   caddy:
@@ -304,7 +304,7 @@ fi
 # IMPORTANT: when PUBLIC_API_URL changes we MUST rebuild the dashboard without
 # cache, otherwise Next reuses the old inlined URL and the browser keeps calling
 # the wrong origin (CORS error).
-say "Pulling images & starting Kryptalis..."
+say "Pulling images & starting DockControl..."
 docker compose pull 2>&1 | grep -vE "Skipped|^$" || true
 
 if [ "$NEEDS_DASHBOARD_REBUILD" = "1" ]; then
@@ -325,13 +325,13 @@ if [ -f "$UPDATE_SCRIPT" ]; then
   chmod +x "$UPDATE_SCRIPT"
 fi
 
-# Older installs shipped a kryptalis-update systemd timer that ran
+# Older installs shipped a dockcontrol-update systemd timer that ran
 # update.sh unconditionally every 5 min, racing the in-API updater.
 # Remove it if present.
-if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/kryptalis-update.timer ]; then
-  say "Removing legacy kryptalis-update.timer (auto-update now runs inside the API)"
-  systemctl disable --now kryptalis-update.timer >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/kryptalis-update.timer /etc/systemd/system/kryptalis-update.service
+if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/dockcontrol-update.timer ]; then
+  say "Removing legacy dockcontrol-update.timer (auto-update now runs inside the API)"
+  systemctl disable --now dockcontrol-update.timer >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/dockcontrol-update.timer /etc/systemd/system/dockcontrol-update.service
   systemctl daemon-reload || true
   ok "Legacy auto-update timer removed"
 fi
@@ -374,7 +374,7 @@ HOST_IP=$(curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null || hostname 
 cat <<EOF
 
 ╭───────────────────────────────────────────────────────────╮
-│  Kryptalis is ready                                       │
+│  DockControl is ready                                       │
 ├───────────────────────────────────────────────────────────┤
 │                                                           │
 │  Dashboard: http://$HOST_IP:3000
@@ -393,13 +393,13 @@ Useful commands:
   docker compose down                 # stop everything
   docker compose down -v              # stop + wipe DB (destructive — also
                                       # deletes TLS certs: prefer the
-                                      # KRYPTALIS_RESET=1 installer flow,
+                                      # DOCKCONTROL_RESET=1 installer flow,
                                       # which keeps them)
 
 Update later — re-run the installer:
-  curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/$BRANCH/install.sh | sudo sh
+  curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/DockControl/$BRANCH/install.sh | sudo sh
 
 Fresh start (drops DB, sessions, agent tokens):
-  KRYPTALIS_RESET=1 sh -c "\$(curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/$BRANCH/install.sh)"
+  DOCKCONTROL_RESET=1 sh -c "\$(curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/DockControl/$BRANCH/install.sh)"
 
 EOF

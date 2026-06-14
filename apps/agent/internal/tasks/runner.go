@@ -236,7 +236,7 @@ func (r *Runner) Backup(ctx context.Context, taskID string, payload map[string]i
 		}
 	}
 
-	staging, err := os.MkdirTemp(os.TempDir(), "kryptalis-backup-")
+	staging, err := os.MkdirTemp(os.TempDir(), "dockcontrol-backup-")
 	if err != nil {
 		return nil, "creating staging dir: " + err.Error()
 	}
@@ -296,7 +296,7 @@ func (r *Runner) Backup(ctx context.Context, taskID string, payload map[string]i
 	// Pack staging → tar.gz (native Go — no host tar dependency), then
 	// upload. A temp archive file (not a pipe) so sizeBytes is exact and the
 	// upload gets a complete archive even if packing fails midway.
-	archive, err := os.CreateTemp(os.TempDir(), "kryptalis-backup-*.tar.gz")
+	archive, err := os.CreateTemp(os.TempDir(), "dockcontrol-backup-*.tar.gz")
 	if err != nil {
 		return nil, "creating archive temp: " + err.Error()
 	}
@@ -378,7 +378,7 @@ func (r *Runner) Restore(ctx context.Context, payload map[string]interface{}) (m
 		}
 	}
 
-	extractDir, err := os.MkdirTemp(os.TempDir(), "kryptalis-restore-")
+	extractDir, err := os.MkdirTemp(os.TempDir(), "dockcontrol-restore-")
 	if err != nil {
 		return nil, "creating extract dir: " + err.Error()
 	}
@@ -566,7 +566,7 @@ func untarGz(r io.Reader, dir string) error {
 				return err
 			}
 		default:
-			// Symlinks/devices have no business in a kryptalis backup —
+			// Symlinks/devices have no business in a dockcontrol backup —
 			// skip rather than create escape hatches.
 		}
 	}

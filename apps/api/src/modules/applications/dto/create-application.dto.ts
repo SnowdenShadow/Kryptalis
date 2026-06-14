@@ -152,7 +152,7 @@ export class CreateApplicationDto {
   /**
    * Optional: publish the container on this host port for direct
    * IP-based access (use when you have no domain). The platform refuses
-   * ports already in use by Kryptalis system services or other apps.
+   * ports already in use by DockControl system services or other apps.
    */
   @ApiProperty({ required: false, description: 'Host port to publish on (no domain case)' })
   @IsOptional()

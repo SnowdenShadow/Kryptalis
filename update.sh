@@ -1,5 +1,5 @@
 #!/bin/sh
-# Kryptalis self-update.
+# DockControl self-update.
 #
 # The Nest API is the auto-update brain (system-updates.service.ts): it
 # polls GitHub every 60s and, when a new commit lands on the tracked
@@ -12,7 +12,7 @@
 #   ./update.sh --check   report only — exit 0 if up to date, 1 if behind
 #   ./update.sh --force   same as no-arg (kept for symmetry with the docs)
 #
-# Logs are tee'd to .kryptalis/update.log so the API can stream them
+# Logs are tee'd to .dockcontrol/update.log so the API can stream them
 # back to the dashboard even after `docker compose up -d --build`
 # recreates the API container and kills the spawning process's pipes.
 
@@ -20,11 +20,11 @@ set -eu
 
 # Default to the directory this script lives in — works both inside the
 # updater container (mounted at /app) and run manually from the host
-# checkout (e.g. /opt/kryptalis). KRYPTALIS_DIR still overrides.
+# checkout (e.g. /opt/dockcontrol). DOCKCONTROL_DIR still overrides.
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-INSTALL_DIR="${KRYPTALIS_DIR:-$SCRIPT_DIR}"
-BRANCH="${KRYPTALIS_BRANCH:-main}"
-LOG_DIR="$INSTALL_DIR/.kryptalis"
+INSTALL_DIR="${DOCKCONTROL_DIR:-$SCRIPT_DIR}"
+BRANCH="${DOCKCONTROL_BRANCH:-main}"
+LOG_DIR="$INSTALL_DIR/.dockcontrol"
 LOG_FILE="$LOG_DIR/update.log"
 MODE="${1:-apply}"
 

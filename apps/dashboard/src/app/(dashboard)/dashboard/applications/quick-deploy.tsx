@@ -686,7 +686,7 @@ export function QuickDeployDialog({
             />
             <p className="text-[11px] text-muted-foreground">
               {t('quickDeploy.composeHint') ||
-                'Standard Compose v3 syntax. Kryptalis adds the project + shared networks automatically so other apps in the same project can reach yours by container_name.'}
+                'Standard Compose v3 syntax. DockControl adds the project + shared networks automatically so other apps in the same project can reach yours by container_name.'}
             </p>
           </div>
         )}
@@ -858,7 +858,7 @@ export function QuickDeployDialog({
                 {!hostPortValid && hostPort.trim() !== '' && (
                   <p className="text-[11px] text-destructive">
                     {t('quickDeploy.hostPortInvalid') ||
-                      'Port must be 1024–65535 and not one of the reserved Kryptalis ports.'}
+                      'Port must be 1024–65535 and not one of the reserved DockControl ports.'}
                   </p>
                 )}
                 {nextFreePort && hostPort === String(nextFreePort.port) && (

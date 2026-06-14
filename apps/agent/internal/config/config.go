@@ -14,19 +14,19 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-	apiURL := getenv("KRYPTALIS_API_URL", "API_URL")
+	apiURL := getenv("DOCKCONTROL_API_URL", "API_URL")
 	if apiURL == "" {
-		return nil, fmt.Errorf("KRYPTALIS_API_URL is required")
+		return nil, fmt.Errorf("DOCKCONTROL_API_URL is required")
 	}
 
-	token := getenv("KRYPTALIS_TOKEN", "AGENT_TOKEN")
+	token := getenv("DOCKCONTROL_TOKEN", "AGENT_TOKEN")
 	if token == "" {
-		return nil, fmt.Errorf("KRYPTALIS_TOKEN is required")
+		return nil, fmt.Errorf("DOCKCONTROL_TOKEN is required")
 	}
 
-	serverID := getenv("KRYPTALIS_SERVER_ID", "SERVER_ID")
+	serverID := getenv("DOCKCONTROL_SERVER_ID", "SERVER_ID")
 	if serverID == "" {
-		return nil, fmt.Errorf("KRYPTALIS_SERVER_ID is required")
+		return nil, fmt.Errorf("DOCKCONTROL_SERVER_ID is required")
 	}
 
 	interval := 5 * time.Second

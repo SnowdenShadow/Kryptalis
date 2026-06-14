@@ -5,7 +5,7 @@
  * (Postgres / MySQL / MariaDB / Redis / KeyDB / Dragonfly / Mongo /
  * ClickHouse). For matches we extract:
  *
- *   - the canonical Kryptalis DbType
+ *   - the canonical DockControl DbType
  *   - the service name (used as idempotency key on redeploy)
  *   - the resolved container_name (with __INSTANCE_ID__ already expanded
  *     by the caller — we get the final string)

@@ -28,7 +28,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 const execFileAsync = promisify(execFile);
-const PROJ_DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const PROJ_DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
 const PROJ_APPS_DIR = path.join(PROJ_DATA_DIR, 'apps');
 const PROJ_DBS_DIR = path.join(PROJ_DATA_DIR, 'databases');
 
@@ -283,8 +283,8 @@ export class ProjectsService implements OnModuleInit {
           }
         }
         // belt + suspenders: kill orphan containers under both naming schemes
-        try { await execFileAsync('docker', ['rm', '-f', `kryptalis-${slug}`], { timeout: 10_000 }); } catch {}
-        try { await execFileAsync('docker', ['rm', '-f', `kryptalis-${slug}-${id12}`], { timeout: 10_000 }); } catch {}
+        try { await execFileAsync('docker', ['rm', '-f', `dockcontrol-${slug}`], { timeout: 10_000 }); } catch {}
+        try { await execFileAsync('docker', ['rm', '-f', `dockcontrol-${slug}-${id12}`], { timeout: 10_000 }); } catch {}
       } else if (appServer) {
         try {
           // slug: per-instance convention (new remote deploys);
@@ -293,7 +293,7 @@ export class ProjectsService implements OnModuleInit {
           await this.agent.enqueueTask(appServer.id, 'REMOVE', {
             slug: `${slug}-${app.id.slice(0, 12)}`,
             legacySlug: slug,
-            containerName: `kryptalis-${slug}`,
+            containerName: `dockcontrol-${slug}`,
             purgeVolumes: true,
           });
         } catch {}
@@ -302,10 +302,10 @@ export class ProjectsService implements OnModuleInit {
 
     // ── Databases ───────────────────────────────────────────────────
     // databases.service stores compose dir as DBS_DIR/<db.name> (no slug) and
-    // names containers kryptalis-db-<db.name>. Match those exactly or LOCAL
+    // names containers dockcontrol-db-<db.name>. Match those exactly or LOCAL
     // cleanup misses the bind-mount + leaks the postgres/redis container.
     for (const db of project.databases) {
-      const containerName = `kryptalis-db-${db.name}`;
+      const containerName = `dockcontrol-db-${db.name}`;
       const slug = `db-${db.name}`;
       if (isLocal) {
         const dbDir = path.join(PROJ_DBS_DIR, db.name);
@@ -347,10 +347,10 @@ export class ProjectsService implements OnModuleInit {
 
     // Drop the project's dedicated docker network now that every app/db
     // in it is gone. Otherwise `docker network ls` keeps showing
-    // kryptalis_proj_<id> forever and we leak networks on every
+    // dockcontrol_proj_<id> forever and we leak networks on every
     // project delete.
     if (isLocal) {
-      const networkName = `kryptalis_proj_${id.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
+      const networkName = `dockcontrol_proj_${id.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
       try { await execFileAsync('docker', ['network', 'rm', networkName], { timeout: 10_000 }); } catch {}
     }
 
@@ -438,7 +438,7 @@ export class ProjectsService implements OnModuleInit {
           // per-instance dir convention first, bare slug for legacy installs
           slug: `${slugify(app.name)}-${app.id.slice(0, 12)}`,
           legacySlug: slugify(app.name),
-          containerName: `kryptalis-${slugify(app.name)}`,
+          containerName: `dockcontrol-${slugify(app.name)}`,
           purgeVolumes: false,
         });
       } catch (e: any) {
@@ -449,7 +449,7 @@ export class ProjectsService implements OnModuleInit {
       try {
         await this.agent.enqueueTask(oldServerId, 'REMOVE', {
           slug: slugify(db.name),
-          containerName: `kryptalis-db-${slugify(db.name)}`,
+          containerName: `dockcontrol-db-${slugify(db.name)}`,
           purgeVolumes: false,
         });
       } catch (e: any) {
@@ -674,7 +674,7 @@ export class ProjectsService implements OnModuleInit {
    * can be reached at *from inside* the shared docker network, and ready-made
    * connection-string snippets the user can paste into another app's env vars.
    *
-   * Network: kryptalis_proj_<projectId-stripped>. Every container is named
+   * Network: dockcontrol_proj_<projectId-stripped>. Every container is named
    * by its slug + id-suffix so siblings can resolve each other by DNS.
    */
   async getServiceMesh(projectId: string, userId: string) {
@@ -696,11 +696,11 @@ export class ProjectsService implements OnModuleInit {
     if (!project) throw new NotFoundException('Project not found');
 
     const slugify = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'svc';
-    const networkName = `kryptalis_proj_${projectId.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
+    const networkName = `dockcontrol_proj_${projectId.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
 
     const apps = project.applications.map((a) => {
       const slug = slugify(a.name);
-      const host = a.containerName || `kryptalis-${slug}`;
+      const host = a.containerName || `dockcontrol-${slug}`;
       const port = a.containerPort || a.port || 80;
       return {
         id: a.id,
@@ -716,7 +716,7 @@ export class ProjectsService implements OnModuleInit {
 
     const dbs = project.databases.map((d) => {
       const slug = slugify(d.name);
-      const host = `kryptalis-db-${slug}`;
+      const host = `dockcontrol-db-${slug}`;
       const port = d.port;
       const protocol =
         d.type === 'POSTGRESQL' ? 'postgres' :

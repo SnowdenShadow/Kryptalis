@@ -1,10 +1,10 @@
 #!/bin/sh
-# Kryptalis SFTP entrypoint.
+# DockControl SFTP entrypoint.
 #
 # Responsibilities:
 #   1. Persist host keys across container recreates without masking
 #      the rest of /etc/ssh. The sftp_host_keys volume mounts at
-#      /var/lib/kryptalis-sftp-keys; we generate any missing keys
+#      /var/lib/dockcontrol-sftp-keys; we generate any missing keys
 #      there, then symlink them into /etc/ssh so sshd finds them at
 #      the standard paths.
 #   2. Ensure the `sftpusers` group exists. (The per-user sshd_config
@@ -17,13 +17,13 @@
 #      (/run/sshd, /var/empty, /etc/ssh/sshd_config.d).
 #   4. exec the command (sshd by default).
 #
-# Account CRUD is NOT done here. Kryptalis API drives it at runtime
-# via `docker exec kryptalis-sftp useradd ...` / `userdel ...`.
+# Account CRUD is NOT done here. DockControl API drives it at runtime
+# via `docker exec dockcontrol-sftp useradd ...` / `userdel ...`.
 
 set -e
 
 # ── 1. host keys ────────────────────────────────────────────────────
-KEYDIR=/var/lib/kryptalis-sftp-keys
+KEYDIR=/var/lib/dockcontrol-sftp-keys
 mkdir -p "$KEYDIR"
 chmod 0700 "$KEYDIR"
 
@@ -61,7 +61,7 @@ done
 groupadd -f -g 65530 sftpusers
 
 # ── 3. runtime dirs ────────────────────────────────────────────────
-# Per-user sshd_config drop-in directory. Kryptalis API drops one
+# Per-user sshd_config drop-in directory. DockControl API drops one
 # .conf file per account here at runtime. sshd's `Include` directive
 # only succeeds if the directory exists at sshd startup.
 mkdir -p /etc/ssh/sshd_config.d

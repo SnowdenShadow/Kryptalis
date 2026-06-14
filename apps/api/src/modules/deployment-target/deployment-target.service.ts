@@ -126,7 +126,7 @@ export class DeploymentTargetService {
    * exec result on local; on remote, fires a START task.
    *
    * `remote` carries the slug(s) the agent resolves its own app dir from
-   * (/opt/kryptalis/apps/<slug>) — the agent reads payload.slug, NOT a dir
+   * (/opt/dockcontrol/apps/<slug>) — the agent reads payload.slug, NOT a dir
    * path. Passing {dir} here used to fail every remote lifecycle op with
    * "missing slug": the local dir path means nothing on the agent's disk.
    * `legacySlug` covers apps deployed before the per-instance convention.

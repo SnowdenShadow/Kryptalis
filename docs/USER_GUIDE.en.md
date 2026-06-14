@@ -1,6 +1,6 @@
-# Kryptalis — User Guide
+# DockControl — User Guide
 
-Complete guide to running apps, databases, domains, and microservices on Kryptalis.
+Complete guide to running apps, databases, domains, and microservices on DockControl.
 
 ---
 
@@ -20,12 +20,12 @@ Complete guide to running apps, databases, domains, and microservices on Kryptal
 
 ## 1. Deployment modes
 
-Kryptalis runs in one of two modes, set in **Settings → Infrastructure**:
+DockControl runs in one of two modes, set in **Settings → Infrastructure**:
 
 | Mode | What it does | When to use |
 |---|---|---|
 | **Local** | Everything runs on this single VPS. The `Servers` page is hidden. | Solo project, one VPS, simplest setup. |
-| **Multi-server** | This VPS + extra VPS connected via the Kryptalis agent. Apps can be deployed on any registered server. | Multiple VPS, different regions, isolating workloads. |
+| **Multi-server** | This VPS + extra VPS connected via the DockControl agent. Apps can be deployed on any registered server. | Multiple VPS, different regions, isolating workloads. |
 
 ### Switching modes
 
@@ -35,9 +35,9 @@ Kryptalis runs in one of two modes, set in **Settings → Infrastructure**:
 ### Adding a remote server (Multi mode only)
 
 1. `/dashboard/servers` → "Add server"
-2. Kryptalis generates an install command (one-liner with a token)
+2. DockControl generates an install command (one-liner with a token)
 3. SSH into the remote VPS, paste the command
-4. The Kryptalis agent installs itself, connects back, and the server flips to `ONLINE`
+4. The DockControl agent installs itself, connects back, and the server flips to `ONLINE`
 5. You can now deploy apps to it
 
 ---
@@ -77,13 +77,13 @@ A **project** is a logical group of apps + databases that:
 
 ### Container internals
 
-Kryptalis gives every app:
+DockControl gives every app:
 
-- A predictable container name: `kryptalis-<slug>`
+- A predictable container name: `dockcontrol-<slug>`
 - A predictable internal hostname: same as the container name
 - Membership in the project's shared Docker network
 
-Other apps in the same project reach this app at `http://kryptalis-<slug>:<port>` — no public URL needed.
+Other apps in the same project reach this app at `http://dockcontrol-<slug>:<port>` — no public URL needed.
 
 ### Lifecycle
 
@@ -105,13 +105,13 @@ Buttons on the app detail page:
 - Redis / KeyDB / Dragonfly
 - ClickHouse
 
-Kryptalis creates a container `kryptalis-db-<slug>` on the project network, with a generated username/password.
+DockControl creates a container `dockcontrol-db-<slug>` on the project network, with a generated username/password.
 
 **Connecting from an app in the same project:**
 The Service Mesh tab gives you ready-made connection strings. For PostgreSQL it looks like:
 
 ```
-DATABASE_URL=postgres://<user>:<password>@kryptalis-db-<slug>:5432/<slug>
+DATABASE_URL=postgres://<user>:<password>@dockcontrol-db-<slug>:5432/<slug>
 ```
 
 Paste it as an environment variable in your app — no firewall, no public port.
@@ -124,7 +124,7 @@ Paste it as an environment variable in your app — no firewall, no public port.
 
 `/dashboard/domains` → "Add domain". Type the full hostname (e.g. `athexis.xyz` or `api.athexis.xyz`).
 
-You don't need to "buy" the domain through Kryptalis — you just tell Kryptalis you own it. Kryptalis then:
+You don't need to "buy" the domain through DockControl — you just tell DockControl you own it. DockControl then:
 
 - Reserves it in its database
 - Configures Caddy to serve it
@@ -167,22 +167,22 @@ Click "Verify now" in the Records tab to check propagation. Up to 24h is normal.
 
 ### Subdomain hierarchy
 
-The Domains page groups subdomains under their apex visually. Click a card to expand its subdomains. "Add subdomain" pre-fills the parent (you only type `api`, Kryptalis appends `.athexis.xyz`).
+The Domains page groups subdomains under their apex visually. Click a card to expand its subdomains. "Add subdomain" pre-fills the parent (you only type `api`, DockControl appends `.athexis.xyz`).
 
 ---
 
 ## 6. Microservices
 
-Microservices in Kryptalis = multiple apps in the same project talking to each other.
+Microservices in DockControl = multiple apps in the same project talking to each other.
 
 ### How it works
 
-Every project owns a Docker network: `kryptalis_proj_<projectId>`.
+Every project owns a Docker network: `dockcontrol_proj_<projectId>`.
 
 When you deploy an app to a project:
 
 - **Local mode**: the API creates the network (if missing) and attaches the app to it.
-- **Multi-server mode (same server)**: the Kryptalis agent creates the network and writes a `docker-compose.override.yml` that attaches every service in the stack to it. No manual config needed.
+- **Multi-server mode (same server)**: the DockControl agent creates the network and writes a `docker-compose.override.yml` that attaches every service in the stack to it. No manual config needed.
 
 Apps in the same project resolve each other by container name via Docker's internal DNS.
 
@@ -192,18 +192,18 @@ Create a project "myapp", then 3 services:
 
 | Service | Type | Internal hostname |
 |---|---|---|
-| `frontend` | Next.js app, port 3000 | `kryptalis-frontend:3000` |
-| `api` | NestJS app, port 4000 | `kryptalis-api:4000` |
-| `db` | PostgreSQL | `kryptalis-db-db:5432` |
+| `frontend` | Next.js app, port 3000 | `dockcontrol-frontend:3000` |
+| `api` | NestJS app, port 4000 | `dockcontrol-api:4000` |
+| `db` | PostgreSQL | `dockcontrol-db-db:5432` |
 
 In the **Service Mesh** tab, copy:
 
 ```
 # In frontend's env vars:
-API_URL=http://kryptalis-api:4000
+API_URL=http://dockcontrol-api:4000
 
 # In api's env vars:
-DATABASE_URL=postgres://user:password@kryptalis-db-db:5432/db
+DATABASE_URL=postgres://user:password@dockcontrol-db-db:5432/db
 ```
 
 Attach a domain to `frontend` only. `api` and `db` stay internal — no public exposure.
@@ -242,7 +242,7 @@ In Multi mode, you can move a project (and all its apps + databases) from one se
 
 Per-domain mail server (Postfix + Dovecot in containers). `/dashboard/emails`.
 
-Attach a mail server to a domain → Kryptalis tells you the exact MX / A / SPF / DKIM / DMARC / PTR records to set. Tab "DNS health" shows what's missing.
+Attach a mail server to a domain → DockControl tells you the exact MX / A / SPF / DKIM / DMARC / PTR records to set. Tab "DNS health" shows what's missing.
 
 Reverse DNS (PTR) — only your VPS provider can set this. Most panels have a "Reverse DNS" field; set it to `mail.<your-apex>`.
 

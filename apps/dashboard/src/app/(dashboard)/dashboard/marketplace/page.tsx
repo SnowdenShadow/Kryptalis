@@ -11,7 +11,7 @@ import { cn } from '@/lib/utils';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { QuickDeployDialog } from '../applications/quick-deploy';
-import type { MarketplaceApp as MarketplaceAppResponse } from '@kryptalis/types';
+import type { MarketplaceApp as MarketplaceAppResponse } from '@dockcontrol/types';
 
 /**
  * Marketplace page — slimmed down.

@@ -86,7 +86,7 @@ export function InfrastructureTab() {
           </CardTitle>
           <CardDescription>
             Local = everything on this VPS. Multi = add other VPS as deployment
-            targets via the Kryptalis agent.
+            targets via the DockControl agent.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -125,7 +125,7 @@ export function InfrastructureTab() {
               <div className="flex-1">
                 <p className="font-medium text-sm">Multi-server</p>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  This VPS + extra VPS connected via the Kryptalis agent. Apps
+                  This VPS + extra VPS connected via the DockControl agent. Apps
                   can be deployed on any registered server. Add servers from{' '}
                   <Link href="/dashboard/servers" className="text-primary hover:underline">
                     /dashboard/servers

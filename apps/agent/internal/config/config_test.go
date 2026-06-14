@@ -10,9 +10,9 @@ import (
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
-		"KRYPTALIS_API_URL", "API_URL",
-		"KRYPTALIS_TOKEN", "AGENT_TOKEN",
-		"KRYPTALIS_SERVER_ID", "SERVER_ID",
+		"DOCKCONTROL_API_URL", "API_URL",
+		"DOCKCONTROL_TOKEN", "AGENT_TOKEN",
+		"DOCKCONTROL_SERVER_ID", "SERVER_ID",
 		"POLL_INTERVAL",
 	} {
 		t.Setenv(k, "")
@@ -21,35 +21,35 @@ func clearEnv(t *testing.T) {
 
 func setRequired(t *testing.T) {
 	t.Helper()
-	t.Setenv("KRYPTALIS_API_URL", "http://localhost:3000")
-	t.Setenv("KRYPTALIS_TOKEN", "tok")
-	t.Setenv("KRYPTALIS_SERVER_ID", "srv-1")
+	t.Setenv("DOCKCONTROL_API_URL", "http://localhost:3000")
+	t.Setenv("DOCKCONTROL_TOKEN", "tok")
+	t.Setenv("DOCKCONTROL_SERVER_ID", "srv-1")
 }
 
 func TestLoadMissingAPIURL(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("KRYPTALIS_TOKEN", "tok")
-	t.Setenv("KRYPTALIS_SERVER_ID", "srv-1")
+	t.Setenv("DOCKCONTROL_TOKEN", "tok")
+	t.Setenv("DOCKCONTROL_SERVER_ID", "srv-1")
 	if _, err := Load(); err == nil {
-		t.Fatal("expected error when KRYPTALIS_API_URL is missing")
+		t.Fatal("expected error when DOCKCONTROL_API_URL is missing")
 	}
 }
 
 func TestLoadMissingToken(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("KRYPTALIS_API_URL", "http://localhost:3000")
-	t.Setenv("KRYPTALIS_SERVER_ID", "srv-1")
+	t.Setenv("DOCKCONTROL_API_URL", "http://localhost:3000")
+	t.Setenv("DOCKCONTROL_SERVER_ID", "srv-1")
 	if _, err := Load(); err == nil {
-		t.Fatal("expected error when KRYPTALIS_TOKEN is missing")
+		t.Fatal("expected error when DOCKCONTROL_TOKEN is missing")
 	}
 }
 
 func TestLoadMissingServerID(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("KRYPTALIS_API_URL", "http://localhost:3000")
-	t.Setenv("KRYPTALIS_TOKEN", "tok")
+	t.Setenv("DOCKCONTROL_API_URL", "http://localhost:3000")
+	t.Setenv("DOCKCONTROL_TOKEN", "tok")
 	if _, err := Load(); err == nil {
-		t.Fatal("expected error when KRYPTALIS_SERVER_ID is missing")
+		t.Fatal("expected error when DOCKCONTROL_SERVER_ID is missing")
 	}
 }
 

@@ -26,40 +26,40 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build shared types
-        run: pnpm --filter @kryptalis/types build
+        run: pnpm --filter @dockcontrol/types build
 
       - name: Generate Prisma client
         working-directory: apps/api
         run: pnpm exec prisma generate
 
       - name: Type-check API
-        run: pnpm --filter @kryptalis/api exec tsc --noEmit
+        run: pnpm --filter @dockcontrol/api exec tsc --noEmit
 
       - name: Type-check Dashboard
-        run: pnpm --filter @kryptalis/dashboard exec tsc --noEmit
+        run: pnpm --filter @dockcontrol/dashboard exec tsc --noEmit
 
       - name: Lint API
         continue-on-error: false
-        run: pnpm --filter @kryptalis/api lint
+        run: pnpm --filter @dockcontrol/api lint
 
       - name: Lint Dashboard
         continue-on-error: false
-        run: pnpm --filter @kryptalis/dashboard lint
+        run: pnpm --filter @dockcontrol/dashboard lint
 
       - name: Test API
-        run: pnpm --filter @kryptalis/api exec vitest run
+        run: pnpm --filter @dockcontrol/api exec vitest run
 
       - name: Test Dashboard
-        run: pnpm --filter @kryptalis/dashboard exec vitest run
+        run: pnpm --filter @dockcontrol/dashboard exec vitest run
 
       # Full production builds — a compile-clean tree can still fail
       # `next build` (prerender errors) or `nest build`; with auto-update
       # deploying main everywhere, a broken build must never reach main.
       - name: Build API
-        run: pnpm --filter @kryptalis/api build
+        run: pnpm --filter @dockcontrol/api build
 
       - name: Build Dashboard
-        run: pnpm --filter @kryptalis/dashboard build
+        run: pnpm --filter @dockcontrol/dashboard build
         env:
           NEXT_PUBLIC_API_URL: http://localhost:4000
 
@@ -81,10 +81,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # The dashboard imports @kryptalis/types from dist/ — the dev server
+      # The dashboard imports @dockcontrol/types from dist/ — the dev server
       # needs it built before it can compile any page.
       - name: Build shared types
-        run: pnpm --filter @kryptalis/types build
+        run: pnpm --filter @dockcontrol/types build
 
       - name: Install Playwright browser
         working-directory: apps/dashboard
@@ -93,7 +93,7 @@ jobs:
       # All API traffic is mocked via page.route() — no backend required.
       - name: Run e2e tests
         continue-on-error: false
-        run: pnpm --filter @kryptalis/dashboard e2e
+        run: pnpm --filter @dockcontrol/dashboard e2e
 
       - name: Upload Playwright report
         if: failure()

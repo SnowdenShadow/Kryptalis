@@ -179,7 +179,7 @@ export function SystemConfigTab() {
               <Label htmlFor="smtp_from">From address</Label>
               <Input
                 id="smtp_from"
-                placeholder='"Kryptalis" <noreply@your-domain.com>'
+                placeholder='"DockControl" <noreply@your-domain.com>'
                 value={form.smtp_from || ''}
                 onChange={(e) => set('smtp_from', e.target.value)}
               />
@@ -313,7 +313,7 @@ export function SystemConfigTab() {
             Cloudflare R2, Backblaze B2, MinIO). Endpoint, bucket, access key
             and secret key are all required before S3/R2/B2 targets become
             available on the Backups page. Objects are written under{' '}
-            <code className="text-xs">kryptalis-backups/&lt;backupId&gt;/</code>.
+            <code className="text-xs">dockcontrol-backups/&lt;backupId&gt;/</code>.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -331,7 +331,7 @@ export function SystemConfigTab() {
               <Label htmlFor="s3_bucket">Bucket</Label>
               <Input
                 id="s3_bucket"
-                placeholder="kryptalis-backups"
+                placeholder="dockcontrol-backups"
                 value={form.s3_bucket || ''}
                 onChange={(e) => set('s3_bucket', e.target.value)}
               />

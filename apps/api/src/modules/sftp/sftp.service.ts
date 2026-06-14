@@ -30,7 +30,7 @@ const execFileAsync = promisify(execFile);
  *   - app-scope accounts: a single { dir: 'app', source: <app data> }.
  *   - project-scope accounts: one entry PER application of the project,
  *     dir = '<slug>-<id12>' (mirrors the on-disk layout). The flat
- *     .kryptalis/apps dir is shared across ALL projects, so a chroot on
+ *     .dockcontrol/apps dir is shared across ALL projects, so a chroot on
  *     it would leak other tenants' apps — per-app binds are the only
  *     safe way to give project-wide access.
  */
@@ -44,15 +44,15 @@ interface ChrootBind {
 /**
  * SFTP account orchestrator.
  *
- * Talks to the `kryptalis-sftp` container over the host docker socket:
+ * Talks to the `dockcontrol-sftp` container over the host docker socket:
  *
- *   docker exec kryptalis-sftp useradd  -m -d <home> -s /bin/false -G sftpusers ...
- *   docker exec kryptalis-sftp chpasswd
- *   docker exec kryptalis-sftp userdel  -r ...
+ *   docker exec dockcontrol-sftp useradd  -m -d <home> -s /bin/false -G sftpusers ...
+ *   docker exec dockcontrol-sftp chpasswd
+ *   docker exec dockcontrol-sftp userdel  -r ...
  *
  * Account state lives in two places:
  *
- *   1. Kryptalis DB row (source of truth — owns RBAC, audit, expiry).
+ *   1. DockControl DB row (source of truth — owns RBAC, audit, expiry).
  *   2. Container /etc/passwd + /etc/shadow + /home/<user>/ + per-user
  *      sshd_config drop-in, persisted across restarts via named volumes
  *      sftp_users + sftp_homes.
@@ -63,7 +63,7 @@ interface ChrootBind {
  * other way around.
  *
  * Threat model:
- *   - Kryptalis-internal credentials use bcrypt (`passwordHash`).
+ *   - DockControl-internal credentials use bcrypt (`passwordHash`).
  *   - sshd authenticates via PAM/crypt(3) against /etc/shadow inside
  *     the container — set via `chpasswd` (SHA-512 crypt entry).
  *   - Plaintext is AES-256-GCM at rest (`passwordEnc`) under the
@@ -81,7 +81,7 @@ interface ChrootBind {
 @Injectable()
 export class SftpService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SftpService.name);
-  private readonly CONTAINER_NAME = 'kryptalis-sftp';
+  private readonly CONTAINER_NAME = 'dockcontrol-sftp';
 
   // Username must start with a letter, then 2-31 of [a-z 0-9 _ -].
   // Useradd would accept more, but we want a tight surface for the
@@ -307,14 +307,14 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     const payload = accounts.map((acc) => {
       const roots: Record<string, string> = {};
       if (acc.application) {
-        roots['app'] = `/opt/kryptalis/apps/${remoteAppSlug(acc.application.name, acc.application.id)}`;
+        roots['app'] = `/opt/dockcontrol/apps/${remoteAppSlug(acc.application.name, acc.application.id)}`;
       } else if (acc.project) {
         for (const app of acc.project.applications) {
           // Only this server's apps — a project may span machines.
           const appServer = app.serverId ?? acc.project.serverId;
           if (appServer !== serverId) continue;
           roots[`${appSlugify(app.name)}-${app.id.slice(0, 12)}`] =
-            `/opt/kryptalis/apps/${remoteAppSlug(app.name, app.id)}`;
+            `/opt/dockcontrol/apps/${remoteAppSlug(app.name, app.id)}`;
         }
       }
       return {
@@ -624,7 +624,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   // ── Docker shell wrapper ─────────────────────────────────────────
 
   /**
-   * Centralises every `docker exec kryptalis-sftp …` call. Uses
+   * Centralises every `docker exec dockcontrol-sftp …` call. Uses
    * `execFile` (NOT a shell), and refuses any arg containing a null
    * byte or newline. `execFile` doesn't spawn a shell so injection
    * isn't possible by construction, but the explicit check catches
@@ -1072,7 +1072,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    * App scope → single bind at /home/<user>/app.
    *
    * Project scope → one bind per application of the project, each at
-   * /home/<user>/<slug>-<id12>. The on-disk layout (.kryptalis/apps)
+   * /home/<user>/<slug>-<id12>. The on-disk layout (.dockcontrol/apps)
    * is a FLAT directory shared by every project, so a single chroot
    * over it would expose other tenants' apps — per-app bind mounts
    * are the only containment-preserving way to grant project-wide
@@ -1188,7 +1188,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     const id12 = app.id.slice(0, 12);
 
     // Path inside the sftp container. docker-compose maps host
-    // .kryptalis/apps → /data/apps.
+    // .dockcontrol/apps → /data/apps.
     const hostFsPath = `/data/apps/${slug}-${id12}`;
 
     // No live container → fall back to host-fs (git deploys land

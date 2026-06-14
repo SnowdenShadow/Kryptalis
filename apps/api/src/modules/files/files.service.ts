@@ -42,8 +42,8 @@ import { remoteAppSlug, slugify as appSlugify } from '../applications/applicatio
  *   3. **Filename hardening.** uploads and renames sanitize basename to
  *      reject '.', '..', null bytes, control chars, slashes, backslashes.
  *      Empty results are rejected.
- *   4. **Denylist for managed files.** `.kryptalis.env` and the
- *      Kryptalis-generated compose override are off-limits across ALL
+ *   4. **Denylist for managed files.** `.dockcontrol.env` and the
+ *      DockControl-generated compose override are off-limits across ALL
  *      operations (read/write/upload/download/rename/delete). Hidden-from-
  *      listing was never enough — the previous code happily read/wrote
  *      these by exact path.
@@ -57,11 +57,11 @@ import { remoteAppSlug, slugify as appSlugify } from '../applications/applicatio
  *      (userId, scope, scopeId, action, path).
  *
  * Tests should cover: realpath traversal via symlink uploaded as a regular
- * file; rename TO `.kryptalis.env`; download with a filename containing
+ * file; rename TO `.dockcontrol.env`; download with a filename containing
  * CRLF; cross-project access by id; admin bypass on unlinked DBs.
  */
 
-const ROOT_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const ROOT_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
 const APPS_DIR = path.join(ROOT_DIR, 'apps');
 const DBS_DIR = path.join(ROOT_DIR, 'databases');
 // Upload staging area — same volume as APPS_DIR/DBS_DIR so the final
@@ -97,12 +97,12 @@ const TEXT_EXTENSIONS = new Set([
   '.sql', '.graphql', '.gql', '.proto', '.lock', '.log',
 ]);
 
-// Files Kryptalis owns — never expose, never let the user mutate.
+// Files DockControl owns — never expose, never let the user mutate.
 // Lowercase entries; all checks lowercase the basename before lookup so
 // case-insensitive filesystems (NTFS, default APFS) can't bypass via
-// `.KRYPTALIS.ENV`.
+// `.DOCKCONTROL.ENV`.
 const MANAGED_FILES = new Set([
-  '.kryptalis.env',
+  '.dockcontrol.env',
   'docker-compose.override.yml',
 ]);
 
@@ -388,7 +388,7 @@ export class FilesService {
     // us to host-fs.
     // Pull the actual side-file names declared by the matching template
     // (e.g. PrestaShop's prestashop-proxy.conf + php-trust-proxy.ini +
-    // kryptalis-trust-proxy.php). Hard-coded suffix patterns would either
+    // dockcontrol-trust-proxy.php). Hard-coded suffix patterns would either
     // miss future templates or accidentally whitelist user files; the
     // explicit list is the precise oracle. Pulled lazily to avoid a
     // circular import on the marketplace module.
@@ -574,14 +574,14 @@ export class FilesService {
   }
 
   /**
-   * Throw if `relPath` traverses or lands on a Kryptalis-managed file.
-   * Case-insensitive and checks every path component (so 'sub/.kryptalis.env'
+   * Throw if `relPath` traverses or lands on a DockControl-managed file.
+   * Case-insensitive and checks every path component (so 'sub/.dockcontrol.env'
    * is refused, not just the leaf).
    */
   private assertNotManaged(relPath: string) {
     if (this.pathTraversesManaged(relPath)) {
       throw new ForbiddenException(
-        `Path '${relPath}' touches a Kryptalis-managed file.`,
+        `Path '${relPath}' touches a DockControl-managed file.`,
       );
     }
   }
@@ -612,7 +612,7 @@ export class FilesService {
     const safe = raw.replace(/[\x00-\x1f/\\]/g, '_');
     if (!safe) throw new BadRequestException('Invalid filename.');
     if (this.isManaged(safe)) {
-      throw new ForbiddenException(`${safe} is managed by Kryptalis and cannot be touched.`);
+      throw new ForbiddenException(`${safe} is managed by DockControl and cannot be touched.`);
     }
     return safe;
   }
@@ -1348,7 +1348,7 @@ export class FilesService {
   ) {
     const src = await this.resolvePath(userId, scope, scopeId, fromRel, 'DEVELOPER');
     this.assertNotManaged(src.relPath);
-    // Sanitize the destination basename first so a `to: 'subdir/.kryptalis.env'`
+    // Sanitize the destination basename first so a `to: 'subdir/.dockcontrol.env'`
     // is refused before any disk hit, regardless of intermediate prefix.
     const dstParts = toRel.replace(/\\/g, '/').split('/').filter(Boolean);
     const dstName = dstParts.pop() || '';

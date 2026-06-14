@@ -61,7 +61,7 @@ export interface MarketplaceApp {
 //   - Appwrite: same story — single-container `appwrite/appwrite` boots
 //     into a crashloop without mariadb/redis/influxdb wired up.
 //   - Postal / Mailu / Rainloop: see commit history for the full
-//     rationale; Kryptalis's own mail server feature is the supported
+//     rationale; DockControl's own mail server feature is the supported
 //     mail path.
 function loadCatalog(): MarketplaceApp[] {
   // Resolve relative to this compiled file. Works in both `ts-node` (src/)
@@ -90,13 +90,13 @@ function loadCatalog(): MarketplaceApp[] {
 
 const APPS: MarketplaceApp[] = loadCatalog();
 
-const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
 const APPS_DIR = path.join(DATA_DIR, 'apps');
 
-// Webmail apps that bind to a specific Kryptalis mail server. Multi-install
+// Webmail apps that bind to a specific DockControl mail server. Multi-install
 // is allowed (one instance per mail server) — uniqueness is enforced on
 // (slug, domainId) instead of (slug, projectId).
-// Webmail apps the install wizard auto-wires to a Kryptalis mail server.
+// Webmail apps the install wizard auto-wires to a DockControl mail server.
 // Rainloop was here previously but its compose template never had IMAP/SMTP
 // env keys to substitute, so the wiring promise was a lie. Dropped along
 // with the app itself.
@@ -325,7 +325,7 @@ export class MarketplaceService implements OnModuleInit {
     }
 
     // Pre-compute auto-resolved values for webmail-style apps that need to
-    // point at an existing Kryptalis mail server. The compose template is
+    // point at an existing DockControl mail server. The compose template is
     // patched on the fly with these substitutions.
     let composeContent = template.compose;
     if (isWebmail) {
@@ -421,10 +421,10 @@ export class MarketplaceService implements OnModuleInit {
     // that exist inside the API container but NOT on the host, and the
     // daemon would silently create empty dirs at the mount point.
     //
-    // KRYPTALIS_HOST_DATA_DIR is set in the top-level compose to the
-    // operator's actual host path (`${PWD}/.kryptalis`). Default to the
+    // DOCKCONTROL_HOST_DATA_DIR is set in the top-level compose to the
+    // operator's actual host path (`${PWD}/.dockcontrol`). Default to the
     // in-container path so single-process dev `pnpm dev` keeps working.
-    const hostDataDir = process.env.KRYPTALIS_HOST_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+    const hostDataDir = process.env.DOCKCONTROL_HOST_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
     const hostAppDir = path.join(
       hostDataDir,
       'apps',
@@ -505,7 +505,7 @@ export class MarketplaceService implements OnModuleInit {
     });
 
     // Templates already declare:
-    //   - networks: kryptalis-apps (external) at top-level
+    //   - networks: dockcontrol-apps (external) at top-level
     //   - the service joined to that network
     //   - host port publish (so direct IP:port access still works)
     //
@@ -537,7 +537,7 @@ export class MarketplaceService implements OnModuleInit {
       // here would plant the app on the PLATFORM host while the dashboard
       // says it's on the project's server. Ship the fully-rendered compose
       // to the agent instead; it writes compose/.env/side-files under
-      // /opt/kryptalis/apps/<slug> and brings the stack up there.
+      // /opt/dockcontrol/apps/<slug> and brings the stack up there.
       //
       // __HOST_APP_DIR__ (PrestaShop bind mounts) must point at the AGENT's
       // app dir, not the platform host's data dir.
@@ -551,7 +551,7 @@ export class MarketplaceService implements OnModuleInit {
       const remoteSlug = remoteAppSlug(appName, application.id);
       composeContent = composeContent.replace(
         new RegExp(hostAppDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
-        `/opt/kryptalis/apps/${remoteSlug}`,
+        `/opt/dockcontrol/apps/${remoteSlug}`,
       );
       const task = await this.agent.enqueueTask(data.serverId, 'DEPLOY', {
         slug: remoteSlug,
@@ -639,7 +639,7 @@ export class MarketplaceService implements OnModuleInit {
 
   /**
    * Compute the container_name a template will pick at install time. Mirrors
-   * the `container_name: kryptalis-<slug>-__INSTANCE_ID__` convention used by
+   * the `container_name: dockcontrol-<slug>-__INSTANCE_ID__` convention used by
    * every template in templates.ts. We need this BEFORE the compose file
    * is written so we can persist it on the Application row — Caddy reads
    * the row to know where to proxy.
@@ -648,7 +648,7 @@ export class MarketplaceService implements OnModuleInit {
     // Match the canonical template names. Slugs like 'uptime-kuma' are kept
     // verbatim; the underlying templates use the same form.
     const stem = slug === 'redis' ? 'redis-app' : slug;
-    return `kryptalis-${stem}-${instanceId}`;
+    return `dockcontrol-${stem}-${instanceId}`;
   }
 
   /** True when no running container holds this host port. */
@@ -810,7 +810,7 @@ export class MarketplaceService implements OnModuleInit {
     });
 
     const instanceId = application.id.slice(0, 12);
-    const containerName = `kryptalis-custom-${instanceId}`;
+    const containerName = `dockcontrol-custom-${instanceId}`;
     await this.prisma.application.update({
       where: { id: application.id },
       data: { containerName },
@@ -892,7 +892,7 @@ export class MarketplaceService implements OnModuleInit {
   /**
    * Attach every container the compose stack declares (app + any DB sidecar,
    * e.g. WordPress + its MariaDB) to the project network
-   * `kryptalis_proj_<projectId>`. The service-mesh view
+   * `dockcontrol_proj_<projectId>`. The service-mesh view
    * (projects.service.getServiceMesh) advertises hostnames reachable on that
    * network — without this connect, sibling apps deployed via the classic
    * deploy path could never resolve a marketplace install by container_name.

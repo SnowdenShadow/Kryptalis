@@ -8,10 +8,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kryptalis/agent/internal/config"
-	"github.com/kryptalis/agent/internal/monitor"
-	"github.com/kryptalis/agent/internal/poller"
-	"github.com/kryptalis/agent/internal/sftpserver"
+	"github.com/dockcontrol/agent/internal/config"
+	"github.com/dockcontrol/agent/internal/monitor"
+	"github.com/dockcontrol/agent/internal/poller"
+	"github.com/dockcontrol/agent/internal/sftpserver"
 )
 
 // sftpAdapter bridges poller.SftpSyncer (payload structs) to the
@@ -47,11 +47,11 @@ func main() {
 	// Embedded SFTP server — serves THIS host's app files to accounts the
 	// API pushes via SFTP_SYNC. Failure to start (port busy) is non-fatal:
 	// deploys still work; SFTP_SYNC tasks fail with a clear error.
-	sftpAddr := os.Getenv("KRYPTALIS_SFTP_ADDR")
+	sftpAddr := os.Getenv("DOCKCONTROL_SFTP_ADDR")
 	if sftpAddr == "" {
 		sftpAddr = ":2522"
 	}
-	if srv, err := sftpserver.New("/opt/kryptalis/sftp-state", sftpAddr); err != nil {
+	if srv, err := sftpserver.New("/opt/dockcontrol/sftp-state", sftpAddr); err != nil {
 		log.Printf("sftp: disabled (%v)", err)
 	} else {
 		p.Sftp = sftpAdapter{srv: srv}
@@ -68,7 +68,7 @@ func main() {
 	m := monitor.New(cfg)
 	go m.Start(ctx)
 
-	log.Printf("Kryptalis Agent started (server=%s)", cfg.ServerID)
+	log.Printf("DockControl Agent started (server=%s)", cfg.ServerID)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

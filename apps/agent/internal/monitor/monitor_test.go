@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kryptalis/agent/internal/config"
+	"github.com/dockcontrol/agent/internal/config"
 )
 
 func TestNewDoesNotPanic(t *testing.T) {

@@ -1,9 +1,9 @@
 FROM node:20-alpine AS base
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
-# Cross-compile the kryptalis-agent for both archs the API serves at
+# Cross-compile the dockcontrol-agent for both archs the API serves at
 # GET /api/agent/binary?arch=amd64|arm64 — agent.controller.ts resolves
-# /app/apps/agent/bin/kryptalis-agent-linux-<arch> inside the container.
+# /app/apps/agent/bin/dockcontrol-agent-linux-<arch> inside the container.
 FROM golang:1.25-alpine AS agent-builder
 WORKDIR /src
 COPY apps/agent/go.mod apps/agent/go.sum ./
@@ -11,11 +11,11 @@ RUN go mod download
 COPY apps/agent/ ./
 ARG AGENT_VERSION=0.1.0
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-      go build -trimpath -ldflags "-s -w -X github.com/kryptalis/agent/internal/monitor.Version=${AGENT_VERSION}" \
-      -o /out/kryptalis-agent-linux-amd64 ./cmd/agent \
+      go build -trimpath -ldflags "-s -w -X github.com/dockcontrol/agent/internal/monitor.Version=${AGENT_VERSION}" \
+      -o /out/dockcontrol-agent-linux-amd64 ./cmd/agent \
  && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
-      go build -trimpath -ldflags "-s -w -X github.com/kryptalis/agent/internal/monitor.Version=${AGENT_VERSION}" \
-      -o /out/kryptalis-agent-linux-arm64 ./cmd/agent
+      go build -trimpath -ldflags "-s -w -X github.com/dockcontrol/agent/internal/monitor.Version=${AGENT_VERSION}" \
+      -o /out/dockcontrol-agent-linux-arm64 ./cmd/agent
 
 FROM base AS deps
 WORKDIR /app
@@ -34,11 +34,11 @@ COPY --from=deps /app/packages/types/node_modules ./packages/types/node_modules
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
 COPY packages ./packages
 COPY apps/api ./apps/api
-RUN pnpm --filter @kryptalis/types build
+RUN pnpm --filter @dockcontrol/types build
 # Generate the Prisma client BEFORE tsc — otherwise TaskType, Role, ProjectRole, etc.
 # aren't exported from @prisma/client and the API build fails with TS2305.
 RUN cd apps/api && pnpm exec prisma generate
-RUN pnpm --filter @kryptalis/api build
+RUN pnpm --filter @dockcontrol/api build
 
 FROM base AS runner
 WORKDIR /app
@@ -58,7 +58,7 @@ COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 # resolver finds it via path.join(__dirname, 'catalog.json').
 COPY --from=builder /app/apps/api/src/modules/marketplace/catalog.json ./apps/api/dist/modules/marketplace/catalog.json
 # Agent binaries served by GET /api/agent/binary?arch=... — the controller
-# probes /app/apps/agent/bin/kryptalis-agent-linux-<arch>.
+# probes /app/apps/agent/bin/dockcontrol-agent-linux-<arch>.
 COPY --from=agent-builder /out/ ./apps/agent/bin/
 # Startup script: migrate deploy, P3005-gated baseline fallback, then
 # node dist/main. A dedicated COPY'd script (instead of an inline sh -c

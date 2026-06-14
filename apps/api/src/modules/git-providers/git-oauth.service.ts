@@ -13,7 +13,7 @@ type Provider = 'GITHUB';
  *
  * Why device flow instead of Web flow:
  *   - No client secret → safe to bake the client_id into the codebase.
- *     Every Kryptalis install can use the same app without any operator
+ *     Every DockControl install can use the same app without any operator
  *     setup. `install.sh` users get OAuth for free.
  *   - No callback URL → works on localhost, raw IP, custom domain, behind
  *     NAT, on someone's homelab. The Web flow falls over the second the
@@ -38,7 +38,7 @@ type Provider = 'GITHUB';
  *   client secret) is NOT used in device flow at all, so committing the
  *   client_id is safe.
  *
- *   The baked-in default is the official Kryptalis OAuth App ("Kryptalis"
+ *   The baked-in default is the official DockControl OAuth App ("DockControl"
  *   on github.com, Device Flow enabled). Operators who want their own
  *   branding/app can override it with GITHUB_OAUTH_CLIENT_ID in env.
  */

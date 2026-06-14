@@ -18,7 +18,7 @@ interface AuthState {
 
 // Soft migration: the refresh token used to live in localStorage (and in
 // the persisted zustand snapshot below). It now travels exclusively in the
-// httpOnly `kryptalis_rt` cookie, so wipe any residue left by older builds
+// httpOnly `dockcontrol_rt` cookie, so wipe any residue left by older builds
 // — an XSS can no longer harvest a long-lived credential here. We capture
 // the value before deleting so a legacy session (logged in before this
 // deploy, hence no cookie yet) can do ONE body-based refresh, after which
@@ -55,7 +55,7 @@ export const useAuthStore = create<AuthState>()(
       isAuthenticated: () => !!get().accessToken,
     }),
     {
-      name: 'kryptalis-auth',
+      name: 'dockcontrol-auth',
       // v1 drops the persisted refreshToken (now httpOnly-cookie only).
       // The migrate fn strips the stale key from any v0 snapshot.
       version: 1,

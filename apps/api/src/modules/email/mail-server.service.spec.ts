@@ -10,8 +10,8 @@ import {
 // Pin the data dir BEFORE the service module computes its constants.
 // fs is fully mocked, so the path never touches the real disk.
 vi.hoisted(() => {
-  process.env.KRYPTALIS_DATA_DIR = '/virt/kryptalis';
-  delete process.env.KRYPTALIS_HOST_DATA_DIR;
+  process.env.DOCKCONTROL_DATA_DIR = '/virt/dockcontrol';
+  delete process.env.DOCKCONTROL_HOST_DATA_DIR;
   delete process.env.CADDY_DATA_VOLUME;
 });
 
@@ -68,7 +68,7 @@ const vfs = fs as unknown as {
 };
 const mockAssert = vi.mocked(assertProjectAccess);
 
-const MAIL_DIR = '/virt/kryptalis/mail';
+const MAIL_DIR = '/virt/dockcontrol/mail';
 
 // ── execFile driver ──────────────────────────────────────────────────
 // promisify(execFile) calls the node-style callback. Handlers match on
@@ -148,7 +148,7 @@ function makeService() {
 }
 
 const DOMAIN = { id: 'dom1', domain: 'example.com', projectId: 'p1', application: null };
-const CONTAINER = 'kryptalis-mail-example-com';
+const CONTAINER = 'dockcontrol-mail-example-com';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -318,7 +318,7 @@ describe('deploy', () => {
     expect(upsert.create.dkimPrivateKey).toMatch(/^enc:/);
     // public key stored header-less, single-line base64 (DNS TXT form)
     expect(upsert.create.dkimPublicKey).toMatch(/^[A-Za-z0-9+/=]+$/);
-    expect(upsert.create.dkimSelector).toBe('kryptalis');
+    expect(upsert.create.dkimSelector).toBe('dockcontrol');
     expect(upsert.create.hostname).toBe('mail.example.com');
   });
 
@@ -420,7 +420,7 @@ describe('runDeploy', () => {
   const DIR = `${MAIL_DIR}/srv1`;
 
   it('renders the compose with named container, host-path volumes and published ports', async () => {
-    process.env.CADDY_DATA_VOLUME = 'kryptalis_caddy_data';
+    process.env.CADDY_DATA_VOLUME = 'dockcontrol_caddy_data';
     const { service } = makeService();
 
     await (service as any).runDeploy('srv1', 'example.com', PORTS, 'PRIVKEY');
@@ -447,7 +447,7 @@ describe('runDeploy', () => {
     expect(compose).toContain('SSL_TYPE: manual');
     expect(compose).toContain('mail.example.com/mail.example.com.crt');
     expect(compose).toContain('name: mycustom_caddy_data');
-    expect(compose).toContain('- kryptalis_caddy_data:/caddy-certs:ro');
+    expect(compose).toContain('- dockcontrol_caddy_data:/caddy-certs:ro');
   });
 
   it('local dev domain (.test): TLS left unconfigured, no caddy volume', async () => {
@@ -468,12 +468,12 @@ describe('runDeploy', () => {
     await (service as any).runDeploy('srv1', 'example.com', PORTS, 'PRIVKEY');
 
     const odk = `${DIR}/config/opendkim`;
-    expect(vfs.__files.get(`${odk}/keys/example.com/kryptalis.private`)).toBe('PRIVKEY\n');
+    expect(vfs.__files.get(`${odk}/keys/example.com/dockcontrol.private`)).toBe('PRIVKEY\n');
     expect(vfs.__files.get(`${odk}/KeyTable`)).toBe(
-      'kryptalis._domainkey.example.com example.com:kryptalis:/etc/opendkim/keys/example.com/kryptalis.private\n',
+      'dockcontrol._domainkey.example.com example.com:dockcontrol:/etc/opendkim/keys/example.com/dockcontrol.private\n',
     );
     expect(vfs.__files.get(`${odk}/SigningTable`)).toBe(
-      '*@example.com kryptalis._domainkey.example.com\n',
+      '*@example.com dockcontrol._domainkey.example.com\n',
     );
     expect(vfs.__files.get(`${odk}/TrustedHosts`)).toContain('172.16.0.0/12');
     // version stamp for the boot reconciler

@@ -8,7 +8,7 @@ import * as crypto from 'crypto';
  * secrets, etc.).
  *
  * Algorithm: AES-256-GCM with a per-blob random 12-byte IV and 16-byte tag.
- * Key derivation: scrypt(ENCRYPTION_KEY, salt='kryptalis-v1', 32 bytes).
+ * Key derivation: scrypt(ENCRYPTION_KEY, salt='dockcontrol-v1', 32 bytes).
  * Storage layout (base64-url):
  *   v1.<iv-b64>.<tag-b64>.<ciphertext-b64>
  *
@@ -25,7 +25,7 @@ import * as crypto from 'crypto';
 export class EncryptionService implements OnModuleInit {
   private readonly logger = new Logger(EncryptionService.name);
   private key!: Buffer;
-  private static SALT = Buffer.from('kryptalis-v1');
+  private static SALT = Buffer.from('dockcontrol-v1');
 
   constructor(private config: ConfigService) {}
 

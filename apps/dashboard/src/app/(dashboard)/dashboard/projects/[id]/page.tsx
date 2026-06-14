@@ -18,7 +18,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import type { ProjectResponse } from '@kryptalis/types';
+import type { ProjectResponse } from '@dockcontrol/types';
 import { api, ApiError } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';

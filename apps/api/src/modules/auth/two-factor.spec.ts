@@ -16,7 +16,7 @@ vi.mock('otplib', () => ({
     options: {},
     verify: vi.fn(),
     generateSecret: vi.fn().mockReturnValue('MOCK2FASECRET234567'),
-    keyuri: vi.fn().mockReturnValue('otpauth://totp/Kryptalis:alice%40example.com?secret=MOCK'),
+    keyuri: vi.fn().mockReturnValue('otpauth://totp/DockControl:alice%40example.com?secret=MOCK'),
   },
 }));
 
@@ -157,7 +157,7 @@ let svc: AuthService;
 beforeEach(() => {
   vi.clearAllMocks();
   mockGenerateSecret.mockReturnValue('MOCK2FASECRET234567');
-  mockKeyuri.mockReturnValue('otpauth://totp/Kryptalis:alice%40example.com?secret=MOCK');
+  mockKeyuri.mockReturnValue('otpauth://totp/DockControl:alice%40example.com?secret=MOCK');
   prisma = makePrisma();
   svc = makeService(prisma);
 });
@@ -363,7 +363,7 @@ describe('startTwoFactorSetup', () => {
     const res = await svc.startTwoFactorSetup('u1');
     expect(res.secret).toBe('MOCK2FASECRET234567');
     expect(res.otpauth).toContain('otpauth://totp/');
-    expect(mockKeyuri).toHaveBeenCalledWith('alice@example.com', 'Kryptalis', 'MOCK2FASECRET234567');
+    expect(mockKeyuri).toHaveBeenCalledWith('alice@example.com', 'DockControl', 'MOCK2FASECRET234567');
 
     const write = prisma.user.update.mock.calls[0][0];
     expect(write.where).toEqual({ id: 'u1' });

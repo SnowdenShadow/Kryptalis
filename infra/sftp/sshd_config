@@ -1,4 +1,4 @@
-# Kryptalis SFTP daemon config.
+# DockControl SFTP daemon config.
 #
 # Two principles:
 #   1. SFTP-only — every non-root login is forced to internal-sftp.
@@ -53,7 +53,7 @@ ClientAliveCountMax 5
 # Force SFTP-only for everyone except root (which is locked anyway).
 Subsystem sftp internal-sftp -l VERBOSE
 
-# Per-user sshd_config includes. The Kryptalis API drops one .conf
+# Per-user sshd_config includes. The DockControl API drops one .conf
 # file per account here with BOTH the chroot path AND the sftp/lock
 # directives. We DO NOT add a Match Group block here — sshd evaluates
 # Match in order and stops at the first match, so a global Match

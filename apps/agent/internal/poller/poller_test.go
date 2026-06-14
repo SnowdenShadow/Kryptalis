@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kryptalis/agent/internal/config"
+	"github.com/dockcontrol/agent/internal/config"
 )
 
 func TestSanitize(t *testing.T) {
@@ -158,7 +158,7 @@ networks:
 		t.Fatal(err)
 	}
 
-	if err := writeProjectNetworkOverride(dir, "kryptalis_proj_123"); err != nil {
+	if err := writeProjectNetworkOverride(dir, "dockcontrol_proj_123"); err != nil {
 		t.Fatalf("writeProjectNetworkOverride: %v", err)
 	}
 
@@ -180,7 +180,7 @@ networks:
 	if strings.Contains(out, "x-common") {
 		t.Errorf("override must not contain extension field x-common:\n%s", out)
 	}
-	if !strings.Contains(out, "name: kryptalis_proj_123") {
+	if !strings.Contains(out, "name: dockcontrol_proj_123") {
 		t.Errorf("override missing external network name:\n%s", out)
 	}
 	if !strings.Contains(out, "external: true") {

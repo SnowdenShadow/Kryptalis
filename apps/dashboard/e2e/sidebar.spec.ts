@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { loginAs } from './helpers/api-mock';
 
 /**
- * Role comes from the persisted zustand user (`kryptalis-auth`), which
+ * Role comes from the persisted zustand user (`dockcontrol-auth`), which
  * loginAs seeds; the sidebar reads `useAuthStore().user.role` directly
  * (no /auth/me round-trip needed for the nav itself).
  */

@@ -32,6 +32,7 @@ import {
 import * as path from 'path';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
+import * as crypto from 'crypto';
 
 /**
  * Deployment pipeline for applications: git-clone deploys, docker-image
@@ -90,7 +91,7 @@ export class ApplicationDeployService {
    * Dispatch a non-git deploy (image / raw compose / raw Dockerfile) to the
    * remote agent and mirror the outcome onto the Application + Deployment
    * rows. The agent writes the compose/Dockerfile under its own
-   * /opt/kryptalis/apps/<slug> and runs `docker compose up -d --build`.
+   * /opt/dockcontrol/apps/<slug> and runs `docker compose up -d --build`.
    */
   private async dispatchRemoteDeploy(
     server: { id: string },
@@ -203,10 +204,10 @@ export class ApplicationDeployService {
             pull_policy: 'always',
             ...(Object.keys(env).length ? { environment: { ...env } } : {}),
             ...(publishHost && publishContainer ? { ports: [`${publishHost}:${publishContainer}`] } : {}),
-            networks: ['kryptalis_apps'],
+            networks: ['dockcontrol_apps'],
           },
         },
-        networks: { kryptalis_apps: { external: true, name: 'kryptalis-apps' } },
+        networks: { dockcontrol_apps: { external: true, name: 'dockcontrol-apps' } },
       };
       await this.dispatchRemoteDeploy(
         remoteForImage,
@@ -285,12 +286,12 @@ export class ApplicationDeployService {
       // otherwise inject \\n  privileged: true or a sibling service.
       // Attach to BOTH the per-project network (so sibling apps in the
       // same project can resolve each other by container_name) AND the
-      // shared kryptalis-apps bridge (so Caddy can resolve us by name
+      // shared dockcontrol-apps bridge (so Caddy can resolve us by name
       // for HTTPS routing). Missing the second one → Caddy hits ENOTFOUND
       // on every request → 502. Same pattern as the compose-only and
       // marketplace install paths.
-      const networks = ['kryptalis_apps'];
-      if (projectNet) networks.unshift('kryptalis_project');
+      const networks = ['dockcontrol_apps'];
+      if (projectNet) networks.unshift('dockcontrol_project');
       const composeDoc: any = {
         services: {
           app: {
@@ -306,8 +307,8 @@ export class ApplicationDeployService {
           },
         },
         networks: {
-          ...(projectNet ? { kryptalis_project: { external: true, name: projectNet } } : {}),
-          kryptalis_apps: { external: true, name: 'kryptalis-apps' },
+          ...(projectNet ? { dockcontrol_project: { external: true, name: projectNet } } : {}),
+          dockcontrol_apps: { external: true, name: 'dockcontrol-apps' },
         },
       };
       const compose = yaml.dump(composeDoc, { lineWidth: 200 });
@@ -463,7 +464,7 @@ export class ApplicationDeployService {
       // Persist + write .env so secrets aren't inlined in the compose.
       let envFile: string | undefined;
       if (opts.envVars && Object.keys(opts.envVars).length) {
-        envFile = path.join(appDir, '.kryptalis.env');
+        envFile = path.join(appDir, '.dockcontrol.env');
         fs.writeFileSync(envFile, this.env.serializeEnv(opts.envVars));
       }
 
@@ -576,10 +577,10 @@ export class ApplicationDeployService {
             restart: 'unless-stopped',
             ...(Object.keys(env).length ? { environment: { ...env } } : {}),
             ...(publishHost && publishContainer ? { ports: [`${publishHost}:${publishContainer}`] } : {}),
-            networks: ['kryptalis_apps'],
+            networks: ['dockcontrol_apps'],
           },
         },
-        networks: { kryptalis_apps: { external: true, name: 'kryptalis-apps' } },
+        networks: { dockcontrol_apps: { external: true, name: 'dockcontrol-apps' } },
       };
       await this.dispatchRemoteDeploy(
         remoteForDockerfile,
@@ -659,12 +660,12 @@ export class ApplicationDeployService {
             ...(publishHost && publishContainer
               ? { ports: [`${publishHost}:${publishContainer}`] }
               : {}),
-            ...(projectNet ? { networks: ['kryptalis_project', 'kryptalis_apps'] } : { networks: ['kryptalis_apps'] }),
+            ...(projectNet ? { networks: ['dockcontrol_project', 'dockcontrol_apps'] } : { networks: ['dockcontrol_apps'] }),
           },
         },
         networks: {
-          ...(projectNet ? { kryptalis_project: { external: true, name: projectNet } } : {}),
-          kryptalis_apps: { external: true, name: 'kryptalis-apps' },
+          ...(projectNet ? { dockcontrol_project: { external: true, name: projectNet } } : {}),
+          dockcontrol_apps: { external: true, name: 'dockcontrol-apps' },
         },
       };
       const composeStr = yaml.dump(composeDoc, { lineWidth: 200 });
@@ -919,23 +920,31 @@ export class ApplicationDeployService {
     let hasPrevSnapshot = false;
 
     try {
-      // 1. clean previous stack BEFORE wiping. `down` without -v keeps
-      // user volumes (DB, uploads) intact across redeploys. The remove
-      // path elsewhere uses -v + --rmi to actually purge.
+      // 1. snapshot the previous appDir — but DO NOT stop the running
+      // stack here. The old `down`-first order took the app offline for
+      // the entire clone + npm-install + build (minutes of downtime per
+      // push). The running containers don't need their config dir: we
+      // rename it aside, build the new version next to them, and only
+      // swap containers at `up` time. The compose PROJECT name is the
+      // directory basename, which stays identical, so the later
+      // `up --force-recreate --remove-orphans` adopts and replaces the
+      // old containers (and removeCollidingContainers force-frees any
+      // explicitly-named ones just before). Downtime drops from
+      // minutes to the seconds of the container swap — which Caddy's
+      // lb_try retries bridge for domain-routed traffic.
       if (fs.existsSync(appDir)) {
-        try {
-          await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000);
-        } catch {}
-        // Snapshot the current (last-deployed) state. An orphan .prev left
-        // by a crash mid-deploy is overwritten here — it's older than the
-        // appDir we're about to snapshot.
+        // An orphan .prev left by a crash mid-deploy is overwritten
+        // here — it's older than the appDir we're about to snapshot.
         try {
           if (fs.existsSync(prevDir)) fs.rmSync(prevDir, { recursive: true, force: true });
           fs.renameSync(appDir, prevDir);
           hasPrevSnapshot = true;
         } catch {
           // rename failed (locked file, cross-device, …) — degrade to the
-          // historical wipe; rollback will be best-effort on the new dir.
+          // historical stop+wipe; rollback will be best-effort.
+          try {
+            await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000);
+          } catch {}
           fs.rmSync(appDir, { recursive: true, force: true });
         }
       }
@@ -988,14 +997,14 @@ export class ApplicationDeployService {
       if (Object.keys(mergedEnv).length) opts.envVars = mergedEnv;
       let envFile: string | undefined;
       if (opts.envVars && Object.keys(opts.envVars).length) {
-        envFile = path.join(appDir, '.kryptalis.env');
+        envFile = path.join(appDir, '.dockcontrol.env');
         const serialized = this.env.serializeEnv(opts.envVars);
         fs.writeFileSync(envFile, serialized);
         // Also overwrite the repo's `.env` files with the merged values.
         // Critical for build-time inlining: Next.js / Vite / CRA read `.env`
         // directly from the source tree during `npm run build`, NOT from
         // the compose `env_file:` runtime variables. `docker compose
-        // --env-file .kryptalis.env` only substitutes ${VAR} in the YAML;
+        // --env-file .dockcontrol.env` only substitutes ${VAR} in the YAML;
         // it never replaces an `env_file: .env` declared INSIDE the
         // compose. So we mirror the merged env into every common .env
         // name the framework might consume. The repo's original .env
@@ -1067,7 +1076,7 @@ export class ApplicationDeployService {
             data: {
               port: internalPort,
               framework: (stack as any),
-              // Caddy reaches the app on the shared kryptalis-apps bridge
+              // Caddy reaches the app on the shared dockcontrol-apps bridge
               // by container_name:internalPort — no host port publish, no
               // port collision possible.
               containerName: containerName(slug),
@@ -1098,7 +1107,7 @@ export class ApplicationDeployService {
         // does, Caddy will reach the container via the shared bridge —
         // so we strip the user's `ports:` blocks (which would otherwise
         // collide with platform services like the dashboard on :3000)
-        // and replace them with kryptalis-apps network membership. The
+        // and replace them with dockcontrol-apps network membership. The
         // user's intent is "this is internet-facing via a domain"; the
         // raw host port publish is a vestige of their local dev setup.
         const appRowForDomain = await this.prisma.application.findUnique({
@@ -1158,9 +1167,6 @@ export class ApplicationDeployService {
         log('> docker compose pull');
         const r1 = await dockerCompose(appDir, ['pull'], envFile, 600_000).catch((e: any) => ({ stdout: '', stderr: e?.stderr || e?.message || '' }));
         log(r1.stdout + r1.stderr);
-        // Defensive: nuke any container squatting the explicit names this
-        // compose declares (leftovers from a failed deploy, etc).
-        await removeCollidingContainers(content, log);
         // Rebuild so frameworks that inline env vars at build time (Next.js
         // NEXT_PUBLIC_*, Vite VITE_*) pick up the latest values. A plain
         // `build` is enough: BuildKit's cache is content-addressed — changed
@@ -1169,6 +1175,11 @@ export class ApplicationDeployService {
         // layers (npm ci) stay cached when the lockfile is unchanged, which
         // is most of the build time. (--no-cache here used to make every
         // redeploy reinstall everything for no correctness gain.)
+        //
+        // Build happens while the PREVIOUS version is still serving — the
+        // old containers are only removed after the image is ready, so a
+        // push-triggered redeploy costs seconds of swap, not minutes of
+        // build downtime.
         //
         // Unlike `pull`, a BUILD failure is fatal. Swallowing it here used to
         // let `up -d` relaunch a stale pre-existing image and mark the deploy
@@ -1182,6 +1193,30 @@ export class ApplicationDeployService {
           log(stderr);
           throw new Error(`docker compose build failed: ${stderr}`);
         }
+        // Blue-green canary: boot the main service's freshly built image in
+        // a throwaway container while the previous version still serves.
+        // Crash at startup (missing env, bad import) → abort the deploy with
+        // the canary's logs, zero downtime. Only the MAIN service is
+        // canaried — sidecars (DBs) are stock images that the old stack is
+        // already running.
+        const mainService = readComposeContainerInfo(content, containerName(slug));
+        const mainImage = await this.resolveBuiltImage(appDir, content, mainService.containerName);
+        if (mainImage) {
+          const healthy = await this.canaryBoot(mainImage, {
+            env: opts.envVars,
+            networks: ['dockcontrol-apps', ...(projectNet ? [projectNet] : [])],
+            log,
+          });
+          if (!healthy) {
+            throw new Error('Canary failed — new version crashes at startup; previous version left running.');
+          }
+        }
+
+        // Canary passed — NOW free the explicit container_names the compose
+        // claims (the still-running previous version + any failed-deploy
+        // leftovers) and bring the new stack up. This rm→up window is the
+        // only downtime, bridged by Caddy's lb_try retries.
+        await removeCollidingContainers(content, log);
         log('> docker compose up -d --force-recreate');
         const r2 = await dockerCompose(appDir, ['up', '-d', '--force-recreate', '--remove-orphans'], envFile, 900_000);
         log(r2.stdout + r2.stderr);
@@ -1191,12 +1226,24 @@ export class ApplicationDeployService {
         log(`> docker build -t ${img} .`);
         const rb = await execFileAsync('docker', ['build', '-t', img, '.'], { cwd: appDir, timeout: 900_000 });
         log(rb.stdout + rb.stderr);
+
+        // Blue-green canary BEFORE removing the running container — a
+        // startup crash aborts the deploy while the old version serves.
+        const healthy = await this.canaryBoot(img, {
+          env: opts.envVars,
+          networks: ['dockcontrol-apps', ...(projectNet ? [projectNet] : [])],
+          log,
+        });
+        if (!healthy) {
+          throw new Error('Canary failed — new version crashes at startup; previous version left running.');
+        }
+
         try { await execFileAsync('docker', ['rm', '-f', cname]); } catch {}
 
         // Resolve the container's internal port (EXPOSE in Dockerfile +
         // opts.port override). This is what Caddy will reverse_proxy to,
         // NOT a host port. The platform reaches the container through
-        // the shared `kryptalis-apps` bridge — host port publish is
+        // the shared `dockcontrol-apps` bridge — host port publish is
         // intentionally skipped so multiple apps can listen on port 80
         // without colliding.
         const exposed = parseDockerfileExposed(fs.readFileSync(dockerfilePath, 'utf-8'));
@@ -1204,10 +1251,10 @@ export class ApplicationDeployService {
           opts.port ?? (exposed.length > 0 ? exposed[0] : undefined);
 
         // Build run argv. Attach to:
-        //   1. kryptalis-apps  → Caddy proxies to <containerName>:<internalPort>
+        //   1. dockcontrol-apps  → Caddy proxies to <containerName>:<internalPort>
         //   2. projectNet      → sibling apps in the same project reach by name
         const runArgs = ['run', '-d', '--name', cname, '--restart', 'unless-stopped'];
-        runArgs.push('--network', 'kryptalis-apps', '--network-alias', slug);
+        runArgs.push('--network', 'dockcontrol-apps', '--network-alias', slug);
         if (projectNet) {
           runArgs.push('--network', projectNet, '--network-alias', slug);
         }
@@ -1249,9 +1296,9 @@ export class ApplicationDeployService {
         const envBlock = opts.envVars && Object.keys(opts.envVars).length
           ? `    environment:\n${Object.entries(opts.envVars).map(([k, v]) => `      ${k}: ${JSON.stringify(v)}`).join('\n')}\n`
           : '';
-        const networksBlock = `    networks:\n      - kryptalis-apps${projectNet ? `\n      - ${projectNet}` : ''}\n`;
+        const networksBlock = `    networks:\n      - dockcontrol-apps${projectNet ? `\n      - ${projectNet}` : ''}\n`;
         const topLevelNetworks =
-          `networks:\n  kryptalis-apps:\n    external: true${projectNet ? `\n  ${projectNet}:\n    external: true` : ''}\n`;
+          `networks:\n  dockcontrol-apps:\n    external: true${projectNet ? `\n  ${projectNet}:\n    external: true` : ''}\n`;
         const composeContent =
           `services:\n  ${slug}:\n    image: ${img}\n    container_name: ${cname}\n    restart: unless-stopped\n${portsBlock}${envBlock}${networksBlock}\n${topLevelNetworks}`;
         fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), composeContent);
@@ -1377,6 +1424,125 @@ export class ApplicationDeployService {
       // current state — either the rollback is up, or the app is down.
       this.proxy.regenerate().catch(() => {});
       this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+    }
+  }
+
+  /**
+   * Resolve the image the main compose service will run, for canary boot.
+   * Priority: the service matching `mainContainerName` (else the first
+   * service with a `build:` block, else the first service).
+   *
+   * Built services without an explicit `image:` get compose's default
+   * `<project>-<service>` tag, project = appDir basename (compose lowercases
+   * it). Verified via `docker image inspect` — if the tag can't be resolved
+   * (older compose naming with underscores, custom project name), we return
+   * null and the deploy proceeds WITHOUT a canary rather than failing a
+   * healthy deploy on a naming mismatch.
+   */
+  private async resolveBuiltImage(
+    appDir: string,
+    composeContent: string,
+    mainContainerName: string | null,
+  ): Promise<string | null> {
+    try {
+      const doc: any = yaml.load(composeContent);
+      const services = Object.entries<any>(doc?.services || {});
+      if (services.length === 0) return null;
+      const [svcName, svc] =
+        services.find(([, s]) => s?.container_name === mainContainerName) ??
+        services.find(([, s]) => s?.build) ??
+        services[0];
+      if (typeof svc?.image === 'string' && svc.image && !svc.build) return svc.image;
+      if (typeof svc?.image === 'string' && svc.image) {
+        // build + explicit image tag → compose tags the build result with it
+        return svc.image;
+      }
+      if (!svc?.build) return null;
+      const project = path.basename(appDir).toLowerCase().replace(/[^a-z0-9_-]/g, '');
+      const candidates = [`${project}-${svcName}`, `${project}_${svcName}`];
+      for (const tag of candidates) {
+        try {
+          await execFileAsync('docker', ['image', 'inspect', tag], { timeout: 10_000 });
+          return tag;
+        } catch {}
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Blue-green canary: boot a throwaway container from the freshly built
+   * image BEFORE touching the running stack. Catches the most common bad
+   * deploy — code that builds fine but crashes at startup (missing env,
+   * bad import, migration explosion) — while the previous version is
+   * still serving. Canary fails → deploy aborts → zero downtime.
+   *
+   * The canary runs with NO published ports and NO volumes (sharing a
+   * data volume with the live container risks corruption), under a
+   * unique name, attached to the app's networks so DB sidecars and
+   * project siblings resolve like in production.
+   *
+   * Returns true when the container is still running after `holdMs`.
+   * On failure the canary's last log lines are appended to the build log
+   * so the user sees WHY it crashed without ssh'ing anywhere.
+   */
+  private async canaryBoot(
+    image: string,
+    opts: {
+      env?: Record<string, string> | null;
+      networks?: string[];
+      log: (s: string) => void;
+      holdMs?: number;
+    },
+  ): Promise<boolean> {
+    const name = `dockcontrol-canary-${crypto.randomBytes(6).toString('hex')}`;
+    // Hold window env-tunable: ops can lengthen for slow-boot apps
+    // (DOCKCONTROL_CANARY_HOLD_MS=30000) or set 0 to skip the wait entirely.
+    const envHold = Number(process.env.DOCKCONTROL_CANARY_HOLD_MS);
+    const holdMs = opts.holdMs ?? (Number.isFinite(envHold) ? envHold : 10_000);
+    const args = ['run', '-d', '--name', name, '--label', 'dockcontrol.canary=1'];
+    const networks = opts.networks?.filter(Boolean) ?? [];
+    if (networks.length > 0) args.push('--network', networks[0]);
+    for (const [k, v] of Object.entries(opts.env || {})) {
+      args.push('-e', `${k}=${v}`);
+    }
+    args.push(image);
+    opts.log(`> canary boot: ${image} (${holdMs / 1000}s hold)`);
+    try {
+      await execFileAsync('docker', args, { timeout: 60_000 });
+      for (const net of networks.slice(1)) {
+        await execFileAsync('docker', ['network', 'connect', net, name], { timeout: 10_000 }).catch(() => {});
+      }
+      const deadline = Date.now() + holdMs;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1_000));
+        const insp = await execFileAsync(
+          'docker',
+          ['inspect', '--format', '{{.State.Running}} {{.State.ExitCode}}', name],
+          { timeout: 10_000 },
+        );
+        const [running, exitCode] = insp.stdout.trim().split(' ');
+        if (running !== 'true') {
+          const logsOut = await execFileAsync('docker', ['logs', '--tail', '30', name], { timeout: 10_000 })
+            .then((r) => (r.stdout + r.stderr).trim())
+            .catch(() => '');
+          opts.log(`✖ canary exited (code ${exitCode}) — the new version crashes at startup. Previous version keeps serving.`);
+          if (logsOut) opts.log(`--- canary logs ---\n${logsOut}\n-------------------`);
+          return false;
+        }
+      }
+      opts.log('✓ canary healthy — swapping containers');
+      return true;
+    } catch (e: any) {
+      // `docker run` itself failed (bad entrypoint, missing platform…) —
+      // treat as a failed canary, not an infra error: the OLD version is
+      // still up and that's the state we want to preserve.
+      opts.log(`✖ canary could not start: ${(e?.stderr || e?.message || e).toString().slice(0, 500)}`);
+      return false;
+    } finally {
+      await execFileAsync('docker', ['rm', '-f', name], { timeout: 15_000 }).catch(() => {});
     }
   }
 

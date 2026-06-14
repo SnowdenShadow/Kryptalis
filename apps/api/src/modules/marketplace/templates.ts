@@ -10,7 +10,7 @@
 //                     names AND volume namespaces so two instances of the
 //                     same image can coexist on one host.
 //
-// Every template ALSO attaches to the `kryptalis-apps` external network so
+// Every template ALSO attaches to the `dockcontrol-apps` external network so
 // Caddy can reach the container by name. The network is created by the root
 // docker-compose. Marketplace install MAY strip the host `ports:` block
 // when a port-pinned binding is requested — Caddy publishes the port on
@@ -20,10 +20,10 @@ export const COMPOSE_TEMPLATES: Record<string, { compose: string; healthCheck?: 
     compose: `services:
   portainer:
     image: portainer/portainer-ce:lts
-    container_name: kryptalis-portainer-__INSTANCE_ID__
+    container_name: dockcontrol-portainer-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       # 9000 = Portainer's plain-HTTP listener. The dashboard links users to
       # http://<ip>:<hostPort>, so mapping the HTTPS listener (9443, self-signed)
@@ -39,17 +39,17 @@ export const COMPOSE_TEMPLATES: Record<string, { compose: string; healthCheck?: 
 volumes:
   portainer_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   grafana: {
     compose: `services:
   grafana:
     image: grafana/grafana:latest
-    container_name: kryptalis-grafana-__INSTANCE_ID__
+    container_name: dockcontrol-grafana-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:3000"
     volumes:
@@ -62,17 +62,17 @@ networks:
 volumes:
   grafana_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   'uptime-kuma': {
     compose: `services:
   uptime-kuma:
     image: louislam/uptime-kuma:1
-    container_name: kryptalis-uptime-kuma-__INSTANCE_ID__
+    container_name: dockcontrol-uptime-kuma-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:3001"
     env_file:
@@ -82,17 +82,17 @@ networks:
 volumes:
   uptime_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   n8n: {
     compose: `services:
   n8n:
     image: n8nio/n8n:latest
-    container_name: kryptalis-n8n-__INSTANCE_ID__
+    container_name: dockcontrol-n8n-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:5678"
     env_file:
@@ -104,26 +104,26 @@ networks:
 volumes:
   n8n_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   wordpress: {
     compose: `services:
   wordpress:
     image: wordpress:latest
-    container_name: kryptalis-wordpress-__INSTANCE_ID__
+    container_name: dockcontrol-wordpress-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:80"
     environment:
       # container_name, NOT the bare service name: the service-name alias
-      # lives on the SHARED kryptalis-apps network, so two WordPress
+      # lives on the SHARED dockcontrol-apps network, so two WordPress
       # installs would both answer to "wordpress-db" and round-robin
       # each other's DB traffic. The instance-suffixed container_name is
       # unique per install.
-      WORDPRESS_DB_HOST: kryptalis-wordpress-db-__INSTANCE_ID__
+      WORDPRESS_DB_HOST: dockcontrol-wordpress-db-__INSTANCE_ID__
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: __RANDOM_PASSWORD__
       WORDPRESS_DB_NAME: wordpress
@@ -133,10 +133,10 @@ networks:
       - wordpress-db
   wordpress-db:
     image: mariadb:11
-    container_name: kryptalis-wordpress-db-__INSTANCE_ID__
+    container_name: dockcontrol-wordpress-db-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     environment:
       MYSQL_DATABASE: wordpress
       MYSQL_USER: wordpress
@@ -148,17 +148,17 @@ volumes:
   wp_data___INSTANCE_ID__:
   wp_db___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   ghost: {
     compose: `services:
   ghost:
     image: ghost:5-alpine
-    container_name: kryptalis-ghost-__INSTANCE_ID__
+    container_name: dockcontrol-ghost-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:2368"
     env_file:
@@ -171,17 +171,17 @@ networks:
 volumes:
   ghost_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   minio: {
     compose: `services:
   minio:
     image: minio/minio:latest
-    container_name: kryptalis-minio-__INSTANCE_ID__
+    container_name: dockcontrol-minio-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:9001"
       - "9000:9000"
@@ -196,17 +196,17 @@ networks:
 volumes:
   minio_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   nextcloud: {
     compose: `services:
   nextcloud:
     image: nextcloud:latest
-    container_name: kryptalis-nextcloud-__INSTANCE_ID__
+    container_name: dockcontrol-nextcloud-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:80"
     env_file:
@@ -216,41 +216,41 @@ networks:
 volumes:
   nextcloud_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   postgresql: {
     compose: `services:
   postgresql:
     image: postgres:16-alpine
-    container_name: kryptalis-postgresql-__INSTANCE_ID__
+    container_name: dockcontrol-postgresql-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:5432"
     env_file:
       - .env
     environment:
-      POSTGRES_USER: \${POSTGRES_USER:-kryptalis}
+      POSTGRES_USER: \${POSTGRES_USER:-dockcontrol}
       POSTGRES_PASSWORD: \${POSTGRES_PASSWORD:-__RANDOM_PASSWORD__}
-      POSTGRES_DB: \${POSTGRES_DB:-kryptalis}
+      POSTGRES_DB: \${POSTGRES_DB:-dockcontrol}
     volumes:
       - pg_data___INSTANCE_ID__:/var/lib/postgresql/data
 volumes:
   pg_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   redis: {
     compose: `services:
   redis:
     image: redis:7-alpine
-    container_name: kryptalis-redis-app-__INSTANCE_ID__
+    container_name: dockcontrol-redis-app-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:6379"
     volumes:
@@ -258,17 +258,17 @@ networks:
 volumes:
   redis_app_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   mysql: {
     compose: `services:
   mysql:
     image: mysql:8
-    container_name: kryptalis-mysql-__INSTANCE_ID__
+    container_name: dockcontrol-mysql-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:3306"
     env_file:
@@ -281,40 +281,40 @@ networks:
 volumes:
   mysql_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   mongodb: {
     compose: `services:
   mongodb:
     image: mongo:7
-    container_name: kryptalis-mongodb-__INSTANCE_ID__
+    container_name: dockcontrol-mongodb-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:27017"
     env_file:
       - .env
     environment:
-      MONGO_INITDB_ROOT_USERNAME: \${MONGO_INITDB_ROOT_USERNAME:-kryptalis}
+      MONGO_INITDB_ROOT_USERNAME: \${MONGO_INITDB_ROOT_USERNAME:-dockcontrol}
       MONGO_INITDB_ROOT_PASSWORD: \${MONGO_INITDB_ROOT_PASSWORD:-__RANDOM_PASSWORD__}
     volumes:
       - mongo_data___INSTANCE_ID__:/data/db
 volumes:
   mongo_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   gitea: {
     compose: `services:
   gitea:
     image: gitea/gitea:latest
-    container_name: kryptalis-gitea-__INSTANCE_ID__
+    container_name: dockcontrol-gitea-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:3000"
     env_file:
@@ -327,17 +327,17 @@ networks:
 volumes:
   gitea_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   vaultwarden: {
     compose: `services:
   vaultwarden:
     image: vaultwarden/server:latest
-    container_name: kryptalis-vaultwarden-__INSTANCE_ID__
+    container_name: dockcontrol-vaultwarden-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:80"
     env_file:
@@ -349,38 +349,38 @@ networks:
 volumes:
   vw_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   plausible: {
     compose: `services:
   plausible-db:
     image: postgres:15-alpine
-    container_name: kryptalis-plausible-db-__INSTANCE_ID__
+    container_name: dockcontrol-plausible-db-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     environment:
       POSTGRES_PASSWORD: __RANDOM_PASSWORD__
     volumes:
       - plausible_db___INSTANCE_ID__:/var/lib/postgresql/data
   plausible-events:
     image: clickhouse/clickhouse-server:24.3-alpine
-    container_name: kryptalis-plausible-events-__INSTANCE_ID__
+    container_name: dockcontrol-plausible-events-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     volumes:
       - plausible_events___INSTANCE_ID__:/var/lib/clickhouse
   plausible:
     image: ghcr.io/plausible/community-edition:v2.1.5
-    container_name: kryptalis-plausible-__INSTANCE_ID__
+    container_name: dockcontrol-plausible-__INSTANCE_ID__
     restart: unless-stopped
     depends_on:
       - plausible-db
       - plausible-events
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:8000"
     env_file:
@@ -394,24 +394,24 @@ networks:
       # same generated value). The previous hardcoded "plausible" password
       # never matched the random one the db got — install was dead on boot.
       # Hosts use the instance-suffixed container_name (unique on the
-      # shared kryptalis-apps network), not the bare service alias.
-      DATABASE_URL: postgres://postgres:__RANDOM_PASSWORD__@kryptalis-plausible-db-__INSTANCE_ID__:5432/plausible_db
-      CLICKHOUSE_DATABASE_URL: http://kryptalis-plausible-events-__INSTANCE_ID__:8123/plausible_events_db
+      # shared dockcontrol-apps network), not the bare service alias.
+      DATABASE_URL: postgres://postgres:__RANDOM_PASSWORD__@dockcontrol-plausible-db-__INSTANCE_ID__:5432/plausible_db
+      CLICKHOUSE_DATABASE_URL: http://dockcontrol-plausible-events-__INSTANCE_ID__:8123/plausible_events_db
 volumes:
   plausible_db___INSTANCE_ID__:
   plausible_events___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   'code-server': {
     compose: `services:
   code-server:
     image: codercom/code-server:latest
-    container_name: kryptalis-code-server-__INSTANCE_ID__
+    container_name: dockcontrol-code-server-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:8080"
     env_file:
@@ -423,33 +423,33 @@ networks:
 volumes:
   code_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   supabase: {
     compose: `services:
   supabase-studio:
     image: supabase/studio:latest
-    container_name: kryptalis-supabase-__INSTANCE_ID__
+    container_name: dockcontrol-supabase-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:3000"
     environment:
       STUDIO_PG_META_URL: http://localhost:8080
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   appwrite: {
     compose: `services:
   appwrite:
     image: appwrite/appwrite:1.6
-    container_name: kryptalis-appwrite-__INSTANCE_ID__
+    container_name: dockcontrol-appwrite-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:80"
     volumes:
@@ -457,7 +457,7 @@ networks:
 volumes:
   appwrite_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
 
@@ -466,10 +466,10 @@ networks:
     compose: `services:
   roundcube:
     image: roundcube/roundcubemail:latest
-    container_name: kryptalis-roundcube-__INSTANCE_ID__
+    container_name: dockcontrol-roundcube-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:80"
     environment:
@@ -488,7 +488,7 @@ volumes:
   roundcube_data___INSTANCE_ID__:
   roundcube_config___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
 
@@ -496,10 +496,10 @@ networks:
     compose: `services:
   snappymail:
     image: djmaze/snappymail:latest
-    container_name: kryptalis-snappymail-__INSTANCE_ID__
+    container_name: dockcontrol-snappymail-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:8888"
     volumes:
@@ -507,7 +507,7 @@ networks:
 volumes:
   snappymail_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
 
@@ -515,10 +515,10 @@ networks:
     compose: `services:
   rainloop:
     image: hardware/rainloop:latest
-    container_name: kryptalis-rainloop-__INSTANCE_ID__
+    container_name: dockcontrol-rainloop-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:8888"
     volumes:
@@ -526,7 +526,7 @@ networks:
 volumes:
   rainloop_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
 
@@ -534,10 +534,10 @@ networks:
     compose: `services:
   mailpit:
     image: axllent/mailpit:latest
-    container_name: kryptalis-mailpit-__INSTANCE_ID__
+    container_name: dockcontrol-mailpit-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:8025"
       - "1025:1025"
@@ -549,7 +549,7 @@ networks:
 volumes:
   mailpit_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
 
@@ -557,10 +557,10 @@ networks:
     compose: `services:
   postal:
     image: ghcr.io/postalserver/postal:3
-    container_name: kryptalis-postal-__INSTANCE_ID__
+    container_name: dockcontrol-postal-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:5000"
       - "2526:25"
@@ -572,10 +572,10 @@ networks:
       - postal-rabbitmq
   postal-mariadb:
     image: mariadb:11
-    container_name: kryptalis-postal-mariadb-__INSTANCE_ID__
+    container_name: dockcontrol-postal-mariadb-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     environment:
       MYSQL_ROOT_PASSWORD: __RANDOM_PASSWORD__
       MYSQL_DATABASE: postal
@@ -585,10 +585,10 @@ networks:
       - postal_db___INSTANCE_ID__:/var/lib/mysql
   postal-rabbitmq:
     image: rabbitmq:3-management
-    container_name: kryptalis-postal-rabbitmq-__INSTANCE_ID__
+    container_name: dockcontrol-postal-rabbitmq-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     environment:
       RABBITMQ_DEFAULT_USER: postal
       RABBITMQ_DEFAULT_PASS: postal
@@ -597,7 +597,7 @@ volumes:
   postal_config___INSTANCE_ID__:
   postal_db___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
 
@@ -606,10 +606,10 @@ networks:
 services:
   mailu-admin:
     image: ghcr.io/mailu/admin:2024.06
-    container_name: kryptalis-mailu-admin-__INSTANCE_ID__
+    container_name: dockcontrol-mailu-admin-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:8080"
     environment:
@@ -621,7 +621,7 @@ services:
 volumes:
   mailu_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   // PrestaShop ships its own auto-installer when PS_INSTALL_AUTO=1 and a
@@ -633,10 +633,10 @@ networks:
     compose: `services:
   prestashop:
     image: prestashop/prestashop:latest
-    container_name: kryptalis-prestashop-__INSTANCE_ID__
+    container_name: dockcontrol-prestashop-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:80"
     env_file:
@@ -676,20 +676,20 @@ networks:
       # inside the API container. The daemon resolves bind sources on
       # the HOST filesystem and finds nothing, creating an empty dir at
       # the mount point. The placeholder is replaced at install time
-      # with KRYPTALIS_HOST_DATA_DIR + the per-instance subpath, which
+      # with DOCKCONTROL_HOST_DATA_DIR + the per-instance subpath, which
       # IS a real host path the daemon can resolve.
-      - __HOST_APP_DIR__/prestashop-proxy.conf:/etc/apache2/conf-enabled/kryptalis-proxy.conf:ro
-      - __HOST_APP_DIR__/php-trust-proxy.ini:/usr/local/etc/php/conf.d/zzz-kryptalis-trust-proxy.ini:ro
-      - __HOST_APP_DIR__/kryptalis-trust-proxy.php:/usr/local/etc/php/kryptalis-trust-proxy.php:ro
+      - __HOST_APP_DIR__/prestashop-proxy.conf:/etc/apache2/conf-enabled/dockcontrol-proxy.conf:ro
+      - __HOST_APP_DIR__/php-trust-proxy.ini:/usr/local/etc/php/conf.d/zzz-dockcontrol-trust-proxy.ini:ro
+      - __HOST_APP_DIR__/dockcontrol-trust-proxy.php:/usr/local/etc/php/dockcontrol-trust-proxy.php:ro
     depends_on:
       prestashop-db-__INSTANCE_ID__:
         condition: service_healthy
   prestashop-db-__INSTANCE_ID__:
     image: mariadb:11
-    container_name: kryptalis-prestashop-db-__INSTANCE_ID__
+    container_name: dockcontrol-prestashop-db-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     environment:
       MARIADB_DATABASE: prestashop
       MARIADB_USER: prestashop
@@ -706,20 +706,20 @@ volumes:
   prestashop_data___INSTANCE_ID__:
   prestashop_db___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   // Multi-DB modern web UI. Persistent data so saved connections survive
-  // restarts. Attached to kryptalis-apps so user-deployed DB containers
+  // restarts. Attached to dockcontrol-apps so user-deployed DB containers
   // are reachable by container_name from inside.
   dbgate: {
     compose: `services:
   dbgate:
     image: dbgate/dbgate:latest
-    container_name: kryptalis-dbgate-__INSTANCE_ID__
+    container_name: dockcontrol-dbgate-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:3000"
     env_file:
@@ -729,7 +729,7 @@ networks:
 volumes:
   dbgate_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   // Single-file PHP DB browser. No persistent state — login info kept
@@ -738,16 +738,16 @@ networks:
     compose: `services:
   adminer:
     image: adminer:latest
-    container_name: kryptalis-adminer-__INSTANCE_ID__
+    container_name: dockcontrol-adminer-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:8080"
     env_file:
       - .env
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   // phpMyAdmin — defaults to arbitrary mode (PMA_ARBITRARY=1) so the
@@ -757,16 +757,16 @@ networks:
     compose: `services:
   phpmyadmin:
     image: phpmyadmin:latest
-    container_name: kryptalis-phpmyadmin-__INSTANCE_ID__
+    container_name: dockcontrol-phpmyadmin-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:80"
     env_file:
       - .env
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   // pgAdmin — admin email + password are required env vars (the
@@ -777,10 +777,10 @@ networks:
     compose: `services:
   pgadmin:
     image: dpage/pgadmin4:latest
-    container_name: kryptalis-pgadmin-__INSTANCE_ID__
+    container_name: dockcontrol-pgadmin-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:80"
     env_file:
@@ -793,7 +793,7 @@ networks:
 volumes:
   pgadmin_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   // mongo-express — ME_CONFIG_MONGODB_URL is required (the dashboard
@@ -803,10 +803,10 @@ networks:
     compose: `services:
   mongo-express:
     image: mongo-express:latest
-    container_name: kryptalis-mongo-express-__INSTANCE_ID__
+    container_name: dockcontrol-mongo-express-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:8081"
     env_file:
@@ -814,7 +814,7 @@ networks:
     environment:
       ME_CONFIG_BASICAUTH: "true"
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
   // RedisInsight — Redis Inc's official GUI. Volume persists connection
@@ -824,10 +824,10 @@ networks:
     compose: `services:
   redisinsight:
     image: redis/redisinsight:latest
-    container_name: kryptalis-redisinsight-__INSTANCE_ID__
+    container_name: dockcontrol-redisinsight-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:5540"
     env_file:
@@ -837,7 +837,7 @@ networks:
 volumes:
   redisinsight_data___INSTANCE_ID__:
 networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true`,
   },
 };
@@ -854,7 +854,7 @@ networks:
  */
 export const SIDE_FILES: Record<string, Record<string, string>> = {
   prestashop: {
-    // Mounted at /etc/apache2/conf-enabled/kryptalis-proxy.conf so
+    // Mounted at /etc/apache2/conf-enabled/dockcontrol-proxy.conf so
     // Apache loads it on startup. Maps Caddy's X-Forwarded-Proto to
     // HTTPS=on for PHP and trusts internal docker subnets for the
     // real-client-IP rewrite.
@@ -866,7 +866,7 @@ export const SIDE_FILES: Record<string, Record<string, string>> = {
     // $_SERVER at request boot from the X-Forwarded-Proto header. The
     // Apache conf still helps third-party modules that read `getenv()`.
     'prestashop-proxy.conf':
-      `# Auto-generated by Kryptalis marketplace install.
+      `# Auto-generated by DockControl marketplace install.
 # SetEnvIf is part of mod_setenvif which is enabled by default on the
 # prestashop image. We deliberately do NOT use mod_remoteip here:
 # the PrestaShop image ships Apache without that module compiled in,
@@ -875,24 +875,24 @@ export const SIDE_FILES: Record<string, Record<string, string>> = {
 # conf just covers third-party modules that read getenv('HTTPS').
 SetEnvIf X-Forwarded-Proto https HTTPS=on
 `,
-    // Mounted at /usr/local/etc/php/conf.d/zzz-kryptalis-trust-proxy.ini
+    // Mounted at /usr/local/etc/php/conf.d/zzz-dockcontrol-trust-proxy.ini
     // so the PHP image's docker-php-entrypoint picks it up. The `zzz-`
     // prefix ensures it loads AFTER any image-shipped PHP conf — last
     // writer wins on auto_prepend_file.
     'php-trust-proxy.ini':
-      `; Auto-generated by Kryptalis marketplace install.
-auto_prepend_file = /usr/local/etc/php/kryptalis-trust-proxy.php
+      `; Auto-generated by DockControl marketplace install.
+auto_prepend_file = /usr/local/etc/php/dockcontrol-trust-proxy.php
 `,
     // The actual shim. Runs before every PHP request. Mirrors
     // \$_SERVER['HTTPS'] / SERVER_PORT / REQUEST_SCHEME from the
     // X-Forwarded-Proto header Caddy sets on every reverse_proxy block.
     // We only trust the header when REMOTE_ADDR is on a private
     // docker subnet — i.e. the request came from Caddy on the
-    // kryptalis-apps bridge, not from a direct public connection
+    // dockcontrol-apps bridge, not from a direct public connection
     // bypassing the proxy.
-    'kryptalis-trust-proxy.php':
+    'dockcontrol-trust-proxy.php':
       `<?php
-// Auto-generated by Kryptalis. Trust X-Forwarded-Proto from internal proxies.
+// Auto-generated by DockControl. Trust X-Forwarded-Proto from internal proxies.
 if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
     $remote = $_SERVER['REMOTE_ADDR'] ?? '';
     $internal = false;
@@ -971,14 +971,14 @@ export function renderCustomComposeTemplate(opts: {
   return `services:
   app:
     image: ${opts.image}
-    container_name: kryptalis-custom-__INSTANCE_ID__
+    container_name: dockcontrol-custom-__INSTANCE_ID__
     restart: unless-stopped
     networks:
-      - kryptalis-apps
+      - dockcontrol-apps
     ports:
       - "__HOST_PORT__:${opts.containerPort}"
 ${opts.command ? `    command: ${JSON.stringify(opts.command)}\n` : ''}${env ? `    environment:\n${env}\n` : ''}${vols ? `    volumes:\n${vols}\n` : ''}${hasVolumes ? `volumes: {}\n` : ''}networks:
-  kryptalis-apps:
+  dockcontrol-apps:
     external: true
 `;
 }

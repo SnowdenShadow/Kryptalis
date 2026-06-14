@@ -148,9 +148,9 @@
       "containerPort": 5432,
       "defaultPort": 5433,
       "envVars": [
-        { "key": "POSTGRES_USER", "defaultValue": "kryptalis", "required": false, "description": "Superuser name" },
+        { "key": "POSTGRES_USER", "defaultValue": "dockcontrol", "required": false, "description": "Superuser name" },
         { "key": "POSTGRES_PASSWORD", "defaultValue": "", "required": false, "description": "Superuser password — leave empty to auto-generate (shown after install)" },
-        { "key": "POSTGRES_DB", "defaultValue": "kryptalis", "required": false, "description": "Initial database name" }
+        { "key": "POSTGRES_DB", "defaultValue": "dockcontrol", "required": false, "description": "Initial database name" }
       ]
     },
     {
@@ -247,7 +247,7 @@
       "containerPort": 27017,
       "defaultPort": 27017,
       "envVars": [
-        { "key": "MONGO_INITDB_ROOT_USERNAME", "defaultValue": "kryptalis", "required": false, "description": "Root username" },
+        { "key": "MONGO_INITDB_ROOT_USERNAME", "defaultValue": "dockcontrol", "required": false, "description": "Root username" },
         { "key": "MONGO_INITDB_ROOT_PASSWORD", "defaultValue": "", "required": false, "description": "Root password — leave empty to auto-generate (shown after install)" }
       ]
     },
@@ -349,7 +349,7 @@
       "id": "27",
       "name": "DBGate",
       "slug": "dbgate",
-      "description": "Modern multi-database web UI — supports Postgres, MySQL, MariaDB, MongoDB, Redis, ClickHouse, SQLite. One tool for every database type in Kryptalis.",
+      "description": "Modern multi-database web UI — supports Postgres, MySQL, MariaDB, MongoDB, Redis, ClickHouse, SQLite. One tool for every database type in DockControl.",
       "category": "Databases",
       "icon": "database",
       "iconUrl": "https://raw.githubusercontent.com/dbgate/dbgate/master/app/icon.png",
@@ -376,7 +376,7 @@
       "containerPort": 8080,
       "defaultPort": 8088,
       "envVars": [
-        { "key": "ADMINER_DEFAULT_SERVER", "defaultValue": "", "required": false, "description": "Pre-fill the server field on the login screen (e.g. kryptalis-db-mydb)" },
+        { "key": "ADMINER_DEFAULT_SERVER", "defaultValue": "", "required": false, "description": "Pre-fill the server field on the login screen (e.g. dockcontrol-db-mydb)" },
         { "key": "ADMINER_DESIGN", "defaultValue": "dracula", "required": false, "description": "UI theme (dracula, hever, lucas, mancave, mvt, ng9, nicu, pappu687, pepa-linha…)" }
       ]
     },
@@ -384,7 +384,7 @@
       "id": "29",
       "name": "phpMyAdmin",
       "slug": "phpmyadmin",
-      "description": "The de-facto standard MySQL/MariaDB web admin tool. Auto-discovers any DB on the kryptalis-apps network — pick the server on the login screen.",
+      "description": "The de-facto standard MySQL/MariaDB web admin tool. Auto-discovers any DB on the dockcontrol-apps network — pick the server on the login screen.",
       "category": "Databases",
       "icon": "database",
       "iconUrl": "https://cdn.jsdelivr.net/gh/walkxcode/dashboard-icons/png/phpmyadmin.png",
@@ -433,7 +433,7 @@
       "containerPort": 8081,
       "defaultPort": 8091,
       "envVars": [
-        { "key": "ME_CONFIG_MONGODB_URL", "defaultValue": "", "required": true, "description": "Mongo connection string (e.g. mongodb://user:pass@kryptalis-db-mydb:27017/)" },
+        { "key": "ME_CONFIG_MONGODB_URL", "defaultValue": "", "required": true, "description": "Mongo connection string (e.g. mongodb://user:pass@dockcontrol-db-mydb:27017/)" },
         { "key": "ME_CONFIG_BASICAUTH_USERNAME", "defaultValue": "admin", "required": false, "description": "Mongo Express UI login user (basic auth)" },
         { "key": "ME_CONFIG_BASICAUTH_PASSWORD", "defaultValue": "", "required": true, "description": "Mongo Express UI login password" }
       ]

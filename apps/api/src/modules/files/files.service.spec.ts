@@ -10,7 +10,7 @@ import {
 
 // Pin the data dir BEFORE the service module computes ROOT_DIR/APPS_DIR/….
 vi.hoisted(() => {
-  process.env.KRYPTALIS_DATA_DIR = '/virt/kryptalis-files';
+  process.env.DOCKCONTROL_DATA_DIR = '/virt/dockcontrol-files';
 });
 
 // ── in-memory fs with symlink + O_NOFOLLOW semantics ─────────────────
@@ -250,7 +250,7 @@ const mockAssert = vi.mocked(assertProjectAccess);
 const mockedDockerFs = vi.mocked(dockerFs);
 
 const K = (p: string) => path.resolve(p).replace(/\\/g, '/');
-const ROOT = K('/virt/kryptalis-files');
+const ROOT = K('/virt/dockcontrol-files');
 const APPS = `${ROOT}/apps`;
 const TMP = `${ROOT}/tmp`;
 
@@ -446,23 +446,23 @@ describe('RBAC scoping', () => {
 // ── managed / sensitive files ────────────────────────────────────────
 
 describe('managed + sensitive files', () => {
-  it.each(['.kryptalis.env', '.KRYPTALIS.ENV', 'sub/.kryptalis.env', 'docker-compose.override.yml'])(
+  it.each(['.dockcontrol.env', '.DOCKCONTROL.ENV', 'sub/.dockcontrol.env', 'docker-compose.override.yml'])(
     'read of managed path %j is forbidden',
     async (rel) => {
       const { service } = makeService();
       mkFile(`${APP_DIR}/${rel.toLowerCase()}`, 'secret');
       await expect(service.readFile('u1', 'app', 'app1', rel)).rejects.toThrow(
-        /Kryptalis-managed file/,
+        /DockControl-managed file/,
       );
     },
   );
 
-  it('rename TO .kryptalis.env is refused at sanitization', async () => {
+  it('rename TO .dockcontrol.env is refused at sanitization', async () => {
     const { service } = makeService();
     mkFile(`${APP_DIR}/a.txt`, 'x');
     await expect(
-      service.rename('u1', 'app', 'app1', 'a.txt', '.kryptalis.env'),
-    ).rejects.toThrow(/managed by Kryptalis/);
+      service.rename('u1', 'app', 'app1', 'a.txt', '.dockcontrol.env'),
+    ).rejects.toThrow(/managed by DockControl/);
   });
 
   it('.env read requires project ADMIN (DEVELOPER refused)', async () => {
@@ -505,7 +505,7 @@ describe('list', () => {
     const { service } = makeService();
     mkFile(`${APP_DIR}/zz.txt`, 'z');
     mkDir(`${APP_DIR}/src`);
-    mkFile(`${APP_DIR}/.kryptalis.env`, 'managed');
+    mkFile(`${APP_DIR}/.dockcontrol.env`, 'managed');
     mkDir(`${APP_DIR}/.git`);
     mkFile(`${APP_DIR}/.hidden`, 'h');
 
@@ -807,8 +807,8 @@ describe('remove', () => {
 
   it('refuses to delete a managed file', async () => {
     const { service } = makeService();
-    mkFile(`${APP_DIR}/.kryptalis.env`, 'x');
-    await expect(service.remove('u1', 'app', 'app1', '.kryptalis.env')).rejects.toThrow(
+    mkFile(`${APP_DIR}/.dockcontrol.env`, 'x');
+    await expect(service.remove('u1', 'app', 'app1', '.dockcontrol.env')).rejects.toThrow(
       ForbiddenException,
     );
   });
@@ -821,13 +821,13 @@ describe('docker-fs routing (container-only apps)', () => {
     const ctx = makeService();
     ctx.prisma.application.findUnique.mockResolvedValue({
       ...APP,
-      containerName: 'kryptalis-wp-abc',
+      containerName: 'dockcontrol-wp-abc',
       dockerImage: 'wordpress:6',
     });
     mockedDockerFs.pickRootForImage.mockReturnValue('/var/www/html');
     return ctx;
   }
-  const TARGET = { containerName: 'kryptalis-wp-abc', rootDir: '/var/www/html' };
+  const TARGET = { containerName: 'dockcontrol-wp-abc', rootDir: '/var/www/html' };
 
   it('list routes to dockerFs.listDir and still filters sensitive dotfiles', async () => {
     const { service } = setupDockerApp();

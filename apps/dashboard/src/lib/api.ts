@@ -73,7 +73,7 @@ export class ApiError extends Error {
  * API client with transparent JWT refresh.
  *
  * The access token has a short TTL (15m); the refresh token lasts 7 days and
- * lives in the httpOnly `kryptalis_rt` cookie (path-scoped to /api/auth).
+ * lives in the httpOnly `dockcontrol_rt` cookie (path-scoped to /api/auth).
  * Without auto-refresh the user gets kicked back to /login every 15 minutes,
  * which is what was happening. Now: on any 401 we POST /auth/refresh with
  * credentials:'include' (the cookie does the authenticating), swap in the new
@@ -99,7 +99,7 @@ class ApiClient {
   private clearTokensAndRedirect() {
     if (typeof window === 'undefined') return;
     // logout() clears BOTH localStorage tokens and the persisted zustand
-    // state ('kryptalis-auth'). Clearing only localStorage left zustand
+    // state ('dockcontrol-auth'). Clearing only localStorage left zustand
     // believing the user was still logged in → /login ↔ /dashboard
     // redirect loop after session expiry.
     useAuthStore.getState().logout();
@@ -111,7 +111,7 @@ class ApiClient {
 
   /**
    * Returns a new access token on success, or null if the refresh failed.
-   * Cookie-first: the httpOnly `kryptalis_rt` cookie rides along via
+   * Cookie-first: the httpOnly `dockcontrol_rt` cookie rides along via
    * credentials:'include' and the body stays empty. If that fails AND a
    * pre-cookie localStorage refresh token still exists (legacy session),
    * we retry once with the body — the server then sets the cookie and the
@@ -145,7 +145,7 @@ class ApiClient {
 
         localStorage.setItem('accessToken', data.accessToken);
         // Keep the zustand copy in sync — it persists its own snapshot
-        // ('kryptalis-auth') and would otherwise hold a revoked token.
+        // ('dockcontrol-auth') and would otherwise hold a revoked token.
         useAuthStore.setState({ accessToken: data.accessToken });
         return data.accessToken;
       } catch {

@@ -16,7 +16,7 @@ vi.mock('fs', () => {
     rename: vi.fn().mockResolvedValue(undefined),
     rm: vi.fn().mockResolvedValue(undefined),
     mkdir: vi.fn().mockResolvedValue(undefined),
-    mkdtemp: vi.fn().mockResolvedValue('/tmp/kryptalis-test'),
+    mkdtemp: vi.fn().mockResolvedValue('/tmp/dockcontrol-test'),
     writeFile: vi.fn().mockResolvedValue(undefined),
     readFile: vi.fn().mockResolvedValue('{}'),
     copyFile: vi.fn().mockResolvedValue(undefined),
@@ -499,7 +499,7 @@ describe('remote backups', () => {
       expect.objectContaining({
         id: 'd1',
         type: 'POSTGRESQL',
-        container: 'kryptalis-db-maindb', // manually provisioned naming scheme
+        container: 'dockcontrol-db-maindb', // manually provisioned naming scheme
         username: 'admin',
         // ENCRYPTED in the stored payload — poll() decrypts when serving the
         // task to the agent. Plaintext must never reach agent_tasks.
@@ -656,7 +656,7 @@ describe('remote backups', () => {
         sourceTaskId: 'local-xfer-1',
         volumes: ['maindb_data'],
         // password is encrypted in the stored payload (decrypted by poll()).
-        databases: [expect.objectContaining({ id: 'd1', container: 'kryptalis-db-maindb', password: 'v1.enc(pw)' })],
+        databases: [expect.objectContaining({ id: 'd1', container: 'dockcontrol-db-maindb', password: 'v1.enc(pw)' })],
       }),
     );
     expect(res.message).toContain('queued on remote server');

@@ -44,8 +44,8 @@ coverage/
 # Docker
 docker/data/
 
-# Runtime Kryptalis
-apps/api/.kryptalis/
+# Runtime DockControl
+apps/api/.dockcontrol/
 *.sock
 *.lock
 
@@ -56,3 +56,4 @@ graphify-out/
 # Playwright
 apps/dashboard/test-results/
 apps/dashboard/playwright-report/
+apps/api/.kryptalis/

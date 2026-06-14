@@ -47,7 +47,7 @@ export class AgentHeartbeatDto {
     diskTotal: number;
   };
 
-  /** Live kryptalis-* container states (agents ≥ the status-sync release). */
+  /** Live dockcontrol-* container states (agents ≥ the status-sync release). */
   @ApiProperty({ required: false, type: [HeartbeatContainerDto] })
   @IsOptional()
   @IsArray()

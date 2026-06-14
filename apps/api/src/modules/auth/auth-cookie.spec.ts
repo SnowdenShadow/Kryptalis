@@ -28,7 +28,7 @@ describe('refreshCookieOptions', () => {
   });
 
   it('exposes the expected cookie name', () => {
-    expect(REFRESH_COOKIE_NAME).toBe('kryptalis_rt');
+    expect(REFRESH_COOKIE_NAME).toBe('dockcontrol_rt');
   });
 });
 

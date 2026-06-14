@@ -245,10 +245,10 @@ describe('create', () => {
 
     const data = prisma.database.create.mock.calls[0][0].data;
     expect(data.username).toBe('app_db'); // dashes → underscores
-    expect(data.password).toMatch(/^enc\(kryptalis_/);
+    expect(data.password).toMatch(/^enc\(dockcontrol_/);
     expect(encryption.encrypt).toHaveBeenCalledTimes(1);
     const rawPass = encryption.encrypt.mock.calls[0][0] as string;
-    expect(rawPass).toMatch(/^kryptalis_[A-Za-z0-9_-]{16}$/); // 12 bytes base64url
+    expect(rawPass).toMatch(/^dockcontrol_[A-Za-z0-9_-]{16}$/); // 12 bytes base64url
     expect(data.serverId).toBe('srv1');
     expect(res.status).toBe('deploying');
     expect(res.connectionString).toBe(
@@ -301,7 +301,7 @@ describe('create', () => {
     expect(writeCall).toBeTruthy();
     const doc: any = yaml.load(writeCall![1] as string);
     expect(doc.services.pgdb.image).toBe('postgres:16-alpine');
-    expect(doc.services.pgdb.container_name).toBe('kryptalis-db-pgdb');
+    expect(doc.services.pgdb.container_name).toBe('dockcontrol-db-pgdb');
     expect(doc.services.pgdb.environment.POSTGRES_DB).toBe('pgdb');
     expect(doc.services.pgdb.environment.POSTGRES_USER).toBe('pgdb');
     expect(String(doc.services.pgdb.ports[0])).toMatch(/^\d+:5432$/);
@@ -329,7 +329,7 @@ describe('create', () => {
     );
     const doc: any = yaml.load(writeCall![1] as string);
     expect(doc.services.mydb.image).toBe(image);
-    expect(doc.services.mydb.container_name).toBe('kryptalis-db-mydb');
+    expect(doc.services.mydb.container_name).toBe('dockcontrol-db-mydb');
     expect(String(doc.services.mydb.ports[0])).toMatch(new RegExp(`^\\d+:${cport}$`));
     expect(doc.services.mydb.environment[dbKey]).toBe('mydb');
   });
@@ -368,7 +368,7 @@ describe('create', () => {
     expect(agent.enqueueTask).toHaveBeenCalledWith('srv-remote', 'DEPLOY', {
       slug: 'db-pgdb',
       appName: 'db-pgdb',
-      compose: expect.stringContaining('kryptalis-db-pgdb'),
+      compose: expect.stringContaining('dockcontrol-db-pgdb'),
     });
     expect(findExec((c) => c.cmd === 'docker')).toBeUndefined();
   });
@@ -441,9 +441,9 @@ describe('RBAC scoping', () => {
     const [row] = await service.findAll('u1', {});
     expect(row.status).toBe('running');
     expect(row.connectionString).toBe('postgresql://u:pw@localhost:5450/pgdb');
-    // status was looked up against the kryptalis-db- prefixed name
+    // status was looked up against the dockcontrol-db- prefixed name
     const insp = findExec((c) => c.cmd === 'docker' && c.args[0] === 'inspect');
-    expect(insp!.args).toEqual(['inspect', '--format', '{{.State.Status}}', 'kryptalis-db-pgdb']);
+    expect(insp!.args).toEqual(['inspect', '--format', '{{.State.Status}}', 'dockcontrol-db-pgdb']);
   });
 
   it('REGRESSION findAll: remote-server rows get a connection string on the server host (loaded via include, no N+1)', async () => {
@@ -583,7 +583,7 @@ describe('lifecycle', () => {
     expect(rmDir[1]).toEqual({ recursive: true, force: true });
 
     const rm = findExec((c) => c.cmd === 'docker' && c.args[0] === 'rm');
-    expect(rm!.args).toEqual(['rm', '-f', 'kryptalis-db-pgdb']);
+    expect(rm!.args).toEqual(['rm', '-f', 'dockcontrol-db-pgdb']);
 
     expect(prisma.database.delete).toHaveBeenCalledWith({ where: { id: 'db1' } });
     expect(res).toEqual({ message: 'Database deleted' });
@@ -614,7 +614,7 @@ describe('lifecycle', () => {
 
     expect(agent.enqueueTask).toHaveBeenCalledWith('srv-remote', 'REMOVE', {
       slug: 'db-pgdb',
-      containerName: 'kryptalis-db-pgdb',
+      containerName: 'dockcontrol-db-pgdb',
       purgeVolumes: true,
     });
     expect(findExec((c) => c.cmd === 'docker')).toBeUndefined();

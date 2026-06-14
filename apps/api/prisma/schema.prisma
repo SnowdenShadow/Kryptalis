@@ -489,7 +489,7 @@ model MailServer {
   imapPort     Int              @default(1143)
   imapsPort    Int              @default(993)
   smtpsPort    Int              @default(465)
-  dkimSelector String           @default("kryptalis")
+  dkimSelector String           @default("dockcontrol")
   dkimPublicKey String?
   dkimPrivateKey String?         // PEM-encoded, encrypted at rest in V4
   hostname     String?
@@ -650,7 +650,7 @@ model Database {
 // ─── SFTP accounts ────────────────────────────────────────────────────
 //
 // User-issued SFTP/SSH credentials that map onto an existing app or
-// project scope. The actual sshd lives in the kryptalis-sftp container;
+// project scope. The actual sshd lives in the dockcontrol-sftp container;
 // SftpService writes /etc/passwd entries + chrooted home dirs based on
 // this table at every change.
 //
@@ -667,7 +667,7 @@ model Database {
 model SftpAccount {
   id            String   @id @default(cuid())
   username      String   @unique // sshd login name. Validated [a-z0-9_-]{3,32}.
-  // bcrypt-hashed password (Kryptalis-internal verification). NULL when
+  // bcrypt-hashed password (DockControl-internal verification). NULL when
   // the account is key-only.
   passwordHash  String?
   // AES-encrypted plaintext password — needed because OpenSSH/PAM in
@@ -769,7 +769,7 @@ model Backup {
   sizeBytes           BigInt?
   // Basename of the dump archive (e.g. "<id>.tar.gz"). LOCAL targets resolve
   // the full path as <DATA_DIR>/backups/<filename>; remote targets use it as
-  // the object key suffix under kryptalis-backups/<id>/.
+  // the object key suffix under dockcontrol-backups/<id>/.
   filename            String?
   includeApplications Boolean      @default(true)
   includeDatabases    Boolean      @default(true)

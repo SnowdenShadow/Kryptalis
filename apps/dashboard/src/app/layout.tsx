@@ -8,7 +8,7 @@ import { Toaster } from 'sonner';
 const inter = Inter({ subsets: ['latin'], variable: '--font-sans' });
 
 export const metadata: Metadata = {
-  title: 'Kryptalis',
+  title: 'DockControl',
   description: 'The next-generation self-hosted infrastructure platform',
 };
 
@@ -36,7 +36,7 @@ export default async function RootLayout({
         <script
           nonce={nonce}
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var l=localStorage.getItem('kryptalis-lang');if(l!=='fr'&&l!=='en'){l=((navigator.languages&&navigator.languages[0])||navigator.language||'').toLowerCase().indexOf('fr')===0?'fr':'en';}document.documentElement.lang=l;}catch(e){}})();`,
+            __html: `(function(){try{var l=localStorage.getItem('dockcontrol-lang');if(l!=='fr'&&l!=='en'){l=((navigator.languages&&navigator.languages[0])||navigator.language||'').toLowerCase().indexOf('fr')===0?'fr':'en';}document.documentElement.lang=l;}catch(e){}})();`,
           }}
         />
       </head>

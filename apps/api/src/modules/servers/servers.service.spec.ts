@@ -130,7 +130,7 @@ function mockExecLinux() {
     }
     if (cmd.startsWith('docker ps')) {
       return {
-        stdout: 'kryptalis-wp\tUp 2 hours\twordpress:latest\t0.0.0.0:8080->80/tcp\n',
+        stdout: 'dockcontrol-wp\tUp 2 hours\twordpress:latest\t0.0.0.0:8080->80/tcp\n',
         stderr: '',
       };
     }
@@ -447,7 +447,7 @@ describe('getLocalStats (mocked linux host)', () => {
     ]);
     expect(stats.dockerContainers).toEqual([
       {
-        name: 'kryptalis-wp',
+        name: 'dockcontrol-wp',
         status: 'Up 2 hours',
         image: 'wordpress:latest',
         ports: '0.0.0.0:8080->80/tcp',

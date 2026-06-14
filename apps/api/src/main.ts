@@ -24,7 +24,7 @@ async function bootstrap() {
   app.getHttpAdapter().getInstance().set('trust proxy', 1);
 
   // Express doesn't parse cookies by default. Needed since the refresh
-  // token now travels in the httpOnly `kryptalis_rt` cookie (path-scoped
+  // token now travels in the httpOnly `dockcontrol_rt` cookie (path-scoped
   // to /api/auth) — auth.controller reads req.cookies on refresh/logout.
   app.use(cookieParser());
 
@@ -124,8 +124,8 @@ async function bootstrap() {
   const swaggerPublic = configService.get<string>('SWAGGER_PUBLIC', 'false') === 'true';
   if (process.env.NODE_ENV !== 'production' || swaggerPublic) {
     const swaggerConfig = new DocumentBuilder()
-      .setTitle('Kryptalis API')
-      .setDescription('The Kryptalis infrastructure platform API')
+      .setTitle('DockControl API')
+      .setDescription('The DockControl infrastructure platform API')
       .setVersion('0.1.0')
       .addBearerAuth()
       .build();

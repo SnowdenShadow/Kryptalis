@@ -304,7 +304,7 @@ describe('install — remote-server projects dispatch via the agent', () => {
       expect.objectContaining({
         applicationId: APP_ID,
         compose: expect.stringContaining('wordpress:latest'),
-        projectNetwork: expect.stringContaining('kryptalis_proj_'),
+        projectNetwork: expect.stringContaining('dockcontrol_proj_'),
       }),
     );
     // The queued payload carries fully-rendered compose (no placeholders).
@@ -447,7 +447,7 @@ describe('install — port resolution', () => {
 // ── install: compose rendering ──────────────────────────────────────
 
 describe('install — compose rendering and per-instance naming', () => {
-  it('replaces __INSTANCE_ID__ everywhere and persists kryptalis-<slug>-<id12> as containerName', async () => {
+  it('replaces __INSTANCE_ID__ everywhere and persists dockcontrol-<slug>-<id12> as containerName', async () => {
     const { service, prisma } = makeService();
     const res = await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
     expect(res.applicationId).toBe(APP_ID);
@@ -455,21 +455,21 @@ describe('install — compose rendering and per-instance naming', () => {
     expect(prisma.application.update).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: APP_ID },
-        data: { containerName: `kryptalis-wordpress-${INSTANCE_ID}` },
+        data: { containerName: `dockcontrol-wordpress-${INSTANCE_ID}` },
       }),
     );
     const compose = writtenFile('docker-compose.yml')!;
-    expect(compose).toContain(`kryptalis-wordpress-${INSTANCE_ID}`);
+    expect(compose).toContain(`dockcontrol-wordpress-${INSTANCE_ID}`);
     expect(compose).toContain(`wp_data_${INSTANCE_ID}`);
     expect(compose).not.toContain('__INSTANCE_ID__');
   });
 
-  it('redis is special-cased to the kryptalis-redis-app-<id12> container name', async () => {
+  it('redis is special-cased to the dockcontrol-redis-app-<id12> container name', async () => {
     const { service, prisma } = makeService();
     await service.install({ appSlug: 'redis', projectId: 'p1' }, 'u1');
     expect(prisma.application.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { containerName: `kryptalis-redis-app-${INSTANCE_ID}` },
+        data: { containerName: `dockcontrol-redis-app-${INSTANCE_ID}` },
       }),
     );
   });
@@ -577,7 +577,7 @@ describe('install — compose rendering and per-instance naming', () => {
     const { service } = makeService();
     await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
     const compose = writtenFile('docker-compose.yml')!;
-    expect(compose).toContain(`WORDPRESS_DB_HOST: kryptalis-wordpress-db-${INSTANCE_ID}`);
+    expect(compose).toContain(`WORDPRESS_DB_HOST: dockcontrol-wordpress-db-${INSTANCE_ID}`);
   });
 
   it('plausible: DATABASE_URL password matches the db service password (install used to be dead on boot)', async () => {
@@ -585,7 +585,7 @@ describe('install — compose rendering and per-instance naming', () => {
     await service.install({ appSlug: 'plausible', projectId: 'p1' }, 'u1');
     const compose = writtenFile('docker-compose.yml')!;
     const dbPass = compose.match(/POSTGRES_PASSWORD: (\S+)/)![1];
-    expect(compose).toContain(`DATABASE_URL: postgres://postgres:${dbPass}@kryptalis-plausible-db-${INSTANCE_ID}:5432/plausible_db`);
+    expect(compose).toContain(`DATABASE_URL: postgres://postgres:${dbPass}@dockcontrol-plausible-db-${INSTANCE_ID}:5432/plausible_db`);
     // SECRET_KEY_BASE default = 2 concatenated 32-char values ≥ 64 chars.
     const skb = compose.match(/SECRET_KEY_BASE: \$\{SECRET_KEY_BASE:-(\S+)\}/)![1];
     expect(skb.length).toBeGreaterThanOrEqual(64);
@@ -748,25 +748,25 @@ describe('install — docker compose outcome', () => {
 
     expect(execFileAsyncMock).toHaveBeenCalledWith(
       'docker',
-      ['network', 'inspect', 'kryptalis_proj_p1'],
+      ['network', 'inspect', 'dockcontrol_proj_p1'],
       expect.anything(),
     );
     // WordPress template declares TWO containers (app + MariaDB sidecar) —
     // both must join the mesh so getServiceMesh() hostnames resolve.
     expect(execFileAsyncMock).toHaveBeenCalledWith(
       'docker',
-      ['network', 'connect', 'kryptalis_proj_p1', `kryptalis-wordpress-${INSTANCE_ID}`],
+      ['network', 'connect', 'dockcontrol_proj_p1', `dockcontrol-wordpress-${INSTANCE_ID}`],
       expect.anything(),
     );
     expect(execFileAsyncMock).toHaveBeenCalledWith(
       'docker',
-      ['network', 'connect', 'kryptalis_proj_p1', `kryptalis-wordpress-db-${INSTANCE_ID}`],
+      ['network', 'connect', 'dockcontrol_proj_p1', `dockcontrol-wordpress-db-${INSTANCE_ID}`],
       expect.anything(),
     );
     // inspect succeeded → no create.
     expect(execFileAsyncMock).not.toHaveBeenCalledWith(
       'docker',
-      ['network', 'create', 'kryptalis_proj_p1'],
+      ['network', 'create', 'dockcontrol_proj_p1'],
       expect.anything(),
     );
   });
@@ -779,7 +779,7 @@ describe('install — docker compose outcome', () => {
     });
     execFileAsyncMock.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args[0] === 'network' && args[1] === 'inspect') {
-        throw new Error('Error: No such network: kryptalis_proj_p1');
+        throw new Error('Error: No such network: dockcontrol_proj_p1');
       }
       return { stdout: '', stderr: '' };
     });
@@ -789,12 +789,12 @@ describe('install — docker compose outcome', () => {
 
     expect(execFileAsyncMock).toHaveBeenCalledWith(
       'docker',
-      ['network', 'create', 'kryptalis_proj_p1'],
+      ['network', 'create', 'dockcontrol_proj_p1'],
       expect.anything(),
     );
     expect(execFileAsyncMock).toHaveBeenCalledWith(
       'docker',
-      ['network', 'connect', 'kryptalis_proj_p1', `kryptalis-uptime-kuma-${INSTANCE_ID}`],
+      ['network', 'connect', 'dockcontrol_proj_p1', `dockcontrol-uptime-kuma-${INSTANCE_ID}`],
       expect.anything(),
     );
   });
@@ -888,18 +888,18 @@ describe('installCustom — arbitrary image deploys', () => {
     );
   });
 
-  it('renders the custom compose: image, kryptalis-custom-<id12> name, port mapping, env vars', async () => {
+  it('renders the custom compose: image, dockcontrol-custom-<id12> name, port mapping, env vars', async () => {
     const { service, prisma } = makeService();
     await service.installCustom(
       { ...base, hostPort: 18500, envVars: { TZ: 'Europe/Paris' } },
       'u1',
     );
     expect(prisma.application.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { containerName: `kryptalis-custom-${INSTANCE_ID}` } }),
+      expect.objectContaining({ data: { containerName: `dockcontrol-custom-${INSTANCE_ID}` } }),
     );
     const compose = writtenFile('docker-compose.yml')!;
     expect(compose).toContain('image: linuxserver/jellyfin:latest');
-    expect(compose).toContain(`container_name: kryptalis-custom-${INSTANCE_ID}`);
+    expect(compose).toContain(`container_name: dockcontrol-custom-${INSTANCE_ID}`);
     expect(compose).toContain('"18500:8096"');
     expect(compose).toContain('TZ: "Europe/Paris"');
     expect(compose).not.toContain('__INSTANCE_ID__');
@@ -923,7 +923,7 @@ describe('installCustom — arbitrary image deploys', () => {
 
     expect(execFileAsyncMock).toHaveBeenCalledWith(
       'docker',
-      ['network', 'connect', 'kryptalis_proj_p1', `kryptalis-custom-${INSTANCE_ID}`],
+      ['network', 'connect', 'dockcontrol_proj_p1', `dockcontrol-custom-${INSTANCE_ID}`],
       expect.anything(),
     );
   });

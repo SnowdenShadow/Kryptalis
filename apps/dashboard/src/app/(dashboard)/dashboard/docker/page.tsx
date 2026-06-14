@@ -31,7 +31,7 @@ import type {
   DockerImageResponse,
   DockerNetworkResponse,
   DockerVolumeResponse,
-} from '@kryptalis/types';
+} from '@dockcontrol/types';
 
 type Tab = 'containers' | 'images' | 'networks' | 'volumes';
 

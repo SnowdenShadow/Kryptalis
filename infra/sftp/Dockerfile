@@ -3,11 +3,11 @@
 # What this image does:
 #   - Boots sshd standalone with NO users by default.
 #   - The entrypoint generates host keys on first boot, persisting
-#     them in /var/lib/kryptalis-sftp-keys (a named volume) so client
+#     them in /var/lib/dockcontrol-sftp-keys (a named volume) so client
 #     `known_hosts` stays valid across redeploys. The keys are
 #     symlinked into /etc/ssh at boot — we don't mount /etc/ssh from a
 #     volume because that would mask the baked sshd_config.
-#   - Kryptalis API does `docker exec kryptalis-sftp useradd ...` +
+#   - DockControl API does `docker exec dockcontrol-sftp useradd ...` +
 #     `chpasswd` over the docker socket to add/remove accounts at
 #     runtime. No container restart needed for CRUD.
 #   - Per-user sshd_config drop-ins in /etc/ssh/sshd_config.d enforce

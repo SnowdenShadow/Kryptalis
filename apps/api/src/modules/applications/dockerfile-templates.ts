@@ -8,7 +8,7 @@
  * Each template is a complete, production-ready Dockerfile. They all
  * target a fixed internal port (port 80 for nginx SPAs, port 3000 for
  * Node servers) so the user never sees a port question. Caddy reaches
- * the container by `container_name` on the shared `kryptalis-apps`
+ * the container by `container_name` on the shared `dockcontrol-apps`
  * network — no host port publish needed.
  *
  * Detection priority is determined by detectStack() in

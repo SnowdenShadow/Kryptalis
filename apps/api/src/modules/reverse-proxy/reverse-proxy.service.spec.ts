@@ -88,13 +88,13 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
           name: 'Portainer',
           port: 9443,
           customPort: false,
-          containerName: 'kryptalis-portainer-abc123def456',
+          containerName: 'dockcontrol-portainer-abc123def456',
           containerPort: 9443,
         },
       }),
     ]);
     const { caddyfile } = await service.regenerate();
-    expect(caddyfile).toContain('reverse_proxy https://kryptalis-portainer-abc123def456:9443');
+    expect(caddyfile).toContain('reverse_proxy https://dockcontrol-portainer-abc123def456:9443');
     expect(caddyfile).toContain('tls_insecure_skip_verify');
   });
 
@@ -126,13 +126,13 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
           name: 'Portainer 2',
           port: 9453,
           customPort: false,
-          containerName: 'kryptalis-portainer-fff000fff000',
+          containerName: 'dockcontrol-portainer-fff000fff000',
           containerPort: 9443,
         },
       }),
     ]);
     const { caddyfile } = await service.regenerate();
-    expect(caddyfile).toContain('reverse_proxy https://kryptalis-portainer-fff000fff000:9443');
+    expect(caddyfile).toContain('reverse_proxy https://dockcontrol-portainer-fff000fff000:9443');
   });
 
   it('9443 container port alone (no recognizable name) flags the upstream as TLS', async () => {
@@ -144,13 +144,13 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
           name: 'My Admin UI',
           port: 18000,
           customPort: false,
-          containerName: 'kryptalis-custom-abc123def456',
+          containerName: 'dockcontrol-custom-abc123def456',
           containerPort: 9443,
         },
       }),
     ]);
     const { caddyfile } = await service.regenerate();
-    expect(caddyfile).toContain('reverse_proxy https://kryptalis-custom-abc123def456:9443');
+    expect(caddyfile).toContain('reverse_proxy https://dockcontrol-custom-abc123def456:9443');
     expect(caddyfile).toContain('tls_insecure_skip_verify');
   });
 
@@ -163,13 +163,13 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
           name: 'Portainer',
           port: 9090,
           customPort: false,
-          containerName: 'kryptalis-portainer-abc123def456',
+          containerName: 'dockcontrol-portainer-abc123def456',
           containerPort: 9000,
         },
       }),
     ]);
     const { caddyfile } = await service.regenerate();
-    expect(caddyfile).toContain('reverse_proxy kryptalis-portainer-abc123def456:9000');
+    expect(caddyfile).toContain('reverse_proxy dockcontrol-portainer-abc123def456:9000');
     expect(caddyfile).not.toContain('tls_insecure_skip_verify');
   });
 
@@ -182,7 +182,7 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
           name: 'WordPress',
           port: 8080,
           customPort: false,
-          containerName: 'kryptalis-wordpress-abc123def456',
+          containerName: 'dockcontrol-wordpress-abc123def456',
           containerPort: 80,
           project: { server: { host: '203.0.113.7' } },
         },
@@ -190,7 +190,7 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
     ]);
     const { caddyfile } = await service.regenerate();
     expect(caddyfile).toContain('reverse_proxy 203.0.113.7:8080');
-    expect(caddyfile).not.toContain('kryptalis-wordpress-abc123def456:80');
+    expect(caddyfile).not.toContain('dockcontrol-wordpress-abc123def456:80');
   });
 
   it('remote port-bound app → https://domain proxies through instead of redirecting to a dead local port', async () => {
@@ -205,7 +205,7 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
             application: {
               id: 'a1',
               name: 'Grafana',
-              containerName: 'kryptalis-grafana-abc123def456',
+              containerName: 'dockcontrol-grafana-abc123def456',
               containerPort: 3000,
               port: 12000,
               project: { server: { host: '203.0.113.7' } },
@@ -231,7 +231,7 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
             application: {
               id: 'a1',
               name: 'Grafana',
-              containerName: 'kryptalis-grafana-abc123def456',
+              containerName: 'dockcontrol-grafana-abc123def456',
               containerPort: 3000,
               port: 12000,
               project: { server: { host: 'localhost' } },
@@ -249,8 +249,8 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
     prisma.systemSetting.findUnique.mockResolvedValue({ key: 'system_domain', value: 'panel.acme.com' });
     const { caddyfile } = await service.regenerate();
     expect(caddyfile).toContain('panel.acme.com {');
-    expect(caddyfile).toContain('reverse_proxy kryptalis-api:4000');
-    expect(caddyfile).toContain('reverse_proxy kryptalis-dashboard:3000');
+    expect(caddyfile).toContain('reverse_proxy dockcontrol-api:4000');
+    expect(caddyfile).toContain('reverse_proxy dockcontrol-dashboard:3000');
   });
 
   it('a Domain row colliding with system_domain is SKIPPED (one site block per host or Caddy refuses the whole config)', async () => {
@@ -263,7 +263,7 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
           name: 'Grafana',
           port: 3001,
           customPort: false,
-          containerName: 'kryptalis-grafana-abc123def456',
+          containerName: 'dockcontrol-grafana-abc123def456',
           containerPort: 3000,
         },
       }),
@@ -272,8 +272,8 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
     const { caddyfile } = await service.regenerate();
     // Exactly ONE site block for the host — the platform one.
     expect(caddyfile.match(/^panel\.acme\.com \{/gm)?.length).toBe(1);
-    expect(caddyfile).toContain('reverse_proxy kryptalis-dashboard:3000');
-    expect(caddyfile).not.toContain('kryptalis-grafana-abc123def456');
+    expect(caddyfile).toContain('reverse_proxy dockcontrol-dashboard:3000');
+    expect(caddyfile).not.toContain('dockcontrol-grafana-abc123def456');
   });
 
   it('system_domain with an unsafe value is ignored (no Caddy block)', async () => {
@@ -281,7 +281,7 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
     prisma.systemSetting.findUnique.mockResolvedValue({ key: 'system_domain', value: 'evil{injection}.com' });
     const { caddyfile } = await service.regenerate();
     expect(caddyfile).not.toContain('evil{injection}.com');
-    expect(caddyfile).not.toContain('kryptalis-dashboard:3000');
+    expect(caddyfile).not.toContain('dockcontrol-dashboard:3000');
   });
 
   it('plain HTTP app (grafana) keeps an http upstream without TLS transport', async () => {
@@ -293,13 +293,13 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
           name: 'Grafana',
           port: 3001,
           customPort: false,
-          containerName: 'kryptalis-grafana-abc123def456',
+          containerName: 'dockcontrol-grafana-abc123def456',
           containerPort: 3000,
         },
       }),
     ]);
     const { caddyfile } = await service.regenerate();
-    expect(caddyfile).toContain('reverse_proxy kryptalis-grafana-abc123def456:3000');
+    expect(caddyfile).toContain('reverse_proxy dockcontrol-grafana-abc123def456:3000');
     expect(caddyfile).not.toContain('tls_insecure_skip_verify');
   });
 });
@@ -373,7 +373,7 @@ describe('regenerate — safety rails', () => {
     );
     expect(execFileAsyncMock).toHaveBeenCalledWith(
       'docker',
-      ['exec', 'kryptalis-caddy', 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile'],
+      ['exec', 'dockcontrol-caddy', 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile'],
       expect.anything(),
     );
   });

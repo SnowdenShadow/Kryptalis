@@ -13,7 +13,7 @@ import type { Page, Route, Request } from '@playwright/test';
  * exercise the real form + mocked POST /api/auth/login). Seeding is the
  * most robust because route protection is fully client-side:
  *   - `(dashboard)/layout.tsx` gates on `useAuthStore().accessToken`,
- *     rehydrated by zustand/persist from the `kryptalis-auth` localStorage
+ *     rehydrated by zustand/persist from the `dockcontrol-auth` localStorage
  *     key (shape: `{ state: { user, accessToken }, version: 1 }` — version
  *     must be 1 or the store's migrate() runs).
  *   - `src/lib/api.ts` reads the raw `accessToken` localStorage key for the
@@ -154,7 +154,7 @@ export async function seedAuth(page: Page, user: MockUser): Promise<void> {
       const token = 'e2e-access-token';
       localStorage.setItem('accessToken', token);
       localStorage.setItem(
-        'kryptalis-auth',
+        'dockcontrol-auth',
         JSON.stringify({ state: { user: u, accessToken: token }, version: 1 }),
       );
     },

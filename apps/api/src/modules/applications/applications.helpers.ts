@@ -9,7 +9,7 @@ import * as fs from 'fs';
 import * as yaml from 'js-yaml';
 
 export const execFileAsync = promisify(execFile);
-export const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+export const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
 export const APPS_DIR = path.join(DATA_DIR, 'apps');
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -26,12 +26,12 @@ export function slugify(name: string) {
 }
 
 export function containerName(slug: string) {
-  return `kryptalis-${slug}`;
+  return `dockcontrol-${slug}`;
 }
 
 /**
  * Canonical slug for an app's compose dir on a REMOTE agent
- * (/opt/kryptalis/apps/<remoteAppSlug>). Always per-instance — the agent
+ * (/opt/dockcontrol/apps/<remoteAppSlug>). Always per-instance — the agent
  * has no resolveAppDir() fallback logic, so every dispatch (deploy, start,
  * stop, restart, remove) must derive the exact same name from the same
  * inputs or lifecycle ops land on the wrong directory.
@@ -41,7 +41,7 @@ export function remoteAppSlug(name: string, applicationId: string): string {
 }
 
 export function imageName(slug: string) {
-  return `kryptalis/${slug}:latest`;
+  return `dockcontrol/${slug}:latest`;
 }
 
 /**
@@ -74,8 +74,8 @@ export function resolveAppDir(slug: string, applicationId: string): string {
  */
 export function resolveContainerName(slug: string, applicationId: string): string {
   const perInstance = path.join(APPS_DIR, `${slug}-${applicationId.slice(0, 12)}`);
-  if (fs.existsSync(perInstance)) return `kryptalis-${slug}-${applicationId.slice(0, 12)}`;
-  return `kryptalis-${slug}`;
+  if (fs.existsSync(perInstance)) return `dockcontrol-${slug}-${applicationId.slice(0, 12)}`;
+  return `dockcontrol-${slug}`;
 }
 
 export interface PortDef {
@@ -220,43 +220,43 @@ export function attachProjectNetwork(content: string, networkName: string): stri
   for (const val of Object.values<any>(doc.services)) {
     const existing = val.networks;
     if (Array.isArray(existing)) {
-      if (!existing.includes('kryptalis_project')) existing.push('kryptalis_project');
+      if (!existing.includes('dockcontrol_project')) existing.push('dockcontrol_project');
     } else if (existing && typeof existing === 'object') {
-      existing.kryptalis_project = {};
+      existing.dockcontrol_project = {};
     } else {
-      val.networks = ['kryptalis_project'];
+      val.networks = ['dockcontrol_project'];
     }
   }
   doc.networks = {
     ...(doc.networks || {}),
-    kryptalis_project: { external: true, name: networkName },
+    dockcontrol_project: { external: true, name: networkName },
   };
   return yaml.dump(doc, { lineWidth: 200 });
 }
 
 export function projectNetworkName(projectId: string) {
-  return `kryptalis_proj_${projectId.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
+  return `dockcontrol_proj_${projectId.replace(/[^a-z0-9]/gi, '').toLowerCase()}`;
 }
 
 /**
- * Defensively ensure the shared kryptalis-apps bridge exists before any
- * `docker run --network kryptalis-apps`. The network is normally created
+ * Defensively ensure the shared dockcontrol-apps bridge exists before any
+ * `docker run --network dockcontrol-apps`. The network is normally created
  * by the root docker-compose.yml, but on remote agents / standalone
  * boots it might be missing. Idempotent — `network create` returns
  * non-zero when it already exists, which we swallow.
  */
 export async function ensureSharedAppsNetwork(): Promise<void> {
   try {
-    await execFileAsync('docker', ['network', 'inspect', 'kryptalis-apps'], { timeout: 5_000 });
+    await execFileAsync('docker', ['network', 'inspect', 'dockcontrol-apps'], { timeout: 5_000 });
   } catch {
     try {
-      await execFileAsync('docker', ['network', 'create', 'kryptalis-apps'], { timeout: 10_000 });
+      await execFileAsync('docker', ['network', 'create', 'dockcontrol-apps'], { timeout: 10_000 });
     } catch {}
   }
 }
 
 /**
- * Attach every service of a compose file to the shared `kryptalis-apps`
+ * Attach every service of a compose file to the shared `dockcontrol-apps`
  * bridge. Caddy lives on that bridge and reaches each container by
  * `container_name:internal_port`. This is what makes zero-host-port
  * deploys possible — multiple apps can listen on port 80 internally
@@ -268,16 +268,16 @@ export function attachSharedAppsNetwork(content: string): string {
   for (const val of Object.values<any>(doc.services)) {
     const existing = val.networks;
     if (Array.isArray(existing)) {
-      if (!existing.includes('kryptalis_apps')) existing.push('kryptalis_apps');
+      if (!existing.includes('dockcontrol_apps')) existing.push('dockcontrol_apps');
     } else if (existing && typeof existing === 'object') {
-      existing.kryptalis_apps = {};
+      existing.dockcontrol_apps = {};
     } else {
-      val.networks = ['kryptalis_apps'];
+      val.networks = ['dockcontrol_apps'];
     }
   }
   doc.networks = {
     ...(doc.networks || {}),
-    kryptalis_apps: { external: true, name: 'kryptalis-apps' },
+    dockcontrol_apps: { external: true, name: 'dockcontrol-apps' },
   };
   return yaml.dump(doc, { lineWidth: 200 });
 }
@@ -285,7 +285,7 @@ export function attachSharedAppsNetwork(content: string): string {
 /**
  * Strip every `ports:` block from a compose file. Used when the app is
  * reached via Caddy on a domain — no host port publish is needed and
- * keeping one risks colliding with Kryptalis own services (the dashboard
+ * keeping one risks colliding with DockControl own services (the dashboard
  * on :3000, the API on :4000, postgres on :5432, etc).
  */
 export function stripComposePorts(content: string): string {
@@ -413,15 +413,15 @@ export async function removeCollidingContainers(
 }
 
 /**
- * Host ports reserved by Kryptalis itself + common system ports. Any
+ * Host ports reserved by DockControl itself + common system ports. Any
  * attempt to publish an app here is refused with a clear error so the
  * user doesn't break their own dashboard / API / DB connection.
  */
 export const RESERVED_HOST_PORTS = new Set<number>([
   22,    // ssh
   80, 443, // caddy
-  3000,  // kryptalis-dashboard
-  4000,  // kryptalis-api
+  3000,  // dockcontrol-dashboard
+  4000,  // dockcontrol-api
   5432,  // postgres
   6379,  // redis
   2019,  // caddy admin API

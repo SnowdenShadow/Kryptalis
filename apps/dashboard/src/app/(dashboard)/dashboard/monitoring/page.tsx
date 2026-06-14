@@ -45,7 +45,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import type { AlertRuleResponse, CreateAlertRuleRequest } from '@kryptalis/types';
+import type { AlertRuleResponse, CreateAlertRuleRequest } from '@dockcontrol/types';
 import { api } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';

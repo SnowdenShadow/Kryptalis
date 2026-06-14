@@ -40,12 +40,12 @@ import * as fs from 'fs';
  * CRITICAL: the install dir is mounted at the SAME absolute path inside
  * the updater container as on the host (`-v <dir>:<dir> -w <dir>`), never
  * at /app. The compose file interpolates ${PWD} (fallback for
- * KRYPTALIS_HOST_*_DIR) and resolves relative bind-mount sources against
+ * DOCKCONTROL_HOST_*_DIR) and resolves relative bind-mount sources against
  * the cwd — and the HOST docker daemon resolves those paths against the
  * HOST filesystem. Mounting at /app used to make `docker compose up`
  * recreate the stack under project name "app" with fresh empty volumes
  * (apparent data loss) and bind-mounts pointing at a nonexistent host
- * /app — bricking the install. Same-path mount + `name: kryptalis` in
+ * /app — bricking the install. Same-path mount + `name: dockcontrol` in
  * docker-compose.yml make the update path-stable.
  */
 @Injectable()
@@ -60,13 +60,13 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
 
   // The shared log file written by update.sh inside the docker:cli
-  // container — visible to the API through the .kryptalis bind mount.
-  private readonly LOG_FILE = '/app/.kryptalis/update.log';
+  // container — visible to the API through the .dockcontrol bind mount.
+  private readonly LOG_FILE = '/app/.dockcontrol/update.log';
 
   // Marker file the API touches before spawning update.sh, and clears
   // when it sees a clean post-update state. Survives API restart so we
   // know an update was in progress and recover correctly.
-  private readonly UPDATING_MARKER = '/app/.kryptalis/.update-running';
+  private readonly UPDATING_MARKER = '/app/.dockcontrol/.update-running';
 
   // In-memory state — everything the UI cares about.
   private state: {
@@ -83,7 +83,7 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     message: 'Boot — first check pending.',
     currentSha: null,
     latestSha: null,
-    branch: process.env.KRYPTALIS_BRANCH || 'main',
+    branch: process.env.DOCKCONTROL_BRANCH || 'main',
     repo: null,
     lastCheckedAt: null,
     lastUpdatedAt: null,
@@ -115,10 +115,10 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
 
     if (!this.state.repo) {
       this.logger.warn(
-        'KRYPTALIS_GITHUB_REPO not set and origin remote unresolved — auto-update disabled.',
+        'DOCKCONTROL_GITHUB_REPO not set and origin remote unresolved — auto-update disabled.',
       );
       this.state.status = 'ERROR';
-      this.state.message = 'Repo unresolved — set KRYPTALIS_GITHUB_REPO.';
+      this.state.message = 'Repo unresolved — set DOCKCONTROL_GITHUB_REPO.';
       return;
     }
 
@@ -241,7 +241,7 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     const url = `https://api.github.com/repos/${this.state.repo}/commits/${this.state.branch}`;
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
-      'User-Agent': 'kryptalis-self-update',
+      'User-Agent': 'dockcontrol-self-update',
       'X-GitHub-Api-Version': '2022-11-28',
     };
     if (this.cachedEtag) headers['If-None-Match'] = this.cachedEtag;
@@ -343,7 +343,7 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     // HOST path of the install dir. Mount it at the SAME path inside the
     // updater container so the host docker daemon resolves the compose
     // file's relative bind mounts and ${PWD} fallbacks against the real
-    // install dir (see class doc above). KRYPTALIS_DIR pins update.sh's
+    // install dir (see class doc above). DOCKCONTROL_DIR pins update.sh's
     // INSTALL_DIR to the same value (belt + braces with `-w`).
     const installDir = this.hostInstallDir();
     const args = [
@@ -351,13 +351,13 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
       '-v', `${installDir}:${installDir}`,
       '-v', '/var/run/docker.sock:/var/run/docker.sock',
       '-w', installDir,
-      '-e', `KRYPTALIS_DIR=${installDir}`,
-      '-e', `KRYPTALIS_BRANCH=${this.state.branch}`,
+      '-e', `DOCKCONTROL_DIR=${installDir}`,
+      '-e', `DOCKCONTROL_BRANCH=${this.state.branch}`,
       'docker:cli',
       'sh', '-c',
       // Wrapper cleans the marker on exit no matter what. Paths are
       // double-quoted in case the install dir contains spaces.
-      `sh "${installDir}/update.sh"; rc=$?; rm -f "${installDir}/.kryptalis/.update-running"; exit $rc`,
+      `sh "${installDir}/update.sh"; rc=$?; rm -f "${installDir}/.dockcontrol/.update-running"; exit $rc`,
     ];
 
     // Fire-and-forget. Container runs on the host docker daemon — it
@@ -387,16 +387,16 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   private readonly INSTALL_RO_CANDIDATES = [
     '/app/install-host',
     '/app',
-    '/opt/kryptalis',
+    '/opt/dockcontrol',
   ];
 
   /**
    * Resolve `<owner>/<repo>` for the install. Order:
-   *   1. KRYPTALIS_GITHUB_REPO env override
+   *   1. DOCKCONTROL_GITHUB_REPO env override
    *   2. .git/config inside any of the candidate mount paths
    */
   private resolveRepo(): string | null {
-    const env = process.env.KRYPTALIS_GITHUB_REPO;
+    const env = process.env.DOCKCONTROL_GITHUB_REPO;
     if (env) return env;
 
     for (const root of this.INSTALL_RO_CANDIDATES) {
@@ -444,9 +444,9 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   }
 
   private hostInstallDir(): string {
-    return process.env.KRYPTALIS_HOST_INSTALL_DIR
-      || process.env.KRYPTALIS_HOST_DATA_DIR?.replace(/[\\/]\.kryptalis[\\/]*$/, '')
-      || '/opt/kryptalis';
+    return process.env.DOCKCONTROL_HOST_INSTALL_DIR
+      || process.env.DOCKCONTROL_HOST_DATA_DIR?.replace(/[\\/]\.dockcontrol[\\/]*$/, '')
+      || '/opt/dockcontrol';
   }
 
   private short(sha: string | null): string {

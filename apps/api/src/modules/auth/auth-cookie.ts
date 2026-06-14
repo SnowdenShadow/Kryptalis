@@ -13,7 +13,7 @@ import type { CookieOptions, Request } from 'express';
  * refresh token for older clients — the dashboard simply no longer
  * stores it.
  */
-export const REFRESH_COOKIE_NAME = 'kryptalis_rt';
+export const REFRESH_COOKIE_NAME = 'dockcontrol_rt';
 
 /** Default aligned with JWT_REFRESH_EXPIRATION's default of 7d. */
 export const DEFAULT_REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;

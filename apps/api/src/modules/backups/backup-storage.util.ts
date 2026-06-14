@@ -5,11 +5,11 @@
  * directly and reused by both the service and future job runners.
  *
  * Key layout in the bucket:
- *   kryptalis-backups/<backupId>/<filename>
+ *   dockcontrol-backups/<backupId>/<filename>
  *
  * The Backup model has no path column, so the remote location is fully
  * deterministic from the row id: restore/delete resolve the exact object
- * by listing the `kryptalis-backups/<backupId>/` prefix.
+ * by listing the `dockcontrol-backups/<backupId>/` prefix.
  */
 
 /** Targets that store the dump in an S3-compatible bucket. */
@@ -23,7 +23,7 @@ export function isRemoteTarget(target: string | null | undefined): target is Rem
 
 /** Bucket prefix that holds every object belonging to one backup row. */
 export function backupS3Prefix(backupId: string): string {
-  return `kryptalis-backups/${backupId}/`;
+  return `dockcontrol-backups/${backupId}/`;
 }
 
 /**

@@ -15,12 +15,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kryptalis/agent/internal/config"
+	"github.com/dockcontrol/agent/internal/config"
 )
 
 // Version is stamped at build time via:
 //
-//	go build -ldflags "-X github.com/kryptalis/agent/internal/monitor.Version=x.y.z"
+//	go build -ldflags "-X github.com/dockcontrol/agent/internal/monitor.Version=x.y.z"
 //
 // Hard-coding it here guaranteed drift with the API's expected version.
 var Version = "dev"
@@ -33,7 +33,7 @@ type SystemMetrics struct {
 	DiskTotal   uint64  `json:"diskTotal"`
 }
 
-// ContainerState is one kryptalis-managed container's live docker state,
+// ContainerState is one dockcontrol-managed container's live docker state,
 // shipped with every heartbeat so the API can mirror real RUNNING/STOPPED
 // status for remote apps without per-request agent round-trips.
 type ContainerState struct {
@@ -41,11 +41,11 @@ type ContainerState struct {
 	State string `json:"state"` // running | exited | restarting | ...
 }
 
-// collectContainers lists kryptalis-managed containers (name prefix) with
+// collectContainers lists dockcontrol-managed containers (name prefix) with
 // their current state. Best-effort: docker missing/down → empty list.
 func collectContainers(ctx context.Context) []ContainerState {
 	c := exec.CommandContext(ctx, "docker", "ps", "-a",
-		"--filter", "name=kryptalis-",
+		"--filter", "name=dockcontrol-",
 		"--format", "{{.Names}}\t{{.State}}")
 	out, err := c.Output()
 	if err != nil {

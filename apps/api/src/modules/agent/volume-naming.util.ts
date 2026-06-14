@@ -2,7 +2,7 @@ import * as path from 'path';
 import { slugify, resolveAppDir } from '../applications/applications.helpers';
 
 /**
- * Deterministic docker-volume naming for Kryptalis-managed compose stacks.
+ * Deterministic docker-volume naming for DockControl-managed compose stacks.
  *
  * Compose names volumes `<project>_<volume>` where the project name is the
  * compose dir basename:

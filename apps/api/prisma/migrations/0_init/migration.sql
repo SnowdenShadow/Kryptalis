@@ -306,7 +306,7 @@ CREATE TABLE "mail_servers" (
     "imapPort" INTEGER NOT NULL DEFAULT 1143,
     "imapsPort" INTEGER NOT NULL DEFAULT 993,
     "smtpsPort" INTEGER NOT NULL DEFAULT 465,
-    "dkimSelector" TEXT NOT NULL DEFAULT 'kryptalis',
+    "dkimSelector" TEXT NOT NULL DEFAULT 'dockcontrol',
     "dkimPublicKey" TEXT,
     "dkimPrivateKey" TEXT,
     "hostname" TEXT,

@@ -912,7 +912,7 @@ export class AuthService {
       where: { id: userId },
       data: { twoFactorSecret: this.encryption.encrypt(secret) },
     });
-    const otpauth = authenticator.keyuri(user.email, 'Kryptalis', secret);
+    const otpauth = authenticator.keyuri(user.email, 'DockControl', secret);
     return { secret, otpauth };
   }
 

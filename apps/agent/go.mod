@@ -1,4 +1,4 @@
-module github.com/kryptalis/agent
+module github.com/dockcontrol/agent
 
 go 1.25.0
 

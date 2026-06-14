@@ -1,4 +1,4 @@
-# Kryptalis — top-level stack
+# DockControl — top-level stack
 # Bring everything up with:   docker compose up -d
 # Bring everything down with: docker compose down
 #
@@ -13,28 +13,28 @@
 
 # Pin the compose project name regardless of the cwd's basename. Without
 # this, running `docker compose up` from anywhere other than a dir named
-# "kryptalis" (e.g. the auto-updater container, or a checkout in ~/src/app)
+# "dockcontrol" (e.g. the auto-updater container, or a checkout in ~/src/app)
 # would create a SECOND project with fresh empty volumes (app_postgres_data
-# instead of kryptalis_postgres_data) — apparent loss of the whole DB.
-name: kryptalis
+# instead of dockcontrol_postgres_data) — apparent loss of the whole DB.
+name: dockcontrol
 
 services:
   postgres:
     image: postgres:16.6-alpine
-    container_name: kryptalis-postgres
+    container_name: dockcontrol-postgres
     restart: unless-stopped
     logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
     environment:
-      POSTGRES_USER: kryptalis
+      POSTGRES_USER: dockcontrol
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required (run install.sh or set it in .env)}
-      POSTGRES_DB: kryptalis
+      POSTGRES_DB: dockcontrol
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       # Loopback-only — internal services reach it by DNS (postgres:5432).
       - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U kryptalis"]
+      test: ["CMD-SHELL", "pg_isready -U dockcontrol"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -45,7 +45,7 @@ services:
 
   caddy:
     image: caddy:2.9-alpine
-    container_name: kryptalis-caddy
+    container_name: dockcontrol-caddy
     restart: unless-stopped
     logging: { driver: json-file, options: { max-size: "20m", max-file: "5" } }
     ports:
@@ -55,12 +55,12 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
-      - ./.kryptalis/reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./.dockcontrol/reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - default
-      - kryptalis-apps
+      - dockcontrol-apps
     # Caddy's admin API answers on :2019; we use it as a liveness probe.
     healthcheck:
       test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:2019/config/"]
@@ -73,11 +73,11 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
-    container_name: kryptalis-api
+    container_name: dockcontrol-api
     restart: unless-stopped
     logging: { driver: json-file, options: { max-size: "20m", max-file: "5" } }
     environment:
-      DATABASE_URL: postgresql://kryptalis:${POSTGRES_PASSWORD}@postgres:5432/kryptalis
+      DATABASE_URL: postgresql://dockcontrol:${POSTGRES_PASSWORD}@postgres:5432/dockcontrol
       API_PORT: "4000"
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required}
@@ -100,15 +100,15 @@ services:
       # recorded + verified on restore).
       BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:-}
       PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
-      # Optional — Let's Encrypt contact email. If unset, Kryptalis derives one
+      # Optional — Let's Encrypt contact email. If unset, DockControl derives one
       # from PUBLIC_API_URL (e.g. admin@mydomain.com). Bare IPs fall back to
       # anonymous registration (cert still works, just no expiry notices).
       ACME_EMAIL: ${ACME_EMAIL:-}
       # Where API persists app stacks, mail data, Caddyfile, etc.
       # MUST match the host mount path below so changes are visible to the
-      # Caddy container too (which mounts the same .kryptalis subfolder).
-      KRYPTALIS_DATA_DIR: /app/.kryptalis
-      # Host path corresponding to the .kryptalis volume mount. Required when
+      # Caddy container too (which mounts the same .dockcontrol subfolder).
+      DOCKCONTROL_DATA_DIR: /app/.dockcontrol
+      # Host path corresponding to the .dockcontrol volume mount. Required when
       # API generates child docker-compose stacks (mail server, marketplace
       # apps): the docker daemon on the HOST resolves bind-mount sources
       # against the host filesystem, not the API container's filesystem.
@@ -116,7 +116,7 @@ services:
       # only covers manual `docker compose up` runs from the install root.
       # NEVER rely on ${PWD} from a container (it would resolve to a path
       # that doesn't exist on the host and create phantom dirs at /).
-      KRYPTALIS_HOST_DATA_DIR: ${KRYPTALIS_HOST_DATA_DIR:-${PWD}/.kryptalis}
+      DOCKCONTROL_HOST_DATA_DIR: ${DOCKCONTROL_HOST_DATA_DIR:-${PWD}/.dockcontrol}
       # Optional SMTP transport for transactional mail (password reset,
       # invites, deployment + alert notifications). If SMTP_HOST is unset
       # the NotificationsService becomes a logged no-op — the API still
@@ -136,12 +136,12 @@ services:
       # resolves mounts against the host fs). install.sh writes the
       # absolute value into .env; the ${PWD} fallback only covers manual
       # `docker compose up` runs from the install root.
-      KRYPTALIS_HOST_INSTALL_DIR: ${KRYPTALIS_HOST_INSTALL_DIR:-${PWD}}
+      DOCKCONTROL_HOST_INSTALL_DIR: ${DOCKCONTROL_HOST_INSTALL_DIR:-${PWD}}
       # Optional — override the auto-detected owner/repo (the API
       # otherwise parses .git/config). Useful when running a fork.
-      KRYPTALIS_GITHUB_REPO: ${KRYPTALIS_GITHUB_REPO:-}
+      DOCKCONTROL_GITHUB_REPO: ${DOCKCONTROL_GITHUB_REPO:-}
       # Which branch the auto-update tracks. Default: main.
-      KRYPTALIS_BRANCH: ${KRYPTALIS_BRANCH:-main}
+      DOCKCONTROL_BRANCH: ${DOCKCONTROL_BRANCH:-main}
     ports:
       # API_BIND lets operators restrict the REST API to loopback once Caddy
       # fronts it (API_BIND=127.0.0.1). Default stays 0.0.0.0 so a fresh
@@ -156,8 +156,8 @@ services:
       start_period: 30s
     volumes:
       # API persists generated docker-compose stacks, mail server configs,
-      # Caddyfile, app sources etc. in .kryptalis on the host.
-      - ./.kryptalis:/app/.kryptalis
+      # Caddyfile, app sources etc. in .dockcontrol on the host.
+      - ./.dockcontrol:/app/.dockcontrol
       # API needs to talk to the host Docker daemon to deploy user apps.
       - /var/run/docker.sock:/var/run/docker.sock
       # API writes a docker-compose.override.yml at the install root to
@@ -174,10 +174,10 @@ services:
     networks:
       # default — talk to postgres here.
       - default
-      # kryptalis-apps — shared bridge with Caddy + every user-deployed
+      # dockcontrol-apps — shared bridge with Caddy + every user-deployed
       # container (including mail servers). Lets the API resolve other
       # containers by name (e.g. for the 'send test email' loopback).
-      - kryptalis-apps
+      - dockcontrol-apps
     depends_on:
       postgres:
         condition: service_healthy
@@ -188,8 +188,8 @@ services:
     # Custom alpine + openssh image — see infra/sftp/.
     build:
       context: ./infra/sftp
-    image: kryptalis-sftp:latest
-    container_name: kryptalis-sftp
+    image: dockcontrol-sftp:latest
+    container_name: dockcontrol-sftp
     restart: unless-stopped
     logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
     ports:
@@ -249,7 +249,7 @@ services:
     #
     #   - sftp_host_keys: persists ONLY the two host private/public key
     #     pairs (ssh_host_ed25519_key + ssh_host_rsa_key) at
-    #     /var/lib/kryptalis-sftp-keys. The entrypoint symlinks them into
+    #     /var/lib/dockcontrol-sftp-keys. The entrypoint symlinks them into
     #     /etc/ssh at boot. We deliberately do NOT mount the whole
     #     /etc/ssh — a named volume mounted there would mask the baked
     #     sshd_config (and any future image-side changes), and the only
@@ -257,7 +257,7 @@ services:
     #     keys (so client `known_hosts` doesn't break).
     #   - sftp_users: PAM/shadow state (named — survives recreate).
     #   - sftp_homes: /home; per-user dirs are 0700 (created by useradd).
-    #   - .kryptalis/apps RW: git-deploys / compose-empty apps live
+    #   - .dockcontrol/apps RW: git-deploys / compose-empty apps live
     #     here. Per-user ChrootDirectory keeps each user inside their
     #     own slice.
     #   - /var/lib/docker/volumes via rshared bind: marketplace apps
@@ -268,10 +268,10 @@ services:
     #     target volume actually belongs to the requested app before
     #     pointing the chroot at it.
     volumes:
-      - sftp_host_keys:/var/lib/kryptalis-sftp-keys
+      - sftp_host_keys:/var/lib/dockcontrol-sftp-keys
       - sftp_users:/etc/sftp-state
       - sftp_homes:/home
-      - ./.kryptalis/apps:/data/apps
+      - ./.dockcontrol/apps:/data/apps
       # Marketplace + docker-image apps store code in named volumes.
       # bind-propagation: rshared is CRITICAL: without it, the SFTP
       # container only sees /var/lib/docker/volumes as a flat directory
@@ -307,7 +307,7 @@ services:
       dockerfile: apps/dashboard/Dockerfile
       args:
         NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
-    container_name: kryptalis-dashboard
+    container_name: dockcontrol-dashboard
     restart: unless-stopped
     logging: { driver: json-file, options: { max-size: "10m", max-file: "5" } }
     environment:
@@ -331,12 +331,12 @@ services:
 
 networks:
   # default — postgres/api/dashboard talk to each other here.
-  # kryptalis-apps — shared bridge that Caddy also joins. User apps the API
+  # dockcontrol-apps — shared bridge that Caddy also joins. User apps the API
   #   deploys attach to it via `external: true`, which lets Caddy proxy by
   #   container_name (so we don't need host port publish on app containers
   #   and can serve HTTPS with a Let's Encrypt cert on any custom port).
-  kryptalis-apps:
-    name: kryptalis-apps
+  dockcontrol-apps:
+    name: dockcontrol-apps
     driver: bridge
 
 volumes:

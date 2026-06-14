@@ -27,7 +27,7 @@
  *
  * **Why not docker SDK.** node-docker-api would be cleaner but adds 4 MB
  * of deps for ~6 calls. execFile of the CLI is already how every other
- * Kryptalis module talks to docker — keeps the surface uniform.
+ * DockControl module talks to docker — keeps the surface uniform.
  */
 
 import { execFile } from 'child_process';
@@ -38,7 +38,7 @@ import * as fs from 'fs';
 const execFileAsync = promisify(execFile);
 
 export interface DockerFsTarget {
-  /** Container name (e.g. `kryptalis-prestashop-abc123def456`). */
+  /** Container name (e.g. `dockcontrol-prestashop-abc123def456`). */
   containerName: string;
   /** Absolute path inside the container that the browser is anchored at. */
   rootDir: string;
@@ -198,9 +198,9 @@ export async function listDir(target: DockerFsTarget, relPath: string): Promise<
   // contain spaces).
   const { stdout } = await dockerSh(
     target.containerName,
-    `ls -lA --time-style=long-iso '${abs}' 2>/dev/null || echo "__KRYPTALIS_ERR__"`,
+    `ls -lA --time-style=long-iso '${abs}' 2>/dev/null || echo "__DOCKCONTROL_ERR__"`,
   );
-  if (stdout.includes('__KRYPTALIS_ERR__')) {
+  if (stdout.includes('__DOCKCONTROL_ERR__')) {
     throw new Error(`Path '${relPath || '/'}' not found in container or not a directory`);
   }
   const entries: DockerEntry[] = [];

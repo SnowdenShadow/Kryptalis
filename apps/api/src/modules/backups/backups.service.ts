@@ -44,7 +44,7 @@ import { pipeline } from 'stream/promises';
 const execFileAsync = promisify(execFile);
 
 // Same runtime-dir convention as databases/applications/files services.
-const DATA_DIR = process.env.KRYPTALIS_DATA_DIR || path.join(process.cwd(), '.kryptalis');
+const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
 const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
 
 /** Manifest written at the archive root — restore is driven entirely by it. */
@@ -75,7 +75,7 @@ interface BackupManifest {
  * The backup engine is implemented here: create() produces a tar.gz dump of
  * the targeted server (database dumps via `docker exec`, application volume
  * tars via `docker run busybox tar`, application metadata as JSON) in the
- * runtime dir (.kryptalis/backups/<id>.tar.gz), then runs the integrity /
+ * runtime dir (.dockcontrol/backups/<id>.tar.gz), then runs the integrity /
  * encryption / upload flow. The dump runs asynchronously — create() returns
  * the row in PENDING and the job flips it to IN_PROGRESS → COMPLETED/FAILED.
  * restore() downloads/verifies/decrypts, extracts the archive and replays
@@ -141,7 +141,7 @@ interface BackupManifest {
  *     s3_access_key / s3_secret_key (Admin → System Config; secret key is
  *     encrypted at rest). Env fallbacks S3_* for headless installs.
  *   - After the local dump → (optional) encryption → sha256 flow, dumps for
- *     S3/R2/B2 targets are uploaded under `kryptalis-backups/<backupId>/
+ *     S3/R2/B2 targets are uploaded under `dockcontrol-backups/<backupId>/
  *     <filename>` and the local file is deleted. The object key is also
  *     re-resolvable deterministically from the row id (ListObjectsV2 on the
  *     per-backup prefix) for rows predating the filename column.
@@ -363,7 +363,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     const salt = crypto.randomBytes(16);
     const iv = crypto.randomBytes(12);
     // Node's type defs vary by version (ArrayBuffer vs Buffer); coerce.
-    const dataKey = Buffer.from(crypto.hkdfSync('sha256', masterKey, salt, Buffer.from('kryptalis-backup-v1'), 32));
+    const dataKey = Buffer.from(crypto.hkdfSync('sha256', masterKey, salt, Buffer.from('dockcontrol-backup-v1'), 32));
     const cipher = crypto.createCipheriv('aes-256-gcm', dataKey, iv);
 
     const tmpPath = `${filePath}.enc.tmp`;
@@ -407,7 +407,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
       const salt = header.subarray(0, 16);
       const iv = header.subarray(16, 28);
-      const dataKey = Buffer.from(crypto.hkdfSync('sha256', masterKey, salt, Buffer.from('kryptalis-backup-v1'), 32));
+      const dataKey = Buffer.from(crypto.hkdfSync('sha256', masterKey, salt, Buffer.from('dockcontrol-backup-v1'), 32));
       const decipher = crypto.createDecipheriv('aes-256-gcm', dataKey, iv);
       decipher.setAuthTag(tag);
 
@@ -516,7 +516,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     const { client, bucket } = this.s3ClientOrThrow();
     const tmpPath = path.join(
       os.tmpdir(),
-      `kryptalis-restore-${backupId}-${crypto.randomBytes(6).toString('hex')}.dump`,
+      `dockcontrol-restore-${backupId}-${crypto.randomBytes(6).toString('hex')}.dump`,
     );
     try {
       const key = await this.resolveRemoteKey(client, bucket, backupId);
@@ -638,8 +638,8 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
   private dbContainerName(db: { name: string; host: string; autoImported: boolean }): string {
     // Auto-imported rows store the real container_name in `host`; manually
-    // provisioned rows use the kryptalis-db-<name> scheme (databases.service).
-    return db.autoImported ? db.host : `kryptalis-db-${db.name}`;
+    // provisioned rows use the dockcontrol-db-<name> scheme (databases.service).
+    return db.autoImported ? db.host : `dockcontrol-db-${db.name}`;
   }
 
   private async dumpDatabases(
@@ -816,7 +816,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
     const filename = `${backupId}.tar.gz`;
     const archivePath = path.join(BACKUPS_DIR, filename);
-    const stagingDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'kryptalis-backup-'));
+    const stagingDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'dockcontrol-backup-'));
     try {
       const manifest: BackupManifest = {
         version: 1,
@@ -1347,7 +1347,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         archivePath = plainPath;
       }
 
-      extractDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'kryptalis-restore-'));
+      extractDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'dockcontrol-restore-'));
       await execFileAsync('tar', ['-xzf', archivePath, '-C', extractDir], {
         timeout: 1_800_000,
         maxBuffer: 8 * 1024 * 1024,
@@ -1356,7 +1356,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       const manifestPath = path.join(extractDir, 'manifest.json');
       if (!fs.existsSync(manifestPath)) {
         throw new BadRequestException(
-          'Backup archive has no manifest.json — not a Kryptalis backup archive.',
+          'Backup archive has no manifest.json — not a DockControl backup archive.',
         );
       }
       let manifest: BackupManifest;

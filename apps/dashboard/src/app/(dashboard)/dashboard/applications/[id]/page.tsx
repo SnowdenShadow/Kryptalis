@@ -56,7 +56,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import type { ApplicationResponse, DeploymentResponse, DomainResponse } from '@kryptalis/types';
+import type { ApplicationResponse, DeploymentResponse, DomainResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';

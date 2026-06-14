@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
 
@@ -210,6 +210,19 @@ beforeEach(() => {
   installFsDefaults();
   installExecDefaults();
   vi.mocked(detectStack).mockReturnValue(null);
+  // Blue-green canary: skip the 10s hold (real wall-clock sleeps would
+  // blow up suite duration) and report the canary container as running so
+  // the swap proceeds. Failure-path tests override the inspect handler.
+  process.env.DOCKCONTROL_CANARY_HOLD_MS = '0';
+  handlers.push((cmd, args) =>
+    cmd === 'docker' && args[0] === 'inspect' && args.includes('{{.State.Running}} {{.State.ExitCode}}')
+      ? { stdout: 'true 0' }
+      : undefined,
+  );
+});
+
+afterEach(() => {
+  delete process.env.DOCKCONTROL_CANARY_HOLD_MS;
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -224,10 +237,10 @@ describe('runDockerImageDeploy', () => {
 
     const doc = readComposeDoc();
     expect(doc.services.app.image).toBe('nginx:1.27');
-    expect(doc.services.app.container_name).toBe('kryptalis-my-app');
-    expect(doc.services.app.networks).toEqual(['kryptalis_project', 'kryptalis_apps']);
-    expect(doc.networks.kryptalis_project).toEqual({ external: true, name: 'kryptalis_proj_proj1' });
-    expect(doc.networks.kryptalis_apps).toEqual({ external: true, name: 'kryptalis-apps' });
+    expect(doc.services.app.container_name).toBe('dockcontrol-my-app');
+    expect(doc.services.app.networks).toEqual(['dockcontrol_project', 'dockcontrol_apps']);
+    expect(doc.networks.dockcontrol_project).toEqual({ external: true, name: 'dockcontrol_proj_proj1' });
+    expect(doc.networks.dockcontrol_apps).toEqual({ external: true, name: 'dockcontrol-apps' });
 
     expect(findExec((c) => c.cmd === 'docker' && c.args.join(' ') === 'compose pull')).toBeTruthy();
     expect(
@@ -267,7 +280,7 @@ describe('runDockerImageDeploy', () => {
 
     const insp = findExec((c) => c.cmd === 'docker' && c.args[0] === 'inspect');
     expect(insp!.args).toEqual([
-      'inspect', '--format', '{{json .Config.ExposedPorts}}', 'kryptalis-my-app',
+      'inspect', '--format', '{{json .Config.ExposedPorts}}', 'dockcontrol-my-app',
     ]);
     expect(prisma.application.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -354,9 +367,9 @@ describe('runComposeOnlyDeploy', () => {
 
     const doc = readComposeDoc();
     expect(doc.services.web.networks).toEqual(
-      expect.arrayContaining(['kryptalis_project', 'kryptalis_apps']),
+      expect.arrayContaining(['dockcontrol_project', 'dockcontrol_apps']),
     );
-    expect(doc.networks.kryptalis_apps).toEqual({ external: true, name: 'kryptalis-apps' });
+    expect(doc.networks.dockcontrol_apps).toEqual({ external: true, name: 'dockcontrol-apps' });
 
     expect(prisma.application.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -370,14 +383,14 @@ describe('runComposeOnlyDeploy', () => {
     );
   });
 
-  it('writes envVars to .kryptalis.env and threads --env-file into the compose argv', async () => {
+  it('writes envVars to .dockcontrol.env and threads --env-file into the compose argv', async () => {
     const { service } = makeService();
 
     await service.runComposeOnlyDeploy('dep1', APP_ID, APP_NAME, USER_COMPOSE, {
       envVars: { API_KEY: 'k1' },
     });
 
-    const envPath = path.join(appDir(), '.kryptalis.env');
+    const envPath = path.join(appDir(), '.dockcontrol.env');
     expect(vfs.__files.get(norm(envPath))).toBe('API_KEY=k1');
     const up = findExec((c) => c.cmd === 'docker' && c.args.includes('up'));
     expect(up!.args).toEqual([
@@ -441,7 +454,7 @@ describe('runDockerfileOnlyDeploy', () => {
 
     const doc = readComposeDoc();
     expect(doc.services.app.build).toEqual({ context: '.' });
-    expect(doc.services.app.container_name).toBe('kryptalis-my-app');
+    expect(doc.services.app.container_name).toBe('dockcontrol-my-app');
 
     expect(findExec((c) => c.cmd === 'docker' && c.args.join(' ') === 'compose build')).toBeTruthy();
     expect(
@@ -585,7 +598,7 @@ describe('runDeploy — env handling', () => {
     });
 
     expect(env.serializeEnv).toHaveBeenCalledWith({ A: 'user', B: 'repo' });
-    expect(vfs.__files.get(norm(path.join(appDir(), '.kryptalis.env')))).toBe('A=user\nB=repo');
+    expect(vfs.__files.get(norm(path.join(appDir(), '.dockcontrol.env')))).toBe('A=user\nB=repo');
     // mirrored into framework-consumed env files
     expect(vfs.__files.get(norm(path.join(appDir(), '.env')))).toBe('A=user\nB=repo');
     expect(vfs.__files.get(norm(path.join(appDir(), '.env.production')))).toBe('A=user\nB=repo');
@@ -615,7 +628,7 @@ describe('runDeploy — compose path', () => {
     const doc = readComposeDoc();
     expect(doc.services.web.ports).toBeUndefined(); // stripped — Caddy proxies over the bridge
     expect(doc.services.web.networks).toEqual(
-      expect.arrayContaining(['kryptalis_apps', 'kryptalis_project']),
+      expect.arrayContaining(['dockcontrol_apps', 'dockcontrol_project']),
     );
     expect(prisma.application.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -685,27 +698,35 @@ describe('runDeploy — Dockerfile path', () => {
     });
 
     const build = findExec((c) => c.cmd === 'docker' && c.args[0] === 'build');
-    expect(build!.args).toEqual(['build', '-t', 'kryptalis/my-app:latest', '.']);
+    expect(build!.args).toEqual(['build', '-t', 'dockcontrol/my-app:latest', '.']);
     expect(norm(build!.opts.cwd)).toBe(norm(appDir()));
 
-    const run = findExec((c) => c.cmd === 'docker' && c.args[0] === 'run');
+    // The canary boots its own labeled `docker run` first — skip it.
+    const run = findExec(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run' && !c.args.includes('dockcontrol.canary=1'),
+    );
     expect(run!.args).toEqual([
-      'run', '-d', '--name', 'kryptalis-my-app', '--restart', 'unless-stopped',
-      '--network', 'kryptalis-apps', '--network-alias', 'my-app',
-      '--network', 'kryptalis_proj_proj1', '--network-alias', 'my-app',
+      'run', '-d', '--name', 'dockcontrol-my-app', '--restart', 'unless-stopped',
+      '--network', 'dockcontrol-apps', '--network-alias', 'my-app',
+      '--network', 'dockcontrol_proj_proj1', '--network-alias', 'my-app',
       '-e', 'FOO=bar',
-      'kryptalis/my-app:latest',
+      'dockcontrol/my-app:latest',
     ]);
     expect(run!.args).not.toContain('-p');
+    // Canary ran (and was cleaned up) BEFORE the old container was removed.
+    const canary = findExec(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run' && c.args.includes('dockcontrol.canary=1'),
+    );
+    expect(canary).toBeTruthy();
 
     // Caddy coordinates from EXPOSE
     expect(prisma.application.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { containerName: 'kryptalis-my-app', containerPort: 80 },
+        data: { containerName: 'dockcontrol-my-app', containerPort: 80 },
       }),
     );
     // compose mirror written for later lifecycle ops
-    expect(composeFileOf(appDir())).toContain('image: kryptalis/my-app:latest');
+    expect(composeFileOf(appDir())).toContain('image: dockcontrol/my-app:latest');
     expect(lastAppStatus(prisma)).toBe('RUNNING');
   });
 
@@ -717,10 +738,44 @@ describe('runDeploy — Dockerfile path', () => {
       portMapping: { '80': 8081 },
     });
 
-    const run = findExec((c) => c.cmd === 'docker' && c.args[0] === 'run');
+    const run = findExec(
+      (c) => c.cmd === 'docker' && c.args[0] === 'run' && !c.args.includes('dockcontrol.canary=1'),
+    );
     const pIdx = run!.args.indexOf('-p');
     expect(pIdx).toBeGreaterThan(-1);
     expect(run!.args[pIdx + 1]).toBe('8081:80');
+  });
+
+  it('blue-green: canary crash → deploy FAILED, old container NEVER removed', async () => {
+    const { service, prisma } = makeService();
+    // Canary container reports exited(1) on inspect.
+    handlers.unshift((cmd, args) =>
+      cmd === 'docker' && args[0] === 'inspect' && args.includes('{{.State.Running}} {{.State.ExitCode}}')
+        ? { stdout: 'false 1' }
+        : undefined,
+    );
+    // Hold > 0 so the inspect loop actually runs one iteration.
+    process.env.DOCKCONTROL_CANARY_HOLD_MS = '1500';
+
+    await service.runDeploy('dep1', APP_ID, APP_NAME, GIT_URL, 'main', {
+      dockerfileOverride: 'FROM nginx\nEXPOSE 80',
+    });
+
+    // The old production container was never freed: no rm -f on its name,
+    // no production `docker run`.
+    expect(
+      findExec((c) => c.cmd === 'docker' && c.args[0] === 'rm' && c.args.includes('dockcontrol-my-app')),
+    ).toBeUndefined();
+    expect(
+      findExec(
+        (c) => c.cmd === 'docker' && c.args[0] === 'run' && !c.args.includes('dockcontrol.canary=1'),
+      ),
+    ).toBeUndefined();
+    // Canary itself was cleaned up.
+    expect(
+      findExec((c) => c.cmd === 'docker' && c.args[0] === 'rm' && c.args.some((a) => a.startsWith('dockcontrol-canary-'))),
+    ).toBeTruthy();
+    expect(lastDeploymentData(prisma).status).toBe('FAILED');
   });
 });
 
@@ -737,7 +792,7 @@ describe('runDeploy — stack autodetection', () => {
         data: expect.objectContaining({
           port: 3000,
           framework: 'NEXTJS',
-          containerName: 'kryptalis-my-app',
+          containerName: 'dockcontrol-my-app',
           containerPort: 3000,
         }),
       }),
@@ -758,7 +813,7 @@ describe('runDeploy — stack autodetection', () => {
     const doc = readComposeDoc();
     const svc = doc.services[SLUG];
     expect(svc.image).toBe('node:20-alpine');
-    expect(svc.container_name).toBe('kryptalis-my-app');
+    expect(svc.container_name).toBe('dockcontrol-my-app');
     expect(svc.ports).toEqual(['4000:4000']);
     // YAML structured form — quotes/semicolons survive as a single argv element
     expect(svc.command).toEqual(['sh', '-c', 'npm ci && node "weird; rm -rf /" start']);
@@ -1037,7 +1092,7 @@ describe('runDeploy — remote server delegation', () => {
         appName: APP_NAME,
         gitUrl: GIT_URL,
         branch: 'main',
-        projectNetwork: 'kryptalis_proj_proj1',
+        projectNetwork: 'dockcontrol_proj_proj1',
       }),
       15 * 60_000,
     );

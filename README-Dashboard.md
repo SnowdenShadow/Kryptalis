@@ -1,6 +1,6 @@
 # Dashboard
 
-Kryptalis is built around a modern, fast and intuitive user interface.
+DockControl is built around a modern, fast and intuitive user interface.
 
 The goal is to make infrastructure management accessible to everyone.
 

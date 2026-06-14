@@ -38,7 +38,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import type { DatabaseResponse } from '@kryptalis/types';
+import type { DatabaseResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';

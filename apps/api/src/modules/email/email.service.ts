@@ -269,7 +269,7 @@ export class EmailService {
       spf: { host: apex, type: 'TXT', value: `v=spf1 mx a:mail.${apex} ~all` },
       dmarc: { host: `_dmarc.${apex}`, type: 'TXT', value: `v=DMARC1; p=quarantine; rua=mailto:postmaster@${apex}; adkim=r; aspf=r; pct=100` },
       dkim: {
-        host: `${server?.dkimSelector || 'kryptalis'}._domainkey.${apex}`,
+        host: `${server?.dkimSelector || 'dockcontrol'}._domainkey.${apex}`,
         type: 'TXT',
         value: dkimValue,
         ready: !!server?.dkimPublicKey,
@@ -303,7 +303,7 @@ export class EmailService {
    *  - MX    <apex>               → must point to mail.<apex>, nothing else
    *  - PTR   serverIp             → must = mail.<apex> (rDNS / FCrDNS)
    *  - SPF   <apex> TXT           → present + matches expected
-   *  - DKIM  kryptalis._domainkey → present + matches stored public key
+   *  - DKIM  dockcontrol._domainkey → present + matches stored public key
    *  - DMARC _dmarc.<apex>        → present + has p= policy
    */
   async getDnsHealth(userId: string, domainId: string) {
@@ -352,7 +352,7 @@ export class EmailService {
     const spfMultiple = apexTxts.filter((t) => /^v=spf1\b/i.test(t)).length > 1;
 
     // 5. DKIM
-    const selector = server?.dkimSelector || 'kryptalis';
+    const selector = server?.dkimSelector || 'dockcontrol';
     const dkimHost = `${selector}._domainkey.${apex}`;
     const dkimTxts = flat(await safe(resolver.resolveTxt(dkimHost)));
     const dkimRaw = dkimTxts.find((t) => /v=DKIM1/i.test(t)) || null;

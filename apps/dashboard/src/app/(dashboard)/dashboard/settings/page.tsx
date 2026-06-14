@@ -37,7 +37,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Select } from '@/components/ui/select';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import type { NotificationPrefs } from '@kryptalis/types';
+import type { NotificationPrefs } from '@dockcontrol/types';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 

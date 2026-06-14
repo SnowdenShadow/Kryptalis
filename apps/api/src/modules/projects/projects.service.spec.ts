@@ -595,9 +595,9 @@ describe('getServiceMesh', () => {
 
     const mesh = await service.getServiceMesh('p1', 'u1');
 
-    expect(mesh.apps[0].host).toBe('kryptalis-my-shop');
-    expect(mesh.apps[0].url).toBe('http://kryptalis-my-shop:3000');
-    expect(mesh.databases[0].host).toBe('kryptalis-db-shopdb');
+    expect(mesh.apps[0].host).toBe('dockcontrol-my-shop');
+    expect(mesh.apps[0].url).toBe('http://dockcontrol-my-shop:3000');
+    expect(mesh.databases[0].host).toBe('dockcontrol-db-shopdb');
     expect(mesh.databases[0].url).toContain('postgres://shop:');
     expect(mesh.envSuggestions).toHaveLength(1);
     expect(mesh.envSuggestions[0].envVar).toBe('DATABASE_URL');

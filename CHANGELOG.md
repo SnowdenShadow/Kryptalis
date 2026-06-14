@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Kryptalis are documented here.
+All notable changes to DockControl are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
@@ -10,8 +10,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 **Critical**
 - API Dockerfile no longer runs `prisma db push --accept-data-loss` at startup — a destructive schema change combined with auto-update could silently destroy data on every installation. Destructive pushes are now an explicit manual operation.
 - `update.sh` `run()` helper now propagates the real command exit code (previously `tee` masked every failure as success, so failed updates logged "✓ update complete").
-- `install.sh` systemd timer heredoc wrote the literal string `${KRYPTALIS_UPDATE_INTERVAL:-5min}` into the unit (systemd does no shell expansion) — the auto-update timer never loaded. Interval is now resolved before writing the unit.
-- `install.sh` no longer silently wipes the Postgres volume when `.env` is missing — it refuses and requires explicit `KRYPTALIS_RESET=1`.
+- `install.sh` systemd timer heredoc wrote the literal string `${DOCKCONTROL_UPDATE_INTERVAL:-5min}` into the unit (systemd does no shell expansion) — the auto-update timer never loaded. Interval is now resolved before writing the unit.
+- `install.sh` no longer silently wipes the Postgres volume when `.env` is missing — it refuses and requires explicit `DOCKCONTROL_RESET=1`.
 - Dashboard admin page violated the Rules of Hooks (conditional early-return before `useQuery`) — guaranteed React crash for non-admin users. Guard moved after all hooks.
 - Token state desync between localStorage and the persisted zustand store caused a `/login ↔ /dashboard` redirect loop after session expiry. Both stores now stay in sync on refresh/logout.
 - Go agent: all `exec.Command` calls now use `exec.CommandContext` with per-task-type timeouts — a hung `docker compose pull` could previously brick the agent (4 stuck tasks = full semaphore, silent).
