@@ -176,6 +176,32 @@ func volumeImportArgv(volume string) []string {
 	return []string{"run", "--rm", "-i", "-v", volume + ":/data", "busybox", "tar", "-xzf", "-", "-C", "/data"}
 }
 
+// volumeListArgv lists every docker volume name, one per line. Filtering by
+// prefix is done in Go (filterByPrefix) — `docker volume ls --filter name=`
+// is a substring match, not a prefix match, so it can't be trusted here.
+func volumeListArgv() []string {
+	return []string{"volume", "ls", "--format", "{{.Name}}"}
+}
+
+// filterByPrefix returns the names whose value starts with ANY of the given
+// prefixes. An empty prefixes slice returns all names unchanged. Pure (no
+// docker) so the prefix-matching contract is unit-testable on its own.
+func filterByPrefix(names, prefixes []string) []string {
+	if len(prefixes) == 0 {
+		return names
+	}
+	matched := []string{}
+	for _, name := range names {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(name, prefix) {
+				matched = append(matched, name)
+				break
+			}
+		}
+	}
+	return matched
+}
+
 // redactArgv masks the value of every `-e KEY=VALUE` pair so error messages
 // and logs never leak MYSQL_PWD / REDISCLI_AUTH / MONGO_PASSWORD.
 func redactArgv(argv []string) []string {

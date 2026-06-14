@@ -42,6 +42,19 @@ func TestDecodePayloadVolumeImport(t *testing.T) {
 	}
 }
 
+func TestDecodePayloadVolumeList(t *testing.T) {
+	var p volumeListPayload
+	err := decodePayload(map[string]interface{}{
+		"prefixes": []interface{}{"app1_", "app2_"},
+	}, &p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Prefixes) != 2 || p.Prefixes[0] != "app1_" || p.Prefixes[1] != "app2_" {
+		t.Errorf("prefixes = %v", p.Prefixes)
+	}
+}
+
 func TestDecodePayloadBackup(t *testing.T) {
 	var p backupPayload
 	err := decodePayload(map[string]interface{}{

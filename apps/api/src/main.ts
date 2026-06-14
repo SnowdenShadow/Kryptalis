@@ -50,6 +50,12 @@ async function bootstrap() {
       next();
       return;
     }
+    // Project-transfer import: the body is a raw encrypted .dctproj stream,
+    // not JSON — let the controller pipe it to disk itself.
+    if (req.path === '/api/projects/transfer/parse') {
+      next();
+      return;
+    }
     const isWebhook =
       req.path.startsWith('/api/webhooks/') || req.path === '/api/system/updates/webhook';
     // Preserve the EXACT bytes the provider signed so the controller can HMAC

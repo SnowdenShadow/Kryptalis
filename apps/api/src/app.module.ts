@@ -31,6 +31,7 @@ import { ReverseProxyModule } from './modules/reverse-proxy/reverse-proxy.module
 import { SystemModule } from './modules/system/system.module';
 import { HealthModule } from './modules/health/health.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { ProjectTransferModule } from './modules/project-transfer/project-transfer.module';
 
 @Module({
   imports: [
@@ -103,6 +104,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     SystemModule,
     HealthModule,
     NotificationsModule,
+    ProjectTransferModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

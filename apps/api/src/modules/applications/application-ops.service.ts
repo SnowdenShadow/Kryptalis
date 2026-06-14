@@ -22,6 +22,7 @@ import {
   resolveAppServer,
   isAppLocal,
   assertAppOwnership,
+  projectNetworkName,
   APPS_DIR,
 } from './applications.helpers';
 import { assertCloneHostAllowed } from '../git-providers/git-providers.service';
@@ -227,9 +228,83 @@ export class ApplicationOpsService {
   private async redeployComposeDir(userId: string, app: any) {
     const server = await resolveAppServer(this.prisma, app.id);
     if (!this.deploymentTarget.isLocal(server)) {
-      throw new BadRequestException(
-        'Env-only redeploy for marketplace apps on remote servers is not supported yet — use Restart, or uninstall/reinstall with the new values.',
-      );
+      // Remote target: we can't touch the agent's app dir from here, so ship
+      // the stored compose + saved envVars to the agent exactly like a
+      // marketplace install. The agent writes compose/.env under
+      // /opt/dockcontrol/apps/<remoteSlug> and brings the stack up; its DEPLOY
+      // completion handler flips the Application row. This is also the building
+      // block migrate()/moveServer() use to relocate a compose app's stack.
+      //
+      // The compose MUST come from the DB (app.dockerComposeFile) — the local
+      // APPS_DIR copy is on the platform host, not the agent, so it's the wrong
+      // (or missing) file for a remote app. If it was never persisted, there's
+      // nothing to ship; tell the user to reinstall.
+      const compose: string | null = app.dockerComposeFile;
+      if (!compose) {
+        throw new BadRequestException(
+          'No saved compose file for this app — it cannot be redeployed on the remote server. Reinstall it from the marketplace.',
+        );
+      }
+
+      const deployment = await this.prisma.deployment.create({
+        data: {
+          applicationId: app.id,
+          status: 'DEPLOYING',
+          commitMessage: 'Redeploy (env refresh)',
+          triggeredById: userId,
+          startedAt: new Date(),
+        },
+      });
+
+      try {
+        // envVars are passed RAW (like marketplace) — the agent writes them to
+        // .env on its host. We don't pre-interpolate here the way the local
+        // path does: the agent owns the .env merge + compose interpolation.
+        const task = await this.agent.enqueueAndWait(
+          server!.id,
+          'DEPLOY',
+          {
+            slug: remoteAppSlug(app.name, app.id),
+            appName: app.name,
+            applicationId: app.id,
+            compose,
+            envVars: this.env.decryptEnvVars(app.envVars),
+            projectNetwork: projectNetworkName(app.projectId),
+          },
+          15 * 60_000,
+        );
+        if (task.status === 'FAILED') {
+          throw new Error(task.error || 'agent deploy failed');
+        }
+        await this.prisma.deployment.update({
+          where: { id: deployment.id },
+          data: { status: 'RUNNING', finishedAt: new Date() },
+        });
+        await this.prisma.application.update({
+          where: { id: app.id },
+          data: { status: 'RUNNING' },
+        });
+        return {
+          message: 'Stack recreated with the updated environment',
+          deploymentId: deployment.id,
+        };
+      } catch (err: any) {
+        await this.prisma.deployment.update({
+          where: { id: deployment.id },
+          data: {
+            status: 'FAILED',
+            finishedAt: new Date(),
+            buildLogs: String(err?.message || err).slice(0, 50_000),
+          },
+        });
+        await this.prisma.application.update({
+          where: { id: app.id },
+          data: { status: 'ERROR' },
+        });
+        throw new BadRequestException(
+          `Redeploy failed: ${String(err?.message || err).slice(0, 500)}`,
+        );
+      }
     }
 
     // Marketplace installs write into <catalogSlug>-<id12>, which diverges

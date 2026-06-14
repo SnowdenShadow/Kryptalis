@@ -36,6 +36,10 @@ type volumeImportPayload struct {
 	SourceTaskID string   `json:"sourceTaskId"`
 }
 
+type volumeListPayload struct {
+	Prefixes []string `json:"prefixes"`
+}
+
 type backupPayload struct {
 	Databases  []DatabaseSpec `json:"databases"`
 	Volumes    []string       `json:"volumes"`
@@ -119,6 +123,16 @@ func runDockerWithStdin(ctx context.Context, argv []string, r io.Reader) error {
 // docker volume create).
 func runDockerQuiet(ctx context.Context, argv []string) error {
 	return runDockerToWriter(ctx, argv, io.Discard)
+}
+
+// runDockerCapture runs docker and returns its stdout as a string (for
+// read-only listing commands like `docker volume ls`).
+func runDockerCapture(ctx context.Context, argv []string) (string, error) {
+	var out bytes.Buffer
+	if err := runDockerToWriter(ctx, argv, &out); err != nil {
+		return "", err
+	}
+	return out.String(), nil
 }
 
 func tail(s string, max int) string {
@@ -215,6 +229,31 @@ func (r *Runner) importVolume(ctx context.Context, sourceTaskID, vol string) err
 		return err
 	}
 	return runDockerWithStdin(ctx, volumeImportArgv(vol), body)
+}
+
+// ── VOLUME_LIST ──────────────────────────────────────────────────────
+
+// VolumeList enumerates the docker volumes on this host and returns only
+// those whose name starts with one of the requested prefixes. Read-only:
+// it never creates, removes or mutates anything. Lets the API discover a
+// stack's REAL volume names instead of guessing them for remote migration.
+func (r *Runner) VolumeList(ctx context.Context, payload map[string]interface{}) (map[string]interface{}, string) {
+	var p volumeListPayload
+	if err := decodePayload(payload, &p); err != nil {
+		return nil, err.Error()
+	}
+	out, err := runDockerCapture(ctx, volumeListArgv())
+	if err != nil {
+		return nil, err.Error()
+	}
+	names := []string{}
+	for _, line := range strings.Split(out, "\n") {
+		if name := strings.TrimSpace(line); name != "" {
+			names = append(names, name)
+		}
+	}
+	matched := filterByPrefix(names, p.Prefixes)
+	return map[string]interface{}{"volumes": matched}, ""
 }
 
 // ── BACKUP ───────────────────────────────────────────────────────────

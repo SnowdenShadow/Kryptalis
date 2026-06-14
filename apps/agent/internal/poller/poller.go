@@ -78,6 +78,7 @@ var taskTimeouts = map[string]time.Duration{
 	"FILE_WRITE": 30 * time.Second,
 	// Data-transfer tasks move whole volumes / database dumps over the
 	// network — generous deadlines by design.
+	"VOLUME_LIST":   1 * time.Minute,
 	"VOLUME_EXPORT": 30 * time.Minute,
 	"VOLUME_IMPORT": 30 * time.Minute,
 	"BACKUP":        30 * time.Minute,
@@ -238,6 +239,8 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.runDiskUsage(task)
 	case "SFTP_SYNC":
 		result, taskErr = p.runSftpSync(task)
+	case "VOLUME_LIST":
+		result, taskErr = p.tasks.VolumeList(tctx, task.Payload)
 	case "VOLUME_EXPORT":
 		result, taskErr = p.tasks.VolumeExport(tctx, task.ID, task.Payload)
 	case "VOLUME_IMPORT":

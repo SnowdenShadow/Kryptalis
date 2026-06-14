@@ -20,6 +20,6 @@ import { DatabasesModule } from '../databases/databases.module';
     ApplicationNetworkService,
     ApplicationEnvService,
   ],
-  exports: [ApplicationsService],
+  exports: [ApplicationsService, ApplicationOpsService, ApplicationEnvService],
 })
 export class ApplicationsModule {}

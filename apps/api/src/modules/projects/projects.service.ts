@@ -16,11 +16,14 @@ import {
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
-import { AgentService, AgentTaskCompletion } from '../agent/agent.service';
-import { appVolumePrefix, dbVolumePrefix, deterministicVolumeNames } from '../agent/volume-naming.util';
+import { AgentService, AgentTaskCompletion, AgentTaskType } from '../agent/agent.service';
+import { appVolumePrefix, dbVolumePrefix } from '../agent/volume-naming.util';
+import { slugify, remoteAppSlug, RESERVED_HOST_PORTS } from '../applications/applications.helpers';
+import { ApplicationOpsService } from '../applications/application-ops.service';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -98,6 +101,8 @@ export class ProjectsService implements OnModuleInit {
     private proxy: ReverseProxyService,
     private mailServer: MailServerService,
     private notifications: NotificationsService,
+    private ops: ApplicationOpsService,
+    private encryption: EncryptionService,
   ) {}
 
   onModuleInit() {
@@ -363,54 +368,62 @@ export class ProjectsService implements OnModuleInit {
   /**
    * Move every app + DB in this project from its current server to `targetServerId`.
    *
-   * Flow per app: enqueue REMOVE on the *old* server (best-effort — failures
-   * are logged not blocking, because the old server may be unreachable, which
-   * is often why the user is migrating in the first place), then flip the
-   * project.serverId, transfer the docker volumes and enqueue DEPLOY on the
-   * new server. Caddy regenerates so domain routing follows.
+   * Data-safe, fail-closed ordering (NOTHING is flipped until the move
+   * actually succeeds):
+   *   1. STOP/REMOVE (purgeVolumes:false) the source stack and AWAIT it, so
+   *      the named volumes are quiesced and consistent for export.
+   *   2. Discover the source stack's REAL volume names — `docker volume ls`
+   *      prefix-filtering when the source is local, an awaited VOLUME_LIST
+   *      agent task (exact-prefix match against the live host) when remote.
+   *      No more deterministic name-guessing that silently migrated zero
+   *      volumes for stacks with non-`_data` volume keys.
+   *   3. Transfer the volumes to the target and AWAIT it (export→import for
+   *      remote→remote, local export + awaited import for local→remote, the
+   *      onVolumeExportForLocalImport handler for remote→local).
+   *   4. Deploy on the target through the REAL deploy path — ops.redeploy()
+   *      for every app kind (git/image/compose ship the full stack), a proper
+   *      compose-carrying DEPLOY for each DB. Never a bare {applicationId}.
+   *   5. ONLY on success: flip project.serverId + every database.serverId,
+   *      then regenerate Caddy.
    *
-   * Volume transfer (three source/target combinations — local→local doesn't
-   * exist in MULTI mode):
-   *   - remote → remote: enqueue VOLUME_EXPORT on the source with an
-   *     onComplete chain [VOLUME_IMPORT on the target, ...DEPLOY tasks].
-   *     The agent service's generic chaining sequences them and threads
-   *     sourceTaskId so the import downloads the export's uploaded tars.
-   *   - local → remote: the API exports each volume directly (`docker run
-   *     busybox tar`) into transfers/<local-id>/, then enqueues
-   *     VOLUME_IMPORT on the target ({sourceTaskId: <local-id>}) with the
-   *     DEPLOYs chained behind it.
-   *   - remote → local: enqueue VOLUME_EXPORT on the source with a
-   *     `migrateLocalImport` marker; the VOLUME_EXPORT completion handler
-   *     (onVolumeExportForLocalImport) untars the uploaded volumes into
-   *     local docker volumes and then enqueues the deferred DEPLOYs.
-   * Volume resolution is the deterministic compose-prefix convention (real
-   * `docker volume ls` prefix filtering when the source is local — full
-   * coverage; deterministic `<composeProject>_data` names when remote, which
-   * does NOT cover stacks with differently-named volumes). If the transfer
-   * can't be set up (enqueue/export failure), we fall back to the previous
-   * behavior — deploy immediately with empty volumes — and surface a warning.
+   * On ANY deploy failure we do NOT flip (the project still points at the
+   * source), RESTART the source stack so the user is left running where they
+   * started, and return status `failed`/`partial` — never `ok`. purgeVolumes
+   * is FALSE throughout, so the source data is always recoverable.
+   *
+   * @param includePinned when true, apps explicitly pinned to other servers
+   *   are ALSO relocated (and their serverId cleared); default false keeps
+   *   them where the user put them.
    */
-  async migrate(projectId: string, userId: string, targetServerId: string) {
-    await assertProjectAccess(this.prisma, userId, projectId, 'ADMIN');
+  async migrate(
+    projectId: string,
+    userId: string,
+    targetServerId: string,
+    includePinned = false,
+  ) {
+    await assertProjectAccess(this.prisma, userId, projectId, 'OWNER');
 
     const projectFull = await this.prisma.project.findUnique({
       where: { id: projectId },
       include: {
         server: { select: { id: true, host: true, name: true } },
-        applications: { select: { id: true, name: true, status: true, serverId: true } },
-        databases: { select: { id: true, name: true, autoImported: true } },
+        applications: { select: { id: true, name: true, status: true, serverId: true, hostPort: true } },
+        databases: {
+          select: { id: true, name: true, type: true, username: true, password: true, port: true, autoImported: true },
+        },
+        domains: { select: { id: true } },
       },
     });
     if (!projectFull) throw new NotFoundException('Project not found');
 
-    // Per-app placement: apps EXPLICITLY pinned to another server are NOT
-    // part of the migration — they stay where the user put them. Only
-    // inherit-apps (serverId NULL) follow the project's server.
+    // Per-app placement: apps EXPLICITLY pinned to another server normally
+    // stay where the user put them. includePinned relocates them too (and we
+    // clear their serverId on success so they inherit the project default).
     const pinnedApps = projectFull.applications.filter((a) => a.serverId && a.serverId !== projectFull.serverId);
-    const project = {
-      ...projectFull,
-      applications: projectFull.applications.filter((a) => !a.serverId || a.serverId === projectFull.serverId),
-    };
+    const migratingApps = includePinned
+      ? projectFull.applications
+      : projectFull.applications.filter((a) => !a.serverId || a.serverId === projectFull.serverId);
+    const project = { ...projectFull, applications: migratingApps };
 
     if (project.serverId === targetServerId) {
       throw new BadRequestException('Project is already on this server');
@@ -425,149 +438,509 @@ export class ProjectsService implements OnModuleInit {
     const oldServerId = project.serverId;
     const sourceLocal = isLocalHost(project.server?.host);
     const targetLocal = isLocalHost(target.host);
-    const slugify = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'app';
 
-    // Best-effort tear down on old server. CRITICAL: purgeVolumes is FALSE
-    // here so the source server stops the containers but KEEPS the named
-    // volumes intact — the export below reads them, and the user can still
-    // recover the source state by flipping back.
-    const teardownErrors: string[] = [];
+    const warnings: string[] = [];
+    // `degraded` = a data-affecting step (volume transfer, teardown, deploy)
+    // did not fully succeed → status is at best `partial`, never `ok`.
+    let degraded = false;
+
+    // ── 1. STOP the source stack and AWAIT it ─────────────────────────
+    // REMOVE with purgeVolumes:false stops + removes the containers but KEEPS
+    // the named volumes, so the export below reads a consistent on-disk state
+    // and the user can recover by flipping back. Awaited so volumes are
+    // quiesced before export. Best-effort: an unreachable source (often the
+    // reason for migrating) is a warning, not a hard stop.
     for (const app of project.applications) {
       try {
-        await this.agent.enqueueTask(oldServerId, 'REMOVE', {
-          // per-instance dir convention first, bare slug for legacy installs
-          slug: `${slugify(app.name)}-${app.id.slice(0, 12)}`,
-          legacySlug: slugify(app.name),
-          containerName: `dockcontrol-${slugify(app.name)}`,
-          purgeVolumes: false,
-        });
+        await this.agent.enqueueAndWait(
+          oldServerId,
+          'REMOVE',
+          {
+            slug: remoteAppSlug(app.name, app.id),
+            legacySlug: slugify(app.name),
+            containerName: `dockcontrol-${slugify(app.name)}`,
+            purgeVolumes: false,
+          },
+          5 * 60_000,
+        );
       } catch (e: any) {
-        teardownErrors.push(`${app.name}: ${e?.message || e}`);
+        warnings.push(`teardown ${app.name}: ${e?.message || e}`);
+        degraded = true;
       }
     }
     for (const db of project.databases) {
       try {
-        await this.agent.enqueueTask(oldServerId, 'REMOVE', {
-          slug: slugify(db.name),
-          containerName: `dockcontrol-db-${slugify(db.name)}`,
-          purgeVolumes: false,
-        });
+        await this.agent.enqueueAndWait(
+          oldServerId,
+          'REMOVE',
+          {
+            // DB names are NEVER slugified — databases.service writes the dir
+            // as DBS_DIR/<raw name> and names the container with the raw name.
+            slug: `db-${db.name}`,
+            containerName: `dockcontrol-db-${db.name}`,
+            purgeVolumes: false,
+          },
+          5 * 60_000,
+        );
       } catch (e: any) {
-        teardownErrors.push(`db ${db.name}: ${e?.message || e}`);
+        warnings.push(`teardown db ${db.name}: ${e?.message || e}`);
+        degraded = true;
       }
     }
 
-    // Flip the server pointer.
+    // ── 2. Discover REAL source volume names ──────────────────────────
+    const prefixes = [
+      ...project.applications.map((a) => appVolumePrefix(a.name, a.id)),
+      ...project.databases.filter((d) => !d.autoImported).map((d) => dbVolumePrefix(d.name)),
+    ];
+    let volumes: string[] = [];
+    try {
+      if (prefixes.length === 0) {
+        volumes = [];
+      } else if (sourceLocal) {
+        volumes = await this.listLocalProjectVolumes(project.applications, project.databases);
+      } else {
+        // Ask the source agent for the host's REAL volume names matching our
+        // compose-project prefixes (exact-prefix) — no name guessing.
+        // VOLUME_LIST is a Phase-1 agent capability not yet mirrored in the
+        // Prisma TaskType enum (schema.prisma is outside this batch — see the
+        // deferred note), so the type is asserted at the call site.
+        const task = await this.agent.enqueueAndWait(
+          oldServerId,
+          'VOLUME_LIST' as unknown as AgentTaskType,
+          { prefixes },
+          2 * 60_000,
+        );
+        if (task.status === 'FAILED') throw new Error(task.error || 'VOLUME_LIST failed');
+        volumes = Array.isArray((task.result as any)?.volumes) ? (task.result as any).volumes : [];
+      }
+    } catch (e: any) {
+      warnings.push(`volume discovery: ${e?.message || e}`);
+      degraded = true;
+    }
+
+    // ── 3. Transfer volumes to the target and AWAIT it ────────────────
+    const remoteToLocal = !sourceLocal && targetLocal;
+    if (volumes.length > 0) {
+      try {
+        if (sourceLocal && !targetLocal) {
+          // local → remote: export locally, then awaited import on the target.
+          const sourceTaskId = await this.exportLocalVolumes(volumes);
+          const imp = await this.agent.enqueueAndWait(
+            targetServerId,
+            'VOLUME_IMPORT',
+            { volumes, sourceTaskId },
+            30 * 60_000,
+          );
+          if (imp.status === 'FAILED') throw new Error(imp.error || 'volume import failed');
+        } else if (!sourceLocal && !targetLocal) {
+          // remote → remote: export on source (chained import keeps the staged
+          // tars alive), then await that import's completion on the target.
+          const exp = await this.agent.enqueueAndWait(
+            oldServerId,
+            'VOLUME_EXPORT',
+            {
+              volumes,
+              onComplete: [{ serverId: targetServerId, type: 'VOLUME_IMPORT', payload: { volumes } }],
+            },
+            30 * 60_000,
+          );
+          if (exp.status === 'FAILED') throw new Error(exp.error || 'volume export failed');
+          const imp = await this.awaitChainedImport(targetServerId, (exp as any).createdAt);
+          if (!imp || imp.status === 'FAILED') {
+            throw new Error(imp?.error || 'volume import did not complete');
+          }
+        }
+        // remote → local is handled by deferRemoteToLocal below (the import
+        // runs in the VOLUME_EXPORT completion handler after we return).
+      } catch (e: any) {
+        warnings.push(`volume transfer: ${e?.message || e} — source data NOT moved`);
+        degraded = true;
+      }
+    }
+
+    // remote→local imports run in the VOLUME_EXPORT completion handler AFTER
+    // this request returns, so deploying now would race an empty volume. Defer
+    // the deploys to that handler and report the move as in-flight.
+    if (remoteToLocal && volumes.length > 0 && !degraded) {
+      return this.deferRemoteToLocal(userId, projectId, project, target, oldServerId, targetServerId, volumes, warnings, pinnedApps, includePinned);
+    }
+
+    // ── 4. Deploy on the target via the REAL deploy path ──────────────
+    const queued: string[] = [];
+    let deployFailed = false;
+
+    for (const app of project.applications) {
+      try {
+        await this.reassignCollidingPort(app, targetServerId, warnings);
+        // Re-point placement to the target BEFORE deploying so resolveAppServer
+        // inside ops.redeploy ships the stack to the new host. This is NOT the
+        // success flip — project.serverId still points at the source, so a
+        // deploy failure stays recoverable on the old server.
+        await this.prisma.application.update({
+          where: { id: app.id },
+          data: { serverId: targetServerId },
+        });
+        // ops.redeploy ships the full stack (git re-clone / image re-pull /
+        // compose + decrypted env) to the target — never a bare marker.
+        await this.ops.redeploy(userId, app.id);
+        queued.push(app.name);
+      } catch (e: any) {
+        warnings.push(`deploy ${app.name}: ${e?.message || e}`);
+        deployFailed = true;
+        degraded = true;
+      }
+    }
+
+    for (const db of project.databases) {
+      try {
+        const composeYaml = this.renderDbCompose(db);
+        if (!composeYaml) {
+          warnings.push(`deploy db ${db.name}: unsupported type ${db.type} — skipped`);
+          degraded = true;
+          continue;
+        }
+        const t = await this.agent.enqueueAndWait(
+          targetServerId,
+          'DEPLOY',
+          { slug: `db-${db.name}`, appName: `db-${db.name}`, compose: composeYaml },
+          15 * 60_000,
+        );
+        if (t.status === 'FAILED') throw new Error(t.error || 'agent db deploy failed');
+        queued.push(`db:${db.name}`);
+      } catch (e: any) {
+        warnings.push(`deploy db ${db.name}: ${e?.message || e}`);
+        deployFailed = true;
+        degraded = true;
+      }
+    }
+
+    // ── 5. Flip-after-success, or ROLLBACK ────────────────────────────
+    if (deployFailed) {
+      // Do NOT flip. Revert any per-app placement we changed and restart the
+      // source stack so the user is left running where they started.
+      await this.rollbackToSource(userId, project, oldServerId, warnings);
+      const msg = `Project migration FAILED — left running on ${project.server?.name || oldServerId}. ` +
+        `Source volumes are KEPT for recovery. See warnings.`;
+      this.appendMailWarning(project, warnings);
+      this.appendPinnedWarning(pinnedApps, includePinned, warnings);
+      return { status: 'failed', message: msg, queued, warnings, flipped: false };
+    }
+
+    // Success: flip project.serverId + every database.serverId so
+    // resolveDbServer / connHost follow the move, then regenerate Caddy.
     await this.prisma.project.update({
       where: { id: projectId },
       data: { serverId: targetServerId },
     });
-
-    // DEPLOY descriptors — either enqueued directly (no volume transfer) or
-    // chained behind the volume import so containers come up on real data.
-    const deploys: Array<{ serverId: string; type: 'DEPLOY'; payload: any; label: string }> = [
-      ...project.applications.map((app) => ({
-        serverId: targetServerId,
-        type: 'DEPLOY' as const,
-        payload: { applicationId: app.id, slug: slugify(app.name) },
-        label: app.name,
-      })),
-      ...project.databases.map((db) => ({
-        serverId: targetServerId,
-        type: 'DEPLOY' as const,
-        payload: { databaseId: db.id, slug: slugify(db.name) },
-        label: `db:${db.name}`,
-      })),
-    ];
-
-    // ── volume transfer ───────────────────────────────────────────────
-    let volumesInFlight = false;
-    let volumes: string[] = [];
-    try {
-      volumes = sourceLocal
-        ? await this.listLocalProjectVolumes(project.applications, project.databases)
-        : deterministicVolumeNames(project.applications, project.databases);
-    } catch (e: any) {
-      teardownErrors.push(`volume discovery: ${e?.message || e}`);
+    if (includePinned && pinnedApps.length > 0) {
+      // Relocated pinned apps inherit the project default now.
+      await this.prisma.application.updateMany({
+        where: { id: { in: pinnedApps.map((a) => a.id) } },
+        data: { serverId: null },
+      });
     }
-
-    const queued: string[] = [];
-    if (volumes.length > 0) {
-      try {
-        const chainEntries = deploys.map((d) => ({
-          serverId: d.serverId,
-          type: d.type,
-          payload: d.payload,
-        }));
-        if (sourceLocal && !targetLocal) {
-          // Export locally into transfers/<local-id>/, agent pulls from there.
-          const sourceTaskId = await this.exportLocalVolumes(volumes);
-          await this.agent.enqueueTask(targetServerId, 'VOLUME_IMPORT', {
-            volumes,
-            sourceTaskId,
-            onComplete: chainEntries,
-          });
-        } else if (!sourceLocal && !targetLocal) {
-          // Full agent chain: export on source → import on target → deploys.
-          await this.agent.enqueueTask(oldServerId, 'VOLUME_EXPORT', {
-            volumes,
-            onComplete: [
-              { serverId: targetServerId, type: 'VOLUME_IMPORT', payload: { volumes } },
-              ...chainEntries,
-            ],
-          });
-        } else {
-          // remote → local: the export's uploads land on this host already;
-          // the VOLUME_EXPORT completion handler imports them + enqueues
-          // the deferred deploys.
-          await this.agent.enqueueTask(oldServerId, 'VOLUME_EXPORT', {
-            volumes,
-            migrateLocalImport: { volumes, deploys: chainEntries },
-          });
-        }
-        volumesInFlight = true;
-        // Deploys ride the chain — report them as queued.
-        queued.push(...deploys.map((d) => d.label));
-      } catch (e: any) {
-        teardownErrors.push(`volume transfer: ${e?.message || e} — falling back to empty volumes`);
-        this.logger.warn(
-          `Project ${projectId} migrate: volume transfer setup failed (${e?.message || e}) — deploying with empty volumes.`,
-        );
-      }
-    }
-
-    // No transfer in flight (no volumes, or setup failed) → previous
-    // behavior: deploy immediately, volumes start empty.
-    if (!volumesInFlight) {
-      for (const d of deploys) {
-        try {
-          await this.agent.enqueueTask(d.serverId, d.type, d.payload);
-          queued.push(d.label);
-        } catch (e: any) {
-          teardownErrors.push(`redeploy ${d.label.replace(/^db:/, 'db ')}: ${e?.message || e}`);
-        }
-      }
-    }
-
-    // Caddy regen so domains follow the move.
+    await this.prisma.database.updateMany({
+      where: { projectId, serverId: oldServerId },
+      data: { serverId: targetServerId },
+    });
     this.proxy.regenerate().catch(() => {});
 
-    const hasRedeployErrors = teardownErrors.some((e) => e.startsWith('redeploy '));
-    const status = hasRedeployErrors ? 'partial' : 'ok';
-    let message: string;
-    if (status === 'partial') {
-      message = `Project migration started with errors — check warnings. Source volumes are KEPT on the old server for recovery.`;
-    } else if (volumesInFlight) {
-      message = `Project migrated from ${project.server?.name || oldServerId} → ${target.name}. Docker volumes are being transferred asynchronously — apps and databases will deploy on the target once the data arrives. Source volumes are preserved on the old server for recovery.`;
-    } else {
-      message = `Project migrated from ${project.server?.name || oldServerId} → ${target.name}. NOTE: no Docker volumes were transferred; databases and uploads will start empty on the target. Source volumes are preserved on the old server for recovery.`;
+    const status = degraded ? 'partial' : 'ok';
+    const base = `Project migrated from ${project.server?.name || oldServerId} → ${target.name}.`;
+    const volNote = volumes.length > 0
+      ? ' Docker volumes were transferred; source volumes are preserved on the old server for recovery.'
+      : ' No Docker volumes were present to transfer.';
+    const message = status === 'partial'
+      ? `${base} Completed with warnings — check them. Source volumes are KEPT on the old server for recovery.`
+      : `${base}${volNote}`;
+
+    this.appendMailWarning(project, warnings);
+    this.appendPinnedWarning(pinnedApps, includePinned, warnings);
+    return { status, message, queued, warnings, flipped: true };
+  }
+
+  /**
+   * remote→local leg: the volume import runs in the VOLUME_EXPORT completion
+   * handler (onVolumeExportForLocalImport) AFTER this request returns, so we
+   * can't await the deploys here. Re-enqueue the export carrying the real
+   * deploy descriptors for the handler, flip placement, and report in-flight.
+   * Apps deploy as full-stack compose/image/git DEPLOYs (the handler can't
+   * call ops.redeploy); DBs as compose DEPLOYs — never bare {applicationId}.
+   */
+  private async deferRemoteToLocal(
+    userId: string,
+    projectId: string,
+    project: any,
+    target: any,
+    oldServerId: string,
+    targetServerId: string,
+    volumes: string[],
+    warnings: string[],
+    pinnedApps: Array<{ id: string; name: string }>,
+    includePinned: boolean,
+  ) {
+    const deploys: Array<{ serverId: string; type: 'DEPLOY'; payload: any }> = [];
+    for (const app of project.applications) {
+      const payload = await this.buildRemoteAppDeployPayload(app.id);
+      if (payload) deploys.push({ serverId: targetServerId, type: 'DEPLOY', payload });
+      else warnings.push(`deploy ${app.name}: no shippable stack (no compose/image/git) — skipped`);
     }
-    if (pinnedApps.length > 0) {
-      teardownErrors.push(
+    for (const db of project.databases) {
+      const composeYaml = this.renderDbCompose(db);
+      if (composeYaml) {
+        deploys.push({
+          serverId: targetServerId,
+          type: 'DEPLOY',
+          payload: { slug: `db-${db.name}`, appName: `db-${db.name}`, compose: composeYaml },
+        });
+      }
+    }
+
+    // Enqueue the export FIRST. The placement flip below is committed ONLY
+    // if this succeeds — otherwise nothing will ever deploy on the target,
+    // so flipping would strand the project on a server running nothing while
+    // the source sits stopped. On failure we roll back: restart the source
+    // and leave the project pointing at the original server.
+    try {
+      await this.agent.enqueueTask(oldServerId, 'VOLUME_EXPORT', {
+        volumes,
+        migrateLocalImport: { volumes, deploys },
+      });
+    } catch (e: any) {
+      warnings.push(`volume transfer: ${e?.message || e} — migration aborted, restoring source`);
+      // Placement was never flipped in this branch; the source was only
+      // STOPPED. Bring it back up (rollbackToSource reverts any app placement
+      // touched and redeploys/STARTs on the source).
+      await this.rollbackToSource(userId, project, oldServerId, warnings).catch(() => {});
+      this.appendMailWarning(project, warnings);
+      this.appendPinnedWarning(pinnedApps, includePinned, warnings);
+      return {
+        status: 'failed' as const,
+        message: `Migration to ${target.name} could not start (volume export failed to enqueue). The project stays on its original server — restarting it there. Source volumes are intact.`,
+        queued: [],
+        warnings,
+        flipped: false,
+      };
+    }
+
+    // Export enqueued — the deferred deploys ride its completion chain, so
+    // flipping placement is now safe and the source volumes are preserved
+    // for recovery (purgeVolumes:false).
+    await this.prisma.project.update({ where: { id: projectId }, data: { serverId: targetServerId } });
+    if (includePinned && pinnedApps.length > 0) {
+      await this.prisma.application.updateMany({
+        where: { id: { in: pinnedApps.map((a) => a.id) } },
+        data: { serverId: null },
+      });
+    }
+    for (const app of project.applications) {
+      await this.prisma.application.update({ where: { id: app.id }, data: { serverId: targetServerId } });
+    }
+    await this.prisma.database.updateMany({
+      where: { projectId, serverId: oldServerId },
+      data: { serverId: targetServerId },
+    });
+    this.proxy.regenerate().catch(() => {});
+
+    this.appendMailWarning(project, warnings);
+    this.appendPinnedWarning(pinnedApps, includePinned, warnings);
+    return {
+      status: 'ok' as const,
+      message: `Project migrated to ${target.name}. Volumes are transferring; apps and databases deploy on the target once the data arrives. Source volumes are preserved for recovery.`,
+      queued: [...project.applications.map((a: any) => a.name), ...project.databases.map((d: any) => `db:${d.name}`)],
+      warnings,
+      flipped: true,
+    };
+  }
+
+  /**
+   * Poll the target for the VOLUME_IMPORT the agent chained off the export
+   * (handleTaskTermination enqueues it on COMPLETED). Scoped to imports
+   * created at/after `exportCreatedAt` so a stale import from a PRIOR
+   * migration is never mistaken for this one. Returns the terminal task or
+   * null on timeout.
+   */
+  private async awaitChainedImport(targetServerId: string, exportCreatedAt?: Date) {
+    const deadline = Date.now() + 30 * 60_000;
+    const where: any = { serverId: targetServerId, type: 'VOLUME_IMPORT' };
+    if (exportCreatedAt) where.createdAt = { gte: exportCreatedAt };
+    while (Date.now() < deadline) {
+      const imp = await this.prisma.agentTask.findFirst({
+        where,
+        orderBy: { createdAt: 'desc' },
+      });
+      if (imp && (imp.status === 'COMPLETED' || imp.status === 'FAILED')) {
+        return imp as any;
+      }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    return null;
+  }
+
+  /**
+   * Build the full-stack remote DEPLOY payload for an app (compose/image/git),
+   * mirroring what ops.redeploy ships to a remote agent. Returns null when the
+   * app has nothing shippable. Used by the deferred remote→local leg where we
+   * can't call ops.redeploy directly.
+   */
+  private async buildRemoteAppDeployPayload(appId: string): Promise<any | null> {
+    const app = await this.prisma.application.findUnique({ where: { id: appId } });
+    if (!app) return null;
+    const base = {
+      slug: remoteAppSlug(app.name, app.id),
+      appName: app.name,
+      applicationId: app.id,
+    };
+    if (app.dockerComposeFile) {
+      return { ...base, compose: app.dockerComposeFile, envVars: this.decryptEnvVars(app.envVars) };
+    }
+    if (app.dockerImage) {
+      return { ...base, dockerImage: app.dockerImage, port: app.port ?? undefined, hostPort: app.hostPort ?? undefined, envVars: this.decryptEnvVars(app.envVars) };
+    }
+    if (app.gitUrl) {
+      return { ...base, gitUrl: app.gitUrl, gitBranch: app.gitBranch || 'main', envVars: this.decryptEnvVars(app.envVars) };
+    }
+    return null;
+  }
+
+  /**
+   * Decrypt a stored env-var map. Matches application-env.service: the at-rest
+   * shape is `{ __k: 1, v: '<encrypted JSON>' }`; legacy rows are plaintext
+   * `{ KEY: VALUE }`.
+   */
+  private decryptEnvVars(raw: any): Record<string, string> {
+    if (!raw) return {};
+    if (typeof raw === 'object' && raw.__k === 1 && typeof raw.v === 'string') {
+      try {
+        return JSON.parse(this.encryption.decrypt(raw.v));
+      } catch {
+        return {};
+      }
+    }
+    return raw as Record<string, string>;
+  }
+
+  /**
+   * Re-render the compose YAML for a managed database, matching databases.
+   * service's DB_CONFIGS templates. The raw db.name is used for the container
+   * name + db name (NEVER slugified). Returns null for unknown types.
+   * (Duplicated from databases.service because DB_CONFIGS is module-private;
+   * see the deferred note in the batch report.)
+   */
+  private renderDbCompose(db: {
+    name: string; type: string; username: string; password: string; port: number;
+  }): string | null {
+    const name = db.name;
+    const user = db.username;
+    const pass = this.encryption.decrypt(db.password);
+    const port = db.port;
+    switch (db.type) {
+      case 'POSTGRESQL':
+        return `services:\n  ${name}:\n    image: postgres:16-alpine\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:5432"\n    environment:\n      POSTGRES_DB: ${name}\n      POSTGRES_USER: ${user}\n      POSTGRES_PASSWORD: ${pass}\n    volumes:\n      - data:/var/lib/postgresql/data\n    healthcheck:\n      test: ["CMD-SHELL", "pg_isready -U ${user}"]\n      interval: 5s\n      timeout: 5s\n      retries: 5\nvolumes:\n  data:`;
+      case 'MYSQL':
+        return `services:\n  ${name}:\n    image: mysql:8\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:3306"\n    environment:\n      MYSQL_DATABASE: ${name}\n      MYSQL_USER: ${user}\n      MYSQL_PASSWORD: ${pass}\n      MYSQL_ROOT_PASSWORD: ${pass}\n    volumes:\n      - data:/var/lib/mysql\nvolumes:\n  data:`;
+      case 'MARIADB':
+        return `services:\n  ${name}:\n    image: mariadb:11\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:3306"\n    environment:\n      MARIADB_DATABASE: ${name}\n      MARIADB_USER: ${user}\n      MARIADB_PASSWORD: ${pass}\n      MARIADB_ROOT_PASSWORD: ${pass}\n    volumes:\n      - data:/var/lib/mysql\nvolumes:\n  data:`;
+      case 'REDIS':
+        return `services:\n  ${name}:\n    image: redis:7-alpine\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:6379"\n    command: redis-server${pass ? ` --requirepass ${pass}` : ''}\n    volumes:\n      - data:/data\nvolumes:\n  data:`;
+      case 'MONGODB':
+        return `services:\n  ${name}:\n    image: mongo:7\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:27017"\n    environment:\n      MONGO_INITDB_DATABASE: ${name}\n      MONGO_INITDB_ROOT_USERNAME: ${user}\n      MONGO_INITDB_ROOT_PASSWORD: ${pass}\n    volumes:\n      - data:/data/db\nvolumes:\n  data:`;
+      case 'KEYDB':
+        return `services:\n  ${name}:\n    image: eqalpha/keydb:latest\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:6379"\n    command: keydb-server${pass ? ` --requirepass ${pass}` : ''} --server-threads 2\n    volumes:\n      - data:/data\nvolumes:\n  data:`;
+      case 'DRAGONFLY':
+        return `services:\n  ${name}:\n    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:6379"\n    ulimits:\n      memlock: -1\n    command: ["--logtostderr"${pass ? `, "--requirepass=${pass}"` : ''}]\n    volumes:\n      - data:/data\nvolumes:\n  data:`;
+      case 'CLICKHOUSE':
+        return `services:\n  ${name}:\n    image: clickhouse/clickhouse-server:latest\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:8123"\n      - "${port + 1000}:9000"\n    ulimits:\n      nofile:\n        soft: 262144\n        hard: 262144\n    environment:\n      CLICKHOUSE_DB: ${name}\n      CLICKHOUSE_USER: ${user}\n      CLICKHOUSE_PASSWORD: ${pass}\n      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1\n    volumes:\n      - data:/var/lib/clickhouse\nvolumes:\n  data:`;
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * If `app` has a stored hostPort that collides with an app already on the
+   * TARGET server, reassign a free non-reserved port scoped to that server and
+   * persist it (so two relocated apps don't fight over the same host port).
+   */
+  private async reassignCollidingPort(
+    app: { id: string; name: string; hostPort: number | null },
+    targetServerId: string,
+    warnings: string[],
+  ): Promise<void> {
+    if (app.hostPort == null) return;
+    const others = await this.prisma.application.findMany({
+      where: { id: { not: app.id }, hostPort: { not: null }, project: { serverId: targetServerId } },
+      select: { hostPort: true },
+    });
+    const used = new Set<number>(others.map((o) => o.hostPort!).filter((n) => !!n));
+    if (!used.has(app.hostPort)) return;
+    const old = app.hostPort;
+    let free: number | null = null;
+    for (let p = 8080; p <= 9999; p++) {
+      if (RESERVED_HOST_PORTS.has(p) || used.has(p)) continue;
+      free = p;
+      break;
+    }
+    if (free == null) {
+      warnings.push(`port: ${app.name} hostPort ${old} collides on the target and no free port was available`);
+      return;
+    }
+    await this.prisma.application.update({ where: { id: app.id }, data: { hostPort: free } });
+    app.hostPort = free;
+    warnings.push(`port: ${app.name} hostPort reassigned ${old} → ${free} to avoid a collision on the target`);
+  }
+
+  /**
+   * Migration rollback: revert per-app placement back to the source and
+   * RESTART the source stack so the user keeps running where they started.
+   */
+  private async rollbackToSource(
+    userId: string,
+    project: any,
+    oldServerId: string,
+    warnings: string[],
+  ): Promise<void> {
+    for (const app of project.applications) {
+      try {
+        // Revert placement to whatever it was before (pinned apps keep their
+        // explicit serverId; inherit-apps go back to null → project default).
+        await this.prisma.application.update({
+          where: { id: app.id },
+          data: { serverId: app.serverId && app.serverId !== oldServerId ? app.serverId : null },
+        });
+      } catch {}
+      try {
+        await this.ops.redeploy(userId, app.id);
+      } catch (e: any) {
+        warnings.push(`rollback restart ${app.name}: ${e?.message || e}`);
+      }
+    }
+    for (const db of project.databases) {
+      try {
+        await this.agent.enqueueTask(oldServerId, 'START', { slug: `db-${db.name}` });
+      } catch (e: any) {
+        warnings.push(`rollback restart db ${db.name}: ${e?.message || e}`);
+      }
+    }
+  }
+
+  private appendMailWarning(project: { domains?: Array<{ id: string }> }, warnings: string[]): void {
+    const n = project.domains?.length ?? 0;
+    if (n > 0) {
+      warnings.push(`${n} mailbox(es) for these domains remain on the platform host (mail is not relocated).`);
+    }
+  }
+
+  private appendPinnedWarning(
+    pinnedApps: Array<{ name: string }>,
+    includePinned: boolean,
+    warnings: string[],
+  ): void {
+    if (!includePinned && pinnedApps.length > 0) {
+      warnings.push(
         `${pinnedApps.length} app(s) pinned to other servers were not migrated (their placement is explicit): ${pinnedApps.map((a) => a.name).join(', ')}`,
       );
     }
-    return { status, message, queued, warnings: teardownErrors };
   }
 
   /**

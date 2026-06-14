@@ -2,6 +2,7 @@
 
 import { useState, useEffect, type FormEvent } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus,
@@ -13,6 +14,8 @@ import {
   Circle,
   Globe,
   Loader2,
+  Upload,
+  AlertTriangle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -53,6 +56,28 @@ interface LocalServer {
   status?: string;
   host?: string | null;
 }
+
+// ── Project import (.dctproj transfer) ──────────────────────────────
+interface TransferManifest {
+  project: { name: string; description?: string };
+  applications: { name: string; framework?: string; gitUrl?: string; dockerImage?: string }[];
+  databases: { name: string; type?: string }[];
+  domains: { domain: string; applicationName?: string }[];
+  includesData: boolean;
+}
+interface ParseResult {
+  stagedId: string;
+  manifest: TransferManifest;
+  conflicts: { domains: string[]; projectNameTaken: boolean };
+  warnings: string[];
+}
+interface ApplyResult {
+  status: 'ok' | 'partial';
+  projectId: string;
+  message: string;
+  warnings: string[];
+}
+type DomainStrategy = 'skip' | 'attach';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -102,6 +127,7 @@ function statusDotColor(status: string): string {
 
 export default function ProjectsPage() {
   const { t } = useTranslation();
+  const router = useRouter();
   const queryClient = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const isAdmin = user?.role === 'ADMIN' || user?.role === 'SUPERADMIN';
@@ -158,6 +184,71 @@ export default function ProjectsPage() {
   // --- Delete confirmation ---
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
 
+  // --- Import dialog (multi-step: 1=upload, 2=review) ---
+  const [showImport, setShowImport] = useState(false);
+  const [importStep, setImportStep] = useState<1 | 2>(1);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPassphrase, setImportPassphrase] = useState('');
+  const [importParsed, setImportParsed] = useState<ParseResult | null>(null);
+  const [importTargetServerId, setImportTargetServerId] = useState('');
+  const [importDomainStrategy, setImportDomainStrategy] = useState<DomainStrategy>('skip');
+
+  function resetImport() {
+    setShowImport(false);
+    setImportStep(1);
+    setImportFile(null);
+    setImportPassphrase('');
+    setImportParsed(null);
+    setImportTargetServerId('');
+    setImportDomainStrategy('skip');
+  }
+
+  // Step 1 → parse the raw .dctproj bytes. rawFetch streams the File body as
+  // octet-stream (no multipart); the passphrase rides in the query string. A
+  // wrong passphrase / corrupted archive surfaces as the backend's message.
+  const parseMutation = useMutation({
+    mutationFn: async () => {
+      if (!importFile) throw new Error(t('projects.import.noFile'));
+      const res = await api.rawFetch(
+        `/projects/transfer/parse?passphrase=${encodeURIComponent(importPassphrase)}`,
+        { method: 'POST', body: importFile, headers: { 'Content-Type': 'application/octet-stream' } },
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body?.message === 'string' ? body.message : `Request failed (${res.status}).`);
+      }
+      return res.json() as Promise<ParseResult>;
+    },
+    onSuccess: (data) => {
+      setImportParsed(data);
+      setImportStep(2);
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  // Step 2 → apply the staged transfer.
+  const applyMutation = useMutation({
+    mutationFn: () =>
+      api.post<ApplyResult>('/projects/transfer/apply', {
+        stagedId: importParsed!.stagedId,
+        passphrase: importPassphrase,
+        ...(isMultiMode && importTargetServerId ? { targetServerId: importTargetServerId } : {}),
+        domainStrategy: importDomainStrategy,
+      }),
+    onSuccess: (data) => {
+      if (data.status === 'partial') {
+        toast.warning(t('projects.import.partial'));
+      } else {
+        toast.success(t('projects.import.success'));
+      }
+      for (const w of data.warnings || []) toast.warning(w);
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      resetImport();
+      router.push(`/dashboard/projects/${data.projectId}`);
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
   // --- Mutations ---
   const createMutation = useMutation({
     mutationFn: (body: { name: string; description?: string; serverId: string }) =>
@@ -212,10 +303,16 @@ export default function ProjectsPage() {
             </Badge>
           )}
         </div>
-        <Button onClick={() => setShowCreate(true)}>
-          <Plus size={16} />
-          {t('projects.new')}
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setShowImport(true)}>
+            <Upload size={16} />
+            {t('projects.import.btn')}
+          </Button>
+          <Button onClick={() => setShowCreate(true)}>
+            <Plus size={16} />
+            {t('projects.new')}
+          </Button>
+        </div>
       </div>
 
       {/* List */}
@@ -470,6 +567,147 @@ export default function ProjectsPage() {
             {deleteMutation.isPending ? t('common.deleting') : t('common.delete')}
           </Button>
         </DialogFooter>
+      </Dialog>
+
+      {/* ---- Import Project Dialog (multi-step) ---- */}
+      <Dialog open={showImport} onClose={resetImport} className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Upload size={16} /> {t('projects.import.title')}
+          </DialogTitle>
+          <DialogDescription>{t('projects.import.desc')}</DialogDescription>
+        </DialogHeader>
+
+        {importStep === 1 ? (
+          <>
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="import-file">{t('projects.import.file')}</Label>
+                <Input
+                  id="import-file"
+                  type="file"
+                  accept=".dctproj"
+                  onChange={(e) => setImportFile(e.target.files?.[0] ?? null)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="import-pass">{t('projects.import.passphrase')}</Label>
+                <Input
+                  id="import-pass"
+                  type="password"
+                  placeholder={t('projects.import.passphrasePlaceholder')}
+                  value={importPassphrase}
+                  onChange={(e) => setImportPassphrase(e.target.value)}
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={resetImport}>{t('common.cancel')}</Button>
+              <Button
+                disabled={!importFile || !importPassphrase || parseMutation.isPending}
+                onClick={() => parseMutation.mutate()}
+              >
+                {parseMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+                {parseMutation.isPending ? t('projects.import.reviewing') : t('projects.import.review')}
+              </Button>
+            </DialogFooter>
+          </>
+        ) : importParsed ? (
+          <>
+            <div className="space-y-3">
+              {/* Manifest summary */}
+              <div className="rounded-lg border border-border p-3 space-y-2 text-sm">
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('projects.import.summary')}</p>
+                <div className="flex items-center gap-2">
+                  <FolderKanban size={14} className="text-primary shrink-0" />
+                  <span className="font-medium">{importParsed.manifest.project.name}</span>
+                </div>
+                {importParsed.manifest.applications.length > 0 && (
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground">{t('projects.import.appsCount', { n: importParsed.manifest.applications.length })}</p>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {importParsed.manifest.applications.map((a, i) => (
+                        <Badge key={`${a.name}-${i}`} variant="outline" className="text-[10px] gap-1">
+                          <AppWindow size={9} /> {a.name}{a.framework ? ` · ${a.framework}` : ''}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {importParsed.manifest.databases.length > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('projects.import.databasesCount', { n: importParsed.manifest.databases.length })}: {importParsed.manifest.databases.map((d) => d.name).join(', ')}
+                  </p>
+                )}
+                <p className="text-xs text-muted-foreground">{t('projects.import.domainsCount', { n: importParsed.manifest.domains.length })}</p>
+                <p className="text-xs text-muted-foreground">
+                  {importParsed.manifest.includesData ? t('projects.import.includesData') : t('projects.import.noData')}
+                </p>
+              </div>
+
+              {/* Conflicts */}
+              {(importParsed.conflicts.projectNameTaken || importParsed.conflicts.domains.length > 0) && (
+                <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 text-xs space-y-1">
+                  <p className="font-semibold text-orange-600 flex items-center gap-1">
+                    <AlertTriangle size={12} /> {t('projects.import.conflicts')}
+                  </p>
+                  {importParsed.conflicts.projectNameTaken && (
+                    <p className="text-muted-foreground">{t('projects.import.conflictProjectName', { name: importParsed.manifest.project.name })}</p>
+                  )}
+                  {importParsed.conflicts.domains.length > 0 && (
+                    <p className="text-muted-foreground">{t('projects.import.conflictDomains', { domains: importParsed.conflicts.domains.join(', ') })}</p>
+                  )}
+                </div>
+              )}
+
+              {/* Warnings */}
+              {importParsed.warnings.length > 0 && (
+                <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs space-y-1">
+                  <p className="font-semibold flex items-center gap-1">
+                    <AlertTriangle size={12} className="text-muted-foreground" /> {t('projects.import.warnings')}
+                  </p>
+                  <ul className="list-disc pl-4 text-muted-foreground space-y-0.5">
+                    {importParsed.warnings.map((w, i) => <li key={i}>{w}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {/* Target server (MULTI mode only) */}
+              {isMultiMode && (
+                <div className="space-y-2">
+                  <Label className="text-xs">{t('projects.import.targetServer')}</Label>
+                  <Select value={importTargetServerId} onChange={(e) => setImportTargetServerId(e.target.value)}>
+                    <option value="">{t('projects.import.selectServerOption')}</option>
+                    {onlineServers.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name}{s.host ? ` (${s.host})` : ''}</option>
+                    ))}
+                  </Select>
+                </div>
+              )}
+
+              {/* Domain strategy */}
+              <div className="space-y-2">
+                <Label className="text-xs">{t('projects.import.domainStrategy')}</Label>
+                <Select value={importDomainStrategy} onChange={(e) => setImportDomainStrategy(e.target.value as DomainStrategy)}>
+                  <option value="skip">{t('projects.import.domainSkip')}</option>
+                  <option value="attach">{t('projects.import.domainAttach')}</option>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {importDomainStrategy === 'attach' ? t('projects.import.domainAttachDesc') : t('projects.import.domainSkipDesc')}
+                </p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" disabled={applyMutation.isPending} onClick={() => { setImportStep(1); setImportParsed(null); }}>
+                {t('projects.import.back')}
+              </Button>
+              <Button disabled={applyMutation.isPending} onClick={() => applyMutation.mutate()}>
+                {applyMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+                {applyMutation.isPending ? t('projects.import.importing') : t('projects.import.submit')}
+              </Button>
+            </DialogFooter>
+          </>
+        ) : null}
       </Dialog>
     </div>
   );

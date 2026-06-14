@@ -677,9 +677,18 @@ export class ApplicationsService {
    *
    * `transferVolumes` (default false) additionally ships the app's docker
    * volumes to the target before redeploying — same VOLUME_EXPORT/IMPORT
-   * machinery as the project-level migrate. Local→remote only for now
-   * (the common case: moving an app off the platform host); other
-   * combinations redeploy with empty volumes and say so.
+   * machinery as the project-level migrate, now wired for ALL three
+   * source/target combinations (local→remote, remote→remote, remote→local).
+   * The import is AWAITED before the redeploy: the agent runs claimed tasks
+   * CONCURRENTLY, so the stack must not come up before the data lands.
+   *
+   * Volume discovery uses the real names — `docker volume ls` when the
+   * source is local, the Phase-1 VOLUME_LIST agent task when the source is
+   * remote (guessing prefixes would miss differently-named volumes).
+   *
+   * Compose/marketplace apps redeploy via ops.redeploy(), which ships
+   * app.dockerComposeFile to the agent; we reject up front (before any
+   * teardown) when that file is missing and the target is remote.
    */
   async moveServer(userId: string, id: string, targetServerId: string, transferVolumes = false) {
     const app = await this.assertOwnership(userId, id, 'ADMIN');
@@ -697,45 +706,118 @@ export class ApplicationsService {
     const currentLocal = isAppLocal(current);
     const targetLocal = isLocalHost(target.host);
 
-    // Optional volume transfer — BEFORE teardown so the export reads live
-    // volumes. Only local→remote is wired here; other combos fall through
-    // with a warning in the response message.
-    let volumesShipped = false;
+    // ── compose/marketplace precondition (BEFORE any teardown) ─────────
+    // A compose app on a remote target redeploys by shipping
+    // app.dockerComposeFile to the agent (Phase-1 ops.redeploy). Without
+    // it there is nothing to bring up — reject NOW so we never tear the
+    // app down on the source only to fail on the target.
+    const isComposeApp =
+      !app.gitUrl && !app.dockerImage && app.framework === 'DOCKER_COMPOSE';
+    if (isComposeApp && !targetLocal && !app.dockerComposeFile) {
+      throw new BadRequestException(
+        `"${app.name}" has no stored compose file — it cannot be redeployed on a remote server. ` +
+          `Add its docker-compose.yml (via the compose editor) before moving it.`,
+      );
+    }
+
+    // ── volume discovery — BEFORE teardown so we read live volumes ─────
+    // Local source: real `docker volume ls`. Remote source: the Phase-1
+    // VOLUME_LIST agent task (real remote names, not guessed prefixes).
+    let volumes: string[] = [];
     let volumeWarning = '';
     if (transferVolumes) {
-      if (currentLocal && !targetLocal) {
-        try {
+      const prefix = appVolumePrefix(app.name, id);
+      try {
+        if (currentLocal) {
           const { stdout } = await execFileAsync('docker', ['volume', 'ls', '--format', '{{.Name}}'], { timeout: 15_000 });
-          const prefix = appVolumePrefix(app.name, id);
-          const volumes = stdout.trim().split('\n').filter(Boolean).filter((v) => v.startsWith(prefix));
-          if (volumes.length > 0) {
-            // Export locally into transfers/<id>/, then have the target
-            // import them. AWAIT the import: the agent claims tasks in
-            // batches and runs them CONCURRENTLY (semaphore + goroutines),
-            // so merely enqueueing import-before-deploy does NOT order them
-            // — the stack could come up on empty volumes while the import
-            // is still streaming. Serializing here is the only safe order.
-            const transferId = await this.exportLocalVolumesForMove(volumes);
-            const importTask = await this.agent.enqueueAndWait(
-              targetServerId,
-              'VOLUME_IMPORT',
-              { volumes, sourceTaskId: transferId },
-              15 * 60_000,
-            );
-            if (importTask.status === 'FAILED') {
-              throw new Error(importTask.error || 'volume import failed on the target');
-            }
-            volumesShipped = true;
+          volumes = stdout.trim().split('\n').filter(Boolean).filter((v) => v.startsWith(prefix));
+        } else if (current) {
+          const listTask = await this.agent.enqueueAndWait(
+            current.id,
+            // VOLUME_LIST is handled by the Phase-1 agent but is not yet a
+            // member of the Prisma TaskType enum — cast until the enum is
+            // migrated (the agent already dispatches it).
+            'VOLUME_LIST' as any,
+            { prefixes: [prefix] },
+            60_000,
+          );
+          if (listTask.status === 'FAILED') {
+            throw new Error(listTask.error || 'volume discovery failed on the source');
           }
-        } catch (e: any) {
-          volumeWarning = ` Volume transfer failed (${e?.message || e}) — continuing with empty volumes.`;
+          const r: any = listTask.result;
+          volumes = Array.isArray(r?.volumes) ? r.volumes : [];
         }
-      } else {
-        volumeWarning = ' Volume transfer is only supported local→remote for now — continuing with empty volumes.';
+      } catch (e: any) {
+        volumeWarning = ` Volume discovery failed (${e?.message || e}) — continuing with empty volumes.`;
       }
     }
 
-    // Tear down on the CURRENT server, volumes kept.
+    // ── volume transfer — AWAITED, all three combos ────────────────────
+    // The agent claims tasks in batches and runs them CONCURRENTLY, so
+    // merely enqueueing import-before-deploy does NOT order them. We block
+    // here until the import is COMPLETED, then redeploy below.
+    let volumesShipped = false;
+    if (transferVolumes && volumes.length > 0) {
+      try {
+        if (currentLocal && !targetLocal) {
+          // local → remote: export here, target imports from our transfers/.
+          const transferId = await this.exportLocalVolumesForMove(volumes);
+          const importTask = await this.agent.enqueueAndWait(
+            targetServerId,
+            'VOLUME_IMPORT',
+            { volumes, sourceTaskId: transferId },
+            15 * 60_000,
+          );
+          if (importTask.status === 'FAILED') {
+            throw new Error(importTask.error || 'volume import failed on the target');
+          }
+          volumesShipped = true;
+        } else if (!currentLocal && current && !targetLocal) {
+          // remote → remote: export on source, then import on target
+          // threading the export's taskId so it downloads the uploaded tars.
+          const exportTask = await this.agent.enqueueAndWait(
+            current.id,
+            'VOLUME_EXPORT',
+            { volumes },
+            15 * 60_000,
+          );
+          if (exportTask.status === 'FAILED') {
+            throw new Error(exportTask.error || 'volume export failed on the source');
+          }
+          const importTask = await this.agent.enqueueAndWait(
+            targetServerId,
+            'VOLUME_IMPORT',
+            { volumes, sourceTaskId: exportTask.id },
+            15 * 60_000,
+          );
+          if (importTask.status === 'FAILED') {
+            throw new Error(importTask.error || 'volume import failed on the target');
+          }
+          volumesShipped = true;
+        } else if (!currentLocal && current && targetLocal) {
+          // remote → local: export on source (uploads land on THIS host),
+          // then untar each into a local docker volume.
+          const exportTask = await this.agent.enqueueAndWait(
+            current.id,
+            'VOLUME_EXPORT',
+            { volumes },
+            15 * 60_000,
+          );
+          if (exportTask.status === 'FAILED') {
+            throw new Error(exportTask.error || 'volume export failed on the source');
+          }
+          await this.importVolumesLocally(exportTask.id, volumes);
+          volumesShipped = true;
+        }
+      } catch (e: any) {
+        volumeWarning = ` Volume transfer failed (${e?.message || e}) — continuing with empty volumes.`;
+      }
+    }
+
+    // ── tear down on the CURRENT server, volumes kept ──────────────────
+    // For a remote source we AWAIT the REMOVE (purgeVolumes:false) so the
+    // old containers are confirmed down before the app comes up on the
+    // target — otherwise the same domain could double-run (split brain).
     if (currentLocal) {
       const appDir = resolveAppDir(slug, id);
       if (fs.existsSync(appDir)) {
@@ -744,13 +826,39 @@ export class ApplicationsService {
       try { await execFileAsync('docker', ['rm', '-f', app.containerName || containerName(slug)]); } catch {}
     } else if (current) {
       try {
-        await this.agent.enqueueTask(current.id, 'REMOVE', {
-          slug: remoteAppSlug(app.name, id),
-          legacySlug: slug,
-          containerName: app.containerName || containerName(slug),
-          purgeVolumes: false,
-        });
+        await this.agent.enqueueAndWait(
+          current.id,
+          'REMOVE',
+          {
+            slug: remoteAppSlug(app.name, id),
+            legacySlug: slug,
+            containerName: app.containerName || containerName(slug),
+            purgeVolumes: false,
+          },
+          5 * 60_000,
+        );
       } catch {}
+    }
+
+    // ── port re-check on the target ────────────────────────────────────
+    // The app's hostPort may already be taken by another app on the target.
+    // Reassign a free one (and persist) before the redeploy resolves it.
+    let portNote = '';
+    if (app.hostPort != null) {
+      const neighbours = await this.prisma.application.findMany({
+        where: { serverId: targetServerId, id: { not: id }, hostPort: { not: null } },
+        select: { hostPort: true },
+      });
+      const taken = new Set<number>([
+        ...RESERVED_HOST_PORTS,
+        ...neighbours.map((n) => n.hostPort!).filter((p) => p != null),
+      ]);
+      if (taken.has(app.hostPort)) {
+        let free = app.hostPort;
+        while (taken.has(free) && free < 65535) free++;
+        await this.prisma.application.update({ where: { id }, data: { hostPort: free } });
+        portNote = ` Host port ${app.hostPort} was taken on ${target.name} — reassigned to ${free}.`;
+      }
     }
 
     // Flip placement: NULL = inherit when the target IS the project default.
@@ -758,31 +866,99 @@ export class ApplicationsService {
       where: { id: app.projectId },
       select: { serverId: true },
     });
+    const inheritOnTarget = proj?.serverId === targetServerId;
     await this.prisma.application.update({
       where: { id },
       data: {
-        serverId: proj?.serverId === targetServerId ? null : targetServerId,
+        serverId: inheritOnTarget ? null : targetServerId,
         status: 'DEPLOYING',
       },
     });
 
-    // Redeploy on the target via the standard redeploy path (it resolves
-    // the app's server fresh, so it lands on the new machine).
-    const result = await this.ops.redeploy(userId, id).catch(async (err: any) => {
-      await this.prisma.application.update({
-        where: { id },
-        data: { status: 'ERROR' },
-      }).catch(() => {});
-      throw err;
-    });
+    // ── redeploy on the target ─────────────────────────────────────────
+    // The app is already torn down on the source. If the redeploy throws,
+    // flip back to the source and try to bring it up there so the user is
+    // not left with a dead app; if even that fails, mark ERROR with a
+    // message that says where the data still lives. Volumes stay KEPT.
+    let result: any;
+    try {
+      result = await this.ops.redeploy(userId, id);
+    } catch (err: any) {
+      const srcServerId = current?.id ?? null;
+      // resolveAppServer returns {id, host} only — fetch the friendly name
+      // for the message (fall back to the id, then a generic label).
+      const srcServer = srcServerId
+        ? await this.prisma.server
+            .findUnique({ where: { id: srcServerId }, select: { name: true } })
+            .catch(() => null)
+        : null;
+      const sourceName = srcServer?.name || srcServerId || 'the original server';
+      if (srcServerId) {
+        const proj2 = await this.prisma.project
+          .findUnique({ where: { id: app.projectId }, select: { serverId: true } })
+          .catch(() => null);
+        await this.prisma.application.update({
+          where: { id },
+          data: {
+            serverId: proj2?.serverId === srcServerId ? null : srcServerId,
+            status: 'DEPLOYING',
+          },
+        }).catch(() => {});
+        try {
+          await this.ops.redeploy(userId, id);
+          this.proxy.regenerate().catch(() => {});
+          throw new BadRequestException(
+            `Move to ${target.name} failed (${err?.message || err}). The app was restored on ${sourceName} — its data is intact there.`,
+          );
+        } catch (recoverErr: any) {
+          if (recoverErr instanceof BadRequestException) throw recoverErr;
+          // recovery deploy itself failed — fall through to ERROR.
+        }
+      }
+      await this.prisma.application
+        .update({ where: { id }, data: { status: 'ERROR' } })
+        .catch(() => {});
+      throw new BadRequestException(
+        `Move to ${target.name} failed (${err?.message || err}) and the app could not be restored automatically. ` +
+          `It is currently DOWN. Its docker volumes are preserved on ${sourceName}; re-deploy it there to recover.`,
+      );
+    }
+
     this.proxy.regenerate().catch(() => {});
     const volumeNote = volumesShipped
-      ? ' Docker volumes are being transferred — data appears once the import lands.'
+      ? ' Docker volumes were transferred — data is on the new server.'
       : ` Volumes were NOT transferred — databases/uploads start empty on the new server (the old server keeps them).${volumeWarning}`;
     return {
-      message: `App moving to ${target.name}.${volumeNote}`,
+      message: `App moving to ${target.name}.${volumeNote}${portNote}`,
       deployment: result,
     };
+  }
+
+  /** Import previously-exported volume tars (uploaded under a remote
+   *  VOLUME_EXPORT's taskId, landing on THIS host) into local docker
+   *  volumes. Used by the remote→local move leg. */
+  private async importVolumesLocally(exportTaskId: string, volumes: string[]): Promise<void> {
+    const dir = this.agent.transferDir(exportTaskId);
+    for (const vol of volumes) {
+      const file = path.join(dir, `${path.basename(vol)}.tar.gz`);
+      if (!fs.existsSync(file)) {
+        throw new Error(`exported tar missing for volume "${vol}"`);
+      }
+      // Idempotent — succeeds when the volume already exists.
+      await execFileAsync('docker', ['volume', 'create', vol], { timeout: 15_000 });
+      await new Promise<void>((resolve, reject) => {
+        const input = fs.createReadStream(file);
+        const child = spawn('docker', ['run', '--rm', '-i', '-v', `${vol}:/data`, 'busybox', 'tar', '-xzf', '-', '-C', '/data']);
+        const timer = setTimeout(() => child.kill('SIGKILL'), 1_800_000);
+        input.pipe(child.stdin);
+        child.once('error', (err) => { clearTimeout(timer); input.destroy(); reject(err); });
+        child.once('close', (code) => {
+          clearTimeout(timer);
+          if (code === 0) resolve();
+          else reject(new Error(`volume import exited ${code}`));
+        });
+      });
+    }
   }
 
   /** Export local docker volumes into transfers/<id>/ for a remote import.

@@ -8,7 +8,7 @@ import {
   ArrowLeft, Trash2, Server, Rocket, Plus, ExternalLink, Store,
   FolderKanban, Activity, Users, Shield, Crown, UserPlus, Loader2,
   ArrowRightLeft, AlertTriangle, Network, Database, Copy, Check, Info,
-  HardDrive,
+  HardDrive, Download,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -95,6 +95,11 @@ export default function ProjectDetailPage() {
   const [showDelete, setShowDelete] = useState(false);
   const [showMigrate, setShowMigrate] = useState(false);
   const [migrateTargetId, setMigrateTargetId] = useState('');
+  const [migrateIncludePinned, setMigrateIncludePinned] = useState(false);
+  const [showExport, setShowExport] = useState(false);
+  const [exportIncludeData, setExportIncludeData] = useState(false);
+  const [exportPassphrase, setExportPassphrase] = useState('');
+  const [exportConfirm, setExportConfirm] = useState('');
   const timeAgo = useMemo(
     () =>
       makeTimeAgo(t, {
@@ -212,16 +217,59 @@ export default function ProjectDetailPage() {
 
   const migrateMutation = useMutation({
     mutationFn: (targetServerId: string) =>
-      api.post(`/projects/${id}/migrate`, { targetServerId }) as Promise<{ message: string; queued: string[]; warnings: string[] }>,
+      api.post(`/projects/${id}/migrate`, { targetServerId, includePinned: migrateIncludePinned }) as Promise<{ status: string; message: string; queued: string[]; warnings: string[] }>,
     onSuccess: (data) => {
-      toast.success(data.message);
-      if (data.warnings.length > 0) {
-        toast.warning(t('toast.migrationWarnings', { n: data.warnings.length }));
+      // The backend now reports an honest status: 'ok' only when nothing
+      // degraded, 'partial' when a transfer/teardown/deploy was imperfect,
+      // 'failed' when it rolled back to the source. Surface it accordingly.
+      if (data.status === 'failed') {
+        toast.error(data.message);
+      } else if (data.status === 'partial') {
+        toast.warning(data.message);
+      } else {
+        toast.success(data.message);
       }
+      // Show each concrete warning (mail stays on host, pinned apps, port
+      // reassignment, volume notes) so a 'partial' isn't a silent surprise.
+      for (const w of data.warnings || []) toast.warning(w);
       queryClient.invalidateQueries({ queryKey: ['project', id] });
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       setShowMigrate(false);
       setMigrateTargetId('');
+      setMigrateIncludePinned(false);
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  // ── Export project (.dctproj) ───────────────────────────────────────
+  // Two-step: POST /export returns a one-shot download token, then a raw
+  // GET streams the binary which we turn into a browser download. rawFetch
+  // shares the auth/refresh pipeline (the bearer is added for us).
+  const exportPassValid = exportPassphrase.length >= 12;
+  const exportPassMatch = exportPassphrase === exportConfirm;
+  const exportMutation = useMutation({
+    mutationFn: async () => {
+      const { downloadToken, filename } = await api.post<{ downloadToken: string; filename: string }>(
+        `/projects/${id}/export`,
+        { includeData: exportIncludeData, passphrase: exportPassphrase },
+      );
+      const res = await api.rawFetch(`/projects/transfer/download/${downloadToken}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    },
+    onSuccess: () => {
+      toast.success(t('projects.export.success'));
+      setShowExport(false);
+      setExportIncludeData(false);
+      setExportPassphrase('');
+      setExportConfirm('');
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -395,6 +443,11 @@ export default function ProjectDetailPage() {
           </div>
           {project.description && <p className="text-sm text-muted-foreground mt-1">{project.description}</p>}
         </div>
+        {has(myRole, 'ADMIN') && (
+          <Button variant="outline" onClick={() => setShowExport(true)}>
+            <Download size={14} /> {t('projects.export.btn')}
+          </Button>
+        )}
         {has(myRole, 'OWNER') && (
           <Button variant="destructive" onClick={() => setShowDelete(true)}>
             <Trash2 size={14} /> {t('common.delete')}
@@ -995,16 +1048,98 @@ export default function ProjectDetailPage() {
                 ))}
             </Select>
           </div>
+
+          <label className="flex items-start gap-2 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={migrateIncludePinned}
+              onChange={(e) => setMigrateIncludePinned(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">{t('projects.migrateIncludePinned')}</span>
+              <span className="text-muted-foreground block">{t('projects.migrateIncludePinnedDesc')}</span>
+            </span>
+          </label>
+
+          <p className="text-xs text-muted-foreground">{t('projects.migrateDataNote')}</p>
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => { setShowMigrate(false); setMigrateTargetId(''); }}>{t('common.cancel')}</Button>
+          <Button variant="outline" onClick={() => { setShowMigrate(false); setMigrateTargetId(''); setMigrateIncludePinned(false); }}>{t('common.cancel')}</Button>
           <Button
             disabled={!migrateTargetId || migrateMutation.isPending}
             onClick={() => migrateMutation.mutate(migrateTargetId)}
           >
             {migrateMutation.isPending && <Loader2 size={12} className="animate-spin" />}
             {t('projects.migrateBtn')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* Export Dialog */}
+      <Dialog open={showExport} onClose={() => { setShowExport(false); setExportPassphrase(''); setExportConfirm(''); }}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Download size={16} /> {t('projects.export.title')}
+          </DialogTitle>
+          <DialogDescription>{t('projects.export.desc')}</DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <label className="flex items-start gap-2 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={exportIncludeData}
+              onChange={(e) => setExportIncludeData(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">{t('projects.export.includeData')}</span>
+              <span className="text-muted-foreground block">{t('projects.export.includeDataDesc')}</span>
+            </span>
+          </label>
+
+          <div className="space-y-2">
+            <Label className="text-xs">{t('projects.export.passphrase')}</Label>
+            <Input
+              type="password"
+              placeholder={t('projects.export.passphrasePlaceholder')}
+              value={exportPassphrase}
+              onChange={(e) => setExportPassphrase(e.target.value)}
+            />
+            {exportPassphrase.length > 0 && !exportPassValid && (
+              <p className="text-xs text-red-500">{t('projects.export.passphraseTooShort')}</p>
+            )}
+          </div>
+
+          <div className="space-y-2">
+            <Label className="text-xs">{t('projects.export.confirmPassphrase')}</Label>
+            <Input
+              type="password"
+              placeholder={t('projects.export.passphrasePlaceholder')}
+              value={exportConfirm}
+              onChange={(e) => setExportConfirm(e.target.value)}
+            />
+            {exportConfirm.length > 0 && !exportPassMatch && (
+              <p className="text-xs text-red-500">{t('projects.export.passphraseMismatch')}</p>
+            )}
+          </div>
+
+          <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 text-xs flex items-start gap-2">
+            <AlertTriangle size={14} className="text-orange-500 shrink-0 mt-0.5" />
+            <p className="text-muted-foreground">{t('projects.export.warning')}</p>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => { setShowExport(false); setExportPassphrase(''); setExportConfirm(''); }}>{t('common.cancel')}</Button>
+          <Button
+            disabled={!exportPassValid || !exportPassMatch || exportMutation.isPending}
+            onClick={() => exportMutation.mutate()}
+          >
+            {exportMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+            {exportMutation.isPending ? t('projects.export.exporting') : t('projects.export.submit')}
           </Button>
         </DialogFooter>
       </Dialog>

@@ -269,6 +269,40 @@ func TestVolumeArgvs(t *testing.T) {
 	if got := volumeImportArgv("myvol"); !reflect.DeepEqual(got, wantImp) {
 		t.Errorf("volumeImportArgv = %v, want %v", got, wantImp)
 	}
+	wantList := []string{"volume", "ls", "--format", "{{.Name}}"}
+	if got := volumeListArgv(); !reflect.DeepEqual(got, wantList) {
+		t.Errorf("volumeListArgv = %v, want %v", got, wantList)
+	}
+}
+
+func TestFilterByPrefix(t *testing.T) {
+	names := []string{"myapp_db", "myapp_uploads", "other_data", "myappX", "unrelated"}
+
+	// Single prefix — only exact-prefix matches, not substring.
+	got := filterByPrefix(names, []string{"myapp_"})
+	want := []string{"myapp_db", "myapp_uploads"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("single prefix = %v, want %v", got, want)
+	}
+
+	// Multiple prefixes — union, each name kept at most once.
+	got = filterByPrefix(names, []string{"myapp_", "other_"})
+	want = []string{"myapp_db", "myapp_uploads", "other_data"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("multi prefix = %v, want %v", got, want)
+	}
+
+	// No prefix matches → empty (non-nil) slice.
+	got = filterByPrefix(names, []string{"nope_"})
+	if len(got) != 0 {
+		t.Errorf("no match = %v, want empty", got)
+	}
+
+	// Empty prefixes → all names returned unchanged.
+	got = filterByPrefix(names, nil)
+	if !reflect.DeepEqual(got, names) {
+		t.Errorf("empty prefixes = %v, want all %v", got, names)
+	}
 }
 
 func TestRedactArgv(t *testing.T) {
