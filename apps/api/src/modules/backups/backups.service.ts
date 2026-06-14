@@ -347,6 +347,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   private backupEncryptionKey(): Buffer | null {
+    // Key encoding/length contract is documented in docs/CONFIG.md
+    // (backup_encryption_key / BACKUP_ENCRYPTION_KEY): >=32 chars, raw UTF-8
+    // bytes used directly as HKDF input keying material (NOT hex-decoded).
     // DB (admin UI) wins, env fallback for legacy installs.
     const raw = this.systemConfig.get<string>('backup_encryption_key', 'BACKUP_ENCRYPTION_KEY');
     // NO key configured at all → encryption is opt-in, dumps stay plaintext.
@@ -938,25 +941,44 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     const sha256 = await this.sha256File(archivePath);
     const stat = await fs.promises.stat(archivePath);
 
-    if (isRemoteTarget(backup.target)) {
-      // Upload, then drop the local copy — the bucket is the only home
-      // of a remote-target dump.
+    const remote = isRemoteTarget(backup.target);
+    if (remote) {
+      // Upload to the bucket. The local copy is NOT dropped yet — see below.
       await this.uploadBackupToS3(backupId, archivePath);
-      await fs.promises.unlink(archivePath).catch(() => undefined);
     }
 
-    await this.prisma.backup.update({
-      where: { id: backupId },
-      data: {
-        sha256,
-        sizeBytes: BigInt(stat.size),
-        size: BigInt(stat.size),
-        encryptedAt: encrypted,
-        filename,
-        status: 'COMPLETED',
-        lastRunAt: new Date(),
-      },
-    });
+    // Persist the COMPLETED row (sha256 + filename + object key) BEFORE
+    // unlinking the local archive. For remote targets a failed status-write
+    // would otherwise orphan an uploaded object holding tenant data with no
+    // row to reference or restore it: on a write failure we delete the remote
+    // object so the bucket never accumulates unreferenced dumps. The local
+    // copy stays on disk until the row is safely written.
+    try {
+      await this.prisma.backup.update({
+        where: { id: backupId },
+        data: {
+          sha256,
+          sizeBytes: BigInt(stat.size),
+          size: BigInt(stat.size),
+          encryptedAt: encrypted,
+          filename,
+          status: 'COMPLETED',
+          lastRunAt: new Date(),
+        },
+      });
+    } catch (err) {
+      if (remote) {
+        // No row will ever reference the uploaded object — remove it.
+        await this.deleteRemoteObjects(backupId);
+      }
+      throw err;
+    }
+
+    if (remote) {
+      // Row is safely COMPLETED — now drop the local copy; the bucket is the
+      // only home of a remote-target dump.
+      await fs.promises.unlink(archivePath).catch(() => undefined);
+    }
     this.logger.log(
       `Backup ${backupId} completed (${stat.size} bytes, target=${backup.target}, encrypted=${encrypted})`,
     );
@@ -1407,6 +1429,13 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
             'Backup file appears corrupted or tampered with — refusing to restore.',
           );
         }
+      } else if (isRemoteTarget(backup.target)) {
+        // Remote objects can be swapped/corrupted in the bucket out of band —
+        // an unverifiable remote dump must NOT be restored over live data.
+        // (Local targets keep current behaviour: an on-disk row we wrote.)
+        throw new BadRequestException(
+          'Backup has no recorded checksum — refusing to restore an unverifiable remote object.',
+        );
       }
       let archivePath = dumpPath;
       if (backup.encryptedAt) {

@@ -34,6 +34,7 @@ import {
   isAppLocal,
 } from './applications.helpers';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
+import { assertCloneHostAllowed } from '../git-providers/git-providers.service';
 import { appVolumePrefix } from '../agent/volume-naming.util';
 import { spawn } from 'child_process';
 import * as path from 'path';
@@ -169,6 +170,24 @@ export class ApplicationsService {
       throw new BadRequestException(
         'Pick one source: Git URL, Docker image, raw Compose, or raw Dockerfile.',
       );
+    }
+
+    // CRITICAL: before a decrypted provider token (or one-shot PAT) is ever
+    // injected into `git clone <gitUrl>`, enforce HTTPS + a host that matches
+    // the selected provider. Without this a member could set gitUrl to
+    // evil.example.com and exfiltrate the victim's token (token exfil + SSRF).
+    // Run during pre-write validation so a bad URL leaves no orphan rows.
+    if (dto.gitUrl && gitProviderId) {
+      const gp = await this.prisma.gitProvider.findFirst({
+        where: { id: gitProviderId, userId },
+        select: { provider: true },
+      });
+      if (!gp) throw new ForbiddenException('Git provider not yours');
+      assertCloneHostAllowed(gp.provider, dto.gitUrl);
+    } else if (dto.gitUrl && gitToken) {
+      // One-shot PAT: no provider host to pin against, but still require
+      // HTTPS and reject private/loopback literals.
+      assertCloneHostAllowed(null, dto.gitUrl);
     }
 
     // Compose YAML must parse — defense against typos and YAML injection.

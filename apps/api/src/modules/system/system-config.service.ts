@@ -7,6 +7,11 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 
+// Marks a cache entry whose stored secret envelope failed to decrypt. get()
+// rethrows on this rather than returning undefined, so a configured-but-
+// undecryptable secret never silently reads as "not configured".
+const DECRYPT_FAILURE = Symbol('decrypt-failure');
+
 /**
  * Runtime configuration store.
  *
@@ -43,6 +48,7 @@ export class SystemConfigService implements OnModuleInit {
     'smtp_pass',
     'backup_encryption_key',
     'github_webhook_secret',
+    's3_access_key',
     's3_secret_key',
   ]);
 
@@ -99,7 +105,20 @@ export class SystemConfigService implements OnModuleInit {
   async reload() {
     const rows = await this.prisma.systemSetting.findMany();
     this.cache.clear();
-    for (const r of rows) this.cache.set(r.key, this.decodeIfSecret(r.key, r.value));
+    for (const r of rows) {
+      try {
+        this.cache.set(r.key, this.decodeIfSecret(r.key, r.value));
+      } catch (err) {
+        // A secret envelope that won't decrypt must NOT crash the whole
+        // config load (it would take down unrelated settings and startup).
+        // Cache a poison sentinel instead so the failure surfaces at get()
+        // time for THIS key only — never as a silent "not configured".
+        this.logger.error(
+          `Caching undecryptable secret config "${r.key}" as poisoned`,
+        );
+        this.cache.set(r.key, { [DECRYPT_FAILURE]: (err as Error).message });
+      }
+    }
   }
 
   /** Subscribe to setting updates. Returns an unsubscribe fn. */
@@ -116,6 +135,11 @@ export class SystemConfigService implements OnModuleInit {
   get<T = string>(key: string, envFallback?: string, defaultValue?: T): T | undefined {
     if (this.cache.has(key)) {
       const v = this.cache.get(key);
+      if (v && typeof v === 'object' && DECRYPT_FAILURE in v) {
+        // Configured secret that won't decrypt. Throw rather than fall through
+        // to env/default — callers must not read this as "unset".
+        throw new Error(v[DECRYPT_FAILURE]);
+      }
       if (v !== null && v !== undefined && v !== '') return v as T;
     }
     if (envFallback && process.env[envFallback] !== undefined && process.env[envFallback] !== '') {
@@ -200,8 +224,16 @@ export class SystemConfigService implements OnModuleInit {
     const out: Record<string, any> = {};
     for (const r of rows) {
       if (this.SECRET_KEYS.has(r.key)) {
-        // True iff a non-empty value is stored.
-        const v = this.decodeIfSecret(r.key, r.value);
+        // Masked to a boolean "is set" — never the plaintext. An envelope
+        // that won't decrypt is still SET (just unreadable), so report true
+        // rather than letting the decrypt failure break the whole snapshot.
+        let v: any;
+        try {
+          v = this.decodeIfSecret(r.key, r.value);
+        } catch {
+          out[r.key] = true;
+          continue;
+        }
         out[r.key] = typeof v === 'string' ? v.length > 0 : !!v;
       } else {
         out[r.key] = r.value;
@@ -223,9 +255,18 @@ export class SystemConfigService implements OnModuleInit {
     if (stored && typeof stored === 'object' && (stored as any).__sec === 1 && typeof (stored as any).v === 'string') {
       try {
         return this.encryption.decrypt((stored as any).v);
-      } catch {
+      } catch (err) {
+        // The value IS a recognized encryption envelope but won't decrypt
+        // (key rotation / tampered or corrupted blob — AES-GCM throws the
+        // same way for both). Returning undefined here is dangerous: callers
+        // read it as "not configured" and silently fall through to a plaintext
+        // path (e.g. an UNENCRYPTED backup from an encryption-enabled config).
+        // Fail loudly instead so the secret never silently becomes "absent".
         this.logger.error(`Failed to decrypt secret config "${key}"`);
-        return undefined;
+        throw new Error(
+          `Secret config "${key}" is stored encrypted but could not be decrypted ` +
+            `(wrong ENCRYPTION_KEY or corrupted value). Refusing to treat it as unset.`,
+        );
       }
     }
     // Legacy plaintext value — return as-is, will be re-encrypted on next set().

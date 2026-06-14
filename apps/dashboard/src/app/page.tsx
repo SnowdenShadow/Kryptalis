@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { api } from '@/lib/api';
+import { api, sessionReady } from '@/lib/api';
 import { useAuthStore } from '@/lib/store';
 
 /**
@@ -20,25 +20,35 @@ import { useAuthStore } from '@/lib/store';
  */
 export default function Home() {
   const router = useRouter();
-  const isAuthed = useAuthStore((s) => !!s.accessToken);
 
   useEffect(() => {
-    if (isAuthed) {
-      router.replace('/dashboard');
-      return;
-    }
-    api
-      .get<{ needsSetup: boolean }>('/auth/setup-status')
-      .then((r) => {
-        router.replace(r.needsSetup ? '/setup' : '/login');
-      })
-      .catch(() => {
-        // API unreachable — fall back to /login. Operator's setup script
-        // would have surfaced the API failure elsewhere; we don't want to
-        // get stuck on a blank page if it's just a transient blip.
-        router.replace('/login');
-      });
-  }, [isAuthed, router]);
+    let active = true;
+    // Wait for the cold-boot silent refresh first: the access token is
+    // memory-only now, so reading the store synchronously would mis-route a
+    // valid session to /login. sessionReady resolves true if the httpOnly
+    // cookie restored a session.
+    void sessionReady.then((restored) => {
+      if (!active) return;
+      if (restored || useAuthStore.getState().accessToken) {
+        router.replace('/dashboard');
+        return;
+      }
+      api
+        .get<{ needsSetup: boolean }>('/auth/setup-status')
+        .then((r) => {
+          if (active) router.replace(r.needsSetup ? '/setup' : '/login');
+        })
+        .catch(() => {
+          // API unreachable — fall back to /login. Operator's setup script
+          // would have surfaced the API failure elsewhere; we don't want to
+          // get stuck on a blank page if it's just a transient blip.
+          if (active) router.replace('/login');
+        });
+    });
+    return () => {
+      active = false;
+    };
+  }, [router]);
 
   return null;
 }

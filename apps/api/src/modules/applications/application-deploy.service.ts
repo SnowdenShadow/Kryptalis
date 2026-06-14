@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { AppStatus, DeploymentStatus } from '@prisma/client';
@@ -41,7 +41,9 @@ import * as crypto from 'crypto';
  * and terminal-outcome notifications. Split out of ApplicationsService.
  */
 @Injectable()
-export class ApplicationDeployService {
+export class ApplicationDeployService implements OnModuleInit {
+  private readonly logger = new Logger(ApplicationDeployService.name);
+
   constructor(
     private prisma: PrismaService,
     private proxy: ReverseProxyService,
@@ -50,6 +52,34 @@ export class ApplicationDeployService {
     private databases: DatabasesService,
     private env: ApplicationEnvService,
   ) {}
+
+  onModuleInit(): void {
+    // One-shot boot sweep: canary containers (label dockcontrol.canary=1) are
+    // throwaway and always torn down in canaryBoot's finally — but an API
+    // crash mid-deploy can leave one behind. Reap any leftover so it doesn't
+    // hold a name/port/network and confuse the next deploy. Best-effort and
+    // off the boot path (never blocks startup; no docker → just logged).
+    void this.reapStaleCanaries();
+  }
+
+  /** Remove leftover canary containers from a prior crash. Best-effort. */
+  private async reapStaleCanaries(): Promise<void> {
+    try {
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['ps', '-aq', '--filter', 'label=dockcontrol.canary=1'],
+        { timeout: 10_000 },
+      );
+      const ids = stdout.trim().split('\n').filter(Boolean);
+      if (!ids.length) return;
+      this.logger.warn(`Reaping ${ids.length} stale canary container(s) from a prior crash.`);
+      await execFileAsync('docker', ['rm', '-f', ...ids], { timeout: 30_000 }).catch(() => {});
+    } catch (err: any) {
+      // docker unavailable / not installed (remote-only install) — nothing
+      // to reap locally. Don't let it bubble into startup.
+      this.logger.debug?.(`Canary reaper skipped: ${err?.message || err}`);
+    }
+  }
 
   /**
    * Notify the user who triggered a deployment of its terminal outcome.

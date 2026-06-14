@@ -14,10 +14,11 @@ import type { NextRequest } from 'next/server';
  * longer execute: injected inline <script> lacks the nonce, and remote
  * src= is blocked.
  *
- * Auth tokens: the access token lives in localStorage so route protection
- * stays client-side ((dashboard)/layout.tsx) + API JWT guards. The refresh
- * token is an httpOnly cookie scoped to the API's /api/auth path, so it is
- * never visible here either.
+ * Auth tokens: the access token lives in MEMORY only (never localStorage),
+ * so route protection stays client-side ((dashboard)/layout.tsx awaits a
+ * silent cookie refresh) + API JWT guards. The refresh token is an httpOnly
+ * cookie scoped to the API's /api/auth path, so it is never visible here
+ * (or to any XSS) either.
  *
  * The non-CSP security headers (HSTS, X-Frame-Options, …) are still set
  * statically in next.config.ts.

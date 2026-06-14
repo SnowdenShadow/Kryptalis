@@ -24,6 +24,7 @@ import {
   assertAppOwnership,
   APPS_DIR,
 } from './applications.helpers';
+import { assertCloneHostAllowed } from '../git-providers/git-providers.service';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
@@ -149,12 +150,20 @@ export class ApplicationOpsService {
    * connector chosen at create time. (The token itself is never exposed
    * back to the requester.)
    */
-  private async resolveCloneHeader(app: { gitProviderId: string | null }): Promise<string | undefined> {
+  private async resolveCloneHeader(app: {
+    gitProviderId: string | null;
+    gitUrl: string | null;
+  }): Promise<string | undefined> {
     if (!app.gitProviderId) return undefined;
     const gp = await this.prisma.gitProvider.findUnique({
       where: { id: app.gitProviderId },
     });
     if (!gp) return undefined;
+    // CRITICAL: enforce HTTPS + provider-host match before injecting the
+    // decrypted token into the clone. The redeploy/webhook path looks up the
+    // provider by id with no user scope, so without this a member could have
+    // stored a gitUrl pointing at an attacker host and exfiltrate the token.
+    if (app.gitUrl) assertCloneHostAllowed(gp.provider, app.gitUrl);
     return this.deploy.buildAuthHeader(gp.provider, this.encryption.decrypt(gp.token));
   }
 

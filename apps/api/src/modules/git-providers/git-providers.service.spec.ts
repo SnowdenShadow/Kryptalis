@@ -35,8 +35,10 @@ function makePrisma() {
     gitProvider: {
       create: vi.fn().mockResolvedValue({}),
       findFirst: vi.fn().mockResolvedValue(null),
+      findUnique: vi.fn().mockResolvedValue(null),
       findMany: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue({}),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       delete: vi.fn().mockResolvedValue({}),
     },
   };
@@ -241,14 +243,22 @@ describe('pollGithubDeviceFlow', () => {
 });
 
 describe('getGithubAccessToken', () => {
-  it('decrypts the newest OAUTH token for the user', async () => {
+  it('decrypts the newest OAUTH token for the user (no refresh when not stale)', async () => {
     const { service, prisma } = makeOAuthService();
-    prisma.gitProvider.findFirst.mockResolvedValue({ token: 'enc:gho_secret' });
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1',
+      token: 'enc:gho_secret',
+      refreshToken: 'enc:ghr_refresh',
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1h out → fresh
+    });
     expect(await service.getGithubAccessToken('u1')).toBe('gho_secret');
     expect(prisma.gitProvider.findFirst).toHaveBeenCalledWith({
       where: { userId: 'u1', provider: 'GITHUB', authMode: 'OAUTH' },
       orderBy: { createdAt: 'desc' },
     });
+    // fresh token → no refresh grant, no write
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(prisma.gitProvider.updateMany).not.toHaveBeenCalled();
   });
 
   it('400s with guidance when no OAuth connection exists', async () => {
@@ -256,6 +266,96 @@ describe('getGithubAccessToken', () => {
     await expect(service.getGithubAccessToken('u1')).rejects.toThrow(
       /No GitHub OAuth connection found/,
     );
+  });
+});
+
+describe('refreshGithubToken', () => {
+  const staleRow = () => ({
+    id: 'gp1',
+    token: 'enc:old_access',
+    refreshToken: 'enc:ghr_old',
+    expiresAt: new Date(Date.now() - 1000), // already past → stale
+  });
+
+  it('exchanges the refresh token and persists the re-encrypted access + refresh + expiry', async () => {
+    const { service, prisma, encryption } = makeOAuthService();
+    onUrl('login/oauth/access_token', {
+      access_token: 'gho_new',
+      refresh_token: 'ghr_new',
+      expires_in: 28800,
+    });
+
+    const { token } = await service.refreshGithubToken(staleRow());
+    expect(token).toBe('enc:gho_new');
+
+    // the single-use refresh token was decrypted and sent with a refresh grant
+    const body = JSON.parse(
+      fetchMock.mock.calls.find(([u]: any[]) =>
+        String(u).includes('login/oauth/access_token'),
+      )![1].body,
+    );
+    expect(body).toMatchObject({
+      grant_type: 'refresh_token',
+      refresh_token: 'ghr_old',
+      client_id: 'Iv1.testclient',
+    });
+    // public device-flow client → no client_secret unless env provides one
+    expect(body.client_secret).toBeUndefined();
+
+    expect(encryption.encrypt).toHaveBeenCalledWith('gho_new');
+    expect(encryption.encrypt).toHaveBeenCalledWith('ghr_new');
+    // guarded write pinned to the expiresAt we read
+    const upd = prisma.gitProvider.updateMany.mock.calls[0][0];
+    expect(upd.where).toMatchObject({ id: 'gp1' });
+    expect(upd.where.expiresAt).toBeInstanceOf(Date);
+    expect(upd.data).toMatchObject({ token: 'enc:gho_new', refreshToken: 'enc:ghr_new' });
+    expect(upd.data.expiresAt).toBeInstanceOf(Date);
+  });
+
+  it('sends client_secret when configured (confidential / web-flow app)', async () => {
+    process.env.GITHUB_OAUTH_CLIENT_SECRET = 'shhh';
+    try {
+      const { service } = makeOAuthService();
+      onUrl('login/oauth/access_token', { access_token: 'gho_new', expires_in: 28800 });
+      await service.refreshGithubToken(staleRow());
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.client_secret).toBe('shhh');
+    } finally {
+      delete process.env.GITHUB_OAUTH_CLIENT_SECRET;
+    }
+  });
+
+  it('no-ops for non-refresh OAuth / PAT rows (no refreshToken) — returns the token as-is', async () => {
+    const { service, prisma } = makeOAuthService();
+    const { token } = await service.refreshGithubToken({
+      id: 'gp1',
+      token: 'enc:pat',
+      refreshToken: null,
+      expiresAt: new Date(Date.now() - 1000),
+    });
+    expect(token).toBe('enc:pat');
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(prisma.gitProvider.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('loses the concurrent-refresh race → re-reads the row the winner wrote', async () => {
+    const { service, prisma } = makeOAuthService();
+    onUrl('login/oauth/access_token', { access_token: 'gho_mine', expires_in: 28800 });
+    // precondition matched zero rows → another deploy already refreshed
+    prisma.gitProvider.updateMany.mockResolvedValue({ count: 0 });
+    prisma.gitProvider.findUnique.mockResolvedValue({ token: 'enc:gho_winner' });
+
+    const { token } = await service.refreshGithubToken(staleRow());
+    expect(token).toBe('enc:gho_winner');
+    expect(prisma.gitProvider.findUnique).toHaveBeenCalledWith({ where: { id: 'gp1' } });
+  });
+
+  it('keeps the existing token when GitHub rejects the refresh grant', async () => {
+    const { service, prisma } = makeOAuthService();
+    onUrl('login/oauth/access_token', { error: 'bad_refresh_token' });
+    const { token } = await service.refreshGithubToken(staleRow());
+    expect(token).toBe('enc:old_access');
+    expect(prisma.gitProvider.updateMany).not.toHaveBeenCalled();
   });
 });
 

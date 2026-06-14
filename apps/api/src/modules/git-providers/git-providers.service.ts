@@ -14,6 +14,71 @@ export interface Repo {
   language?: string;
 }
 
+/**
+ * Canonical SaaS clone hosts per provider. A GitProvider row has NO
+ * host/baseUrl column (see schema), so self-hosted GitLab/GitHub Enterprise
+ * cannot be host-pinned yet — only these canonical hosts are accepted.
+ * Self-hosted support needs a `host` column on GitProvider (deferred).
+ */
+const PROVIDER_HOSTS: Record<string, string[]> = {
+  GITHUB: ['github.com', 'api.github.com'],
+  GITLAB: ['gitlab.com'],
+  BITBUCKET: ['bitbucket.org'],
+};
+
+/**
+ * Block clone targets that point at the loopback/link-local/private ranges
+ * (SSRF). Used for the one-shot PAT path where there's no provider host to
+ * pin against — we still refuse private/loopback literals.
+ */
+export function isPrivateOrLoopbackHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h === '::1' || h === '0.0.0.0') return true;
+  // IPv4 literal ranges: loopback, link-local, RFC1918.
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const [a, b] = [Number(m[1]), Number(m[2])];
+    if (a === 127) return true; // 127.0.0.0/8 loopback
+    if (a === 10) return true; // 10.0.0.0/8
+    if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local
+    if (a === 192 && b === 168) return true; // 192.168.0.0/16
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+  }
+  return false;
+}
+
+/**
+ * Enforce that a clone URL is safe to inject a decrypted git token into:
+ * HTTPS only, and the host must match the selected provider's canonical
+ * host. A member who points gitUrl at evil.example.com would otherwise
+ * exfiltrate the victim's GitHub/GitLab/Bitbucket token (token exfil + SSRF).
+ *
+ * `provider` null/unknown (one-shot PAT path) → no provider host to pin, so
+ * we only require HTTPS and a non-private/loopback host.
+ *
+ * Centralized here so the create path and the redeploy/webhook path can't
+ * drift. Throws BadRequestException on any mismatch.
+ */
+export function assertCloneHostAllowed(provider: string | null | undefined, gitUrl: string): void {
+  let url: URL;
+  try {
+    url = new URL(gitUrl);
+  } catch {
+    throw new BadRequestException('Invalid Git URL');
+  }
+  if (url.protocol !== 'https:') {
+    throw new BadRequestException('Git URL must use https');
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (isPrivateOrLoopbackHost(hostname)) {
+    throw new BadRequestException('Git URL host is not allowed');
+  }
+  const allowed = provider ? PROVIDER_HOSTS[provider] : undefined;
+  if (allowed && !allowed.includes(hostname)) {
+    throw new BadRequestException('Git URL host does not match the selected provider');
+  }
+}
+
 @Injectable()
 export class GitProvidersService {
   constructor(
@@ -27,6 +92,15 @@ export class GitProvidersService {
    */
   private getToken(gp: { token: string }): string {
     return this.encryption.decrypt(gp.token);
+  }
+
+  /**
+   * Guard a clone URL before a decrypted token is injected into it.
+   * Delegates to the shared {@link assertCloneHostAllowed} so the create
+   * and redeploy/webhook paths share one rule. Throws BadRequestException.
+   */
+  assertCloneHostAllowed(provider: string | null | undefined, gitUrl: string): void {
+    assertCloneHostAllowed(provider, gitUrl);
   }
 
   async create(userId: string, dto: CreateGitProviderDto) {

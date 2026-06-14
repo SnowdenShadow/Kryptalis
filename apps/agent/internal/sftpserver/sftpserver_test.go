@@ -139,6 +139,49 @@ func TestResolve_LexicalTraversalDenied(t *testing.T) {
 	}
 }
 
+// TestCanWrite_Permissions covers the platform contract that ADMIN is
+// write-capable (schema: ADMIN == WRITE), WRITE is writable, and READ /
+// disabled accounts are not.
+func TestCanWrite_Permissions(t *testing.T) {
+	cases := []struct {
+		perm     string
+		disabled bool
+		want     bool
+	}{
+		{"WRITE", false, true},
+		{"ADMIN", false, true},
+		{"admin", false, true}, // case-insensitive
+		{"READ", false, false},
+		{"WRITE", true, false},  // disabled overrides
+		{"ADMIN", true, false},  // disabled overrides
+		{"", false, false},
+	}
+	for _, c := range cases {
+		h := &scopedHandlers{acc: Account{Permission: c.perm, Disabled: c.disabled}}
+		if got := h.canWrite(); got != c.want {
+			t.Errorf("canWrite(perm=%q disabled=%v) = %v, want %v", c.perm, c.disabled, got, c.want)
+		}
+	}
+}
+
+// TestFilewrite_AdminCanWrite confirms an ADMIN account is allowed through the
+// write path (not just READ-style refusal).
+func TestFilewrite_AdminCanWrite(t *testing.T) {
+	root := t.TempDir()
+	h := &scopedHandlers{acc: Account{
+		Username:   "u",
+		Permission: "ADMIN",
+		Roots:      map[string]string{"app": root},
+	}}
+	w, err := h.Filewrite(writeReq("/app/admin.txt", flagWrite|flagCreat))
+	if err != nil {
+		t.Fatalf("ADMIN Filewrite should be allowed: %v", err)
+	}
+	if c, ok := w.(interface{ Close() error }); ok {
+		_ = c.Close()
+	}
+}
+
 // TestResolve_NewFileInRootOK ensures a not-yet-existing create/upload target
 // inside the root is allowed (parent-realpath path of checkRealContained).
 func TestResolve_NewFileInRootOK(t *testing.T) {

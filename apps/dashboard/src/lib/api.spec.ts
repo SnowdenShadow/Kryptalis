@@ -69,8 +69,9 @@ beforeEach(() => {
 });
 
 describe('ApiClient request()', () => {
-  it('returns parsed JSON on success and sends the stored access token', async () => {
-    localStorageStub.setItem('accessToken', 'tok-1');
+  it('returns parsed JSON on success and sends the in-memory access token', async () => {
+    // Access token lives in the zustand store (memory), never localStorage.
+    useAuthStore.setState({ accessToken: 'tok-1' });
     fetchMock.mockResolvedValueOnce(jsonRes(200, { hello: 'world' }));
 
     const data = await api.get<{ hello: string }>('/things');
@@ -115,7 +116,7 @@ describe('ApiClient request()', () => {
 
 describe('ApiClient transparent refresh', () => {
   it('on 401: refreshes, stores the new token, and retries the original request', async () => {
-    localStorageStub.setItem('accessToken', 'stale');
+    useAuthStore.setState({ accessToken: 'stale' });
     fetchMock.mockImplementation(async (url: string, init?: { headers?: Record<string, string> }) => {
       if (url.endsWith('/api/auth/refresh')) return jsonRes(200, { accessToken: 'fresh' });
       return authHeader(init) === 'Bearer fresh'
@@ -131,9 +132,10 @@ describe('ApiClient transparent refresh', () => {
     // cookie-first: body must be empty, credentials included
     expect(refreshCalls[0][1].body).toBe('{}');
     expect(refreshCalls[0][1].credentials).toBe('include');
-    // new token persisted in both localStorage and the zustand store
-    expect(localStorageStub.getItem('accessToken')).toBe('fresh');
+    // new token lives in the in-memory store ONLY — never localStorage, so an
+    // XSS can't scrape a valid bearer from disk.
     expect(useAuthStore.getState().accessToken).toBe('fresh');
+    expect(localStorageStub.getItem('accessToken')).toBeNull();
   });
 
   it('two concurrent 401s share a single in-flight refresh', async () => {
@@ -163,7 +165,6 @@ describe('ApiClient transparent refresh', () => {
   });
 
   it('failed refresh: logs out, redirects to /login, throws ApiError(401)', async () => {
-    localStorageStub.setItem('accessToken', 'stale');
     useAuthStore.setState({ accessToken: 'stale', user: { id: '1', name: 'n', email: 'e', role: 'USER' } });
     const logoutSpy = vi.spyOn(useAuthStore.getState(), 'logout');
     fetchMock.mockImplementation(async (url: string) =>
@@ -176,6 +177,8 @@ describe('ApiClient transparent refresh', () => {
     expect((err as InstanceType<typeof ApiError>).status).toBe(401);
     expect(logoutSpy).toHaveBeenCalledTimes(1);
     expect(locationStub.href).toBe('/login');
+    // logout clears the in-memory token (and the legacy localStorage key).
+    expect(useAuthStore.getState().accessToken).toBeNull();
     expect(localStorageStub.getItem('accessToken')).toBeNull();
   });
 
@@ -221,5 +224,24 @@ describe('ApiClient rawFetch()', () => {
     expect(res.status).toBe(200);
     const refreshCalls = fetchMock.mock.calls.filter(([u]) => u.endsWith('/api/auth/refresh'));
     expect(refreshCalls).toHaveLength(1);
+  });
+});
+
+describe('ApiClient restoreSession() (cold-boot recovery)', () => {
+  it('repopulates the in-memory token from the refresh cookie and returns true', async () => {
+    fetchMock.mockImplementation(async (url: string) =>
+      url.endsWith('/api/auth/refresh') ? jsonRes(200, { accessToken: 'restored' }) : jsonRes(401, {}),
+    );
+
+    await expect(api.restoreSession()).resolves.toBe(true);
+    expect(useAuthStore.getState().accessToken).toBe('restored');
+    expect(localStorageStub.getItem('accessToken')).toBeNull(); // never persisted
+  });
+
+  it('returns false and leaves the user logged out when no session can be restored', async () => {
+    fetchMock.mockImplementation(async () => jsonRes(401, {}));
+
+    await expect(api.restoreSession()).resolves.toBe(false);
+    expect(useAuthStore.getState().accessToken).toBeNull();
   });
 });

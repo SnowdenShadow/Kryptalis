@@ -45,7 +45,7 @@ type Account struct {
 	Username     string   `json:"username"`
 	PasswordHash string   `json:"passwordHash,omitempty"` // bcrypt
 	PublicKeys   []string `json:"publicKeys,omitempty"`   // authorized_keys lines
-	Permission   string   `json:"permission"`             // READ | WRITE
+	Permission   string   `json:"permission"`             // READ | WRITE | ADMIN (ADMIN == WRITE)
 	Disabled     bool     `json:"disabled"`
 	// Root dirs this account may access, keyed by the display dir name
 	// shown at the top level (e.g. "app" or "<slug>-<id12>").
@@ -385,7 +385,10 @@ func checkRealContained(root, real string) error {
 }
 
 func (h *scopedHandlers) canWrite() bool {
-	return !h.acc.Disabled && strings.EqualFold(h.acc.Permission, "WRITE")
+	// Platform contract: ADMIN is write-capable (schema: ADMIN == WRITE).
+	// Treating only "WRITE" as writable left remote ADMIN accounts read-only.
+	return !h.acc.Disabled &&
+		(strings.EqualFold(h.acc.Permission, "WRITE") || strings.EqualFold(h.acc.Permission, "ADMIN"))
 }
 
 func (h *scopedHandlers) Fileread(r *sftp.Request) (io.ReaderAt, error) {

@@ -201,7 +201,106 @@ export class GitOAuthService {
         'No GitHub OAuth connection found. Sign in with GitHub from Settings → Git first.',
       );
     }
-    return this.encryption.decrypt(gp.token);
+    const refreshed = await this.refreshGithubToken(gp);
+    return this.encryption.decrypt(refreshed.token);
+  }
+
+  /**
+   * Refresh-if-stale for OAuth tokens.
+   *
+   * GitHub user-to-server tokens expire ~8h after issue, so a connection
+   * that worked at deploy time is dead by the next morning. When `expiresAt`
+   * is within the skew window (already past or < 5 min away) and a
+   * refresh token exists, we exchange it for a fresh access token.
+   *
+   * Device flow is a public client: there is no client secret, and GitHub's
+   * refresh grant works for public clients with `client_id` alone (the same
+   * client_id we used to obtain the device code). If the OAuth App has refresh
+   * tokens disabled, no `refreshToken` is stored — we leave the row untouched
+   * and return it as-is, which also preserves PAT / non-refresh OAuth.
+   *
+   * Concurrency: two simultaneous deploys would both spend the single-use
+   * refresh token and one would get a revoked-token error. We guard with an
+   * `updateMany` that carries the current `expiresAt` as a precondition, so
+   * only one refresh commits; the loser re-reads the freshly-written row.
+   */
+  async refreshGithubToken(gp: {
+    id: string;
+    token: string;
+    refreshToken: string | null;
+    expiresAt: Date | null;
+  }): Promise<{ token: string }> {
+    const SKEW_MS = 5 * 60 * 1000;
+    const stale = gp.expiresAt
+      ? gp.expiresAt.getTime() - Date.now() < SKEW_MS
+      : false;
+    // Non-refresh OAuth (no refreshToken) and PAT keep working untouched.
+    if (!stale || !gp.refreshToken) {
+      return { token: gp.token };
+    }
+
+    const clientId = this.githubClientId();
+    const body: Record<string, string> = {
+      client_id: clientId,
+      grant_type: 'refresh_token',
+      refresh_token: this.encryption.decrypt(gp.refreshToken),
+    };
+    // Web-flow / confidential apps configure a secret; device-flow public
+    // clients don't and refresh on client_id alone.
+    const clientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET;
+    if (clientSecret) {
+      body.client_secret = clientSecret;
+    }
+
+    let data: any;
+    try {
+      const res = await fetch('https://github.com/login/oauth/access_token', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      data = await res.json();
+    } catch (e) {
+      this.logger.warn(`refreshGithubToken: ${(e as Error).message}`);
+      return { token: gp.token };
+    }
+    if (data.error || !data.access_token) {
+      this.logger.warn(
+        `refreshGithubToken: ${data.error_description || data.error || 'missing access_token'}`,
+      );
+      return { token: gp.token };
+    }
+
+    const newToken = this.encryption.encrypt(data.access_token);
+    const newRefreshToken = data.refresh_token
+      ? this.encryption.encrypt(data.refresh_token)
+      : gp.refreshToken;
+    const newExpiresAt = data.expires_in
+      ? new Date(Date.now() + data.expires_in * 1000)
+      : null;
+
+    // Only one concurrent caller wins: the precondition pins the row to the
+    // expiresAt we read, so a racing refresh that already committed bumps it
+    // and our update matches zero rows.
+    const result = await this.prisma.gitProvider.updateMany({
+      where: { id: gp.id, expiresAt: gp.expiresAt },
+      data: {
+        token: newToken,
+        refreshToken: newRefreshToken,
+        expiresAt: newExpiresAt,
+      },
+    });
+    if (result.count === 0) {
+      // Lost the race — another refresh already wrote a fresh token. Re-read.
+      const current = await this.prisma.gitProvider.findUnique({
+        where: { id: gp.id },
+      });
+      return { token: current?.token ?? gp.token };
+    }
+    return { token: newToken };
   }
 
   // ── Internals ───────────────────────────────────────────────────────

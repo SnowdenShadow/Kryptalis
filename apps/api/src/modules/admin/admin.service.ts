@@ -62,6 +62,7 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
       'smtp_pass',
       'backup_encryption_key',
       'github_webhook_secret',
+      's3_access_key',
       's3_secret_key',
     ]);
     const cleaned: Record<string, any> = {};

@@ -247,6 +247,33 @@ describe('restore', () => {
     );
   });
 
+  it('local backup with no recorded checksum is allowed (legacy on-disk row)', async () => {
+    const { service } = setup({ filename: 'b1.tar.gz', sha256: null, encryptedAt: false });
+    // Past the checksum gate the flow extracts the archive (mocked tar) — the
+    // point is it does NOT throw the "unverifiable" guard for a LOCAL target.
+    vi.mocked(execFile).mockImplementation(((...args: any[]) => {
+      const cb = args[args.length - 1];
+      if (typeof cb === 'function') cb(null, { stdout: '', stderr: '' });
+    }) as any);
+    // No manifest in the mocked archive → restore fails LATER, not at the
+    // checksum gate. Assert it's not the remote-unverifiable error.
+    mockFs.promises.readFile.mockResolvedValue('not json');
+    await expect(service.restore('u1', 'b1')).rejects.not.toThrow(
+      'unverifiable remote object',
+    );
+  });
+
+  it('refuses to restore a REMOTE backup that has no recorded checksum', async () => {
+    const { service, prisma } = setup({ target: 'S3', filename: 'b1.tar.gz', sha256: null });
+    prisma.server.findUnique.mockResolvedValue({ host: 'localhost' });
+    // Skip the real S3 download — we only care about the fail-closed gate.
+    vi.spyOn(service as any, 'downloadBackupFromS3').mockResolvedValue('/tmp/remote.dump');
+
+    await expect(service.restore('u1', 'b1')).rejects.toThrow(
+      'no recorded checksum',
+    );
+  });
+
   it('refuses an encrypted backup when no encryption key is configured', async () => {
     const { service, systemConfig } = setup({
       filename: 'b1.tar.gz',

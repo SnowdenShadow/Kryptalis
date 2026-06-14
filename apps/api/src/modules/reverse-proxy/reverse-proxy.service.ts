@@ -33,6 +33,34 @@ const INSTALL_ROOT_HOST = process.env.DOCKCONTROL_HOST_INSTALL_DIR
 const SAFE_DOMAIN_RE =
   /^(?=.{1,253}$)(?:(?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,63}$/;
 
+/** Bare IPv4 literal (0-255 per octet). */
+const SAFE_IPV4_RE =
+  /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+/** IPv6 literal, optionally bracketed — only hex groups, ':' and '.' (IPv4-mapped). */
+const SAFE_IPV6_RE = /^\[?[0-9A-Fa-f:.]+\]?$/;
+
+/**
+ * Validate a remote upstream host before it is interpolated raw into a
+ * `reverse_proxy <host>:<port>` directive. A Server.host that contained
+ * whitespace, '{', '}', a newline, or a Caddy directive would let a
+ * compromised/legacy server row inject arbitrary Caddyfile config.
+ *
+ * Accept ONLY: a bare IPv4 literal, a (bracketed or plain) IPv6 literal,
+ * or a SAFE_DOMAIN_RE-valid hostname. Anything containing whitespace,
+ * control chars, '{', '}', or newlines is rejected so the caller can fail
+ * closed and skip the upstream rather than emit a poisoned block.
+ */
+type RegenerateResult = { domains: number; caddyfile: string; error?: string };
+
+function isSafeUpstreamHost(host: string | null | undefined): boolean {
+  if (!host) return false;
+  // Reject anything that could break out of the directive line.
+  if (/[\s{}"\\#]/.test(host) || /[\x00-\x1f\x7f]/.test(host)) return false;
+  if (SAFE_IPV4_RE.test(host)) return true;
+  if (host.includes(':')) return SAFE_IPV6_RE.test(host);
+  return SAFE_DOMAIN_RE.test(host);
+}
+
 /**
  * Strip everything that could break out of a Caddyfile string literal
  * or comment line: CR, LF, `{`, `}`, `\\`, `"`, `#`, control chars.
@@ -73,6 +101,21 @@ export class ReverseProxyService implements OnApplicationBootstrap, OnModuleDest
    */
   private pendingReload: NodeJS.Timeout | null = null;
   private readonly RELOAD_DEBOUNCE_MS = 1500;
+
+  /**
+   * Serialization for regenerate(). regenerate() is a read-modify-write on
+   * the single shared Caddyfile, fired (often fire-and-forget) from ~30
+   * call sites. Two concurrent runs interleave their render→validate→reload
+   * and the rollback can restore the wrong "previous" file — or the
+   * bind-mounted container reads a half-written Caddyfile.
+   *
+   * Invariant: at most ONE runRegenerate() executes at a time. While one is
+   * in flight, additional callers don't start a second pass — they set
+   * regenQueued and share the in-flight promise; a SINGLE trailing run fires
+   * once the current one finishes (coalescing, same spirit as scheduleReload).
+   */
+  private regenInFlight: Promise<RegenerateResult> | null = null;
+  private regenQueued = false;
 
   constructor(private prisma: PrismaService) {
     if (!fs.existsSync(PROXY_DIR)) fs.mkdirSync(PROXY_DIR, { recursive: true });
@@ -162,6 +205,25 @@ ${email ? `  email ${email}\n` : ''}}
   }
 
   /**
+   * Write `content` to `targetPath` atomically: write a sibling temp file,
+   * then rename it over the target. rename(2) is atomic within a filesystem,
+   * so a reader (the bind-mounted Caddy container running `validate`/`reload`)
+   * never observes a partially-written Caddyfile. Falls back to a direct
+   * write if the rename fails (e.g. cross-device) so we never end up with no
+   * Caddyfile at all.
+   */
+  private atomicWriteCaddyfile(targetPath: string, content: string): void {
+    const tmpPath = `${targetPath}.tmp`;
+    try {
+      fs.writeFileSync(tmpPath, content);
+      fs.renameSync(tmpPath, targetPath);
+    } catch (e: any) {
+      this.logger.warn(`Atomic Caddyfile write failed (${e?.message}); falling back to direct write`);
+      fs.writeFileSync(targetPath, content);
+    }
+  }
+
+  /**
    * Caddy now lives in the root docker-compose. These methods proxy to that
    * container. start/stop become docker-compose calls at repo root.
    */
@@ -221,7 +283,59 @@ ${email ? `  email ${email}\n` : ''}}
 
   // ── regenerate + reload ───────────────────────────────────────────
 
-  async regenerate() {
+  /**
+   * Public entry point — serializes against concurrent callers. If a
+   * regenerate is already running, this does NOT start a second overlapping
+   * pass; it marks a trailing run as needed and resolves with the result of
+   * the run that observes the latest DB state. Net effect: a burst of N
+   * concurrent regenerate() calls produces at most 2 actual passes (the one
+   * already running + a single trailing one that captures everyone's writes).
+   */
+  async regenerate(): Promise<RegenerateResult> {
+    if (this.regenInFlight) {
+      // A pass is already running (or a trailing pass is already chained
+      // behind it). Don't start a second overlapping pass — ensure exactly
+      // one trailing pass runs after the current chain so our (and any
+      // sibling caller's) DB mutations are picked up, and share that promise.
+      this.regenQueued = true;
+      return this.regenInFlight;
+    }
+    // regenInFlight tracks the WHOLE chain (current pass + any coalesced
+    // trailing pass) and is only cleared once the chain fully settles, so
+    // there is no gap where a concurrent caller could slip past the guard.
+    const chain = this.regenerateChain().finally(() => {
+      this.regenInFlight = null;
+    });
+    this.regenInFlight = chain;
+    return chain;
+  }
+
+  /**
+   * Run runRegenerate() and, when it finishes, drain a single queued trailing
+   * run if one was requested while it was in flight. Loops (not recurses on
+   * the public guard) so coalescing collapses any number of concurrent
+   * requests into one tail without ever clearing regenInFlight mid-chain.
+   */
+  private async regenerateChain(): Promise<RegenerateResult> {
+    let result: RegenerateResult;
+    do {
+      this.regenQueued = false;
+      try {
+        result = await this.runRegenerate();
+      } catch (e: any) {
+        // Soft-fail rather than reject the shared promise — fire-and-forget
+        // callers must not emit unhandled rejections, and a queued trailing
+        // run should still get its chance.
+        this.logger.warn(`regenerate failed: ${e?.message || e}`);
+        result = { domains: 0, caddyfile: '', error: e?.message || String(e) };
+      }
+      // If a caller requested a regenerate while the pass above was running,
+      // loop once more to capture their writes.
+    } while (this.regenQueued);
+    return result;
+  }
+
+  private async runRegenerate(): Promise<RegenerateResult> {
     // EVERY domain owned by a project — even those not yet linked to an app.
     // Reserved domains still get a Caddy block so Let's Encrypt provisions the cert
     // in advance (the user gets a green padlock the moment they wire it to an app).
@@ -319,7 +433,7 @@ ${email ? `  email ${email}\n` : ''}}
         project?: { server?: { host: string | null } | null } | null;
       },
       hostPort: number,
-    ): string => {
+    ): string | null => {
       // Remote app (MULTI mode): the container lives on another machine —
       // container-name DNS doesn't resolve here. Proxy to the remote
       // server's public host on the app's PUBLISHED host port (every
@@ -329,6 +443,17 @@ ${email ? `  email ${email}\n` : ''}}
       // app.server = per-app placement; falls back to the project default.
       const serverHost = app.server?.host ?? app.project?.server?.host;
       const isRemote = !!serverHost && !isLocalHost(serverHost);
+      // Defense-in-depth: serverHost is interpolated raw into the upstream
+      // address. A malformed/hostile Server.host (whitespace, '{', '}',
+      // newline, a Caddy directive) would inject arbitrary config. Validate
+      // exactly like a domain at render time and FAIL CLOSED — skip the
+      // upstream block rather than emit a poisoned one.
+      if (isRemote && !isSafeUpstreamHost(serverHost)) {
+        this.logger.warn(
+          `Refusing to render reverse_proxy upstream for app '${app.name}' — unsafe server host '${serverHost}'. Skipping this upstream.`,
+        );
+        return null;
+      }
       const target = isRemote
         ? `${serverHost}:${hostPort}`
         : app.containerName && app.containerPort
@@ -423,7 +548,10 @@ ${email ? `  email ${email}\n` : ''}}
         blocks.push(`# ${host} :80 → ${mainLinked ? `app ${safeMainAppName}` : 'reserved'}`);
         blocks.push(`http://${host} {`);
         if (mainLinked) {
-          blocks.push(proxyFor(mainApp!, mainPort ?? 0));
+          const proxy = proxyFor(mainApp!, mainPort ?? 0);
+          // proxyFor returns null when the remote upstream host is unsafe —
+          // fail closed with a 502 rather than emit an injected directive.
+          blocks.push(proxy ?? `  respond "Upstream unavailable." 502`);
         } else if (portBindings.length > 0) {
           const first = portBindings[0];
           blocks.push(`  respond "Open http://${host}:${first.port} for ${sanitizeCaddyName(first.application.name)}." 200`);
@@ -435,14 +563,16 @@ ${email ? `  email ${email}\n` : ''}}
         blocks.push(`# ${host} :443 → ${mainLinked ? `app ${safeMainAppName}` : (portBindings.length > 0 ? 'port-bound apps' : 'reserved')}`);
         blocks.push(`${host} {`);
         if (mainLinked) {
-          blocks.push(proxyFor(mainApp!, mainPort ?? 0));
+          const proxy = proxyFor(mainApp!, mainPort ?? 0);
+          blocks.push(proxy ?? `  respond "Upstream unavailable." 502`);
         } else if (portBindings.length > 0) {
           const first = portBindings[0];
           if (bindingIsRemote(first)) {
             // Remote port-bound app: proxy through to <server>:<port> —
             // a redirect to http://domain:port would land on THIS host
             // where nothing listens on that port.
-            blocks.push(proxyFor(first.application as any, first.port));
+            const proxy = proxyFor(first.application as any, first.port);
+            blocks.push(proxy ?? `  respond "Upstream unavailable." 502`);
           } else {
             // Local port binding = direct container publish (plain HTTP, no
             // TLS termination by Caddy) — redirect to http://, not https://,
@@ -543,14 +673,21 @@ ${email ? `  email ${email}\n` : ''}}
 
     const caddyfile = blocks.join('\n');
     const caddyfilePath = path.join(PROXY_DIR, 'Caddyfile');
-    // Keep the previous (known-good) config for rollback: an invalid
-    // Caddyfile makes `caddy reload` fail AND a container restart loop —
-    // every hosted domain drops with ERR_CONNECTION_REFUSED until fixed.
+    // Captured INSIDE the critical section (regenerate() is now serialized,
+    // so no concurrent pass can mutate the file between this read and the
+    // rollback below). Keep the previous (known-good) config for rollback:
+    // an invalid Caddyfile makes `caddy reload` fail AND a container restart
+    // loop — every hosted domain drops with ERR_CONNECTION_REFUSED.
     let previousCaddyfile: string | null = null;
     try {
       previousCaddyfile = fs.readFileSync(caddyfilePath, 'utf-8');
     } catch {}
-    fs.writeFileSync(caddyfilePath, caddyfile);
+    // Atomic publish: write a temp file then rename over the target. The
+    // Caddyfile is bind-mounted into the container; a plain writeFileSync
+    // would let the container observe a half-written file mid-write (and a
+    // concurrent validate would parse garbage). rename() is atomic on the
+    // same filesystem, so readers see either the old or the new file whole.
+    this.atomicWriteCaddyfile(caddyfilePath, caddyfile);
 
     // Validate INSIDE the container (same binary/version that will load
     // it — the file is bind-mounted, so the new content is already
@@ -567,7 +704,7 @@ ${email ? `  email ${email}\n` : ''}}
         `Generated Caddyfile failed validation — rolling back to the previous config. Error: ${e?.stderr || e?.message}`,
       );
       if (previousCaddyfile !== null) {
-        fs.writeFileSync(caddyfilePath, previousCaddyfile);
+        this.atomicWriteCaddyfile(caddyfilePath, previousCaddyfile);
       }
       return { domains: activeCount, caddyfile, error: 'caddyfile validation failed — previous config kept' };
     }
@@ -660,7 +797,17 @@ ${email ? `  email ${email}\n` : ''}}
    * (see docker-compose.yml). The host has it at /opt/dockcontrol/docker-compose.override.yml.
    */
   private async syncCaddyComposeOverride(extraPorts: number[]): Promise<boolean> {
-    const portLines = extraPorts.flatMap((p) => [`      - "${p}:${p}"`, `      - "${p}:${p}/udp"`]);
+    // Defense-in-depth: ports are concatenated raw into YAML. Today the only
+    // caller passes [], but reject anything that isn't a valid TCP/UDP port
+    // (integer in 1..65535) before emission so a future caller can't inject
+    // YAML via a bogus value. Skips the empty-array fast path entirely.
+    const safePorts = extraPorts.filter((p) => Number.isInteger(p) && p >= 1 && p <= 65535);
+    if (safePorts.length !== extraPorts.length) {
+      this.logger.warn(
+        `Dropping invalid Caddy override port(s): ${extraPorts.filter((p) => !safePorts.includes(p)).join(', ')}`,
+      );
+    }
+    const portLines = safePorts.flatMap((p) => [`      - "${p}:${p}"`, `      - "${p}:${p}/udp"`]);
     const desired = `# Auto-managed by DockControl API — do not edit.
 # Extra ports published on the Caddy container for HTTPS port-pinned bindings.
 services:

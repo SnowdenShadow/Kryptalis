@@ -754,7 +754,7 @@ export class FilesService {
     if (remote) {
       const task = await this.agent.enqueueAndWait(
         remote.serverId,
-        'FILE_LIST' as any,
+        'FILE_LIST',
         { slug: remote.slug, legacySlug: remote.legacySlug, path: resolved.relPath || '.' },
         30_000,
       );
@@ -1413,7 +1413,7 @@ export class FilesService {
     if (remoteRm) {
       const task = await this.agent.enqueueAndWait(
         remoteRm.serverId,
-        'FILE_DELETE' as any,
+        'FILE_DELETE',
         { slug: remoteRm.slug, legacySlug: remoteRm.legacySlug, path: resolved.relPath },
         30_000,
       );
@@ -1577,7 +1577,7 @@ export class FilesService {
       try {
         const task = await this.agent.enqueueAndWait(
           serverId,
-          'DISK_USAGE' as any,
+          'DISK_USAGE',
           { slugs: apps.flatMap((a) => [remoteAppSlug(a.name, a.id), appSlugify(a.name)]) },
           20_000,
         );

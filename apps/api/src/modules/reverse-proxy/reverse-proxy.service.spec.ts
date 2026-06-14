@@ -11,9 +11,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
  * is what every assertion below reads.
  */
 
-const { execFileAsyncMock, writeFileSyncMock } = vi.hoisted(() => ({
+const { execFileAsyncMock, writeFileSyncMock, renameSyncMock } = vi.hoisted(() => ({
   execFileAsyncMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  renameSyncMock: vi.fn(),
 }));
 
 vi.mock('child_process', async () => {
@@ -32,6 +33,9 @@ vi.mock('fs', async (importOriginal) => {
     existsSync: vi.fn().mockReturnValue(true), // PROXY_DIR "exists" → no mkdir
     mkdirSync: vi.fn(),
     writeFileSync: writeFileSyncMock,
+    // Atomic Caddyfile publish writes Caddyfile.tmp then renames over the
+    // target — stub the rename so no real file ops happen on disk.
+    renameSync: renameSyncMock,
     readFileSync: vi.fn().mockReturnValue(''), // compose override read
   };
   return { ...mocked, default: mocked };
@@ -376,5 +380,68 @@ describe('regenerate — safety rails', () => {
       ['exec', 'dockcontrol-caddy', 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile'],
       expect.anything(),
     );
+  });
+
+  it('publishes the Caddyfile atomically: writes <path>.tmp then renames over the target', async () => {
+    const { service } = makeService([domainRow()]);
+    await service.regenerate();
+    // The rendered config lands on a .tmp sibling first…
+    expect(writeFileSyncMock).toHaveBeenCalledWith(
+      expect.stringContaining('Caddyfile.tmp'),
+      expect.stringContaining('athexis.xyz'),
+    );
+    // …then is renamed over the real Caddyfile so readers never see a partial file.
+    expect(renameSyncMock).toHaveBeenCalledWith(
+      expect.stringContaining('Caddyfile.tmp'),
+      expect.stringMatching(/Caddyfile$/),
+    );
+  });
+});
+
+describe('regenerate — upstream host injection (remote Server.host)', () => {
+  function remoteAppDomain(host: string): any {
+    return domainRow({
+      applicationId: 'a1',
+      application: {
+        id: 'a1',
+        name: 'WordPress',
+        port: 8080,
+        customPort: false,
+        containerName: 'dockcontrol-wordpress-abc123def456',
+        containerPort: 80,
+        project: { server: { host } },
+      },
+    });
+  }
+
+  it('a bare IPv4 remote host is rendered as a normal upstream', async () => {
+    const { service } = makeService([remoteAppDomain('203.0.113.7')]);
+    const { caddyfile } = await service.regenerate();
+    expect(caddyfile).toContain('reverse_proxy 203.0.113.7:8080');
+  });
+
+  it('a valid hostname remote host is rendered as a normal upstream', async () => {
+    const { service } = makeService([remoteAppDomain('node1.example.com')]);
+    const { caddyfile } = await service.regenerate();
+    expect(caddyfile).toContain('reverse_proxy node1.example.com:8080');
+  });
+
+  it('a Server.host carrying a Caddy directive injection is SKIPPED (fail closed)', async () => {
+    const { service } = makeService([
+      remoteAppDomain('evil.com}\n:80 {\n  respond "pwned" 200\n}\n#'),
+    ]);
+    const { caddyfile } = await service.regenerate();
+    // No reverse_proxy to the poisoned host, no injected respond block.
+    expect(caddyfile).not.toContain('reverse_proxy evil.com');
+    expect(caddyfile).not.toContain('respond "pwned"');
+    // Fail-closed fallback keeps the site block valid.
+    expect(caddyfile).toContain('respond "Upstream unavailable." 502');
+  });
+
+  it('a Server.host with whitespace/extra directive tokens is SKIPPED', async () => {
+    const { service } = makeService([remoteAppDomain('1.2.3.4 { tls internal }')]);
+    const { caddyfile } = await service.regenerate();
+    expect(caddyfile).not.toContain('reverse_proxy 1.2.3.4 {');
+    expect(caddyfile).toContain('respond "Upstream unavailable." 502');
   });
 });

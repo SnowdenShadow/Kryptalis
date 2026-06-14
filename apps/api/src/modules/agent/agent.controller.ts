@@ -78,9 +78,10 @@ export class AgentController {
   @Header('Content-Type', 'text/x-shellscript')
   installScript(@Query('token') token: string, @Res() res: Response) {
     // Tight regex: every install token DockControl issues is 64 hex chars
-    // (32 random bytes). Accept the canonical shape only — defends against
-    // anyone trying to brute-force /agent/register with short tokens.
-    if (!token || !/^[a-zA-Z0-9_-]{32,128}$/.test(token)) {
+    // (servers.service mintToken → randomBytes(32).toString('hex')). Accept the
+    // canonical shape only — defends against anyone trying to brute-force
+    // /agent/register with short/malformed tokens.
+    if (!token || !/^[a-f0-9]{64}$/.test(token)) {
       res.status(400).type('text/plain').send('Missing or invalid token\n');
       return;
     }

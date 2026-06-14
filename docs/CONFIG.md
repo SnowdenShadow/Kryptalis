@@ -37,7 +37,7 @@ Two more `.env` keys are optional but commonly set:
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `PUBLIC_API_URL` | autodetected at install | The URL the browser uses to reach the API. Baked into the dashboard at build time (`NEXT_PUBLIC_API_URL`). Change → rebuild dashboard with `--no-cache`. |
-| `BACKUP_ENCRYPTION_KEY` | unset | When set, backup dumps are AES-256-GCM encrypted on disk. Separate from `ENCRYPTION_KEY` so backup access can be siloed. Can also be set via `SystemSetting.backup_encryption_key`. |
+| `BACKUP_ENCRYPTION_KEY` | unset | When set, backup dumps are AES-256-GCM encrypted on disk. Must be a string of **at least 32 characters** — its UTF-8 bytes are used directly as HKDF input keying material (not decoded as hex), so generate it as **48+ random base64/hex characters** for full entropy (`openssl rand -base64 48`). Separate from `ENCRYPTION_KEY` so backup access can be siloed. Can also be set via `SystemSetting.backup_encryption_key`. |
 | `ACME_EMAIL` | derived from `PUBLIC_API_URL` | Let's Encrypt contact email for expiry notices. Bare-IP installs fall back to anonymous registration. |
 | `DASHBOARD_BIND` | `0.0.0.0` | Set to `127.0.0.1` once a public domain fronts the dashboard so direct `:3000` traffic stops bypassing TLS. |
 | `API_BIND` | `0.0.0.0` | Same idea for the API: set to `127.0.0.1` once Caddy fronts it so direct `:4000` traffic stops bypassing TLS. |
@@ -91,7 +91,7 @@ The audit log has a hardcoded retention of 365 days (cleaned hourly), tracked in
 
 | Key | Env fallback | Default | Description |
 | --- | --- | --- | --- |
-| `backup_encryption_key` | `BACKUP_ENCRYPTION_KEY` | unset → plaintext | 32-byte hex key for AES-256-GCM backup encryption. **Encrypted at rest** (envelope inside `SystemSetting`). Set this *before* any production data lands, then back the key up off-system. |
+| `backup_encryption_key` | `BACKUP_ENCRYPTION_KEY` | unset → plaintext | Master key for AES-256-GCM backup encryption. Must be a string of **at least 32 characters**; its raw UTF-8 bytes are used directly as HKDF input keying material (the per-dump data key is HKDF-derived from it — the value is **not** decoded as hex, so the string length, not its encoding, is what matters). Generate **48+ random base64/hex characters** (`openssl rand -base64 48`) for full entropy. **Encrypted at rest** (envelope inside `SystemSetting`). Set this *before* any production data lands, then back the key up off-system. |
 | `s3_endpoint` | `S3_ENDPOINT` | — | Endpoint URL of the S3-compatible store (Amazon S3, Cloudflare R2, Backblaze B2, MinIO). Required for remote backup targets. |
 | `s3_bucket` | `S3_BUCKET` | — | Bucket name backups are written into. Required for remote backup targets. |
 | `s3_region` | `S3_REGION` | `auto` | Bucket region. `auto` works for R2/B2/MinIO; set a real region for Amazon S3. |

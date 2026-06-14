@@ -7,7 +7,7 @@ import { Loader2 } from 'lucide-react';
 import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
 import { useSidebarStore, useAuthStore } from '@/lib/store';
-import { api } from '@/lib/api';
+import { api, sessionReady } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 /**
@@ -23,6 +23,11 @@ import { cn } from '@/lib/utils';
  *
  * The 401 path in api.ts is still there as a backstop for expired or
  * revoked tokens; this layer just prevents the cold-boot leak.
+ *
+ * The access token is now memory-only (never localStorage), so on a hard
+ * reload we must `await sessionReady` — a silent refresh via the httpOnly
+ * cookie — BEFORE deciding to bounce, otherwise a valid session flashes the
+ * login page while the in-memory token is still empty.
  */
 export default function DashboardLayout({
   children,
@@ -35,9 +40,17 @@ export default function DashboardLayout({
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    // After zustand's persist has had a chance to rehydrate from localStorage
-    // (synchronously by next tick) decide whether to render or bounce.
-    setHydrated(true);
+    // Wait for the cold-boot silent refresh (sessionReady) to settle before
+    // deciding to render or bounce — the access token lives in memory only,
+    // so a hard reload starts with accessToken===null even for a valid
+    // session until the httpOnly-cookie refresh repopulates it.
+    let active = true;
+    void sessionReady.finally(() => {
+      if (active) setHydrated(true);
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {

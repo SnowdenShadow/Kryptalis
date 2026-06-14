@@ -92,8 +92,10 @@ class ApiClient {
   }
 
   private getAccessToken(): string | null {
-    if (typeof window === 'undefined') return null;
-    return localStorage.getItem('accessToken');
+    // In-memory only — never localStorage. An XSS can no longer scrape a
+    // valid bearer from storage; the worst it can read is whatever lives in
+    // the current JS heap, and only while a session is actually open.
+    return useAuthStore.getState().accessToken;
   }
 
   private clearTokensAndRedirect() {
@@ -143,9 +145,8 @@ class ApiClient {
         }
         if (!data?.accessToken) return null;
 
-        localStorage.setItem('accessToken', data.accessToken);
-        // Keep the zustand copy in sync — it persists its own snapshot
-        // ('dockcontrol-auth') and would otherwise hold a revoked token.
+        // Token stays in memory only (never localStorage). The store does not
+        // persist accessToken (see partialize), so this leaves nothing on disk.
         useAuthStore.setState({ accessToken: data.accessToken });
         return data.accessToken;
       } catch {
@@ -265,6 +266,20 @@ class ApiClient {
     return res;
   }
 
+  /**
+   * Cold-boot session recovery. The access token lives in memory only, so a
+   * page reload starts with no bearer. The httpOnly `dockcontrol_rt` cookie
+   * (or, for a legacy session, the one-shot localStorage refresh token) still
+   * authenticates us — attempt a silent refresh to repopulate the in-memory
+   * token. Returns true if a session was restored. Safe to call when no
+   * session exists (the refresh simply 401s and we stay logged out).
+   */
+  async restoreSession(): Promise<boolean> {
+    if (typeof window === 'undefined') return false;
+    const token = await this.tryRefresh();
+    return token !== null;
+  }
+
   get<T>(endpoint: string) {
     return this.request<T>(endpoint);
   }
@@ -283,3 +298,19 @@ class ApiClient {
 }
 
 export const api = new ApiClient(API_URL);
+
+/**
+ * Cold-boot session recovery, fired once at module load in the browser.
+ *
+ * The access token is now memory-only and is NOT persisted, so a page reload
+ * starts with `accessToken === null` even for a still-valid session. We kick
+ * off a silent refresh immediately (the httpOnly `dockcontrol_rt` cookie does
+ * the authenticating) to repopulate the in-memory token before the user
+ * interacts. `sessionReady` resolves to true if a session was restored — auth
+ * gates should `await sessionReady` before deciding to bounce to /login, so a
+ * legitimate reload isn't treated as logged-out.
+ *
+ * SSR / tests: resolves false synchronously (no window → restoreSession bails).
+ */
+export const sessionReady: Promise<boolean> =
+  typeof window === 'undefined' ? Promise.resolve(false) : api.restoreSession();

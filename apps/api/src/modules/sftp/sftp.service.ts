@@ -327,7 +327,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       };
     });
 
-    const task = await this.agent.enqueueAndWait(serverId, 'SFTP_SYNC' as any, { accounts: payload }, 60_000);
+    const task = await this.agent.enqueueAndWait(serverId, 'SFTP_SYNC', { accounts: payload }, 60_000);
     if (task.status === 'FAILED') {
       throw new Error(task.error || 'remote SFTP sync failed');
     }
