@@ -17,7 +17,7 @@ You do **not** need Docker, Node, Postgres, Redis, or Caddy installed beforehand
 Run as root on the VPS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/DockControl/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/main/install.sh | sudo sh
 ```
 
 The script:
@@ -35,7 +35,7 @@ The installer asks for **nothing interactively**. Everything is taken from env v
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `DOCKCONTROL_DIR` | `/opt/dockcontrol` | Install root. |
-| `DOCKCONTROL_REPO` | `https://github.com/SnowdenShadow/DockControl.git` | Source repo. |
+| `DOCKCONTROL_REPO` | `https://github.com/SnowdenShadow/Kryptalis.git` | Source repo. |
 | `DOCKCONTROL_BRANCH` | `main` | Branch to track. |
 | `PUBLIC_API_URL` | autodetected | Forces the public API URL baked into the dashboard build. |
 | `PUBLIC_DASHBOARD_URL` | derived from `PUBLIC_API_URL` (same host, port 3000) | Public dashboard origin used in email CTA links. |

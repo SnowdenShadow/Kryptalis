@@ -25,7 +25,7 @@ premier boot, une IPv4 publique. Pour le test SSL : un nom de domaine dont tu co
 ## A1. Installation
 1. En root sur la VPS :
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/DockControl/main/install.sh | sudo sh
+   curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/main/install.sh | sudo sh
    ```
    (`install.sh:6`. Doit tourner en root — `install.sh:41`. Installe git/curl/openssl/Docker, exige le plugin `docker compose`.)
 2. ✅ L'installeur génère `.env` (mode `600`) avec `JWT_SECRET`/`JWT_REFRESH_SECRET` (`openssl rand -hex 32`),

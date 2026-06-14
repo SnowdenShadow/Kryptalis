@@ -3,7 +3,7 @@
 # ─────────────────────────────────────────────────────────────────────
 # Usage on a fresh Ubuntu / Debian VPS (as root):
 #
-#   curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/DockControl/main/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/main/install.sh | sudo sh
 #
 # Special flags (via env var):
 #   DOCKCONTROL_RESET=1   wipe the .env + all docker volumes and reinstall fresh
@@ -27,7 +27,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-REPO_URL="${DOCKCONTROL_REPO:-https://github.com/SnowdenShadow/DockControl.git}"
+REPO_URL="${DOCKCONTROL_REPO:-https://github.com/SnowdenShadow/Kryptalis.git}"
 INSTALL_DIR="${DOCKCONTROL_DIR:-/opt/dockcontrol}"
 BRANCH="${DOCKCONTROL_BRANCH:-main}"
 RESET="${DOCKCONTROL_RESET:-0}"
@@ -412,9 +412,9 @@ Useful commands:
                                       # which keeps them)
 
 Update later — re-run the installer:
-  curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/DockControl/$BRANCH/install.sh | sudo sh
+  curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/$BRANCH/install.sh | sudo sh
 
 Fresh start (drops DB, sessions, agent tokens):
-  DOCKCONTROL_RESET=1 sh -c "\$(curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/DockControl/$BRANCH/install.sh)"
+  DOCKCONTROL_RESET=1 sh -c "\$(curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/$BRANCH/install.sh)"
 
 EOF

@@ -132,7 +132,9 @@
       "Bash(cd \"C:/Users/Snowden/Desktop/Kryptalis-dev/apps/api\")",
       "Bash(docker --version)",
       "Bash(node_modules/.bin/vitest run *)",
-      "Bash(node -e \"const S=/^[a-zA-Z0-9][a-zA-Z0-9_.-]*\\\\$/;const v='\\\\${HOSTDIR}';console.log\\('SAFE_VOLUME_NAME passes?',S.test\\(v\\)\\)\")"
+      "Bash(node -e \"const S=/^[a-zA-Z0-9][a-zA-Z0-9_.-]*\\\\$/;const v='\\\\${HOSTDIR}';console.log\\('SAFE_VOLUME_NAME passes?',S.test\\(v\\)\\)\")",
+      "Bash(sed -n '18,22p' README.md)",
+      "Bash(sed -n '18,22p;36,40p' INSTALL.md)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Snowden\\Desktop\\Kryptalis-dev\\apps\\agent\\internal\\poller",

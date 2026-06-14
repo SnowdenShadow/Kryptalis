@@ -17,7 +17,7 @@ DockControl is a self-hosted Platform-as-a-Service that turns one or more Linux 
 On a fresh Ubuntu / Debian VPS as root:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/DockControl/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/SnowdenShadow/Kryptalis/main/install.sh | sudo sh
 ```
 
 The installer is idempotent — re-running it pulls latest, preserves `.env`, and only rebuilds what changed.
