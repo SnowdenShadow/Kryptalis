@@ -193,6 +193,16 @@ export default function ProjectsPage() {
   const [importTargetServerId, setImportTargetServerId] = useState('');
   const [importDomainStrategy, setImportDomainStrategy] = useState<DomainStrategy>('skip');
   const [importAllowHost, setImportAllowHost] = useState(false);
+  // Per-app git provider chosen on THIS install (for private repos). Keyed by
+  // the manifest app name; empty value = clone anonymously (public repo).
+  const [importGitProviders, setImportGitProviders] = useState<Record<string, string>>({});
+
+  // The importer's own connected git providers — used to authenticate private
+  // repo clones without ever shipping a token in the archive.
+  const { data: gitProviders = [] } = useQuery<{ id: string; provider: string; name: string; username?: string }[]>({
+    queryKey: ['git-providers'],
+    queryFn: () => api.get('/git-providers'),
+  });
 
   function resetImport() {
     setShowImport(false);
@@ -203,6 +213,7 @@ export default function ProjectsPage() {
     setImportTargetServerId('');
     setImportDomainStrategy('skip');
     setImportAllowHost(false);
+    setImportGitProviders({});
   }
 
   // Step 1 → parse the raw .dctproj bytes. rawFetch streams the File body as
@@ -237,6 +248,11 @@ export default function ProjectsPage() {
         ...(isMultiMode && importTargetServerId ? { targetServerId: importTargetServerId } : {}),
         domainStrategy: importDomainStrategy,
         ...(importAllowHost ? { allowHostAccess: true } : {}),
+        // Only send non-empty provider selections.
+        ...((() => {
+          const map = Object.fromEntries(Object.entries(importGitProviders).filter(([, v]) => v));
+          return Object.keys(map).length ? { gitProviderMap: map } : {};
+        })()),
       }),
     onSuccess: (data) => {
       if (data.status === 'partial') {
@@ -717,6 +733,30 @@ export default function ProjectsPage() {
                     <span className="text-muted-foreground block mt-0.5">{t('projects.import.hostAccessDesc')}</span>
                   </span>
                 </label>
+              )}
+
+              {/* Per-app git provider — for private repos, the importer picks
+                  one of THEIR connected providers (the token never travels in
+                  the archive). Public repos can be left as "None". */}
+              {importParsed?.manifest.applications.some((a) => a.gitUrl) && (
+                <div className="space-y-2">
+                  <Label className="text-xs">{t('projects.import.gitProviderTitle')}</Label>
+                  <p className="text-xs text-muted-foreground">{t('projects.import.gitProviderDesc')}</p>
+                  {importParsed.manifest.applications.filter((a) => a.gitUrl).map((a) => (
+                    <div key={a.name} className="flex items-center gap-2">
+                      <span className="text-xs font-mono shrink-0 w-28 truncate" title={a.name}>{a.name}</span>
+                      <Select
+                        value={importGitProviders[a.name] || ''}
+                        onChange={(e) => setImportGitProviders((m) => ({ ...m, [a.name]: e.target.value }))}
+                      >
+                        <option value="">{t('projects.import.gitProviderNone')}</option>
+                        {gitProviders.map((gp) => (
+                          <option key={gp.id} value={gp.id}>{gp.name} ({gp.provider}{gp.username ? ` · ${gp.username}` : ''})</option>
+                        ))}
+                      </Select>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
             <DialogFooter>

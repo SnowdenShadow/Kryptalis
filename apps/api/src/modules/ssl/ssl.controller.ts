@@ -29,4 +29,21 @@ export class SslController {
   list(@CurrentUser('id') userId: string, @Query('domainId') domainId?: string) {
     return this.svc.getCertificates(userId, domainId);
   }
+
+  @Get('diagnose/:domainId')
+  @ApiOperation({ summary: 'Explain why a domain’s certificate is/ isn’t issued (DNS / ports / cert)' })
+  diagnose(@CurrentUser('id') userId: string, @Param('domainId') domainId: string) {
+    return this.svc.diagnose(userId, domainId);
+  }
+
+  @Get('logs/:domainId')
+  @ApiOperation({ summary: 'Recent Caddy/ACME log lines for a domain (the real issuance error)' })
+  logs(
+    @CurrentUser('id') userId: string,
+    @Param('domainId') domainId: string,
+    @Query('lines') lines?: string,
+  ) {
+    const n = Number(lines);
+    return this.svc.getLogs(userId, domainId, Number.isFinite(n) ? n : 200);
+  }
 }

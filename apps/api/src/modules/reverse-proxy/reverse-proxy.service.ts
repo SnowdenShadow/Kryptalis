@@ -833,6 +833,10 @@ ${portLines.length > 0 ? portLines.join('\n') : '      []'}
 
   private async hasIssuedCert(host: string): Promise<boolean> {
     try {
+      // Defense-in-depth: a host with shell metacharacters must never reach the
+      // `sh -c` below. Hostnames are RFC-1035 (letters/digits/dot/dash) — refuse
+      // anything else outright rather than interpolate it.
+      if (!/^[a-zA-Z0-9.-]+$/.test(host)) return false;
       // Look for the cert file inside the Caddy container. The exact subdir
       // varies by CA (acme-v02.api.letsencrypt.org-directory for LE prod,
       // acme-staging-v02… for staging) so we glob.
@@ -846,6 +850,51 @@ ${portLines.length > 0 ? portLines.join('\n') : '      []'}
     } catch {
       return false;
     }
+  }
+
+  /** Public wrapper — does Caddy hold a valid cert for `host`? (SSL diagnostics) */
+  async certExists(host: string): Promise<boolean> {
+    return this.hasIssuedCert(host);
+  }
+
+  /**
+   * Return the most recent Caddy log lines relevant to a domain's certificate
+   * issuance (the real ACME error lives here: rate limits, failed HTTP-01
+   * challenges, DNS problems). `host` is NEVER passed to a shell — we fetch the
+   * container's logs with execFile (argv array, no shell) and filter in JS.
+   */
+  async getAcmeLogsForDomain(host: string, lines = 200): Promise<string[]> {
+    const tail = Math.max(50, Math.min(1000, Math.floor(lines) || 200));
+    let raw = '';
+    try {
+      // `docker logs` writes to stderr for many runtimes — capture both.
+      const { stdout, stderr } = await execFileAsync(
+        'docker',
+        ['logs', '--tail', String(tail), CONTAINER_NAME],
+        { timeout: 8000, maxBuffer: 8 * 1024 * 1024 },
+      );
+      raw = `${stdout || ''}${stderr || ''}`;
+    } catch {
+      return [];
+    }
+    const hostLc = (host || '').toLowerCase();
+    const markers = ['acme', 'obtain', 'certificate', 'challenge', 'rate limit', 'rate_limit', 'error', 'tls'];
+    const out: string[] = [];
+    let bytes = 0;
+    for (const line of raw.split('\n')) {
+      const l = line.toLowerCase();
+      // Keep lines that mention THIS host, or generic ACME/TLS markers (so the
+      // user sees rate-limit / challenge failures even when the host isn't on
+      // the line). No cross-tenant leakage of another domain's specifics: other
+      // hosts' lines only pass if they ALSO carry a generic marker, which is
+      // fine — these are issuance-level diagnostics, not secrets.
+      if (hostLc && l.includes(hostLc)) { out.push(line); }
+      else if (markers.some((m) => l.includes(m))) { out.push(line); }
+      else continue;
+      bytes += line.length + 1;
+      if (bytes > 50_000) break;
+    }
+    return out;
   }
 
   /**

@@ -231,6 +231,36 @@ describe('ProjectTransferService — parse / import safety', () => {
     expect(appsCreate.mock.calls[0][1].composeContent).toContain('docker.sock');
   });
 
+  it('wires a chosen git provider for a git app (and clones anonymously without one)', async () => {
+    // sampleProject's "web" app is a git app (gitUrl set).
+    prisma.project.findUnique.mockResolvedValue(sampleProject);
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: false, passphrase: PASS });
+    created.push(archivePath);
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+
+    const appsCreate = vi.fn().mockResolvedValue({ id: 'a1' });
+    (svc as any).applications = { create: appsCreate };
+    (svc as any).projects = { create: vi.fn().mockResolvedValue({ id: 'proj1' }) };
+    (svc as any).databases = { create: vi.fn().mockResolvedValue({ id: 'd1' }) };
+    (svc as any).domains = { create: vi.fn() };
+
+    // WITH a provider chosen for "web" → dto.gitProviderId is set.
+    const p1 = await svc.parseImport('u2', archivePath, PASS);
+    await svc.applyImport('u2', p1.stagedId, { passphrase: PASS, gitProviderMap: { web: 'prov-123' } });
+    const gitCall = appsCreate.mock.calls.find((c) => c[1].gitUrl);
+    expect(gitCall).toBeDefined();
+    expect(gitCall![1].gitProviderId).toBe('prov-123');
+
+    // WITHOUT a provider → no gitProviderId (anonymous public clone).
+    appsCreate.mockClear();
+    const p2 = await svc.parseImport('u2', archivePath, PASS);
+    await svc.applyImport('u2', p2.stagedId, { passphrase: PASS });
+    const gitCall2 = appsCreate.mock.calls.find((c) => c[1].gitUrl);
+    expect(gitCall2).toBeDefined();
+    expect(gitCall2![1].gitProviderId).toBeUndefined();
+  });
+
   it('carries a safe compose app (named volume, no host mount) as portable', async () => {
     const safeApp = {
       ...sampleProject,

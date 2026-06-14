@@ -117,6 +117,7 @@ export class ProjectTransferController {
       targetServerId: dto.targetServerId,
       domainStrategy: dto.domainStrategy,
       allowHostAccess: dto.allowHostAccess,
+      gitProviderMap: dto.gitProviderMap,
     });
   }
 }

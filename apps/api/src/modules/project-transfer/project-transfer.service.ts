@@ -555,7 +555,7 @@ export class ProjectTransferService {
   async applyImport(
     userId: string,
     stagedId: string,
-    opts: { passphrase: string; targetServerId?: string; domainStrategy?: DomainStrategy; allowHostAccess?: boolean },
+    opts: { passphrase: string; targetServerId?: string; domainStrategy?: DomainStrategy; allowHostAccess?: boolean; gitProviderMap?: Record<string, string> },
   ): Promise<{ status: 'ok' | 'partial'; projectId: string; message: string; warnings: string[] }> {
     if (!/^xfer_[a-f0-9]+$/.test(stagedId)) throw new BadRequestException('Invalid import id.');
     // The staged session MUST belong to this user (defends against a second
@@ -640,7 +640,16 @@ export class ProjectTransferService {
             serverId: opts.targetServerId,
             envVars,
           };
-          if (app.gitUrl) { dto.gitUrl = app.gitUrl; dto.gitBranch = app.gitBranch || 'main'; }
+          if (app.gitUrl) {
+            dto.gitUrl = app.gitUrl;
+            dto.gitBranch = app.gitBranch || 'main';
+            // Git credentials never travel in the archive. For a private repo
+            // the operator picks one of THEIR providers on this install; create()
+            // then validates ownership + host and clones with that token. No
+            // provider → anonymous clone (public repos).
+            const providerId = opts.gitProviderMap?.[app.name];
+            if (providerId) dto.gitProviderId = providerId;
+          }
           else if (app.dockerImage) dto.dockerImage = app.dockerImage;
           else if (app.dockerComposeFile) dto.composeContent = app.dockerComposeFile;
           if (app.buildCommand) dto.buildCommand = app.buildCommand;
@@ -653,7 +662,13 @@ export class ProjectTransferService {
           const created = await this.applications.create(userId, dto);
           appNameToId[app.name] = (created as any).id;
         } catch (e: any) {
-          warnings.push(`app ${app.name}: ${e?.message || e}`);
+          const base = `app ${app.name}: ${e?.message || e}`;
+          // A git app with no provider picked is the usual private-repo failure
+          // — point the operator at the fix.
+          const hint = app.gitUrl && !opts.gitProviderMap?.[app.name]
+            ? ' (if this is a private repo, re-import and pick a connected git provider for this app)'
+            : '';
+          warnings.push(base + hint);
         }
       }
 

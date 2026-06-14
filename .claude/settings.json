@@ -145,7 +145,13 @@
       "Bash(grep -nA30 '\"slug\": \"portainer\"' marketplace/catalog.json)",
       "Bash(echo \"VITEST=$?\")",
       "Bash(grep -aE \"FAIL|×|toEqual|expected|application-deploy|publishedHostPort\" /tmp/f.log | head -15)",
-      "Bash(grep -aiE \"fail|✗|×|expected|received|not.*equal|deploy\" /tmp/f.log | grep -viE \"passed|✓\" | head -20)"
+      "Bash(grep -aiE \"fail|✗|×|expected|received|not.*equal|deploy\" /tmp/f.log | grep -viE \"passed|✓\" | head -20)",
+      "Bash(grep -nA18 \"^model GitProvider\" ../prisma/schema.prisma)",
+      "Bash(grep -rnA18 \"model GitProvider\" ../prisma/schema.prisma)",
+      "Bash(grep -nA16 \"model GitProvider\" prisma/schema.prisma)",
+      "Bash(grep -nE \"</div>\\\\s*$|</Dialog>|DialogFooter\" \"app/\\(dashboard\\)/dashboard/domains/page.tsx\")",
+      "Bash(awk 'NR>=506 && /^        \\\\\\)\\\\}/ {print NR\": \"$0; c++} c>=1 && NR>506 {exit}' \"app/\\(dashboard\\)/dashboard/domains/page.tsx\")",
+      "Bash(sed -n '600,640p' \"app/\\(dashboard\\)/dashboard/domains/page.tsx\")"
     ],
     "additionalDirectories": [
       "C:\\Users\\Snowden\\Desktop\\Kryptalis-dev\\apps\\agent\\internal\\poller",

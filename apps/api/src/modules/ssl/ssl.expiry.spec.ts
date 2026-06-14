@@ -33,9 +33,14 @@ function makeService() {
   const proxy = {
     regenerate: vi.fn().mockResolvedValue({ domains: 1, caddyfile: '' }),
     scheduleReload: vi.fn(),
+    certExists: vi.fn().mockResolvedValue(false),
+    getAcmeLogsForDomain: vi.fn().mockResolvedValue([]),
   };
-  const service = new SslService(prisma as any, notifications as any, proxy as any);
-  return { service, prisma, notifications, proxy };
+  const domains = {
+    getDnsHealth: vi.fn().mockResolvedValue({ checks: { a: { status: 'OK', message: 'A → 1.2.3.4' } } }),
+  };
+  const service = new SslService(prisma as any, notifications as any, proxy as any, domains as any);
+  return { service, prisma, notifications, proxy, domains };
 }
 
 function domainRow(overrides: Record<string, unknown> = {}) {
@@ -185,5 +190,43 @@ describe('issue', () => {
     await expect(service.issue('regular-user', 'd3')).rejects.toThrow(/platform ADMIN/);
     expect(proxy.scheduleReload).not.toHaveBeenCalled();
     expect(proxy.regenerate).not.toHaveBeenCalled();
+  });
+});
+
+describe('diagnose', () => {
+  it('aggregates DNS + ports + cert checks for a public domain', async () => {
+    const { service, prisma, proxy, domains } = makeService();
+    prisma.domain.findUnique.mockResolvedValue({ id: 'd1', domain: 'shop.example.com', projectId: null, sslStatus: 'PENDING' });
+    prisma.user.findUnique.mockResolvedValue({ role: 'ADMIN' });
+    domains.getDnsHealth.mockResolvedValue({ checks: { a: { status: 'FAIL', message: 'No A record' } } });
+    proxy.certExists.mockResolvedValue(false);
+    // No PUBLIC_API_URL → ports check downgrades to a WARN (still produces a check).
+    const res = await service.diagnose('admin', 'd1');
+    expect(res.domain).toBe('shop.example.com');
+    const keys = res.checks.map((c) => c.key);
+    expect(keys).toContain('dns');
+    expect(keys).toContain('cert');
+    expect(res.checks.find((c) => c.key === 'dns')!.status).toBe('FAIL');
+    expect(res.checks.find((c) => c.key === 'cert')!.status).toBe('FAIL');
+  });
+
+  it('short-circuits a local hostname with a clear FAIL', async () => {
+    const { service, prisma } = makeService();
+    prisma.domain.findUnique.mockResolvedValue({ id: 'd2', domain: 'app.local', projectId: null, sslStatus: 'PENDING' });
+    prisma.user.findUnique.mockResolvedValue({ role: 'ADMIN' });
+    const res = await service.diagnose('admin', 'd2');
+    expect(res.checks).toHaveLength(1);
+    expect(res.checks[0].key).toBe('local');
+    expect(res.checks[0].status).toBe('FAIL');
+  });
+
+  it('getLogs returns the proxy-filtered Caddy lines', async () => {
+    const { service, prisma, proxy } = makeService();
+    prisma.domain.findUnique.mockResolvedValue({ id: 'd1', domain: 'shop.example.com', projectId: null });
+    prisma.user.findUnique.mockResolvedValue({ role: 'ADMIN' });
+    proxy.getAcmeLogsForDomain.mockResolvedValue(['acme: obtaining certificate for shop.example.com']);
+    const res = await service.getLogs('admin', 'd1', 100);
+    expect(proxy.getAcmeLogsForDomain).toHaveBeenCalledWith('shop.example.com', 100);
+    expect(res.lines[0]).toMatch(/obtaining certificate/);
   });
 });

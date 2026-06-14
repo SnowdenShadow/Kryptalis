@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsIn, IsBoolean, MinLength, MaxLength, Matches } from 'class-validator';
+import { IsString, IsOptional, IsIn, IsBoolean, IsObject, MinLength, MaxLength, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class ApplyImportDto {
@@ -32,4 +32,15 @@ export class ApplyImportDto {
   @IsOptional()
   @IsBoolean()
   allowHostAccess?: boolean;
+
+  @ApiProperty({
+    required: false,
+    description:
+      'Per-app git provider selection: { "<appName>": "<gitProviderId on THIS install>" }. ' +
+      'Lets a private-repo app clone with the importer’s own credentials — the token never travels ' +
+      'in the archive. Public-repo apps need no entry.',
+  })
+  @IsOptional()
+  @IsObject()
+  gitProviderMap?: Record<string, string>;
 }

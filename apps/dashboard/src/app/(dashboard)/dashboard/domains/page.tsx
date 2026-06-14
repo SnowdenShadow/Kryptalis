@@ -325,7 +325,40 @@ function DnsHealthDialog({
   copiedId: string;
 }) {
   const { t } = useTranslation();
-  const [tab, setTab] = useState<'health' | 'records'>('health');
+  const queryClient = useQueryClient();
+  const [tab, setTab] = useState<'health' | 'records' | 'ssl'>('health');
+  const [showLogs, setShowLogs] = useState(false);
+
+  // SSL diagnostics — why the cert is/isn't issued.
+  const {
+    data: sslDiag,
+    isFetching: sslDiagFetching,
+    refetch: refetchSslDiag,
+  } = useQuery<{ domain: string; sslStatus: string; checkedAt: string; checks: { key: string; status: 'OK' | 'WARN' | 'FAIL'; message: string }[] }>({
+    queryKey: ['ssl-diagnose', domain.id],
+    queryFn: () => api.get(`/ssl/diagnose/${domain.id}`),
+    enabled: tab === 'ssl',
+    staleTime: 15_000,
+  });
+  const {
+    data: sslLogs,
+    isFetching: sslLogsFetching,
+    refetch: refetchSslLogs,
+  } = useQuery<{ domain: string; lines: string[] }>({
+    queryKey: ['ssl-logs', domain.id],
+    queryFn: () => api.get(`/ssl/logs/${domain.id}`),
+    enabled: tab === 'ssl' && showLogs,
+    staleTime: 10_000,
+  });
+  const reissueMutation = useMutation({
+    mutationFn: () => api.post('/ssl/issue', { domainId: domain.id }),
+    onSuccess: () => {
+      toast.success(t('domains.ssl.reissued'));
+      // Re-check after Caddy has had a moment to run ACME.
+      setTimeout(() => { refetchSslDiag(); queryClient.invalidateQueries({ queryKey: ['domains'] }); }, 6000);
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
   const { data, isLoading, isFetching, refetch } = useQuery<DnsHealth>({
     queryKey: ['domain-health-detail', domain.id],
     queryFn: () => api.get(`/domains/${domain.id}/health`),
@@ -373,6 +406,15 @@ function DnsHealthDialog({
           )}
         >
           {t('domains.tabRecords')}
+        </button>
+        <button
+          onClick={() => setTab('ssl')}
+          className={cn(
+            'px-3 py-1.5 text-xs font-medium border-b-2 transition-colors',
+            tab === 'ssl' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'
+          )}
+        >
+          {t('domains.tabSsl')}
         </button>
       </div>
 
@@ -557,6 +599,75 @@ function DnsHealthDialog({
                 </p>
               </>
             )}
+          </>
+        )}
+
+        {tab === 'ssl' && (
+          <>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{t('domains.ssl.diagnosis')}</p>
+              <div className="flex gap-1.5">
+                <Button size="sm" variant="outline" onClick={() => refetchSslDiag()} disabled={sslDiagFetching}>
+                  {sslDiagFetching ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                  {t('domains.recheck')}
+                </Button>
+                <Button size="sm" onClick={() => reissueMutation.mutate()} disabled={reissueMutation.isPending}>
+                  {reissueMutation.isPending && <Loader2 size={11} className="animate-spin" />}
+                  {t('domains.ssl.reissue')}
+                </Button>
+              </div>
+            </div>
+
+            {sslDiagFetching && !sslDiag && (
+              <div className="py-6 flex justify-center"><Loader2 size={20} className="animate-spin text-muted-foreground" /></div>
+            )}
+
+            {sslDiag && (
+              <div className="space-y-2">
+                {sslDiag.checks.map((c, i) => {
+                  const cls = c.status === 'OK' ? 'border-emerald-500/30 bg-emerald-500/5'
+                    : c.status === 'WARN' ? 'border-orange-500/30 bg-orange-500/5'
+                    : 'border-red-500/30 bg-red-500/5';
+                  const Icon = c.status === 'OK' ? Check : c.status === 'WARN' ? AlertTriangle : AlertCircle;
+                  const iconCls = c.status === 'OK' ? 'text-emerald-500' : c.status === 'WARN' ? 'text-orange-500' : 'text-red-500';
+                  return (
+                    <div key={`${c.key}-${i}`} className={cn('rounded-md border p-2.5 text-xs flex items-start gap-2', cls)}>
+                      <Icon size={13} className={cn('shrink-0 mt-0.5', iconCls)} />
+                      <span>{c.message}</span>
+                    </div>
+                  );
+                })}
+                <p className="text-[11px] text-muted-foreground">{t('domains.ssl.hint')}</p>
+              </div>
+            )}
+
+            {/* Caddy / ACME logs (collapsible) */}
+            <div className="pt-1">
+              <button
+                onClick={() => setShowLogs((s) => !s)}
+                className="text-xs font-medium text-muted-foreground hover:text-foreground flex items-center gap-1"
+              >
+                <RefreshCw size={11} /> {showLogs ? t('domains.ssl.hideLogs') : t('domains.ssl.showLogs')}
+              </button>
+              {showLogs && (
+                <div className="mt-2 space-y-1.5">
+                  <div className="flex justify-end">
+                    <Button size="sm" variant="outline" onClick={() => refetchSslLogs()} disabled={sslLogsFetching}>
+                      {sslLogsFetching ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+                      {t('domains.ssl.refreshLogs')}
+                    </Button>
+                  </div>
+                  {sslLogs && sslLogs.lines.length === 0 && (
+                    <p className="text-xs text-muted-foreground italic">{t('domains.ssl.noLogs')}</p>
+                  )}
+                  {sslLogs && sslLogs.lines.length > 0 && (
+                    <pre className="text-[10px] leading-relaxed bg-muted/40 rounded-md p-2 max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono">
+                      {sslLogs.lines.join('\n')}
+                    </pre>
+                  )}
+                </div>
+              )}
+            </div>
           </>
         )}
       </div>

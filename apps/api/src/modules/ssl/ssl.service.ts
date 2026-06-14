@@ -7,9 +7,11 @@ import {
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
+import * as net from 'net';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
+import { DomainsService } from '../domains/domains.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import {
   assertProjectAccess,
@@ -62,6 +64,8 @@ export class SslService implements OnModuleInit, OnModuleDestroy {
     private notifications: NotificationsService,
     // @Global ReverseProxyModule — Caddy is the actual cert issuer.
     private proxy: ReverseProxyService,
+    // For the DNS-health portion of the SSL diagnostics.
+    private domains: DomainsService,
   ) {}
 
   onModuleInit() {
@@ -210,6 +214,92 @@ export class SslService implements OnModuleInit, OnModuleDestroy {
     this.proxy.scheduleReload();
 
     return { message: 'SSL issuance triggered — certificate is provisioned by the managed reverse proxy' };
+  }
+
+  /**
+   * Load a domain + enforce the same RBAC `issue()` uses (DEVELOPER on the
+   * project, or platform ADMIN for an orphan domain). Returns the domain row.
+   */
+  private async assertDomainSslAccess(userId: string, domainId: string) {
+    const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
+    if (!domain) throw new NotFoundException('Domain not found');
+    if (!domain.projectId) await this.assertPlatformAdmin(userId);
+    else await assertProjectAccess(this.prisma, userId, domain.projectId, 'DEVELOPER');
+    return domain;
+  }
+
+  /**
+   * Explain WHY a domain's certificate is (or isn't) issued. Aggregates the
+   * existing DNS health check, whether Caddy holds the cert, whether ports
+   * 80/443 are reachable, and the local-hostname case. Read-only.
+   */
+  async diagnose(userId: string, domainId: string) {
+    const domain = await this.assertDomainSslAccess(userId, domainId);
+    const host = domain.domain;
+    const checks: { key: string; status: 'OK' | 'WARN' | 'FAIL'; message: string }[] = [];
+
+    // Local hostname → ACME impossible, short-circuit.
+    if (this.isLocalOnlyDomain(host)) {
+      checks.push({ key: 'local', status: 'FAIL', message: `'${host}' is a local hostname — Let's Encrypt cannot issue a certificate. Use a real public domain.` });
+      return { domain: host, sslStatus: domain.sslStatus, checkedAt: new Date().toISOString(), checks };
+    }
+
+    // 1) DNS — reuse the domains health check's A-record verdict.
+    try {
+      const health: any = await this.domains.getDnsHealth(userId, domainId);
+      const a = health?.checks?.a;
+      if (a) checks.push({ key: 'dns', status: a.status === 'OK' ? 'OK' : a.status === 'WARN' ? 'WARN' : 'FAIL', message: a.message });
+    } catch (e: any) {
+      checks.push({ key: 'dns', status: 'WARN', message: `Could not run the DNS check: ${e?.message || e}` });
+    }
+
+    // 2) Ports 80/443 reachable on the public IP (HTTP-01 needs 80; TLS needs 443).
+    const expectedIp = this.resolveServerIp();
+    if (expectedIp) {
+      for (const port of [80, 443]) {
+        const open = await this.isPortOpen(expectedIp, port);
+        checks.push(open
+          ? { key: `port${port}`, status: 'OK', message: `Port ${port} reachable on ${expectedIp}.` }
+          : { key: `port${port}`, status: 'FAIL', message: `Port ${port} not reachable on ${expectedIp} — open it in your firewall/security group (Let's Encrypt needs ${port === 80 ? 'HTTP-01 on 80' : 'HTTPS on 443'}).` });
+      }
+    } else {
+      checks.push({ key: 'ports', status: 'WARN', message: 'Server public IP not configured (PUBLIC_API_URL) — cannot test ports 80/443.' });
+    }
+
+    // 3) Cert on disk?
+    const hasCert = await this.proxy.certExists(host);
+    checks.push(hasCert
+      ? { key: 'cert', status: 'OK', message: 'Caddy holds a certificate for this domain.' }
+      : { key: 'cert', status: domain.sslStatus === 'ACTIVE' ? 'WARN' : 'FAIL', message: 'No certificate on disk yet. After DNS + ports are green, click “Re-issue certificate” and wait ~10-60s.' });
+
+    return { domain: host, sslStatus: domain.sslStatus, checkedAt: new Date().toISOString(), checks };
+  }
+
+  /** Recent Caddy/ACME log lines for a domain (the real issuance error). */
+  async getLogs(userId: string, domainId: string, lines = 200) {
+    const domain = await this.assertDomainSslAccess(userId, domainId);
+    const logLines = await this.proxy.getAcmeLogsForDomain(domain.domain, lines);
+    return { domain: domain.domain, lines: logLines };
+  }
+
+  /** The server's public IPv4 from PUBLIC_API_URL, or null. */
+  private resolveServerIp(): string | null {
+    const m = (process.env.PUBLIC_API_URL || '').match(/^https?:\/\/([^:/]+)/);
+    return m && /^\d+\.\d+\.\d+\.\d+$/.test(m[1]) ? m[1] : null;
+  }
+
+  /** Best-effort TCP connect to host:port with a short timeout. */
+  private isPortOpen(host: string, port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const sock = new net.Socket();
+      let settled = false;
+      const done = (ok: boolean) => { if (settled) return; settled = true; try { sock.destroy(); } catch { /* ignore */ } resolve(ok); };
+      sock.setTimeout(3000);
+      sock.once('connect', () => done(true));
+      sock.once('timeout', () => done(false));
+      sock.once('error', () => done(false));
+      sock.connect(port, host);
+    });
   }
 
   /** Hostnames Caddy serves without TLS — mirrors reverse-proxy.service's
