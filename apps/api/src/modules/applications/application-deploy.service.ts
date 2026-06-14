@@ -492,11 +492,23 @@ export class ApplicationDeployService implements OnModuleInit {
       fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), finalCompose);
       log('> wrote docker-compose.yml');
 
-      // Persist + write .env so secrets aren't inlined in the compose.
+      // Persist + write .dockcontrol.env (used by `--env-file` for ${VAR}
+      // substitution in the YAML).
       let envFile: string | undefined;
       if (opts.envVars && Object.keys(opts.envVars).length) {
         envFile = path.join(appDir, '.dockcontrol.env');
         fs.writeFileSync(envFile, this.env.serializeEnv(opts.envVars));
+      }
+      // ALSO write a plain `.env` in the app dir. `--env-file .dockcontrol.env`
+      // only substitutes ${VAR} in the compose YAML — it does NOT satisfy an
+      // `env_file: .env` directive declared INSIDE the compose (marketplace
+      // stacks like Portainer use it, and compose hard-fails if the file is
+      // missing). Mirror the merged env (empty file is fine — it just
+      // satisfies the directive) exactly as the git-deploy path does.
+      try {
+        fs.writeFileSync(path.join(appDir, '.env'), this.env.serializeEnv(opts.envVars || {}));
+      } catch (err: any) {
+        log(`! could not write .env: ${err?.message || err}`);
       }
 
       log('> docker compose pull');
