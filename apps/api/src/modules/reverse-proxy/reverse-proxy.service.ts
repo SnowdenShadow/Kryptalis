@@ -205,22 +205,20 @@ ${email ? `  email ${email}\n` : ''}}
   }
 
   /**
-   * Write `content` to `targetPath` atomically: write a sibling temp file,
-   * then rename it over the target. rename(2) is atomic within a filesystem,
-   * so a reader (the bind-mounted Caddy container running `validate`/`reload`)
-   * never observes a partially-written Caddyfile. Falls back to a direct
-   * write if the rename fails (e.g. cross-device) so we never end up with no
-   * Caddyfile at all.
+   * Write `content` to the Caddyfile.
+   *
+   * CRITICAL: the Caddyfile is a SINGLE-FILE bind mount
+   * (`./.dockcontrol/reverse-proxy/Caddyfile:/etc/caddy/Caddyfile`). Docker
+   * binds it by INODE, so a write-tmp-then-rename — which replaces the inode —
+   * leaves the Caddy container pinned to the ORIGINAL (seed) inode: the API
+   * writes the real config on the host while Caddy keeps reading the empty
+   * seed → no domains, no certs. We therefore write IN PLACE (truncate +
+   * write the same inode), which the bind mount sees immediately. A partial
+   * write is acceptable here: `caddy validate` runs right after and any bad
+   * content is rolled back by the caller.
    */
   private atomicWriteCaddyfile(targetPath: string, content: string): void {
-    const tmpPath = `${targetPath}.tmp`;
-    try {
-      fs.writeFileSync(tmpPath, content);
-      fs.renameSync(tmpPath, targetPath);
-    } catch (e: any) {
-      this.logger.warn(`Atomic Caddyfile write failed (${e?.message}); falling back to direct write`);
-      fs.writeFileSync(targetPath, content);
-    }
+    fs.writeFileSync(targetPath, content);
   }
 
   /**

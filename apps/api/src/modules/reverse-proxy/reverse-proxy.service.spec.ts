@@ -382,18 +382,22 @@ describe('regenerate — safety rails', () => {
     );
   });
 
-  it('publishes the Caddyfile atomically: writes <path>.tmp then renames over the target', async () => {
+  it('writes the Caddyfile IN PLACE (single-file bind mount — never tmp+rename)', async () => {
     const { service } = makeService([domainRow()]);
     await service.regenerate();
-    // The rendered config lands on a .tmp sibling first…
+    // The rendered config is written directly to the real Caddyfile path so
+    // the single-file bind mount (bound by inode) sees it. A tmp+rename would
+    // swap the inode and leave the Caddy container reading the old seed file.
     expect(writeFileSyncMock).toHaveBeenCalledWith(
-      expect.stringContaining('Caddyfile.tmp'),
+      expect.stringMatching(/Caddyfile$/),
       expect.stringContaining('athexis.xyz'),
     );
-    // …then is renamed over the real Caddyfile so readers never see a partial file.
-    expect(renameSyncMock).toHaveBeenCalledWith(
+    // Must NOT rename a .tmp over the Caddyfile (that breaks the bind mount).
+    expect(renameSyncMock).not.toHaveBeenCalled();
+    // And must NOT write a .tmp sibling at all for the Caddyfile.
+    expect(writeFileSyncMock).not.toHaveBeenCalledWith(
       expect.stringContaining('Caddyfile.tmp'),
-      expect.stringMatching(/Caddyfile$/),
+      expect.anything(),
     );
   });
 });
