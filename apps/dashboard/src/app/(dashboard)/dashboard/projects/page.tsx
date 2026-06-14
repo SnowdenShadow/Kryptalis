@@ -60,7 +60,7 @@ interface LocalServer {
 // ── Project import (.dctproj transfer) ──────────────────────────────
 interface TransferManifest {
   project: { name: string; description?: string };
-  applications: { name: string; framework?: string; gitUrl?: string; dockerImage?: string }[];
+  applications: { name: string; framework?: string; gitUrl?: string; dockerImage?: string; requiresHostAccess?: boolean }[];
   databases: { name: string; type?: string }[];
   domains: { domain: string; applicationName?: string }[];
   includesData: boolean;
@@ -192,6 +192,7 @@ export default function ProjectsPage() {
   const [importParsed, setImportParsed] = useState<ParseResult | null>(null);
   const [importTargetServerId, setImportTargetServerId] = useState('');
   const [importDomainStrategy, setImportDomainStrategy] = useState<DomainStrategy>('skip');
+  const [importAllowHost, setImportAllowHost] = useState(false);
 
   function resetImport() {
     setShowImport(false);
@@ -201,6 +202,7 @@ export default function ProjectsPage() {
     setImportParsed(null);
     setImportTargetServerId('');
     setImportDomainStrategy('skip');
+    setImportAllowHost(false);
   }
 
   // Step 1 → parse the raw .dctproj bytes. rawFetch streams the File body as
@@ -234,6 +236,7 @@ export default function ProjectsPage() {
         passphrase: importPassphrase,
         ...(isMultiMode && importTargetServerId ? { targetServerId: importTargetServerId } : {}),
         domainStrategy: importDomainStrategy,
+        ...(importAllowHost ? { allowHostAccess: true } : {}),
       }),
     onSuccess: (data) => {
       if (data.status === 'partial') {
@@ -696,6 +699,25 @@ export default function ProjectsPage() {
                   {importDomainStrategy === 'attach' ? t('projects.import.domainAttachDesc') : t('projects.import.domainSkipDesc')}
                 </p>
               </div>
+
+              {/* Host-access consent — only when the archive carries apps that
+                  take full host control (docker socket / host bind-mounts). */}
+              {importParsed?.manifest.applications.some((a) => a.requiresHostAccess) && (
+                <label className="flex items-start gap-2 rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 text-xs cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={importAllowHost}
+                    onChange={(e) => setImportAllowHost(e.target.checked)}
+                  />
+                  <span>
+                    <span className="flex items-center gap-1 font-semibold text-orange-600">
+                      <AlertTriangle size={13} /> {t('projects.import.hostAccessTitle')}
+                    </span>
+                    <span className="text-muted-foreground block mt-0.5">{t('projects.import.hostAccessDesc')}</span>
+                  </span>
+                </label>
+              )}
             </div>
             <DialogFooter>
               <Button variant="outline" disabled={applyMutation.isPending} onClick={() => { setImportStep(1); setImportParsed(null); }}>

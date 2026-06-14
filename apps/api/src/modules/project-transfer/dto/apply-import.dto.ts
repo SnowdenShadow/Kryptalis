@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsIn, MinLength, MaxLength, Matches } from 'class-validator';
+import { IsString, IsOptional, IsIn, IsBoolean, MinLength, MaxLength, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class ApplyImportDto {
@@ -22,4 +22,14 @@ export class ApplyImportDto {
   @IsOptional()
   @IsIn(['skip', 'attach'])
   domainStrategy?: 'skip' | 'attach';
+
+  @ApiProperty({
+    required: false,
+    description:
+      'Explicit consent to import apps that take full host control (docker socket / host bind-mounts). ' +
+      'Off by default — only set true for an archive you created or fully trust.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  allowHostAccess?: boolean;
 }

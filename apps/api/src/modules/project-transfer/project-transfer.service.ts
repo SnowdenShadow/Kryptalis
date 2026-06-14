@@ -555,7 +555,7 @@ export class ProjectTransferService {
   async applyImport(
     userId: string,
     stagedId: string,
-    opts: { passphrase: string; targetServerId?: string; domainStrategy?: DomainStrategy },
+    opts: { passphrase: string; targetServerId?: string; domainStrategy?: DomainStrategy; allowHostAccess?: boolean },
   ): Promise<{ status: 'ok' | 'partial'; projectId: string; message: string; warnings: string[] }> {
     if (!/^xfer_[a-f0-9]+$/.test(stagedId)) throw new BadRequestException('Invalid import id.');
     // The staged session MUST belong to this user (defends against a second
@@ -609,12 +609,17 @@ export class ProjectTransferService {
       //    create path re-encrypts them at rest with THIS install's key).
       const appNameToId: Record<string, string> = {};
       for (const app of manifest.applications) {
-        // Host-access apps (docker.sock / host bind-mounts, e.g. Portainer) are
-        // not portable between installs for security reasons — skip with a
-        // clear, actionable warning instead of creating an unrunnable stack.
-        if (app.requiresHostAccess) {
-          warnings.push(`app ${app.name}: needs host access (mounts the docker socket or host paths) and was NOT imported for security — reinstall it from the marketplace on this server.`);
+        // Host-access apps (docker.sock / host bind-mounts, e.g. Portainer)
+        // give whoever crafted the archive ROOT on this host. Import them ONLY
+        // when the operator gave explicit consent (allowHostAccess) — they are
+        // moving an app they trust. Without consent: skip with a clear warning
+        // (an attacker's archive can't silently gain host control).
+        if (app.requiresHostAccess && !opts.allowHostAccess) {
+          warnings.push(`app ${app.name}: needs host access (mounts the docker socket or host paths) and was SKIPPED — re-import with "allow host access" checked if you trust this archive, or reinstall it from the marketplace.`);
           continue;
+        }
+        if (app.requiresHostAccess && opts.allowHostAccess) {
+          warnings.push(`app ${app.name}: imported WITH host access (docker socket / host paths) per your explicit consent — it controls the host, treat it accordingly.`);
         }
         // An app with no deployable source can't be recreated — say so rather
         // than silently leaving a STOPPED row.

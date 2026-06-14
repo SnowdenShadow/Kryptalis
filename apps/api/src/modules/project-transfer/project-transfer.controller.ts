@@ -116,6 +116,7 @@ export class ProjectTransferController {
       passphrase: dto.passphrase,
       targetServerId: dto.targetServerId,
       domainStrategy: dto.domainStrategy,
+      allowHostAccess: dto.allowHostAccess,
     });
   }
 }

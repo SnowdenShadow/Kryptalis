@@ -191,6 +191,46 @@ describe('ProjectTransferService — parse / import safety', () => {
     expect(result.warnings.some((w) => /host access|docker socket/i.test(w))).toBe(true);
   });
 
+  it('imports a host-access app ONLY with explicit consent (allowHostAccess)', async () => {
+    const hostApp = {
+      ...sampleProject,
+      applications: [{
+        ...sampleProject.applications[0],
+        name: 'portainer',
+        gitUrl: null,
+        framework: 'DOCKER_COMPOSE',
+        dockerComposeFile: 'services:\n  web:\n    image: portainer/portainer-ce\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n',
+      }],
+      databases: [],
+      domains: [],
+    };
+    prisma.project.findUnique.mockResolvedValue(hostApp);
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: false, passphrase: PASS });
+    created.push(archivePath);
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+
+    // Wire the create paths the apply step calls.
+    const appsCreate = vi.fn().mockResolvedValue({ id: 'newapp1' });
+    const projCreate = vi.fn().mockResolvedValue({ id: 'newproj1' });
+    (svc as any).applications = { create: appsCreate };
+    (svc as any).projects = { create: projCreate };
+    (svc as any).databases = { create: vi.fn() };
+    (svc as any).domains = { create: vi.fn() };
+
+    // Without consent → app is skipped, applications.create NOT called.
+    const parsed1 = await svc.parseImport('u2', archivePath, PASS);
+    const r1 = await svc.applyImport('u2', parsed1.stagedId, { passphrase: PASS });
+    expect(appsCreate).not.toHaveBeenCalled();
+    expect(r1.warnings.some((w) => /SKIPPED/i.test(w))).toBe(true);
+
+    // With consent → app IS created (host-access carried through).
+    const parsed2 = await svc.parseImport('u2', archivePath, PASS);
+    await svc.applyImport('u2', parsed2.stagedId, { passphrase: PASS, allowHostAccess: true });
+    expect(appsCreate).toHaveBeenCalledTimes(1);
+    expect(appsCreate.mock.calls[0][1].composeContent).toContain('docker.sock');
+  });
+
   it('carries a safe compose app (named volume, no host mount) as portable', async () => {
     const safeApp = {
       ...sampleProject,
