@@ -119,6 +119,15 @@ export class ApplicationOpsService {
    * wiping the app dir is when a second redeploy click would conflict).
    */
   private async assertNoInflightDeployment(applicationId: string) {
+    // NOTE: this is a best-effort check, not a lock. There's an inherent
+    // TOCTOU window between this read and the caller's subsequent
+    // deployment.create() — two near-simultaneous redeploys can both pass.
+    // A real fix needs a DB-level unique partial index on
+    // (applicationId, status IN inflight) or an advisory lock; that's a
+    // migration we deliberately defer. The build step's .prev snapshot +
+    // force-recreate make a double-deploy recover rather than corrupt, so
+    // this guard catches the overwhelmingly common double-click case without
+    // introducing a race of its own.
     const inflight = await this.prisma.deployment.findFirst({
       where: {
         applicationId,

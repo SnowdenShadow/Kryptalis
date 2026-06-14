@@ -662,10 +662,12 @@ export class DatabasesService {
 
     for (const db of detected) {
       try {
-        // Auto-generate a password if the compose env left it blank — Redis-
-        // like images often ship without one, but a blank field would render
-        // poorly in the UI. The container itself stays password-less; we just
-        // store an empty string in that case (caller decides).
+        // The detected password may be blank — Redis-like images often ship
+        // without one, and the detector can't always recover a real value
+        // (e.g. a password injected at runtime). We must NOT clobber a
+        // previously-stored real password with an encrypted empty string on
+        // redeploy, so the update path below only writes `password` when a
+        // real value was detected (see the conditional spread).
         const password = db.password || '';
 
         const existing = await this.prisma.database.findFirst({
@@ -691,7 +693,11 @@ export class DatabasesService {
               host,
               port,
               username: db.username,
-              password: this.encryption.encrypt(password),
+              // Only overwrite the stored password when a real value was
+              // detected. A blank detection on redeploy must NOT replace an
+              // existing non-empty password with encrypted "" — that breaks
+              // every connection string built from this row.
+              ...(password ? { password: this.encryption.encrypt(password) } : {}),
               autoImported: true,
               serverId: opts.serverId,
               projectId: opts.projectId,

@@ -117,6 +117,16 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: apps/agent/go.sum
 
+      - name: Gofmt
+        # `gofmt -l` lists files that aren't formatted; any output → fail.
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: Vet
         run: go vet ./...
 
@@ -125,3 +135,31 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+  infra:
+    name: Infra (compose, Docker, shell)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # docker compose + buildx ship on ubuntu-latest runners — no setup step.
+      - name: Validate docker-compose.yml
+        run: docker compose -f docker-compose.yml config -q
+
+      # Build every first-party image so a broken Dockerfile fails CI before
+      # it reaches main (auto-update deploys main everywhere). Multi-stage
+      # contexts are large; build sequentially to keep runner memory sane.
+      - name: Build API image
+        run: docker build -f apps/api/Dockerfile -t dockcontrol-api:ci .
+
+      - name: Build Dashboard image
+        run: docker build -f apps/dashboard/Dockerfile --build-arg NEXT_PUBLIC_API_URL=http://localhost:4000 -t dockcontrol-dashboard:ci .
+
+      - name: Build SFTP image
+        run: docker build -t dockcontrol-sftp:ci infra/sftp
+
+      # shellcheck is preinstalled on ubuntu-latest. --severity=warning
+      # blocks real bugs (unquoted globs, undefined vars) without failing on
+      # pure style nits in the existing POSIX scripts.
+      - name: ShellCheck install/update/entrypoint scripts
+        run: shellcheck --severity=warning install.sh update.sh infra/sftp/entrypoint.sh

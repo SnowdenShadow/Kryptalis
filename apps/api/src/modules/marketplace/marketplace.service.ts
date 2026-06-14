@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, ConflictException, BadRequestException, 
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate } from './templates';
+import { checkVolumeSafety } from './dto/install-custom.dto';
 import { projectNetworkName, listComposeContainerNames, remoteAppSlug } from '../applications/applications.helpers';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
@@ -236,16 +237,29 @@ export class MarketplaceService implements OnModuleInit {
     let appName = (data.name && data.name.trim()) || app.name;
     let isMultiInstall = false;
     if (!isWebmail) {
+      const baseName = (data.name && data.name.trim()) || app.name;
       let suffix = 2;
+      let resolved = false;
       while (suffix < 100) {
         const existing = await this.prisma.application.findFirst({
           where: { name: appName, projectId: data.projectId },
           select: { id: true },
         });
-        if (!existing) break;
-        appName = `${(data.name && data.name.trim()) || app.name} ${suffix}`;
+        if (!existing) {
+          resolved = true;
+          break;
+        }
+        appName = `${baseName} ${suffix}`;
         isMultiInstall = true;
         suffix++;
+      }
+      // Exhausted every "<App> 2".."<App> 99" suffix — every candidate is
+      // taken. Refuse instead of falling through with a colliding name
+      // (mirrors the custom-install 409 path).
+      if (!resolved) {
+        throw new ConflictException(
+          `Too many "${baseName}" apps in this project — pick a different name.`,
+        );
       }
     }
 
@@ -742,6 +756,26 @@ export class MarketplaceService implements OnModuleInit {
     // Reject obvious shell injection / whitespace in the image ref.
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._\-\/:@]*$/.test(data.image)) {
       throw new BadRequestException('Invalid image reference');
+    }
+    // Volume hardening — a DEVELOPER must never bind-mount the host fs
+    // (e.g. "/:/host" or "/var/run/docker.sock:...") or inject compose keys
+    // via newlines. Only named volumes mapped to absolute container paths
+    // are allowed. Enforced HERE (not just in the DTO) so direct service
+    // callers / future controllers can't bypass it.
+    for (const v of data.volumes ?? []) {
+      const err = checkVolumeSafety(v);
+      if (err) throw new BadRequestException(err);
+    }
+    // Reserved host ports are managed by the platform (Caddy 80/443,
+    // Postgres 5432, dashboard/API 3000/4000) — refuse to publish onto them.
+    const RESERVED_HOST_PORTS = new Set([80, 443, 5432, 3000, 4000]);
+    if (data.hostPort !== undefined) {
+      if (!Number.isInteger(data.hostPort) || data.hostPort < 1 || data.hostPort > 65535) {
+        throw new BadRequestException('hostPort must be 1-65535');
+      }
+      if (RESERVED_HOST_PORTS.has(data.hostPort)) {
+        throw new BadRequestException(`Port ${data.hostPort} is reserved by the platform`);
+      }
     }
 
     // Name dedup within project — same rule as template installs.

@@ -37,6 +37,8 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     ConfigModule.forRoot({
       isGlobal: true,
       validationSchema: Joi.object({
+        // Gates Swagger exposure (/api/docs) and refresh-token debug logging.
+        NODE_ENV: Joi.string().valid('development', 'production', 'test').default('development'),
         DATABASE_URL: Joi.string().required(),
         API_PORT: Joi.number().default(4000),
         JWT_SECRET: Joi.string().min(32).required(),
@@ -64,6 +66,10 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
         SMTP_PASS: Joi.string().allow('').optional(),
         SMTP_FROM: Joi.string().allow('').optional(),
         PUBLIC_DASHBOARD_URL: Joi.alternatives().try(Joi.string().uri(), Joi.string().allow('')).optional(),
+        // Gates the refresh-cookie Secure flag + CORS allowlist derivation.
+        // compose injects `${PUBLIC_API_URL:-http://localhost:4000}` so it's
+        // normally a URL, but keep the compose empty-string convention.
+        PUBLIC_API_URL: Joi.alternatives().try(Joi.string().uri(), Joi.string().allow('')).optional(),
       }),
     }),
     // Global throttler — defaults are conservative; tight per-route limits

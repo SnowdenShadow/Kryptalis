@@ -24,6 +24,7 @@ import {
   ensureSharedAppsNetwork,
   attachSharedAppsNetwork,
   stripComposePorts,
+  stripReservedComposePorts,
   readComposeContainerInfo,
   dockerCompose,
   removeCollidingContainers,
@@ -1157,6 +1158,13 @@ export class ApplicationDeployService {
               hostPort: opts.hostPort,
             },
           });
+        } else {
+          // No domain AND no user-picked hostPort: keep the repo's host-port
+          // publishes EXCEPT any that target a reserved port. A repo that
+          // hardcodes `443:443` or `3000:3000` would otherwise collide with
+          // Caddy / the dashboard and break the platform. Container ports stay
+          // intact — only the offending host binding is neutralized.
+          content = stripReservedComposePorts(content);
         }
 
         if (projectNet) content = attachProjectNetwork(content, projectNet);

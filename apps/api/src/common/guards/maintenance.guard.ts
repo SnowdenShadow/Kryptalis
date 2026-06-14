@@ -10,6 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import type { Request } from 'express';
 import { SystemConfigService } from '../../modules/system/system-config.service';
+import { PrismaService } from '../../prisma/prisma.service';
 
 /**
  * Read-only HTTP verbs are never blocked by maintenance mode.
@@ -64,6 +65,7 @@ export class MaintenanceGuard implements CanActivate, OnModuleInit, OnModuleDest
   constructor(
     private readonly systemConfig: SystemConfigService,
     private readonly config: ConfigService,
+    private readonly prisma: PrismaService,
   ) {}
 
   onModuleInit() {
@@ -81,7 +83,7 @@ export class MaintenanceGuard implements CanActivate, OnModuleInit, OnModuleDest
     this.enabled = this.systemConfig.getBool('maintenance_mode');
   }
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     if (!this.enabled) return true;
     if (context.getType() !== 'http') return true;
 
@@ -89,16 +91,29 @@ export class MaintenanceGuard implements CanActivate, OnModuleInit, OnModuleDest
     if (isMaintenanceExempt(req.method, req.path ?? req.url)) return true;
 
     // Admins ride through. The JWT signature is verified with the same
-    // secret the passport strategy uses, so a forged role claim is dead
-    // on arrival; per-route guards still do full authn/authz after us.
+    // secret the passport strategy uses, so a forged role claim is dead on
+    // arrival. But the token's `role` claim is a snapshot from issue time —
+    // a since-demoted or SUSPENDED admin would still carry ADMIN in an
+    // unexpired token. Re-read the LIVE role+status from the DB (honouring
+    // the same re-read invariant the rest of authz uses) so only a
+    // currently-active admin bypasses maintenance.
     const auth = req.headers?.authorization;
     if (auth?.startsWith('Bearer ')) {
       try {
         const payload = this.jwt.verify(auth.slice(7), {
           secret: this.config.get<string>('JWT_SECRET')!,
         });
-        if (payload?.role === 'ADMIN' || payload?.role === 'SUPERADMIN') {
-          return true;
+        if (payload?.sub) {
+          const user = await this.prisma.user.findUnique({
+            where: { id: payload.sub as string },
+            select: { role: true, status: true },
+          });
+          if (
+            user?.status === 'ACTIVE' &&
+            (user.role === 'ADMIN' || user.role === 'SUPERADMIN')
+          ) {
+            return true;
+          }
         }
       } catch {
         // fall through to 503 — an invalid token is not an admin.

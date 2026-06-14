@@ -137,6 +137,14 @@ export default function SetupPage() {
     : score === 3 ? 'bg-blue-500'
     : 'bg-green-500';
   const passwordsMatch = confirmPassword === '' || password === confirmPassword;
+  // Mirror the backend write policy (auth.service.isStrongEnough): ≥12 chars
+  // AND at least 3 of {lower, upper, digit, symbol}.
+  const charClasses =
+    (/[a-z]/.test(password) ? 1 : 0) +
+    (/[A-Z]/.test(password) ? 1 : 0) +
+    (/\d/.test(password) ? 1 : 0) +
+    (/[^A-Za-z0-9]/.test(password) ? 1 : 0);
+  const passwordValid = password.length >= 12 && charClasses >= 3;
 
   const registerMutation = useMutation({
     mutationFn: () =>
@@ -164,7 +172,7 @@ export default function SetupPage() {
 
   function handleCreateAccount(e: React.FormEvent) {
     e.preventDefault();
-    if (password !== confirmPassword) return;
+    if (password !== confirmPassword || !passwordValid) return;
     registerMutation.mutate();
   }
 
@@ -413,21 +421,24 @@ export default function SetupPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="setup-password">{t('auth.password')}</Label>
-                <Input id="setup-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" required minLength={8} />
+                <Input id="setup-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" required minLength={12} />
                 {password.length > 0 && (
-                  <div className="flex gap-1">
-                    {[0, 1, 2, 3].map((i) => (
-                      <div key={i} className={`h-1 flex-1 rounded-full ${i < score ? strengthBarColor : 'bg-muted'}`} />
-                    ))}
-                  </div>
+                  <>
+                    <div className="flex gap-1">
+                      {[0, 1, 2, 3].map((i) => (
+                        <div key={i} className={`h-1 flex-1 rounded-full ${i < score ? strengthBarColor : 'bg-muted'}`} />
+                      ))}
+                    </div>
+                    {!passwordValid && <p className="text-xs text-destructive">{t('auth.passwordPolicy')}</p>}
+                  </>
                 )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="setup-confirm">{t('auth.confirmPassword')}</Label>
-                <Input id="setup-confirm" type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••" required minLength={8} />
+                <Input id="setup-confirm" type="password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder="••••••••" required minLength={12} />
                 {!passwordsMatch && <p className="text-xs text-destructive">{t('auth.passwordsDontMatch')}</p>}
               </div>
-              <Button type="submit" className="w-full" disabled={registerMutation.isPending || password !== confirmPassword}>
+              <Button type="submit" className="w-full" disabled={registerMutation.isPending || !passwordValid || password !== confirmPassword}>
                 {registerMutation.isPending && <Loader2 size={14} className="animate-spin" />}
                 {t('setup.createAndContinue')} <ArrowRight size={14} />
               </Button>

@@ -280,6 +280,40 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  // Sent when an existing user is added straight to a project (membership
+  // created directly — no acceptance token). Unlike sendUserInvited this
+  // links to the project page itself, never the dead /invite/accept flow.
+  async sendUserAddedToProject(
+    email: string,
+    projectName: string,
+    inviterName: string,
+    projectId: string,
+  ): Promise<void> {
+    const url = this.buildDashboardUrl(`/dashboard/projects/${encodeURIComponent(projectId)}`);
+    if (!this.smtpReady) {
+      this.logger.warn(`Skipping project-added email to ${email} — SMTP not configured.`);
+      return;
+    }
+    const html = renderEmail({
+      title: `You've been added to ${projectName}`,
+      preheader: `${inviterName} added you to a project on DockControl.`,
+      body: `
+        <p style="margin:0 0 12px 0;">Hi,</p>
+        <p style="margin:0 0 12px 0;">
+          <strong>${escapeHtml(inviterName)}</strong> added you to the
+          <strong>${escapeHtml(projectName)}</strong> project on DockControl.
+        </p>
+        <p style="margin:0;">You already have access — open the project to get started.</p>`,
+      ctaLabel: 'Open project',
+      ctaUrl: url,
+    });
+    await this.sendMail({
+      to: email,
+      subject: `You've been added to ${projectName} on DockControl`,
+      html,
+    });
+  }
+
   async sendDeploymentResult(
     userId: string,
     appName: string,
@@ -875,7 +909,114 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * SSRF guard for outbound webhook POSTs. Alert-rule webhookUrl is
+   * operator-supplied, so without this an admin (or a compromised one)
+   * could point it at internal infra — the docker network, the host's
+   * loopback, or the cloud metadata endpoint (169.254.169.254) to exfil
+   * IAM creds. We reject anything that isn't a public http(s) target.
+   *
+   * We deliberately do NOT DNS-resolve here (a public hostname could still
+   * resolve to a private IP — full protection needs resolve + connect-time
+   * pinning). This is a hostname/IP-literal screen: it blocks the obvious
+   * `http://169.254.169.254`, `http://localhost`, `http://10.x` cases that
+   * make up the realistic attack surface for a stored alert-rule URL.
+   * Returns the validation error string, or null when the URL is allowed.
+   * Public so the monitoring service can screen a webhookUrl at write time
+   * (create/update alert rule) using the exact same ruleset as dispatch.
+   */
+  validateWebhookUrl(raw: string): string | null {
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return 'not a valid URL';
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      return `unsupported scheme "${url.protocol}" (only http/https)`;
+    }
+    // Strip IPv6 brackets / trailing dot for the literal checks below.
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+    if (host === 'localhost' || host.endsWith('.localhost')) {
+      return 'loopback host is not allowed';
+    }
+    // IPv4 literal → block loopback/private/link-local ranges.
+    const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (v4) {
+      const [a, b] = [Number(v4[1]), Number(v4[2])];
+      if (
+        a === 127 || // 127.0.0.0/8 loopback
+        a === 10 || // 10.0.0.0/8 private
+        (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12 private
+        (a === 192 && b === 168) || // 192.168.0.0/16 private
+        (a === 169 && b === 254) || // 169.254.0.0/16 link-local incl. metadata 169.254.169.254
+        a === 0 // 0.0.0.0/8 "this host"
+      ) {
+        return `private/loopback/link-local address ${host} is not allowed`;
+      }
+      return null;
+    }
+    // IPv6 literal → default-DENY, then allow only addresses that are clearly
+    // public. Blocking by enumerated range alone is unsafe because an IPv4
+    // address can be smuggled inside IPv6 (::ffff:127.0.0.1 IPv4-mapped,
+    // ::a.b.c.d compat, 64:ff9b::a.b.c.d NAT64), so we extract any embedded
+    // IPv4 and run it through the v4 private-range screen.
+    if (host.includes(':')) {
+      if (host === '::1' || host === '::') return 'loopback address is not allowed';
+      if (/^f[cd][0-9a-f]{2}:/.test(host)) return 'unique-local address (fc00::/7) is not allowed';
+      if (/^fe[89ab][0-9a-f]:/.test(host)) return 'link-local address (fe80::/10) is not allowed';
+      // Embedded IPv4 — ::ffff:1.2.3.4 (dotted), ::ffff:0102:0304 (hex), and
+      // the NAT64 64:ff9b::/96 prefix. Pull out the trailing IPv4, whether
+      // written dotted or as the last two hextets, and re-screen it.
+      const embeddedV4 = this.extractEmbeddedV4(host);
+      if (embeddedV4) {
+        const v4err = this.validateWebhookUrl(`http://${embeddedV4}`);
+        // Re-screen returns the v4 range error (or null if the embedded
+        // address is genuinely public).
+        if (v4err) return `embedded IPv4 ${embeddedV4}: ${v4err}`;
+        return null;
+      }
+      // Any IPv6 literal we can't positively classify as public is rejected.
+      // (Global-unicast 2000::/3 alert targets are vanishingly rare; the safe
+      // default for a stored, server-dereferenced URL is deny.)
+      return 'IPv6 literal hosts are not allowed for webhooks';
+    }
+    return null;
+  }
+
+  /**
+   * Extract a dotted-quad IPv4 embedded in an IPv6 literal, covering the
+   * IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d), and NAT64
+   * (64:ff9b::a.b.c.d) forms — including the all-hex spelling where the last
+   * 32 bits are written as two hextets (::ffff:7f00:0001). Returns the dotted
+   * string, or null when there is no embedded IPv4 to screen.
+   */
+  private extractEmbeddedV4(host: string): string | null {
+    // Already-dotted tail, e.g. ::ffff:127.0.0.1 or 64:ff9b::10.0.0.1
+    const dotted = host.match(/:((?:\d{1,3}\.){3}\d{1,3})$/);
+    if (dotted) return dotted[1];
+    // Hex tail for the IPv4-mapped/compat prefixes: last two hextets are the
+    // 32-bit IPv4 (::ffff:7f00:1 → 127.0.0.1, ::ffff:0:7f00:1, etc.).
+    const mapped = host.match(/^(?:0{0,4}:){0,5}:?ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    const compat = host.match(/^(?:0{0,4}:){1,6}([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    const hx = mapped || compat;
+    if (hx) {
+      const hi = parseInt(hx[1], 16);
+      const lo = parseInt(hx[2], 16);
+      if (Number.isFinite(hi) && Number.isFinite(lo) && hi <= 0xffff && lo <= 0xffff) {
+        return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+      }
+    }
+    return null;
+  }
+
   private async postWebhook(url: string, payload: Record<string, unknown>): Promise<void> {
+    // SSRF screen — never POST to an internal/loopback/metadata target.
+    const violation = this.validateWebhookUrl(url);
+    if (violation) {
+      this.logger.warn(`Refusing webhook to ${url}: ${violation}.`);
+      return;
+    }
     // Node 20 ships global fetch + AbortController. 5 s ceiling keeps a
     // slow webhook target from blocking the monitoring loop.
     const ctrl = new AbortController();

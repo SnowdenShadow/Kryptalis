@@ -6,9 +6,11 @@ import {
   OnModuleInit,
   OnModuleDestroy,
 } from '@nestjs/common';
+import { BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateAlertRuleDto } from './dto/create-alert-rule.dto';
+import { UpdateAlertRuleDto } from './dto/update-alert-rule.dto';
 
 const PERIOD_MAP: Record<string, number> = {
   '24h': 24 * 60 * 60 * 1000,
@@ -81,7 +83,7 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
       if (!latest) continue;
 
       for (const rule of serverRules) {
-        const value = this.metricValue(rule.metric, latest);
+        const value = this.metricValue(rule.metric, latest, rule.operator);
         if (value == null) continue;
         if (this.compareThreshold(value, rule.operator, rule.threshold)) {
           // Fire-and-forget: notifications service swallows its own
@@ -106,7 +108,19 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Convert raw metric row → comparable percentage for the named metric. */
+  /**
+   * Convert a raw metric row → comparable percentage for the named metric.
+   *
+   * Direction matters for memory/disk. The dashboard advertises two intents:
+   *   - GT/GTE/EQ → "used % crossed a ceiling" (e.g. disk used >= 90%)
+   *   - LT/LTE    → "free % dropped below a floor" (e.g. free disk < 10%)
+   *
+   * The metric row only stores USED bytes, so a naive `used% < 10` would mean
+   * "almost empty", the opposite of the documented "free disk < 10%". To make
+   * the floor-watching intent work, for LT/LTE on memory/disk we return the
+   * FREE percentage (100 − used%); GT/GTE/EQ keep using the USED percentage.
+   * cpuPercent has no "free" counterpart, so the operator never flips it.
+   */
   private metricValue(
     metric: string,
     row: {
@@ -116,16 +130,23 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
       diskUsed: bigint;
       diskTotal: bigint;
     },
+    operator?: string,
   ): number | null {
+    // LT/LTE on a capacity metric is a "free fell below floor" check.
+    const wantFree = operator === 'LT' || operator === 'LTE';
     switch (metric) {
       case 'cpu':
         return row.cpuPercent;
-      case 'memory':
+      case 'memory': {
         if (row.memoryTotal === 0n) return null;
-        return Number((row.memoryUsed * 10000n) / row.memoryTotal) / 100;
-      case 'disk':
+        const usedPct = Number((row.memoryUsed * 10000n) / row.memoryTotal) / 100;
+        return wantFree ? 100 - usedPct : usedPct;
+      }
+      case 'disk': {
         if (row.diskTotal === 0n) return null;
-        return Number((row.diskUsed * 10000n) / row.diskTotal) / 100;
+        const usedPct = Number((row.diskUsed * 10000n) / row.diskTotal) / 100;
+        return wantFree ? 100 - usedPct : usedPct;
+      }
       default:
         return null;
     }
@@ -298,17 +319,32 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
     return out;
   }
 
+  /**
+   * SSRF screen for an operator-supplied webhookUrl, reusing the exact
+   * ruleset NotificationsService applies at dispatch. Rejecting at write
+   * time gives the admin an immediate 400 instead of a silently-skipped
+   * webhook later.
+   */
+  private assertWebhookUrlSafe(webhookUrl?: string | null) {
+    if (!webhookUrl) return;
+    const violation = this.notifications.validateWebhookUrl(webhookUrl);
+    if (violation) {
+      throw new BadRequestException(`Invalid webhookUrl: ${violation}.`);
+    }
+  }
+
   async createAlertRule(dto: CreateAlertRuleDto) {
     // Mutation is admin-only at the controller layer.
+    this.assertWebhookUrlSafe(dto.webhookUrl);
+    // metric/channel/operator are validated as string literals by the DTO;
+    // Prisma types them as enums, so cast at the boundary.
     return this.prisma.alertRule.create({ data: dto as any });
   }
 
-  async updateAlertRule(
-    id: string,
-    dto: Partial<{ enabled: boolean; threshold: number; operator: string; channel: string; webhookUrl: string | null }>,
-  ) {
+  async updateAlertRule(id: string, dto: UpdateAlertRuleDto) {
     const rule = await this.prisma.alertRule.findUnique({ where: { id } });
     if (!rule) throw new NotFoundException('Alert rule not found');
+    this.assertWebhookUrlSafe(dto.webhookUrl);
     return this.prisma.alertRule.update({ where: { id }, data: dto as any });
   }
 

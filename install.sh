@@ -18,6 +18,15 @@
 
 set -eu
 
+# `sed -i.bak` on .env leaves a .env.bak containing every secret. Clean it
+# on ANY exit (success, error, or interrupt) so a failed run can't strand a
+# world-readable copy of the secrets next to .env.
+cleanup() {
+  [ -n "${INSTALL_DIR:-}" ] && rm -f "$INSTALL_DIR/.env.bak" 2>/dev/null || true
+  rm -f .env.bak 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 REPO_URL="${DOCKCONTROL_REPO:-https://github.com/SnowdenShadow/DockControl.git}"
 INSTALL_DIR="${DOCKCONTROL_DIR:-/opt/dockcontrol}"
 BRANCH="${DOCKCONTROL_BRANCH:-main}"
@@ -222,6 +231,9 @@ else
   if [ "$CURRENT_URL" != "$PUBLIC_API_URL_RESOLVED" ]; then
     say "PUBLIC_API_URL changed: $CURRENT_URL → $PUBLIC_API_URL_RESOLVED"
     sed -i.bak "s|^PUBLIC_API_URL=.*|PUBLIC_API_URL=$PUBLIC_API_URL_RESOLVED|" .env
+    # sed -i.bak inherits the default umask (often 0022 → world-readable);
+    # the .bak holds every secret, so lock it down before the trap removes it.
+    chmod 600 .env.bak 2>/dev/null || true
     NEEDS_DASHBOARD_REBUILD=1
   else
     ok ".env already exists — leaving it alone"
@@ -248,6 +260,9 @@ set_env_var() {
   # set_env_var KEY VALUE — idempotent upsert into .env
   if grep -qE "^$1=" .env; then
     sed -i.bak "s|^$1=.*|$1=$2|" .env
+    # The .bak copy holds every secret; sed creates it with the default
+    # umask (world-readable). Restrict it before the EXIT trap removes it.
+    chmod 600 .env.bak 2>/dev/null || true
   else
     printf '%s=%s\n' "$1" "$2" >> .env
   fi

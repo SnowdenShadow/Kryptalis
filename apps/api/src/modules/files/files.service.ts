@@ -640,7 +640,11 @@ export class FilesService {
   private assertNoSymlinkInPath(rootAbs: string, absPath: string) {
     // Walk from root to leaf parent dir; refuse if any existing component
     // is a symbolic link. (Leaf is handled by O_NOFOLLOW on the actual op.)
-    if (this.O_NOFOLLOW === 0) return; // platform doesn't support — best effort
+    //
+    // This lstat-walk does NOT depend on O_NOFOLLOW — it works on every
+    // platform. When O_NOFOLLOW is unavailable (so the open() can't refuse a
+    // leaf symlink), this walk becomes the ONLY symlink defense, so it must
+    // stay mandatory: we deliberately do NOT early-return on O_NOFOLLOW === 0.
     const parts = path.relative(rootAbs, path.dirname(absPath)).split(path.sep).filter(Boolean);
     let cursor = rootAbs;
     for (const p of parts) {
@@ -937,6 +941,14 @@ export class FilesService {
     if (scope === 'app') {
       const target = await this.resolveDockerTarget(scopeId);
       if (target) {
+        // Same secret gating as the host-fs path below: dotenv files hold
+        // secrets (gate raw read behind project ADMIN) and any sensitive
+        // dotfile component (.git/, .ssh/, .docker/) requires platform
+        // ADMIN. Without this a VIEWER could read container-app secrets.
+        if (isDotenvName(path.basename(resolved.relPath))) {
+          await this.resolvePath(userId, scope, scopeId, relPath, 'ADMIN');
+        }
+        await this.assertSensitiveOrAdmin(userId, resolved.relPath);
         const s = await dockerFs.stat(target, resolved.relPath);
         if (!s.exists) throw new NotFoundException('File not found');
         if (s.isDir) throw new BadRequestException('Path is a directory');
@@ -1267,6 +1279,12 @@ export class FilesService {
     if (scope === 'app') {
       const target = await this.resolveDockerTarget(scopeId);
       if (target) {
+        // Dotenv files hold secrets — gate raw download behind project
+        // ADMIN, matching the host-fs read path. (assertSensitiveOrAdmin
+        // above already covers .git/.ssh/.docker dotfile components.)
+        if (isDotenvName(path.basename(resolved.relPath))) {
+          await this.resolvePath(userId, scope, scopeId, relPath, 'ADMIN');
+        }
         const { stream, filename, size } = await dockerFs.downloadFile(target, resolved.relPath);
         return { stream, filename, size };
       }
@@ -1653,13 +1671,13 @@ export class FilesService {
     // visually-successful save. Instead we log the failure so ops sees it
     // and can investigate (schema drift, DB outage, etc.).
     try {
-      await (this.prisma as any).auditLog?.create?.({
+      await this.prisma.auditLog.create({
         data: {
           userId,
-          resourceType: `file:${scope}`,
-          resourceId: scopeId,
           action,
-          metadata: { path: pathInfo },
+          resource: `file:${scope}`,
+          resourceId: scopeId,
+          details: { path: pathInfo },
         },
       });
     } catch (e: any) {

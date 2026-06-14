@@ -57,7 +57,7 @@ function makeService() {
   };
   const proxy = { regenerate: vi.fn().mockResolvedValue(undefined) };
   const mailServer = { removeForDomain: vi.fn() };
-  const notifications = { sendUserInvited: vi.fn() };
+  const notifications = { sendUserInvited: vi.fn(), sendUserAddedToProject: vi.fn() };
   const service = new ProjectsService(
     prisma as any,
     admin as any,
@@ -331,10 +331,32 @@ describe('addMember', () => {
     });
     prisma.project.findUnique.mockResolvedValue({ name: 'demo' });
     prisma.user.findUnique.mockResolvedValue({ name: 'Alice' });
-    notifications.sendUserInvited.mockRejectedValue(new Error('smtp down'));
+    notifications.sendUserAddedToProject.mockRejectedValue(new Error('smtp down'));
 
     const res = await service.addMember('p1', 'actor', { userId: 'u2', role: 'DEVELOPER' });
     expect(res.id).toBe('m2');
+  });
+
+  it('sends a no-token "added to project" email (not the dead invite-accept CTA)', async () => {
+    const { service, prisma, notifications } = makeService();
+    mockAssert.mockResolvedValue('OWNER');
+    prisma.projectMember.upsert.mockResolvedValue({
+      id: 'm2',
+      createdAt: new Date(),
+      user: { id: 'u2', name: 'Bob', email: 'bob@x.io' },
+    });
+    prisma.project.findUnique.mockResolvedValue({ name: 'demo' });
+    prisma.user.findUnique.mockResolvedValue({ name: 'Alice' });
+
+    await service.addMember('p1', 'actor', { userId: 'u2', role: 'DEVELOPER' });
+
+    expect(notifications.sendUserInvited).not.toHaveBeenCalled();
+    expect(notifications.sendUserAddedToProject).toHaveBeenCalledWith(
+      'bob@x.io',
+      'demo',
+      'Alice',
+      'p1',
+    );
   });
 });
 
@@ -601,6 +623,24 @@ describe('getServiceMesh', () => {
     expect(mesh.databases[0].url).toContain('postgres://shop:');
     expect(mesh.envSuggestions).toHaveLength(1);
     expect(mesh.envSuggestions[0].envVar).toBe('DATABASE_URL');
+  });
+
+  it('REGRESSION: db host uses the raw db.name (matches the real container), not a slugified one', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('VIEWER');
+    // A name slugify would mangle (uppercase + dot): real container is
+    // `dockcontrol-db-Cache.1`, but slugify would yield `cache-1`.
+    prisma.project.findUnique.mockResolvedValue({
+      id: 'p1',
+      applications: [],
+      databases: [
+        { id: 'd1', name: 'Cache.1', type: 'REDIS', port: 6390, username: 'default' },
+      ],
+    });
+
+    const mesh = await service.getServiceMesh('p1', 'u1');
+    expect(mesh.databases[0].host).toBe('dockcontrol-db-Cache.1');
+    expect(mesh.databases[0].url).toContain('@dockcontrol-db-Cache.1:6390/Cache.1');
   });
 
   it('404s on a missing project', async () => {

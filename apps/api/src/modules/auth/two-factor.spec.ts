@@ -84,6 +84,9 @@ function makePrisma() {
     twoFactorBackupCode: {
       findMany: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue({}),
+      // Consumption is now an atomic compare-and-set (updateMany scoped on
+      // usedAt:null); default to count===1 (the row was still unused).
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
       createMany: vi.fn().mockResolvedValue({ count: 10 }),
     },
@@ -184,10 +187,11 @@ describe('login — backup codes', () => {
     expect(prisma.twoFactorBackupCode.findMany).toHaveBeenCalledWith({
       where: { userId: 'u1', usedAt: null },
     });
-    // …and exactly the matched one is burned.
-    expect(prisma.twoFactorBackupCode.update).toHaveBeenCalledTimes(1);
-    expect(prisma.twoFactorBackupCode.update).toHaveBeenCalledWith({
-      where: { id: 'bc-hit' },
+    // …and exactly the matched one is burned via an atomic compare-and-set
+    // (updateMany scoped on usedAt:null so a concurrent second use loses).
+    expect(prisma.twoFactorBackupCode.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.twoFactorBackupCode.updateMany).toHaveBeenCalledWith({
+      where: { id: 'bc-hit', usedAt: null },
       data: { usedAt: expect.any(Date) },
     });
     // Backup path must NOT hit the TOTP verifier.
@@ -478,9 +482,9 @@ describe('disableTwoFactor', () => {
     const res = await svc.disableTwoFactor('u1', PASSWORD, BACKUP_DISPLAY);
     expect(res.message).toMatch(/disabled/i);
     expect(mockVerify).not.toHaveBeenCalled();
-    // The backup code used to disable is consumed too.
-    expect(prisma.twoFactorBackupCode.update).toHaveBeenCalledWith({
-      where: { id: 'bc1' },
+    // The backup code used to disable is consumed too (atomic CAS).
+    expect(prisma.twoFactorBackupCode.updateMany).toHaveBeenCalledWith({
+      where: { id: 'bc1', usedAt: null },
       data: { usedAt: expect.any(Date) },
     });
   });
@@ -566,8 +570,8 @@ describe('resetPassword — 2FA gate', () => {
       backupCode: BACKUP_DISPLAY,
     });
     expect(res.message).toMatch(/Password reset/);
-    expect(prisma.twoFactorBackupCode.update).toHaveBeenCalledWith({
-      where: { id: 'bc1' },
+    expect(prisma.twoFactorBackupCode.updateMany).toHaveBeenCalledWith({
+      where: { id: 'bc1', usedAt: null },
       data: { usedAt: expect.any(Date) },
     });
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);

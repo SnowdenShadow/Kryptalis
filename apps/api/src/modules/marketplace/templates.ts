@@ -15,6 +15,8 @@
 // docker-compose. Marketplace install MAY strip the host `ports:` block
 // when a port-pinned binding is requested — Caddy publishes the port on
 // the host in that case, so the container only needs the internal port.
+import { checkVolumeSafety } from './dto/install-custom.dto';
+
 export const COMPOSE_TEMPLATES: Record<string, { compose: string; healthCheck?: string }> = {
   portainer: {
     compose: `services:
@@ -966,7 +968,16 @@ export function renderCustomComposeTemplate(opts: {
   const env = Object.entries(opts.envVars || {})
     .map(([k, v]) => `      ${k}: ${JSON.stringify(String(v))}`)
     .join('\n');
-  const vols = (opts.volumes || []).map((v) => `      - ${v}`).join('\n');
+  // Defensive: never interpolate a volume raw. A newline or non-named-volume
+  // spec would inject arbitrary compose keys (privileged, cap_add, pid:host)
+  // or bind-mount the host fs. checkVolumeSafety() is the same guard the DTO
+  // and service apply; re-run it here so a direct caller can't bypass it.
+  for (const v of opts.volumes || []) {
+    const err = checkVolumeSafety(v);
+    if (err) throw new Error(`Unsafe volume: ${err}`);
+  }
+  // Quote each safe spec via JSON.stringify so it lands on exactly one line.
+  const vols = (opts.volumes || []).map((v) => `      - ${JSON.stringify(v)}`).join('\n');
   const hasVolumes = (opts.volumes || []).length > 0;
   return `services:
   app:

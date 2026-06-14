@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { COMPOSE_TEMPLATES, PORT_MAP } from './templates';
+import { COMPOSE_TEMPLATES, PORT_MAP, renderCustomComposeTemplate } from './templates';
 
 /**
  * Consistency checks between the three places a marketplace app's ports
@@ -73,5 +73,32 @@ describe('marketplace catalog / PORT_MAP / template consistency', () => {
     for (const app of catalog.apps) {
       expect(HTTPS_PORTS, `${app.slug} defaults to TLS-looking port ${app.ports[0]}`).not.toContain(app.ports[0]);
     }
+  });
+});
+
+describe('renderCustomComposeTemplate — volume hardening', () => {
+  const base = { image: 'linuxserver/jellyfin:latest', containerPort: 8096 };
+
+  it('emits a safe named volume on a single quoted line', () => {
+    const out = renderCustomComposeTemplate({ ...base, volumes: ['media:/data'] });
+    expect(out).toContain('    volumes:\n      - "media:/data"');
+    // Declares the named volume so compose accepts it.
+    expect(out).toContain('volumes: {}');
+  });
+
+  it('throws on host bind-mounts (full host escape)', () => {
+    for (const v of ['/:/host', '/var/run/docker.sock:/sock', '~/.ssh:/root/.ssh', './x:/y', '../etc:/etc']) {
+      expect(() => renderCustomComposeTemplate({ ...base, volumes: [v] }), v).toThrow(/Unsafe volume/);
+    }
+  });
+
+  it('throws on newline-injected compose keys', () => {
+    const inject = 'media:/data\n    privileged: true';
+    expect(() => renderCustomComposeTemplate({ ...base, volumes: [inject] })).toThrow(/Unsafe volume/);
+  });
+
+  it('no volumes → no volumes block', () => {
+    const out = renderCustomComposeTemplate(base);
+    expect(out).not.toContain('volumes:');
   });
 });

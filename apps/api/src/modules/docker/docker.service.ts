@@ -99,11 +99,33 @@ export class DockerService {
     if (typeof containerId !== 'string' || !CONTAINER_ID_RE.test(containerId)) {
       throw new BadRequestException('Invalid container id or name.');
     }
-    if (DESTRUCTIVE_ACTIONS.has(action) && PROTECTED_CONTAINERS.has(containerId)) {
-      throw new ForbiddenException(
-        `Refusing destructive action on protected container '${containerId}'. ` +
-        `Use the platform's deploy / update flow instead.`,
-      );
+    if (DESTRUCTIVE_ACTIONS.has(action)) {
+      // The caller may pass a hex ID instead of a name, which would slip
+      // past a name-only check and let stop/kill/remove hit a protected
+      // container (postgres/redis/api/caddy/agent). Resolve the actual
+      // container NAME and refuse if either the supplied identifier or the
+      // resolved name is protected.
+      const resolvedName = await this.resolveContainerName(serverId, containerId);
+      if (
+        PROTECTED_CONTAINERS.has(containerId) ||
+        (resolvedName && PROTECTED_CONTAINERS.has(resolvedName))
+      ) {
+        throw new ForbiddenException(
+          `Refusing destructive action on protected container '${resolvedName || containerId}'. ` +
+          `Use the platform's deploy / update flow instead.`,
+        );
+      }
+      // Fail CLOSED: if we could NOT positively resolve a name (inspect
+      // timeout / daemon hiccup) and the identifier isn't already a known
+      // protected NAME, we cannot prove a hex-ID target isn't one of the
+      // protected containers — so refuse rather than risk killing the control
+      // plane. A legitimately-gone container makes the action a no-op anyway.
+      if (!resolvedName && !PROTECTED_CONTAINERS.has(containerId)) {
+        throw new ForbiddenException(
+          `Could not verify container '${containerId}' before a destructive action ` +
+          `(it may be gone or the daemon is unreachable). Refusing to proceed.`,
+        );
+      }
     }
     // The `--` separator stops docker from interpreting any future
     // leading-dash content as a flag. The regex above already rejects
@@ -157,6 +179,31 @@ export class DockerService {
   }
 
   // ── internals ──────────────────────────────────────────────────────
+
+  /**
+   * Resolve a container identifier (id OR name) to its canonical name so the
+   * protected-container guard can't be bypassed by passing a hex ID. Returns
+   * null if the container can't be inspected (already gone, daemon hiccup).
+   * For destructive actions the caller treats a null result as "unverified"
+   * and refuses (fail-closed), so a failed lookup can never let a hex-ID
+   * target slip past the protected-container guard.
+   */
+  private async resolveContainerName(
+    serverId: string,
+    containerId: string,
+  ): Promise<string | null> {
+    try {
+      const { stdout } = await this.runDocker(
+        ['inspect', '--format', '{{.Name}}', '--', containerId],
+        10_000,
+      );
+      // docker prints the name with a leading slash, e.g. "/dockcontrol-redis".
+      const name = stdout.trim().replace(/^\//, '');
+      return name || null;
+    } catch {
+      return null;
+    }
+  }
 
   private async runDocker(args: string[], timeoutMs: number) {
     try {

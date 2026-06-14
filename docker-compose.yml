@@ -165,12 +165,15 @@ services:
       # bindings). Mounting the override file individually keeps the rest
       # of the repo read-only.
       - ./docker-compose.override.yml:/app/install-root/docker-compose.override.yml
-      # Auto-update: read-only access to the install dir so the API can
+      # Auto-update: read-only access to ONLY the .git dir so the API can
       # resolve the current commit SHA (.git/HEAD) and the GitHub remote
-      # (.git/config). update.sh itself does NOT run from this mount —
-      # it spawns a separate `docker run docker:cli` container with the
-      # host install path mounted instead.
-      - .:/app/install-host:ro
+      # (.git/config). Mounting just .git (not the whole repo) keeps .env and
+      # every other source file out of the container — the updater code reads
+      # nothing else here (system-updates.service.ts joins '/app/install-host'
+      # + '.git/...', so the path stays /app/install-host/.git). update.sh
+      # itself does NOT run from this mount — it spawns a separate
+      # `docker run docker:cli` container with the host install path mounted.
+      - ./.git:/app/install-host/.git:ro
     networks:
       # default — talk to postgres here.
       - default

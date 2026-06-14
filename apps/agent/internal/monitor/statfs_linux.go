@@ -11,10 +11,13 @@ func diskUsage(path string) (total, used uint64) {
 	if err := syscall.Statfs(path, &fs); err != nil {
 		return 0, 0
 	}
-	total = fs.Blocks * uint64(fs.Bsize)
-	free := fs.Bavail * uint64(fs.Bsize)
-	if total > free {
-		used = total - free
+	bsize := uint64(fs.Bsize)
+	total = fs.Blocks * bsize
+	// Used = all blocks minus ALL free blocks (Bfree includes the
+	// root-reserved ~5%). Using Bavail here would count the reserved
+	// blocks as used and over-report by that reserve.
+	if fs.Blocks >= fs.Bfree {
+		used = (fs.Blocks - fs.Bfree) * bsize
 	}
 	return total, used
 }

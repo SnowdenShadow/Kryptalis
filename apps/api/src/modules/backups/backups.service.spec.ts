@@ -596,6 +596,38 @@ describe('remote backups', () => {
     );
   });
 
+  it('a short configured encryption key FAILS the backup instead of silently writing plaintext', async () => {
+    const { service, prisma, systemConfig, notifications } = makeService();
+    prisma.backup.findUnique.mockResolvedValue(remoteBackupRow({ status: 'IN_PROGRESS' }));
+    prisma.backup.update.mockResolvedValue({});
+    // Key IS configured but too short — must not collapse into a plaintext dump.
+    systemConfig.get.mockReturnValue('shortkey');
+
+    await service.onRemoteBackupTaskResult({
+      id: 'task1',
+      serverId: 's1',
+      type: 'BACKUP',
+      status: 'COMPLETED',
+      payload: { backupId: 'b1', uploadName: 'b1.tar.gz' },
+    } as any);
+
+    // Row FAILED — never COMPLETED — and the operator is told why.
+    expect(prisma.backup.update).toHaveBeenCalledWith({
+      where: { id: 'b1' },
+      data: { status: 'FAILED' },
+    });
+    expect(prisma.backup.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'COMPLETED' }) }),
+    );
+    expect(notifications.sendBackupResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        backupId: 'b1',
+        status: 'FAILED',
+        error: expect.stringContaining('too short'),
+      }),
+    );
+  });
+
   it('BACKUP completion handler ignores tasks without a backupId and already-final rows', async () => {
     const { service, prisma } = makeService();
 

@@ -507,6 +507,14 @@ export class ApplicationsService {
     if (dto.displayName !== undefined && dto.displayName.trim() === '') {
       data.displayName = null;
     }
+    // envVars carry production secrets (DATABASE_URL, JWT secrets, API keys).
+    // A generic `data: { ...dto }` would persist them PLAINTEXT, bypassing the
+    // at-rest encryption setEnv() applies. Route them through the SAME
+    // encryptEnvVars path so a PATCH stays functional but secrets are encrypted
+    // in the { __k: 1, v: <ciphertext> } envelope.
+    if (dto.envVars !== undefined) {
+      data.envVars = this.env.encryptEnvVars(dto.envVars);
+    }
     const result = await this.prisma.application.update({ where: { id }, data });
     // if port changed and app is running, redeploy to apply
     if (dto.port !== undefined) {

@@ -375,6 +375,15 @@ export class AuthService {
     if (row.user.status === 'BANNED' || row.user.status === 'SUSPENDED') {
       throw new ForbiddenException('Account is not active');
     }
+    // A verified inbox is necessary but not sufficient: an account still
+    // awaiting admin approval must NOT receive a token pair here, matching
+    // login()'s PENDING_APPROVAL gate. (The tx above only promotes
+    // PENDING_VERIFICATION → ACTIVE, so a PENDING_APPROVAL row stays put.)
+    if (row.user.status === 'PENDING_APPROVAL') {
+      throw new ForbiddenException(
+        'Your account is awaiting administrator approval. You will be able to sign in once it has been approved.',
+      );
+    }
 
     const tokens = await this.issueTokenPair(row.user.id, row.user.email, row.user.role, ctx);
     return {
@@ -432,16 +441,12 @@ export class AuthService {
     // 15 min — independent of the per-IP throttler so credential stuffing
     // across rotated IPs is mitigated. Attempts during the lock do NOT
     // bump the failed counter (the account is already frozen).
-    if (user?.lockedUntil && user.lockedUntil > new Date()) {
-      const minutes = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60000);
-      throw new UnauthorizedException(
-        `Account temporarily locked due to repeated failed attempts. Try again in ${minutes} minute(s).`,
-      );
-    }
-    // Lock expired (lockedUntil in the past)? The stale counter (≥5) must
-    // not survive — otherwise the very next failure instantly re-locks for
-    // another 15 min. The first attempt after expiry starts a fresh count.
-    const lockExpired = !!(user?.lockedUntil && user.lockedUntil <= new Date());
+    // Account-level lockout gate (throws if frozen) + whether an EXPIRED
+    // lock was observed (stale ≥5 counter must restart at 1 on the next
+    // failure rather than instantly re-lock). Shared with the credential-
+    // change flows (changePassword / disableTwoFactor) so the second-factor
+    // grind is bounded everywhere, not just at login.
+    const lockExpired = user ? this.assertNotLocked(user) : false;
 
     // Run bcrypt EITHER WAY so timing doesn't distinguish missing-email
     // from wrong-password. The dummy hash is a valid bcrypt blob.
@@ -699,15 +704,75 @@ export class AuthService {
 
   // ── profile + password ────────────────────────────────────────────
 
-  async updateProfile(userId: string, dto: { name?: string; email?: string }) {
+  async updateProfile(
+    userId: string,
+    dto: { name?: string; email?: string; currentPassword?: string },
+  ) {
     const data: any = {};
     if (dto.name?.trim()) data.name = dto.name.trim();
-    if (dto.email?.trim()) {
-      const email = dto.email.trim().toLowerCase();
-      const dup = await this.prisma.user.findFirst({ where: { email, id: { not: userId } } });
-      if (dup) throw new ConflictException('Email already in use');
-      data.email = email;
+
+    const newEmail =
+      dto.email?.trim() ? dto.email.trim().toLowerCase() : undefined;
+    const emailIsChanging = !!newEmail;
+
+    if (emailIsChanging) {
+      // An email rebinding is account-takeover-grade: a stolen access token
+      // alone must NOT be able to move the account to an attacker's inbox.
+      // Require the current password (re-auth) before we touch the email.
+      const user = await this.prisma.user.findUnique({ where: { id: userId } });
+      if (!user) throw new UnauthorizedException('User not found');
+      if (newEmail === user.email) {
+        // No-op rebind — drop it so we don't demand a password for nothing.
+      } else {
+        if (!dto.currentPassword) {
+          throw new UnauthorizedException('Current password is required to change your email.');
+        }
+        const ok = await bcrypt.compare(dto.currentPassword, user.password);
+        if (!ok) throw new UnauthorizedException('Current password is incorrect');
+
+        const dup = await this.prisma.user.findFirst({
+          where: { email: newEmail, id: { not: userId } },
+        });
+        if (dup) throw new ConflictException('Email already in use');
+
+        const smtpConfigured = !!this.systemConfig.get<string>('smtp_host', 'SMTP_HOST');
+        if (smtpConfigured) {
+          // Don't bind the unverified address as the live, login-usable
+          // email. Park the account in PENDING_VERIFICATION on the NEW
+          // address and mail a verification token; /auth/verify-email flips
+          // it ACTIVE once the user proves inbox control.
+          data.email = newEmail;
+          data.status = 'PENDING_VERIFICATION';
+          const updated = await this.prisma.user.update({
+            where: { id: userId },
+            data,
+            select: { id: true, name: true, email: true, role: true, status: true },
+          });
+          const rawToken = randomBytes(32).toString('base64url');
+          const tokenHash = this.encryption.hash(rawToken);
+          const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          await this.prisma.emailVerificationToken.create({
+            data: { userId, tokenHash, expiresAt },
+          });
+          if (process.env.NODE_ENV !== 'production') {
+            // eslint-disable-next-line no-console
+            console.warn(
+              '[dev] email verification token for ' + newEmail + ': ' + rawToken +
+              ' (this log is GATED to NODE_ENV !== production)',
+            );
+          }
+          try {
+            await this.notifications.sendEmailVerification(newEmail, rawToken, updated.name);
+          } catch {}
+          return updated;
+        }
+
+        // No SMTP → no verification round-trip is possible; the password
+        // re-auth above is the protection. Write the new email directly.
+        data.email = newEmail;
+      }
     }
+
     if (Object.keys(data).length === 0) throw new ConflictException('Nothing to update');
     return this.prisma.user.update({
       where: { id: userId },
@@ -732,17 +797,25 @@ export class AuthService {
     // Symmetric with disableTwoFactor(): a sensitive credential change must
     // re-verify the second factor when one is set. A phished current
     // password alone shouldn't unlock the keys to the kingdom.
+    //
+    // The TOTP/backup-code check is routed through the SAME per-account
+    // lockout login() uses: a stolen access token would otherwise allow an
+    // unlimited TOTP/backup-code grind here. lockedUntil is honoured BEFORE
+    // verification, each miss bumps the counter, and a hit resets it.
     if (user.twoFactorEnabled) {
       const code = dto.totpCode || dto.backupCode;
       if (!code) {
         throw new UnauthorizedException('Two-factor code required to change password');
       }
+      const lockExpired = this.assertNotLocked(user);
       const validTotp = await this.verifyTwoFactor(userId, user.twoFactorSecret, code, {
         forBackup: !!dto.backupCode,
       });
       if (!validTotp) {
+        await this.bumpFailedAttempt(userId, { freshAfterLockExpiry: lockExpired });
         throw new UnauthorizedException('Invalid two-factor code');
       }
+      await this.resetFailedAttempts(userId);
     }
 
     const hashed = await bcrypt.hash(dto.newPassword, 12);
@@ -753,6 +826,31 @@ export class AuthService {
       data: { status: 'REVOKED' },
     });
     return { message: 'Password changed. Please log in again.' };
+  }
+
+  /**
+   * Throw if the account is currently frozen (lockedUntil in the future),
+   * with the same message login() uses so no caller becomes a password/2FA
+   * oracle. Returns whether an EXPIRED lock was observed — the caller passes
+   * that to bumpFailedAttempt({ freshAfterLockExpiry }) so a stale ≥5
+   * counter restarts at 1 instead of instantly re-locking.
+   */
+  private assertNotLocked(user: { lockedUntil?: Date | null }): boolean {
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      const minutes = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60000);
+      throw new UnauthorizedException(
+        `Account temporarily locked due to repeated failed attempts. Try again in ${minutes} minute(s).`,
+      );
+    }
+    return !!(user.lockedUntil && user.lockedUntil <= new Date());
+  }
+
+  /** Clear the failed-attempt counter + any lock after a successful factor. */
+  private async resetFailedAttempts(userId: string) {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { failedLoginAttempts: 0, lockedUntil: null },
+    });
   }
 
   /**
@@ -962,12 +1060,19 @@ export class AuthService {
     if (user.twoFactorEnabled) {
       // Accept TOTP OR a backup code — distinguished by length/charset.
       // Backup codes are 80-bit hex grouped with dashes ("ab12c-de34f-...").
+      // Routed through the SAME per-account lockout login() uses so a stolen
+      // access token can't grind TOTP/backup codes here without limit.
       const stripped = code.replace(/-/g, '');
       const looksLikeBackup = /^[0-9a-f]{10,}$/i.test(stripped);
+      const lockExpired = this.assertNotLocked(user);
       const valid = await this.verifyTwoFactor(userId, user.twoFactorSecret, code, {
         forBackup: looksLikeBackup,
       });
-      if (!valid) throw new UnauthorizedException('Invalid two-factor code.');
+      if (!valid) {
+        await this.bumpFailedAttempt(userId, { freshAfterLockExpiry: lockExpired });
+        throw new UnauthorizedException('Invalid two-factor code.');
+      }
+      await this.resetFailedAttempts(userId);
     }
     await this.prisma.$transaction([
       this.prisma.user.update({
@@ -1019,11 +1124,16 @@ export class AuthService {
     );
     const matched = results.find((r) => r.ok);
     if (!matched) return false;
-    await this.prisma.twoFactorBackupCode.update({
-      where: { id: matched.id },
+    // Compare-and-set consumption: only the row that is STILL unused
+    // (usedAt: null) is claimed. Two concurrent uses of the same code both
+    // match the bcrypt hash above, but updateMany scopes on usedAt:null so
+    // exactly one write reports count===1; the loser sees count===0 and is
+    // rejected — closes the read-then-write double-spend race.
+    const consumed = await this.prisma.twoFactorBackupCode.updateMany({
+      where: { id: matched.id, usedAt: null },
       data: { usedAt: new Date() },
     });
-    return true;
+    return consumed.count === 1;
   }
 
   // ── token issuance + helpers ──────────────────────────────────────

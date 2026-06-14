@@ -181,29 +181,58 @@ export function remapComposePorts(content: string, mapping: Record<string, numbe
   return yaml.dump(doc, { lineWidth: 200 });
 }
 
+/**
+ * Build-arg allowlist prefixes. Only env vars whose key starts with one of
+ * these framework "public" prefixes are injected into `build.args`. Build
+ * args land in the image history (`docker history`) in plaintext, so copying
+ * the ENTIRE env map there would leak runtime secrets (DATABASE_URL,
+ * JWT_SECRET, third-party API keys). These prefixes are the vars frameworks
+ * are *designed* to inline at build time — they're already shipped to the
+ * client bundle, so exposing them in image history is not a new leak.
+ */
+export const BUILD_ARG_PUBLIC_PREFIXES = [
+  'NEXT_PUBLIC_',
+  'VITE_',
+  'REACT_APP_',
+  'PUBLIC_',
+  'NUXT_PUBLIC_',
+  'GATSBY_',
+  'EXPO_PUBLIC_',
+];
+
+export function isBuildPublicEnvKey(key: string): boolean {
+  return BUILD_ARG_PUBLIC_PREFIXES.some((p) => key.startsWith(p));
+}
+
 export function injectComposeEnv(content: string, env: Record<string, string>): string {
   if (!env || Object.keys(env).length === 0) return content;
   const doc: any = yaml.load(content);
   if (!doc?.services) return content;
+  // Build args end up in image history in plaintext — only inject the
+  // framework build-time-public vars (NEXT_PUBLIC_*, VITE_*, …), NEVER
+  // arbitrary secrets. Runtime env (environment:) below is unaffected.
+  const buildEnv = Object.fromEntries(
+    Object.entries(env).filter(([k]) => isBuildPublicEnvKey(k)),
+  );
   for (const val of Object.values<any>(doc.services)) {
     val.environment = { ...(val.environment || {}), ...env };
-    // Services built from source also get the env as build args — frameworks
-    // that inline at build time (Next NEXT_PUBLIC_*, Vite VITE_*) read
-    // process.env during `npm run build`, which a Dockerfile maps from ARG.
-    // Without this, args hardcoded in the repo's compose win over the
+    // Services built from source also get the public env as build args —
+    // frameworks that inline at build time (Next NEXT_PUBLIC_*, Vite VITE_*)
+    // read process.env during `npm run build`, which a Dockerfile maps from
+    // ARG. Without this, args hardcoded in the repo's compose win over the
     // dashboard's env tab and "save then redeploy" silently keeps old values.
-    if (val.build) {
+    if (val.build && Object.keys(buildEnv).length > 0) {
       if (typeof val.build === 'string') val.build = { context: val.build };
       const args = val.build.args;
       if (Array.isArray(args)) {
         // list form: ["KEY=value", ...] — replace overridden keys, append new
         const kept = args.filter((a: any) => {
           const key = String(a).split('=')[0];
-          return !(key in env);
+          return !(key in buildEnv);
         });
-        val.build.args = [...kept, ...Object.entries(env).map(([k, v]) => `${k}=${v}`)];
+        val.build.args = [...kept, ...Object.entries(buildEnv).map(([k, v]) => `${k}=${v}`)];
       } else {
-        val.build.args = { ...(args || {}), ...env };
+        val.build.args = { ...(args || {}), ...buildEnv };
       }
     }
   }
@@ -295,6 +324,38 @@ export function stripComposePorts(content: string): string {
     if (val && typeof val === 'object' && 'ports' in val) {
       delete val.ports;
     }
+  }
+  return yaml.dump(doc, { lineWidth: 200 });
+}
+
+/**
+ * Drop ONLY the host-port publishes whose host side targets a reserved port
+ * (Caddy's 80/443, the dashboard on 3000, postgres on 5432, etc). Used for
+ * domainless deploys with no user-picked hostPort: a repo's hardcoded
+ * `443:443` would otherwise collide with Caddy and break the platform. The
+ * container ports are kept — we only remove the offending host binding so the
+ * service still publishes its non-reserved ports normally.
+ */
+export function stripReservedComposePorts(content: string): string {
+  const doc: any = yaml.load(content);
+  if (!doc?.services) return content;
+  for (const val of Object.values<any>(doc.services)) {
+    if (!val || typeof val !== 'object' || !Array.isArray(val.ports)) continue;
+    val.ports = val.ports.filter((p: any) => {
+      let host: number | null = null;
+      if (typeof p === 'string') {
+        const parts = p.split('/')[0].split(':');
+        // forms: "8080" | "8080:80" | "127.0.0.1:8080:80"
+        if (parts.length === 2) host = Number(parts[0]);
+        else if (parts.length >= 3) host = Number(parts[1]);
+        // length 1 ("80") = container-only, no host publish — keep.
+      } else if (p && typeof p === 'object' && p.published != null) {
+        host = Number(p.published);
+      }
+      // Keep the publish unless its host side is a reserved port.
+      return !(host != null && Number.isFinite(host) && RESERVED_HOST_PORTS.has(host));
+    });
+    if (val.ports.length === 0) delete val.ports;
   }
   return yaml.dump(doc, { lineWidth: 200 });
 }

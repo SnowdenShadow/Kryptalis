@@ -17,13 +17,13 @@ import {
 } from '../../common/rbac/project-access';
 
 /**
- * Expiry-warning window. Rows in ssl_certificates are NOT auto-renewed by
- * the platform: Caddy's auto-renew path only reconciles Domain.sslStatus /
- * sslExpiresAt (reverse-proxy.service) — nothing in the codebase refreshes
- * SSLCertificate.expiresAt. So a cert ≤14 days from expiry genuinely needs
- * operator action, and 14 days is the classic "renew now" lead time.
- * If these rows ever become Caddy-managed, drop this to 7 (renewal happens
- * ~30 days out; <7 days left would then mean renewal is failing).
+ * Expiry-warning window. The source of truth is Domain.sslExpiresAt /
+ * Domain.sslStatus, which the reverse-proxy (Caddy) reconciles — NOT the
+ * ssl_certificates table, which nothing in the codebase ever populates. So
+ * a domain ≤14 days from expiry genuinely needs operator attention, and 14
+ * days is the classic "renew now" lead time. If Caddy auto-renew ever lands,
+ * drop this to 7 (renewal happens ~30 days out; <7 days left would then mean
+ * renewal is failing).
  */
 const SSL_EXPIRY_WARN_DAYS = 14;
 /** Daily cadence; first check 5 min after boot so startup isn't blocked. */
@@ -44,6 +44,17 @@ export class SslService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SslService.name);
   private expirySweepInterval: ReturnType<typeof setInterval> | null = null;
   private expiryFirstCheck: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * In-memory dedupe ledger for the expiry sweep, keyed by domainId. The
+   * value is the expiry timestamp (ms) we last notified for. Domain has no
+   * persisted `sslExpiryNotifiedAt` column (and we deliberately avoid a
+   * migration here), so dedupe lives in-process: re-notify only when the
+   * expiry moved forward (cert renewed) or the API restarted. Worst case
+   * after a restart is one duplicate warning per still-expiring domain —
+   * acceptable for a daily best-effort watchdog.
+   */
+  private readonly notifiedExpiry = new Map<string, number>();
 
   constructor(
     private prisma: PrismaService,
@@ -84,48 +95,56 @@ export class SslService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Daily expiry watchdog: find certs expiring within SSL_EXPIRY_WARN_DAYS
-   * that haven't been notified for the CURRENT window, notify admins (pref
-   * `sslExpire`) and stamp `expiryNotifiedAt`.
+   * Daily expiry watchdog. Reads the REAL source of truth — Domain.sslExpiresAt
+   * / Domain.sslStatus, which the reverse-proxy (Caddy) reconciles — and warns
+   * admins (pref `sslExpire`) about any domain whose cert expires within
+   * SSL_EXPIRY_WARN_DAYS. The old implementation queried the ssl_certificates
+   * table, which NOTHING in the codebase ever writes, so the watchdog was inert.
    *
-   * Dedupe: a cert is "already notified" only when expiryNotifiedAt falls
-   * inside the current warning window (>= expiresAt − warnDays). If the
-   * cert is renewed (expiresAt jumps forward), the old stamp lands before
-   * the new window start and the alert re-arms automatically — no clearing
-   * needed on renewal.
+   * Caveat: syncSslStatuses() in reverse-proxy can fabricate sslExpiresAt as
+   * now+90d rather than parsing the cert's real notAfter, so the value here is
+   * best-effort/approximate — we key the warning off it regardless. Parsing the
+   * true notAfter would require reading the Caddy cert files; see deferred.
+   *
+   * Dedupe is in-memory (see notifiedExpiry) since Domain has no persisted
+   * notified-at column and we avoid a migration: a domain is re-notified only
+   * if its expiry moved forward (renewal) or the API restarted.
    */
   async sweepExpiringCertificates(): Promise<{ notified: number }> {
     const now = Date.now();
     const horizon = new Date(now + SSL_EXPIRY_WARN_DAYS * 24 * 60 * 60 * 1000);
-    const certs = await this.prisma.sSLCertificate.findMany({
-      where: { expiresAt: { lte: horizon } },
-      include: { domain: { select: { domain: true } } },
+    const domains = await this.prisma.domain.findMany({
+      where: {
+        sslExpiresAt: { not: null, lte: horizon },
+        // Don't nag about domains that never had SSL provisioned.
+        sslStatus: { in: ['ACTIVE', 'EXPIRED'] },
+      },
+      select: { id: true, domain: true, sslExpiresAt: true },
     });
 
     let notified = 0;
-    for (const cert of certs) {
-      const windowStart = new Date(
-        cert.expiresAt.getTime() - SSL_EXPIRY_WARN_DAYS * 24 * 60 * 60 * 1000,
-      );
-      if (cert.expiryNotifiedAt && cert.expiryNotifiedAt >= windowStart) {
-        continue; // already notified for this expiry window
+    for (const d of domains) {
+      const expiresAt = d.sslExpiresAt;
+      if (!expiresAt) continue; // narrowing; the where-clause already excludes null
+      // Already warned for THIS expiry value? (Renewal pushes it forward and
+      // re-arms; a stale-or-equal stamp means we've handled this window.)
+      const last = this.notifiedExpiry.get(d.id);
+      if (last !== undefined && last >= expiresAt.getTime()) {
+        continue;
       }
       const daysLeft = Math.ceil(
-        (cert.expiresAt.getTime() - now) / (24 * 60 * 60 * 1000),
+        (expiresAt.getTime() - now) / (24 * 60 * 60 * 1000),
       );
-      // Stamp BEFORE dispatch so a notification path crash can't cause a
+      // Stamp BEFORE dispatch so a notification-path crash can't cause a
       // re-notify loop on every daily tick.
-      await this.prisma.sSLCertificate.update({
-        where: { id: cert.id },
-        data: { expiryNotifiedAt: new Date() },
-      });
+      this.notifiedExpiry.set(d.id, expiresAt.getTime());
       this.logger.warn(
-        `SSL certificate for ${cert.domain.domain} expires in ${daysLeft} day(s) (${cert.expiresAt.toISOString()}).`,
+        `SSL certificate for ${d.domain} expires in ${daysLeft} day(s) (${expiresAt.toISOString()}).`,
       );
       // Fire-and-forget — sendSslExpiry never throws.
       await this.notifications.sendSslExpiry({
-        domain: cert.domain.domain,
-        expiresAt: cert.expiresAt,
+        domain: d.domain,
+        expiresAt,
         daysLeft,
       });
       notified++;

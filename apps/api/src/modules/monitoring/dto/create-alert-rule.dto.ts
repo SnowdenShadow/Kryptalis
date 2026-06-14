@@ -1,4 +1,4 @@
-import { IsString, IsNumber, IsOptional, IsIn } from 'class-validator';
+import { IsString, IsNumber, IsOptional, IsIn, IsUrl } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreateAlertRuleDto {
@@ -29,6 +29,9 @@ export class CreateAlertRuleDto {
 
   @ApiProperty({ required: false })
   @IsOptional()
-  @IsString()
+  // Require an absolute http(s) URL. The service layer additionally screens
+  // the resolved host against private/loopback/metadata ranges (SSRF) — a
+  // syntactically valid URL is necessary but not sufficient.
+  @IsUrl({ protocols: ['http', 'https'], require_protocol: true })
   webhookUrl?: string;
 }

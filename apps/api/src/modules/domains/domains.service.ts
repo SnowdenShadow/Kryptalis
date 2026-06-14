@@ -269,13 +269,24 @@ export class DomainsService {
   async transfer(userId: string, id: string, targetProjectId: string) {
     await this.assertDomainAccess(userId, id, 'ADMIN');
     await assertProjectAccess(this.prisma, userId, targetProjectId, 'DEVELOPER');
-    const updated = await this.prisma.domain.update({
-      where: { id },
-      data: { projectId: targetProjectId, applicationId: null },
-      include: {
-        project: { select: { id: true, name: true } },
-      },
-    });
+    // Re-home the domain AND its domain-scoped resources in one transaction.
+    // Mailboxes carry their own projectId (RBAC is checked against it), so
+    // leaving them on the old project would let the source project's members
+    // keep reading mail on a domain they no longer own. Move every mailbox on
+    // this domain to the target project atomically with the domain itself.
+    const [updated] = await this.prisma.$transaction([
+      this.prisma.domain.update({
+        where: { id },
+        data: { projectId: targetProjectId, applicationId: null },
+        include: {
+          project: { select: { id: true, name: true } },
+        },
+      }),
+      this.prisma.mailbox.updateMany({
+        where: { domainId: id },
+        data: { projectId: targetProjectId },
+      }),
+    ]);
     this.proxy.regenerate().catch(() => {});
     return updated;
   }

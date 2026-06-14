@@ -13,6 +13,7 @@ import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { MonitoringService } from './monitoring.service';
 import { CreateAlertRuleDto } from './dto/create-alert-rule.dto';
+import { UpdateAlertRuleDto } from './dto/update-alert-rule.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -56,10 +57,7 @@ export class MonitoringController {
   @Patch('alert-rules/:id')
   @Roles('ADMIN', 'SUPERADMIN')
   @ApiOperation({ summary: 'Update alert rule (admin only)' })
-  updateRule(
-    @Param('id') id: string,
-    @Body() dto: Partial<{ enabled: boolean; threshold: number; operator: string; channel: string; webhookUrl: string | null }>,
-  ) {
+  updateRule(@Param('id') id: string, @Body() dto: UpdateAlertRuleDto) {
     return this.svc.updateAlertRule(id, dto);
   }
 

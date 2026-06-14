@@ -581,7 +581,7 @@ describe('writeFile + quota', () => {
     expect(vfs.__nodes.get(`${APP_DIR}/src/index.ts`)!.content!.toString()).toBe('export {};');
     expect(prisma.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ action: 'write', resourceType: 'file:app' }),
+        data: expect.objectContaining({ action: 'write', resource: 'file:app' }),
       }),
     );
   });
@@ -767,7 +767,7 @@ describe('rename', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           action: 'rename',
-          metadata: { path: 'old.txt → sub/new.txt' },
+          details: { path: 'old.txt → sub/new.txt' },
         }),
       }),
     );

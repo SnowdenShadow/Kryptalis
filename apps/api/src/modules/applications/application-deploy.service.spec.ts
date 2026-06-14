@@ -686,6 +686,63 @@ describe('runDeploy — compose path', () => {
     const doc = readComposeDoc();
     expect(doc.services.web.environment).toEqual(expect.objectContaining({ FOO: 'bar' }));
   });
+
+  it('SECURITY: build.args only gets build-time-public env, never secrets', async () => {
+    const { service } = makeService();
+    const BUILT_COMPOSE = `services:
+  web:
+    build: .
+    container_name: my-web
+    ports:
+      - "8080:80"
+`;
+    await service.runDeploy('dep1', APP_ID, APP_NAME, GIT_URL, 'main', {
+      composeOverride: BUILT_COMPOSE,
+      hostPort: 9000,
+      envVars: {
+        NEXT_PUBLIC_API: 'https://api',
+        VITE_KEY: 'pk_123',
+        DATABASE_URL: 'postgres://secret',
+        JWT_SECRET: 'topsecret',
+      },
+    });
+
+    const doc = readComposeDoc();
+    // runtime env keeps everything (it's not in image history)
+    expect(doc.services.web.environment).toEqual(
+      expect.objectContaining({
+        NEXT_PUBLIC_API: 'https://api',
+        DATABASE_URL: 'postgres://secret',
+        JWT_SECRET: 'topsecret',
+      }),
+    );
+    // build args only the allowlisted public prefixes — secrets MUST be absent
+    expect(doc.services.web.build.args).toEqual({
+      NEXT_PUBLIC_API: 'https://api',
+      VITE_KEY: 'pk_123',
+    });
+    expect(doc.services.web.build.args.DATABASE_URL).toBeUndefined();
+    expect(doc.services.web.build.args.JWT_SECRET).toBeUndefined();
+  });
+
+  it('SECURITY: domainless deploy strips repo host-port publishes on reserved ports', async () => {
+    const { service } = makeService();
+    const RESERVED_COMPOSE = `services:
+  web:
+    image: nginx
+    container_name: my-web
+    ports:
+      - "443:443"
+      - "8080:80"
+`;
+    // No domain, no hostPort → reserved 443 publish must be dropped, 8080 kept.
+    await service.runDeploy('dep1', APP_ID, APP_NAME, GIT_URL, 'main', {
+      composeOverride: RESERVED_COMPOSE,
+    });
+
+    const doc = readComposeDoc();
+    expect(doc.services.web.ports).toEqual(['8080:80']);
+  });
 });
 
 describe('runDeploy — Dockerfile path', () => {

@@ -33,6 +33,8 @@ export interface AgentTaskResultRequest {
 
 export interface AgentHeartbeat {
   serverId: string;
+  /** Reporting agent token (mirrors agent-heartbeat.dto.ts). */
+  token: string;
   agentVersion: string;
   os: string;
   arch: string;
@@ -44,6 +46,8 @@ export interface AgentHeartbeat {
     diskUsed: number;
     diskTotal: number;
   };
+  /** Live dockcontrol-* container states (agents ≥ the status-sync release). */
+  containers?: { name: string; state: string }[];
 }
 
 export interface ApiResponse<T = unknown> {

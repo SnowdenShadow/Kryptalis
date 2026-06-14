@@ -1,4 +1,9 @@
-import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  OnModuleInit,
+  Logger,
+  BadRequestException,
+} from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 
@@ -41,10 +46,50 @@ export class SystemConfigService implements OnModuleInit {
     's3_secret_key',
   ]);
 
+  // URL-shaped keys must parse as an http(s) URL when set. Empty/unset is
+  // allowed — it reverts to the env fallback / default.
+  private readonly URL_KEYS = new Set([
+    'public_api_url',
+    'public_dashboard_url',
+  ]);
+
   constructor(
     private prisma: PrismaService,
     private encryption: EncryptionService,
   ) {}
+
+  /**
+   * Validate a security-critical setting before it is persisted. This store
+   * OUTRANKS the Joi-validated env, so without this an admin could silently
+   * weaken security from the UI (e.g. a 4-char backup key, or a malformed
+   * public URL that breaks every generated link). Throws BadRequestException
+   * with a clear message so the admin UI surfaces it instead of accepting
+   * the bad value. Empty values are allowed (they revert to env/default).
+   */
+  private validateKey(key: string, value: any): void {
+    if (value === null || value === undefined || value === '') return;
+    if (key === 'backup_encryption_key') {
+      const s = typeof value === 'string' ? value : String(value);
+      if (s.length < 32) {
+        throw new BadRequestException(
+          'backup_encryption_key must be at least 32 characters.',
+        );
+      }
+      return;
+    }
+    if (this.URL_KEYS.has(key)) {
+      const s = typeof value === 'string' ? value : String(value);
+      let url: URL;
+      try {
+        url = new URL(s);
+      } catch {
+        throw new BadRequestException(`${key} must be a valid URL.`);
+      }
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new BadRequestException(`${key} must be an http(s) URL.`);
+      }
+    }
+  }
 
   async onModuleInit() {
     await this.reload();
@@ -102,6 +147,7 @@ export class SystemConfigService implements OnModuleInit {
    * services can pick up the new value without an API restart.
    */
   async set(key: string, value: any, actorId?: string): Promise<void> {
+    this.validateKey(key, value);
     const stored = this.SECRET_KEYS.has(key) ? this.encodeSecret(value) : value;
     await this.prisma.systemSetting.upsert({
       where: { key },
@@ -116,6 +162,9 @@ export class SystemConfigService implements OnModuleInit {
 
   /** Bulk update — single change-notification with the full list. */
   async setMany(updates: Record<string, any>, actorId?: string): Promise<void> {
+    // Validate everything BEFORE any write so a single bad key rejects the
+    // whole batch rather than half-applying it.
+    for (const [k, v] of Object.entries(updates)) this.validateKey(k, v);
     const ops = Object.entries(updates).map(([k, v]) => {
       const stored = this.SECRET_KEYS.has(k) ? this.encodeSecret(v) : v;
       return this.prisma.systemSetting.upsert({

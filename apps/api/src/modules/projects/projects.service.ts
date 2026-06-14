@@ -715,8 +715,11 @@ export class ProjectsService implements OnModuleInit {
     });
 
     const dbs = project.databases.map((d) => {
-      const slug = slugify(d.name);
-      const host = `dockcontrol-db-${slug}`;
+      // Container name must match what databases.service ACTUALLY creates:
+      // `dockcontrol-db-<raw db.name>` (no slugify). slugify's NFKD strip +
+      // slice(0,48) can diverge from the raw name, yielding a hostname that
+      // doesn't resolve. Same for the db-name path segment in the URL.
+      const host = `dockcontrol-db-${d.name}`;
       const port = d.port;
       const protocol =
         d.type === 'POSTGRESQL' ? 'postgres' :
@@ -732,7 +735,7 @@ export class ProjectsService implements OnModuleInit {
         host,
         port,
         username: d.username,
-        url: `${protocol}://${d.username}:<PASSWORD>@${host}:${port}/${slug}`,
+        url: `${protocol}://${d.username}:<PASSWORD>@${host}:${port}/${d.name}`,
       };
     });
 
@@ -819,6 +822,12 @@ export class ProjectsService implements OnModuleInit {
     // Notify the user they've been added (fire-and-forget — a failed
     // email shouldn't break the add). Only on first add, not on
     // role updates, to avoid spamming.
+    //
+    // The membership is created directly here — there is NO acceptance
+    // token and no /invite/accept flow (that frontend route doesn't even
+    // exist). The old call passed an EMPTY token to sendUserInvited, which
+    // rendered a dead `/invite/accept?token=` CTA. We send a no-token
+    // "you were added" email instead, linking straight to the project.
     try {
       const wasUpdate = result.createdAt.getTime() < Date.now() - 5000;
       if (!wasUpdate) {
@@ -827,11 +836,11 @@ export class ProjectsService implements OnModuleInit {
           this.prisma.user.findUnique({ where: { id: actorId }, select: { name: true } }),
         ]);
         if (project && actor && result.user.email) {
-          await this.notifications.sendUserInvited(
+          await this.notifications.sendUserAddedToProject(
             result.user.email,
             project.name,
             actor.name,
-            '',
+            projectId,
           );
         }
       }

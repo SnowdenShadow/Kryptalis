@@ -81,6 +81,17 @@ export class EmailService {
     await assertProjectAccess(this.prisma, userId, dto.projectId, 'DEVELOPER');
     const domain = await this.assertDomainAccess(userId, dto.domainId, 'DEVELOPER');
 
+    // The mailbox must live under the SAME project that owns the domain.
+    // Without this, a caller with access to two projects could stamp a mailbox
+    // on project A's domain under project B's id — mis-scoping RBAC and letting
+    // project B's members read mail on a domain they don't own.
+    const domainProjectId = domain.projectId || domain.application?.projectId;
+    if (domainProjectId && domainProjectId !== dto.projectId) {
+      throw new BadRequestException(
+        "Mailbox projectId must match the domain's project.",
+      );
+    }
+
     if (dto.password.length < 8) {
       throw new BadRequestException('Password too short (min 8)');
     }

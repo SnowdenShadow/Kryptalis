@@ -1047,10 +1047,17 @@ func (p *Poller) reportResult(taskID string, result map[string]interface{}, task
 		buf, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode >= 400 {
-			// 4xx = rejected (bad token, unknown task) — retrying won't help.
 			log.Printf("task %s report rejected (%d): %s", taskID, resp.StatusCode, string(buf))
-			if resp.StatusCode < 500 {
-				return
+			// Permanent 4xx (bad token, unknown task, malformed) — retrying
+			// won't help. Transient 4xx (408/409/425/429) and all 5xx are
+			// worth retrying with the existing backoff.
+			switch resp.StatusCode {
+			case 408, 409, 425, 429:
+				// transient — fall through to retry
+			default:
+				if resp.StatusCode < 500 {
+					return
+				}
 			}
 			lastErr = fmt.Errorf("status %d", resp.StatusCode)
 			continue

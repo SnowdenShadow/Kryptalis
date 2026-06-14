@@ -68,6 +68,12 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   // know an update was in progress and recover correctly.
   private readonly UPDATING_MARKER = '/app/.dockcontrol/.update-running';
 
+  // Result file the update wrapper writes update.sh's exit code into BEFORE
+  // removing the marker. The watcher reads it to tell a real success (rc==0)
+  // apart from a failed update — the marker disappearing on its own only
+  // proves the wrapper ran, not that the update succeeded.
+  private readonly RESULT_FILE = '/app/.dockcontrol/.update-result';
+
   // In-memory state — everything the UI cares about.
   private state: {
     status: 'UP_TO_DATE' | 'UPDATE_AVAILABLE' | 'UPDATING' | 'ERROR' | 'UNKNOWN';
@@ -139,22 +145,56 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     this.timer.unref?.();
   }
 
+  /**
+   * Read the wrapper's recorded exit code, if it has been written. Returns
+   * the rc, or null when the result file is absent/unparseable (treated as
+   * "no verdict yet"). Cleared after consumption so a stale rc from a prior
+   * run can't poison the next update.
+   */
+  private readUpdateResult(): number | null {
+    try {
+      if (!fs.existsSync(this.RESULT_FILE)) return null;
+      const raw = fs.readFileSync(this.RESULT_FILE, 'utf-8').trim();
+      if (!/^-?\d+$/.test(raw)) return null;
+      return Number(raw);
+    } catch {
+      return null;
+    }
+  }
+
   /** Poll the marker + log file mtime to detect end-of-update post-restart. */
   private watchUpdateCompletion(): void {
     const tick = async () => {
       try {
         if (!fs.existsSync(this.UPDATING_MARKER)) {
-          // Update done.
+          // Wrapper finished. Trust the recorded exit code over the bare
+          // marker removal: rc==0 → success, rc!=0 → the update actually
+          // failed and we must surface it rather than reporting UP_TO_DATE.
+          const rc = this.readUpdateResult();
           const sha = await this.readCurrentSha();
           if (sha) this.state.currentSha = sha;
           this.state.lastUpdatedAt = new Date().toISOString();
-          if (this.state.currentSha && this.state.currentSha === this.state.latestSha) {
+          // Fail CLOSED: success is claimed ONLY on an explicit rc==0. A
+          // missing/unparseable result (rc===null) means the wrapper never
+          // recorded a verdict — update.sh was killed, the disk filled, or
+          // the marker was cleared out-of-band — so we surface ERROR rather
+          // than falsely reporting UP_TO_DATE while stale code keeps running.
+          if (rc === 0) {
             this.state.status = 'UP_TO_DATE';
-            this.state.message = `Updated to ${this.short(this.state.currentSha)}.`;
+            this.state.message =
+              this.state.currentSha && this.state.currentSha === this.state.latestSha
+                ? `Updated to ${this.short(this.state.currentSha)}.`
+                : `Update finished (${this.short(this.state.currentSha)}).`;
+          } else if (rc !== null) {
+            this.state.status = 'ERROR';
+            this.state.message = `Update failed (exit ${rc}). Check the log.`;
           } else {
-            this.state.status = 'UP_TO_DATE';
-            this.state.message = `Update finished (${this.short(this.state.currentSha)}).`;
+            this.state.status = 'ERROR';
+            this.state.message =
+              'Update ended without recording a result — it may have failed. Check the log.';
           }
+          // Consume the result so the next run starts from a clean slate.
+          try { fs.unlinkSync(this.RESULT_FILE); } catch {}
           this.updating = false;
           return;
         }
@@ -336,6 +376,9 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     try {
       fs.mkdirSync(path.dirname(this.UPDATING_MARKER), { recursive: true });
       fs.writeFileSync(this.UPDATING_MARKER, new Date().toISOString());
+      // Drop any stale result from a prior run so the watcher can't read an
+      // old rc before the wrapper records this run's.
+      try { fs.unlinkSync(this.RESULT_FILE); } catch {}
     } catch (e) {
       this.logger.warn(`could not write marker: ${(e as Error).message}`);
     }
@@ -355,9 +398,12 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
       '-e', `DOCKCONTROL_BRANCH=${this.state.branch}`,
       'docker:cli',
       'sh', '-c',
-      // Wrapper cleans the marker on exit no matter what. Paths are
+      // Wrapper records update.sh's exit code to the result file BEFORE
+      // clearing the marker, then removes the marker so the lock releases no
+      // matter what. The watcher keys success off the recorded rc — the
+      // marker disappearing alone proves only that the wrapper ran. Paths are
       // double-quoted in case the install dir contains spaces.
-      `sh "${installDir}/update.sh"; rc=$?; rm -f "${installDir}/.dockcontrol/.update-running"; exit $rc`,
+      `sh "${installDir}/update.sh"; rc=$?; echo "$rc" > "${installDir}/.dockcontrol/.update-result"; rm -f "${installDir}/.dockcontrol/.update-running"; exit $rc`,
     ];
 
     // Fire-and-forget. Container runs on the host docker daemon — it

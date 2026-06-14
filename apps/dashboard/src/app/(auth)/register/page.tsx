@@ -61,6 +61,15 @@ export default function RegisterPage() {
     : score === 3 ? 'bg-blue-500'
     : 'bg-green-500';
   const passwordsMatch = confirmPassword === '' || password === confirmPassword;
+  // Mirror the backend write policy (auth.service.isStrongEnough): ≥12 chars
+  // AND at least 3 of {lower, upper, digit, symbol}. Gating client-side turns
+  // the 400 into inline feedback instead of a failed submit.
+  const charClasses =
+    (/[a-z]/.test(password) ? 1 : 0) +
+    (/[A-Z]/.test(password) ? 1 : 0) +
+    (/\d/.test(password) ? 1 : 0) +
+    (/[^A-Za-z0-9]/.test(password) ? 1 : 0);
+  const passwordValid = password.length >= 12 && charClasses >= 3;
 
   useEffect(() => {
     api.get<{ registration_enabled?: boolean; platform_name?: string }>('/settings/public')
@@ -78,7 +87,7 @@ export default function RegisterPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (password !== confirmPassword) return;
+    if (password !== confirmPassword || !passwordValid) return;
     setLoading(true);
     try {
       // Two possible shapes: bootstrap path returns tokens (first install
@@ -262,7 +271,7 @@ export default function RegisterPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                minLength={8}
+                minLength={12}
               />
               {password.length > 0 && (
                 <div className="space-y-1">
@@ -275,6 +284,9 @@ export default function RegisterPage() {
                     ))}
                   </div>
                   <p className="text-xs text-muted-foreground">{t(strengthLabelKey)}</p>
+                  {!passwordValid && (
+                    <p className="text-xs text-destructive">{t('auth.passwordPolicy')}</p>
+                  )}
                 </div>
               )}
             </div>
@@ -287,13 +299,13 @@ export default function RegisterPage() {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 required
-                minLength={8}
+                minLength={12}
               />
               {!passwordsMatch && (
                 <p className="text-xs text-destructive">{t('auth.passwordsDontMatch')}</p>
               )}
             </div>
-            <Button type="submit" className="w-full" disabled={loading || password !== confirmPassword}>
+            <Button type="submit" className="w-full" disabled={loading || !passwordValid || password !== confirmPassword}>
               {loading ? t('auth.creatingAccount') : t('auth.register')}
             </Button>
           </form>

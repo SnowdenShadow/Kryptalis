@@ -32,19 +32,25 @@ function makeModel() {
     findMany: vi.fn().mockResolvedValue([]),
     create: vi.fn().mockResolvedValue({}),
     update: vi.fn().mockResolvedValue({}),
+    updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     delete: vi.fn().mockResolvedValue({}),
   };
 }
 
 function makeService() {
-  const prisma = {
+  const prisma: any = {
     domain: makeModel(),
     application: makeModel(),
     mailServer: makeModel(),
+    mailbox: makeModel(),
     user: makeModel(),
     // system_domain guard in create() — null = no platform domain set.
     systemSetting: { findUnique: vi.fn().mockResolvedValue(null) },
   };
+  // transfer() re-homes the domain + its mailboxes atomically. The mock just
+  // awaits each operation (they're already promises from the model mocks) and
+  // returns their resolved values in order, mirroring prisma.$transaction.
+  prisma.$transaction = vi.fn((ops: Promise<unknown>[]) => Promise.all(ops));
   const proxy = { regenerate: vi.fn().mockResolvedValue(undefined) };
   const mailServer = { removeForDomain: vi.fn().mockResolvedValue(undefined) };
   const domainAttach = {
@@ -437,7 +443,7 @@ describe('transfer (inter-project)', () => {
     expect(mockAssert).toHaveBeenNthCalledWith(2, expect.anything(), 'u1', 'p2', 'DEVELOPER');
   });
 
-  it('moves the domain, breaks the app link, regenerates Caddy', async () => {
+  it('moves the domain, breaks the app link, re-homes mailboxes, regenerates Caddy', async () => {
     const { service, prisma, proxy } = makeService();
     prisma.domain.findUnique.mockResolvedValue({ ...DOMAIN, applicationId: 'a1' });
     prisma.domain.update.mockResolvedValue({ id: 'd1', projectId: 'p2', applicationId: null });
@@ -449,6 +455,13 @@ describe('transfer (inter-project)', () => {
         data: { projectId: 'p2', applicationId: null },
       }),
     );
+    // Mailboxes on this domain must follow it to the new project, in the same
+    // transaction — otherwise source-project members keep mailbox access.
+    expect(prisma.mailbox.updateMany).toHaveBeenCalledWith({
+      where: { domainId: 'd1' },
+      data: { projectId: 'p2' },
+    });
+    expect(prisma.$transaction).toHaveBeenCalled();
     expect(res.projectId).toBe('p2');
     expect(proxy.regenerate).toHaveBeenCalled();
   });

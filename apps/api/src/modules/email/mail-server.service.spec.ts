@@ -656,6 +656,23 @@ describe('syncAccounts', () => {
     );
   });
 
+  it('emits a catch-all "@domain target" line when a mailbox is flagged catchAll', async () => {
+    const { service, prisma } = setup();
+    // alice is the catch-all box; she receives any unmatched @example.com mail.
+    prisma.mailbox.findMany.mockImplementation(async (q: any) =>
+      q?.where?.NOT
+        ? [{ address: 'fwd@example.com', forwardTo: 'dest@elsewhere.io', catchAll: false }]
+        : [{ address: 'alice@example.com', passwordHash: '$2a$10$hashhash', catchAll: true }],
+    );
+    await service.syncAccounts('dom1');
+    expect(vfs.__files.get(`${DIR}/config/postfix-virtual.cf`)).toBe(
+      'fwd@example.com  dest@elsewhere.io\n' +
+        'sales@example.com  alice@example.com\n' +
+        'noreply@example.com  ext@other.io\n' +
+        '@example.com  alice@example.com\n',
+    );
+  });
+
   it('reloads postfix + dovecot + flushes the auth cache after a change', async () => {
     const { service } = setup();
     await service.syncAccounts('dom1');

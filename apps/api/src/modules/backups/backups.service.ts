@@ -349,8 +349,26 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private backupEncryptionKey(): Buffer | null {
     // DB (admin UI) wins, env fallback for legacy installs.
     const raw = this.systemConfig.get<string>('backup_encryption_key', 'BACKUP_ENCRYPTION_KEY');
+    // NO key configured at all → encryption is opt-in, dumps stay plaintext.
     if (!raw) return null;
-    if (raw.length < 32) return null;
+    // A key IS configured but is too short to be safe. We must NOT silently
+    // fall back to plaintext here — that produces an unencrypted dump from a
+    // config that asked for encryption. Throw so finalizeBackupArchive fails
+    // the row with a precise message instead of writing a plaintext archive.
+    if (raw.length < 32) {
+      throw new BadRequestException(
+        'backup_encryption_key (BACKUP_ENCRYPTION_KEY) is configured but too short — ' +
+          'it must be at least 32 characters. Refusing to write an UNENCRYPTED backup ' +
+          'from an encryption-enabled config.',
+      );
+    }
+    // Interpretation: the master key is consumed as raw UTF-8 bytes. Although
+    // the docs describe a "32-byte hex" value, existing dumps were encrypted
+    // with the utf8 interpretation — decoding configured values as hex now
+    // would change the derived data key and make those dumps undecryptable.
+    // Kept as utf8 for backward-compat (the actual data key is HKDF-derived
+    // per-dump in encryptFileInPlace, so the master-key length is what matters,
+    // not its encoding). Aligning the docs/encoding is tracked as deferred.
     return Buffer.from(raw, 'utf8');
   }
 
@@ -634,6 +652,31 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  /**
+   * Write `MYSQL_PWD=<password>` to a private temp env-file and run `fn` with
+   * the `docker` args that pass it via `--env-file`. This keeps the password
+   * off the host's `docker` process argv (where `-e MYSQL_PWD=…` would leak it
+   * to anyone running `ps`); only the env-file path is visible. The file is
+   * created 0600 and always unlinked afterwards. `extra` is inserted between
+   * `exec` and the env-file (e.g. `-i` for restore's piped stdin).
+   */
+  private async withMysqlPwdEnvFile(
+    password: string,
+    extra: string[],
+    fn: (dockerArgs: string[]) => Promise<void>,
+  ): Promise<void> {
+    const envFile = path.join(
+      os.tmpdir(),
+      `dockcontrol-mysqlpwd-${crypto.randomBytes(8).toString('hex')}.env`,
+    );
+    await fs.promises.writeFile(envFile, `MYSQL_PWD=${password}\n`, { mode: 0o600 });
+    try {
+      await fn(['exec', ...extra, '--env-file', envFile]);
+    } finally {
+      await fs.promises.unlink(envFile).catch(() => undefined);
+    }
+  }
+
   // ── backup job (dump engine) ───────────────────────────────────────
 
   private dbContainerName(db: { name: string; host: string; autoImported: boolean }): string {
@@ -671,12 +714,20 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         case 'MYSQL':
         case 'MARIADB': {
           file = `${db.id}.sql`;
-          const args = [
-            'exec', '-e', `MYSQL_PWD=${password}`, container,
-            'mysqldump', '-u', db.username,
-            ...(dumpAll ? ['--all-databases'] : ['--databases', db.name]),
-          ];
-          await this.runCommandToFile('docker', args, path.join(dir, file), 1_800_000);
+          // Password rides in a temp --env-file (not `-e MYSQL_PWD=…` on the
+          // host argv) so it never appears in the host's process list.
+          await this.withMysqlPwdEnvFile(password, [], (exec) =>
+            this.runCommandToFile(
+              'docker',
+              [
+                ...exec, container,
+                'mysqldump', '-u', db.username,
+                ...(dumpAll ? ['--all-databases'] : ['--databases', db.name]),
+              ],
+              path.join(dir, file),
+              1_800_000,
+            ),
+          );
           break;
         }
         case 'MONGODB': {
@@ -1176,11 +1227,15 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       }
       case 'MYSQL':
       case 'MARIADB': {
-        await this.runCommandWithInputFile(
-          'docker',
-          ['exec', '-i', '-e', `MYSQL_PWD=${password}`, container, 'mysql', '-u', db.username],
-          file,
-          1_800_000,
+        // Password rides in a temp --env-file (not `-e MYSQL_PWD=…` on the
+        // host argv) so it never appears in the host's process list.
+        await this.withMysqlPwdEnvFile(password, ['-i'], (exec) =>
+          this.runCommandWithInputFile(
+            'docker',
+            [...exec, container, 'mysql', '-u', db.username],
+            file,
+            1_800_000,
+          ),
         );
         break;
       }
@@ -1217,6 +1272,24 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     const file = path.join(extractDir, 'volumes', `${path.basename(volumeName)}.tar.gz`);
     if (!fs.existsSync(file)) {
       throw new Error(`tar for volume "${volumeName}" is missing from the archive.`);
+    }
+    // Untarring over a volume that a running container is actively reading
+    // from/writing to corrupts data (the busybox helper extracts files while
+    // the owning DB/app process holds them open). Refuse while the owning
+    // stack is live so the operator stops it first. (Full stop → restore →
+    // start sequencing is deferred — the manifest carries volume names only,
+    // not the app/DB stack handle needed to bring it down and back up here.)
+    const { stdout } = await execFileAsync(
+      'docker',
+      ['ps', '--filter', `volume=${volumeName}`, '--format', '{{.Names}}'],
+      { timeout: 15_000 },
+    );
+    const running = stdout.trim().split('\n').filter(Boolean);
+    if (running.length > 0) {
+      throw new Error(
+        `volume "${volumeName}" is in use by running container(s) [${running.join(', ')}] — ` +
+          'stop the owning stack before restoring this volume, then retry.',
+      );
     }
     // Idempotent — succeeds when the volume already exists.
     await execFileAsync('docker', ['volume', 'create', volumeName], { timeout: 15_000 });

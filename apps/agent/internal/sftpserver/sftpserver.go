@@ -307,12 +307,81 @@ func (h *scopedHandlers) resolve(vpath string) (string, error) {
 	if len(parts) == 2 && parts[1] != "" {
 		real = filepath.Join(rootPath, filepath.FromSlash(parts[1]))
 	}
-	// Containment: the joined path must stay under the root.
-	rel, err := filepath.Rel(rootPath, real)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	// Containment (lexical): the joined path must stay under the root.
+	if !lexContained(rootPath, real) {
 		return "", errDenied
 	}
+	// Containment (real): a symlink planted under the root could point
+	// outside it, and os.Open/OpenFile/Rename/Remove all dereference
+	// symlinks. Re-check the FULLY RESOLVED real path against the
+	// resolved root before handing the path to any os.* call.
+	if err := checkRealContained(rootPath, real); err != nil {
+		return "", err
+	}
 	return real, nil
+}
+
+// lexContained reports whether real lexically stays under root.
+func lexContained(root, real string) bool {
+	rel, err := filepath.Rel(root, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
+}
+
+// checkRealContained verifies the target real path cannot escape root through
+// a symlink. It walks every path component from the root downward and rejects
+// if ANY existing component is a symlink — os.Open/OpenFile/Rename/Remove and
+// MkdirAll all dereference symlinks, so a symlink anywhere along the path
+// (including an intermediate ancestor a create would MkdirAll through) is an
+// escape vector. A not-yet-existing tail (upload/rename target, or dirs MkdirAll
+// will create) is fine: components that don't exist can't be symlinks, and once
+// no existing component is a symlink the lexical containment already proven by
+// resolve() holds for the real path too.
+//
+// This deliberately uses Lstat (never follows) rather than EvalSymlinks: a
+// not-fully-resolvable path used to fall through to a lexical-only pass, which
+// let a symlinked ancestor of a not-yet-existing parent slip past.
+func checkRealContained(root, real string) error {
+	// The root itself must be real (resolve once); a symlinked root dir would
+	// otherwise make every contained path look like an escape.
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		// Root must exist; if it can't be resolved, refuse rather than guess.
+		return errDenied
+	}
+	rel, err := filepath.Rel(realRoot, real)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		// `real` was built under the (possibly symlinked) root; recompute it
+		// against the resolved root so the per-component walk starts clean.
+		rel, err = filepath.Rel(root, real)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return errDenied
+		}
+	}
+	// Walk component by component from realRoot; Lstat each and reject symlinks.
+	cur := realRoot
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		if seg == "" || seg == "." {
+			continue
+		}
+		if seg == ".." {
+			return errDenied
+		}
+		cur = filepath.Join(cur, seg)
+		info, err := os.Lstat(cur)
+		if err != nil {
+			// This component (and therefore everything below it) doesn't exist
+			// yet. Nothing left to dereference — the remaining tail will be
+			// created as real dirs/files under a verified-symlink-free prefix.
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return errDenied
+		}
+	}
+	return nil
 }
 
 func (h *scopedHandlers) canWrite() bool {
@@ -338,7 +407,23 @@ func (h *scopedHandlers) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
 		return nil, err
 	}
-	return os.OpenFile(real, os.O_WRONLY|os.O_CREATE, 0o644)
+	// pkg/sftp streams the body via WriteAt at increasing offsets. With a
+	// plain O_WRONLY|O_CREATE, overwriting a file with shorter content
+	// leaves the original tail bytes in place → corruption. Standard SFTP
+	// write-open semantics truncate on open unless the client asked to
+	// append, so add O_TRUNC for the non-append case. A non-zero starting
+	// offset / explicit append leaves existing content intact for partial
+	// writes.
+	flags := os.O_WRONLY | os.O_CREATE
+	pf := r.Pflags()
+	if !pf.Append {
+		// Non-append open → truncate so a shorter overwrite can't leave the
+		// previous file's tail behind. (Append must NOT add O_APPEND: pkg/sftp
+		// writes via WriteAt, which is incompatible with O_APPEND on most
+		// platforms — the offset already places the bytes correctly.)
+		flags |= os.O_TRUNC
+	}
+	return os.OpenFile(real, flags, 0o644)
 }
 
 func (h *scopedHandlers) Filecmd(r *sftp.Request) error {

@@ -37,7 +37,8 @@ async function bootstrap() {
   // Body parsing rules:
   //   - /api/files/.../upload           → raw stream (no parser)
   //   - /api/agent/transfers/.../upload → raw stream (no parser)
-  //   - /api/webhooks/...               → JSON, but raw bytes preserved for HMAC
+  //   - /api/webhooks/...               → JSON or form-encoded, raw bytes
+  //                                       preserved for HMAC verification
   //   - everything else                 → JSON
   const express = await import('express');
   app.use((req: any, res: any, next: any) => {
@@ -49,12 +50,25 @@ async function bootstrap() {
       next();
       return;
     }
-    const opts: any = { limit: '10mb' };
-    if (req.path.startsWith('/api/webhooks/') || req.path === '/api/system/updates/webhook') {
-      opts.verify = (req2: any, _res2: any, buf: Buffer) => {
-        req2.rawBody = Buffer.from(buf);
-      };
+    const isWebhook =
+      req.path.startsWith('/api/webhooks/') || req.path === '/api/system/updates/webhook';
+    // Preserve the EXACT bytes the provider signed so the controller can HMAC
+    // them. GitHub can deliver as application/json OR
+    // application/x-www-form-urlencoded (payload=<json>); without capturing the
+    // raw body for the form variant too, form deliveries would HMAC the wrong
+    // bytes and always fail verification.
+    const verify = isWebhook
+      ? (req2: any, _res2: any, buf: Buffer) => {
+          req2.rawBody = Buffer.from(buf);
+        }
+      : undefined;
+    const ct: string = (req.headers['content-type'] || '').toLowerCase();
+    if (isWebhook && ct.includes('application/x-www-form-urlencoded')) {
+      express.urlencoded({ limit: '10mb', extended: true, verify })(req, res, next);
+      return;
     }
+    const opts: any = { limit: '10mb' };
+    if (verify) opts.verify = verify;
     express.json(opts)(req, res, next);
   });
 

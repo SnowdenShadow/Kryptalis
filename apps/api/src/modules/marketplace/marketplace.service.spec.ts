@@ -442,6 +442,16 @@ describe('install — port resolution', () => {
       }),
     );
   });
+
+  it('every "<App> 2".."<App> 99" suffix taken → 409 (no colliding "App 99" fall-through)', async () => {
+    const { service, prisma } = makeService();
+    // Every name lookup hits an existing app → the suffix walk exhausts.
+    prisma.application.findFirst.mockResolvedValue({ id: 'existing' });
+    await expect(
+      service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1'),
+    ).rejects.toThrow(ConflictException);
+    expect(prisma.application.create).not.toHaveBeenCalled();
+  });
 });
 
 // ── install: compose rendering ──────────────────────────────────────
@@ -904,6 +914,39 @@ describe('installCustom — arbitrary image deploys', () => {
     expect(compose).toContain('TZ: "Europe/Paris"');
     expect(compose).not.toContain('__INSTANCE_ID__');
     expect(compose).not.toContain('__HOST_PORT__');
+  });
+
+  it('rejects host-escaping volumes (bind-mount / docker.sock / newline injection)', async () => {
+    const { service } = makeService();
+    for (const v of [
+      '/:/host',
+      '/var/run/docker.sock:/var/run/docker.sock',
+      '~/.ssh:/root/.ssh',
+      './data:/data',
+      '../etc:/etc',
+      'media:/data\n    privileged: true',
+    ]) {
+      await expect(
+        service.installCustom({ ...base, volumes: [v] }, 'u1'),
+      ).rejects.toThrow(BadRequestException);
+    }
+  });
+
+  it('accepts a safe named volume and renders it as one quoted line', async () => {
+    const { service } = makeService();
+    await service.installCustom({ ...base, hostPort: 18500, volumes: ['media:/data'] }, 'u1');
+    const compose = writtenFile('docker-compose.yml')!;
+    expect(compose).toContain('    volumes:\n      - "media:/data"');
+    expect(compose).not.toContain('privileged');
+  });
+
+  it('rejects publishing onto a platform-reserved host port', async () => {
+    const { service } = makeService();
+    for (const p of [80, 443, 5432, 3000, 4000]) {
+      await expect(
+        service.installCustom({ ...base, hostPort: p }, 'u1'),
+      ).rejects.toThrow(/reserved by the platform/);
+    }
   });
 
   it('requires DEVELOPER project access like template installs', async () => {

@@ -214,10 +214,14 @@ export class AuthController {
   @Patch('profile')
   @ApiBearerAuth()
   @UseGuards(AuthGuard('jwt'))
+  // Email change is a sensitive rebinding (and password-gated in the
+  // service) — same brute-force budget as login so a stolen access token
+  // can't grind the password confirmation.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @ApiOperation({ summary: 'Update name / email of the current user' })
   updateProfile(
     @CurrentUser() user: { id: string },
-    @Body() body: { name?: string; email?: string },
+    @Body() body: { name?: string; email?: string; currentPassword?: string },
   ) {
     return this.authService.updateProfile(user.id, body);
   }
@@ -226,6 +230,9 @@ export class AuthController {
   @ApiBearerAuth()
   @UseGuards(AuthGuard('jwt'))
   @HttpCode(HttpStatus.OK)
+  // Re-verifies password + (when set) the second factor — throttle it like
+  // login so a stolen access token can't grind the current password / TOTP.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @ApiOperation({ summary: 'Change own password (current → new)' })
   changePassword(
     @CurrentUser() user: { id: string },
@@ -299,6 +306,8 @@ export class AuthController {
   @ApiBearerAuth()
   @UseGuards(AuthGuard('jwt'))
   @HttpCode(HttpStatus.OK)
+  // Confirms enrollment with a TOTP code — throttle the code submission.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @ApiOperation({ summary: 'Confirm enrollment with a TOTP code and receive backup codes' })
   enable2fa(@CurrentUser() user: { id: string }, @Body() body: { code: string }) {
     return this.authService.enableTwoFactor(user.id, body.code);
@@ -308,6 +317,9 @@ export class AuthController {
   @ApiBearerAuth()
   @UseGuards(AuthGuard('jwt'))
   @HttpCode(HttpStatus.OK)
+  // Re-verifies password + second factor — throttle like login so the
+  // disable code can't be ground with a stolen access token.
+  @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @ApiOperation({ summary: 'Disable 2FA (requires password + current TOTP code)' })
   disable2fa(
     @CurrentUser() user: { id: string },

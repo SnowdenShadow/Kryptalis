@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SystemConfigService } from '../system/system-config.service';
+import { ApplicationsService } from '../applications/applications.service';
 import { TriggerDeploymentDto } from './dto/trigger-deployment.dto';
 import {
   assertProjectAccess,
@@ -19,6 +20,7 @@ export class DeploymentsService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
     private systemConfig: SystemConfigService,
+    private applications: ApplicationsService,
   ) {}
 
   onModuleInit() {
@@ -100,13 +102,13 @@ export class DeploymentsService implements OnModuleInit {
     });
     if (!app) throw new NotFoundException('Application not found');
     await assertProjectAccess(this.prisma, userId, app.projectId, 'DEVELOPER');
-    return this.prisma.deployment.create({
-      data: {
-        applicationId: dto.applicationId,
-        commitSha: dto.commitSha,
-        triggeredById: userId,
-      },
-    });
+    // Delegate to the real deploy path so the Deployment row is actually
+    // processed (clone/build/recreate) instead of being parked PENDING with
+    // nothing to consume it — a stuck PENDING trips
+    // ApplicationOpsService.assertNoInflightDeployment and blocks every
+    // subsequent redeploy. redeploy() runs its own RBAC + inflight guard and
+    // creates the processed Deployment row.
+    return this.applications.redeploy(userId, dto.applicationId);
   }
 
   async findAll(userId: string, applicationId?: string) {

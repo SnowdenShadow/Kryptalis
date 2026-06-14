@@ -719,6 +719,46 @@ describe('importFromAppCompose', () => {
     );
   });
 
+  it('detects the Redis --requirepass password from the service command and stores it encrypted', async () => {
+    const { service, prisma, encryption } = makeService();
+    const compose = `services:
+  cache:
+    image: redis:7-alpine
+    container_name: shop-redis
+    command: redis-server --requirepass r3disPass
+`;
+    await service.importFromAppCompose({
+      applicationId: 'app1', projectId: 'p1', serverId: 'srv1', composeYaml: compose,
+    });
+
+    expect(encryption.encrypt).toHaveBeenCalledWith('r3disPass');
+    expect(prisma.database.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ type: 'REDIS', password: 'enc(r3disPass)' }),
+      }),
+    );
+  });
+
+  it('redeploy with a blank detected password does NOT overwrite an existing stored password', async () => {
+    const { service, prisma, encryption } = makeService();
+    prisma.database.findFirst.mockResolvedValue({ id: 'existing-row' });
+    // No env password, no --requirepass → detector yields '' for the password.
+    const compose = `services:
+  cache:
+    image: redis:7-alpine
+`;
+    const res = await service.importFromAppCompose({
+      applicationId: 'app1', projectId: 'p1', serverId: 'srv1', composeYaml: compose,
+    });
+
+    expect(res).toEqual({ created: 0, updated: 1, skipped: 0 });
+    // The update must NOT carry a password field (would clobber the stored one
+    // with encrypted "").
+    const updateArg = prisma.database.update.mock.calls[0][0];
+    expect(updateArg.data).not.toHaveProperty('password');
+    expect(encryption.encrypt).not.toHaveBeenCalled();
+  });
+
   it('a single-row failure is counted as skipped and never breaks the batch', async () => {
     const { service, prisma } = makeService();
     prisma.database.create.mockRejectedValueOnce(new Error('unique violation'));

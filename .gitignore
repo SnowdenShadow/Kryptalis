@@ -46,6 +46,9 @@ docker/data/
 
 # Runtime DockControl
 apps/api/.dockcontrol/
+# Legacy runtime dir (pre-rename) — still on disk until `docker compose down`,
+# then rename to .dockcontrol. Kept ignored so stale DKIM/secrets aren't committed.
+apps/api/.kryptalis/
 *.sock
 *.lock
 

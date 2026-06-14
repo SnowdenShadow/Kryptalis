@@ -580,6 +580,17 @@ export class MailServerService implements OnApplicationBootstrap {
       const dest = a.mailbox?.address || a.forwardTo;
       if (dest) virtualLines.push(`${a.address}  ${dest}`);
     }
+    // Catch-all: a mailbox flagged catchAll receives everything addressed to
+    // the domain that no other mailbox/alias matches. Postfix expresses this
+    // as a bare "@domain  <target>" virtual map entry. createMailbox enforces
+    // at most one catch-all per domain, so the first match wins. Without this
+    // the flag was stored but never wired up — catch-all mail was rejected.
+    const catchAllBox =
+      mailboxes.find((m) => m.catchAll) || forwards.find((m) => m.catchAll);
+    if (catchAllBox) {
+      const target = catchAllBox.forwardTo || catchAllBox.address;
+      virtualLines.push(`@${domain.domain}  ${target}`);
+    }
     const newVirtual = virtualLines.join('\n') + '\n';
     const prevVirtual = fs.existsSync(virtualPath) ? fs.readFileSync(virtualPath, 'utf-8') : '';
     const virtualChanged = prevVirtual !== newVirtual;

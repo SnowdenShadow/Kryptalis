@@ -133,10 +133,36 @@ function normalizeEnv(raw: unknown): Record<string, string> {
  * Falls back to sensible defaults so we never insert an empty username —
  * the user can re-run the importer or rotate creds from the UI later.
  */
+/**
+ * Pull the value of `--requirepass <x>` (or `--requirepass=<x>`) out of a
+ * compose `command:` — Redis/KeyDB/Dragonfly carry the password there, not
+ * in env. Accepts the string form ("redis-server --requirepass secret") and
+ * the list form (["redis-server", "--requirepass", "secret"] or
+ * ["--requirepass=secret"]). Returns '' when not present.
+ */
+function extractRequirePass(command: unknown): string {
+  const tokens: string[] = Array.isArray(command)
+    ? command.map((c) => String(c))
+    : typeof command === 'string'
+      ? command.split(/\s+/).filter(Boolean)
+      : [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === '--requirepass') {
+      const next = tokens[i + 1];
+      if (next && !next.startsWith('--')) return next;
+    } else if (t.startsWith('--requirepass=')) {
+      return t.slice('--requirepass='.length);
+    }
+  }
+  return '';
+}
+
 function extractCreds(
   type: DbType,
   env: Record<string, string>,
   serviceName: string,
+  command?: unknown,
 ): { username: string; password: string; database: string } {
   const pick = (...keys: string[]) => {
     for (const k of keys) if (env[k]) return env[k];
@@ -177,7 +203,7 @@ function extractCreds(
       // No user/db concept — Redis uses a single optional password.
       // Common patterns: REDIS_PASSWORD env, or --requirepass in the command.
       username = 'default';
-      password = pick('REDIS_PASSWORD', 'KEYDB_PASSWORD');
+      password = pick('REDIS_PASSWORD', 'KEYDB_PASSWORD') || extractRequirePass(command);
       database = serviceName;
       break;
     case 'CLICKHOUSE':
@@ -208,7 +234,7 @@ export function detectDatabasesInCompose(composeYaml: string): DetectedDb[] {
     if (!type) continue;
     const containerPort = DEFAULT_PORTS[type];
     const env = normalizeEnv(svc.environment);
-    const { username, password, database } = extractCreds(type, env, serviceName);
+    const { username, password, database } = extractCreds(type, env, serviceName, svc.command);
     out.push({
       type,
       serviceName,
