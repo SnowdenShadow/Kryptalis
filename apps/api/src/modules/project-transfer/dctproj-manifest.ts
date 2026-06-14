@@ -52,6 +52,13 @@ export interface DctprojApp {
   envEncrypted?: string;
   /** Archive-relative paths of this app's volume tars (empty if no data). */
   volumeFiles: string[];
+  /**
+   * True when the app's compose mounts the docker socket or host paths (or is
+   * otherwise unsafe to run from an untrusted archive). Such apps are NOT
+   * portable between installs for security reasons — import skips them with a
+   * clear warning rather than recreating an unrunnable / dangerous stack.
+   */
+  requiresHostAccess?: boolean;
 }
 
 export interface DctprojDb {

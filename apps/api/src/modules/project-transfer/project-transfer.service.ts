@@ -30,6 +30,7 @@ import {
   DomainStrategy,
 } from './dctproj-manifest';
 import { checkImportedComposeSafety } from './dctproj-compose-guard';
+import { slugify, resolveAppDir, findComposePath, APPS_DIR } from '../applications/applications.helpers';
 
 // A docker image reference: [registry[:port]/]name[:tag|@sha256:...]. No shell
 // metacharacters or control chars. Mirrors the marketplace custom-install guard.
@@ -189,6 +190,20 @@ export class ProjectTransferService {
         const envEncrypted = plainEnv && Object.keys(plainEnv).length > 0
           ? encryptBuffer(Buffer.from(JSON.stringify(plainEnv)), opts.passphrase).toString('base64')
           : undefined;
+        // A marketplace / compose app stores its docker-compose.yml ONLY on
+        // disk (the DB column is null), so fall back to reading it from the
+        // app dir — otherwise the import has no stack to recreate and the app
+        // lands STOPPED. Reuse the same dir resolution lifecycle ops use.
+        let composeFile = app.dockerComposeFile || undefined;
+        if (!composeFile && app.framework === 'DOCKER_COMPOSE') {
+          composeFile = this.readAppComposeFromDisk(app) || undefined;
+        }
+        // Apps whose compose mounts the docker socket / host paths cannot be
+        // safely run from an untrusted archive on another install — flag them
+        // so import skips with a clear warning (Portainer etc.).
+        const requiresHostAccess = composeFile
+          ? checkImportedComposeSafety(composeFile).length > 0
+          : undefined;
         const entry: DctprojApp = {
           name: app.name,
           displayName: app.displayName || undefined,
@@ -196,7 +211,7 @@ export class ProjectTransferService {
           gitUrl: app.gitUrl || undefined,
           gitBranch: app.gitBranch || undefined,
           dockerImage: app.dockerImage || undefined,
-          dockerComposeFile: app.dockerComposeFile || undefined,
+          dockerComposeFile: composeFile,
           buildCommand: app.buildCommand || undefined,
           startCommand: app.startCommand || undefined,
           port: app.port ?? undefined,
@@ -205,11 +220,13 @@ export class ProjectTransferService {
           customPort: app.customPort ?? undefined,
           envEncrypted,
           volumeFiles: [],
+          requiresHostAccess: requiresHostAccess || undefined,
         };
         // Data (volumes) are only carried for LOCAL-source apps in this v1 —
         // remote-source volume export would need the agent VOLUME_EXPORT chain,
-        // which is deferred. We note it as a warning at apply time.
-        if (opts.includeData) {
+        // which is deferred. Skip volume export for host-access apps (they are
+        // not imported anyway).
+        if (opts.includeData && !requiresHostAccess) {
           await this.exportLocalAppVolumes(app, dir, entry);
         }
         manifest.applications.push(entry);
@@ -257,6 +274,33 @@ export class ProjectTransferService {
       // should persist. Runs on success AND on any throw.
       await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => undefined);
       if (plainTar) await fs.promises.unlink(plainTar).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Read a compose-app's docker-compose.yml off disk (the marketplace/custom
+   * install path writes it there, never to the DB column). Mirrors the dir
+   * resolution lifecycle ops use: resolveAppDir first, then a scan of APPS_DIR
+   * for a dir ending in `-<id12>` (suffixed installs like "WordPress 2").
+   * Returns the file contents, or null when no compose is found.
+   */
+  private readAppComposeFromDisk(app: { name: string; id: string }): string | null {
+    try {
+      const slug = slugify(app.name);
+      let appDir = resolveAppDir(slug, app.id);
+      let composePath = findComposePath(appDir);
+      if (!composePath && fs.existsSync(APPS_DIR)) {
+        const id12 = app.id.slice(0, 12);
+        const match = fs.readdirSync(APPS_DIR)
+          .find((d) => d.endsWith(`-${id12}`) && findComposePath(path.join(APPS_DIR, d)));
+        if (match) {
+          appDir = path.join(APPS_DIR, match);
+          composePath = findComposePath(appDir);
+        }
+      }
+      return composePath ? fs.readFileSync(composePath, 'utf8') : null;
+    } catch {
+      return null;
     }
   }
 
@@ -388,6 +432,12 @@ export class ProjectTransferService {
       if (!manifest.includesData) warnings.push('This archive contains configuration only — databases and volumes will start empty.');
       const remoteSourced = manifest.applications.some((a) => a.volumeFiles.length === 0) && manifest.includesData;
       if (remoteSourced) warnings.push('Some app volumes were not bundled (remote-source export) — those apps may start with empty data.');
+      // Surface non-portable apps at the REVIEW step so the operator knows
+      // before applying which apps won't come over.
+      const hostApps = manifest.applications.filter((a) => a.requiresHostAccess).map((a) => a.name);
+      if (hostApps.length) {
+        warnings.push(`${hostApps.length} app(s) need host access (docker socket / host paths) and will be SKIPPED — reinstall from the marketplace here: ${hostApps.join(', ')}.`);
+      }
 
       // Bind the staged session to THIS user, with a TTL, so only they can
       // apply it and an abandoned import is swept rather than leaking.
@@ -478,13 +528,12 @@ export class ProjectTransferService {
       // CRITICAL: an imported compose is attacker-controlled. Screen it for
       // host bind-mounts / docker.sock / privileged BEFORE it can ever be
       // written to disk and run — create()'s parse-only check does NOT.
+      // A legitimate-but-unsafe app (Portainer mounts docker.sock, etc.) is
+      // NOT an attack — flag it requiresHostAccess so apply SKIPS it with a
+      // warning, rather than failing the whole import. The flag is recomputed
+      // here (don't trust the exporter's flag) so the safety check is authoritative.
       if (a.dockerComposeFile) {
-        const problems = checkImportedComposeSafety(a.dockerComposeFile);
-        if (problems.length > 0) {
-          throw new BadRequestException(
-            `Imported app "${a.name}" has an unsafe compose file and was rejected: ${problems.slice(0, 5).join('; ')}`,
-          );
-        }
+        a.requiresHostAccess = checkImportedComposeSafety(a.dockerComposeFile).length > 0;
       }
       // Image ref must look like a normal registry reference (no shell-meta /
       // control chars). Mirrors the marketplace custom-install image guard.
@@ -560,6 +609,19 @@ export class ProjectTransferService {
       //    create path re-encrypts them at rest with THIS install's key).
       const appNameToId: Record<string, string> = {};
       for (const app of manifest.applications) {
+        // Host-access apps (docker.sock / host bind-mounts, e.g. Portainer) are
+        // not portable between installs for security reasons — skip with a
+        // clear, actionable warning instead of creating an unrunnable stack.
+        if (app.requiresHostAccess) {
+          warnings.push(`app ${app.name}: needs host access (mounts the docker socket or host paths) and was NOT imported for security — reinstall it from the marketplace on this server.`);
+          continue;
+        }
+        // An app with no deployable source can't be recreated — say so rather
+        // than silently leaving a STOPPED row.
+        if (!app.gitUrl && !app.dockerImage && !app.dockerComposeFile) {
+          warnings.push(`app ${app.name}: has no recreatable source (no git URL, image, or compose) and was skipped.`);
+          continue;
+        }
         try {
           let envVars: Record<string, string> | undefined;
           if (app.envEncrypted) {

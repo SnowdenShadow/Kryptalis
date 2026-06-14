@@ -162,23 +162,56 @@ describe('ProjectTransferService — parse / import safety', () => {
     expect(result.stagedId).toMatch(/^xfer_[a-f0-9]{36}$/);
   });
 
-  it('rejects an imported app whose compose carries a host bind-mount (CRITICAL guard)', async () => {
-    // Export a project whose app ships a malicious compose, then parse it: the
-    // manifest validation must reject the unsafe compose before any apply.
-    const evilProject = {
+  it('flags a host-bind-mount app requiresHostAccess and warns (does NOT fail the whole import)', async () => {
+    // An app whose compose mounts the host (e.g. docker.sock / "/:/host") is a
+    // legitimate-but-non-portable app, not an attack. parse must NOT reject the
+    // archive — it flags the app so apply skips it with a warning, while the
+    // rest of the project still imports.
+    const hostApp = {
       ...sampleProject,
       applications: [{
         ...sampleProject.applications[0],
+        name: 'portainer',
         gitUrl: null,
         framework: 'DOCKER_COMPOSE',
-        dockerComposeFile: 'services:\n  web:\n    image: alpine\n    volumes:\n      - /:/host\n',
+        dockerComposeFile: 'services:\n  web:\n    image: portainer/portainer-ce\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n',
       }],
       databases: [],
       domains: [],
     };
-    prisma.project.findUnique.mockResolvedValue(evilProject);
+    prisma.project.findUnique.mockResolvedValue(hostApp);
     const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: false, passphrase: PASS });
     created.push(archivePath);
-    await expect(svc.parseImport('u2', archivePath, PASS)).rejects.toThrow(/unsafe compose/i);
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+    // parse SUCCEEDS (no throw) and the app is flagged + warned about.
+    const result = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(result.stagedId));
+    expect(result.manifest.applications[0].requiresHostAccess).toBe(true);
+    expect(result.warnings.some((w) => /host access|docker socket/i.test(w))).toBe(true);
+  });
+
+  it('carries a safe compose app (named volume, no host mount) as portable', async () => {
+    const safeApp = {
+      ...sampleProject,
+      applications: [{
+        ...sampleProject.applications[0],
+        name: 'ghost',
+        gitUrl: null,
+        framework: 'DOCKER_COMPOSE',
+        dockerComposeFile: 'services:\n  web:\n    image: ghost:5\n    volumes:\n      - content:/var/lib/ghost/content\n',
+      }],
+      databases: [],
+      domains: [],
+    };
+    prisma.project.findUnique.mockResolvedValue(safeApp);
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: false, passphrase: PASS });
+    created.push(archivePath);
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+    const result = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(result.stagedId));
+    expect(result.manifest.applications[0].requiresHostAccess).toBeFalsy();
+    expect(result.manifest.applications[0].dockerComposeFile).toContain('ghost:5');
   });
 });
