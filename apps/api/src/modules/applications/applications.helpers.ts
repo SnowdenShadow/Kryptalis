@@ -396,30 +396,39 @@ export function listComposeContainerNames(content: string): string[] {
 export function readComposeContainerInfo(
   content: string,
   fallbackContainerName: string,
-): { containerName: string; containerPort: number | null } {
+): { containerName: string; containerPort: number | null; publishedHostPort: number | null } {
   try {
     const doc: any = yaml.load(content);
-    if (!doc?.services) return { containerName: fallbackContainerName, containerPort: null };
+    if (!doc?.services) return { containerName: fallbackContainerName, containerPort: null, publishedHostPort: null };
     for (const [svc, val] of Object.entries<any>(doc.services)) {
       const cname = val?.container_name || `${fallbackContainerName}-${svc}`;
       let target: number | null = null;
+      // The HOST-side published port (left of "host:container") — this is the
+      // port the user reaches the app at, and what drives the dashboard URL.
+      // Distinct from `target` (the in-container port used for Caddy routing).
+      let published: number | null = null;
       if (Array.isArray(val?.ports) && val.ports.length > 0) {
         const p = val.ports[0];
         if (typeof p === 'string') {
           const parts = p.split('/')[0].split(':');
           // forms: "8080" | "8080:80" | "127.0.0.1:8080:80"
           target = Number(parts[parts.length - 1]);
-        } else if (typeof p === 'object' && p?.target != null) {
-          target = Number(p.target);
+          // A published host port only exists when there's a ":" (>=2 parts);
+          // a bare "8080" is the container port with a random host port.
+          if (parts.length >= 2) published = Number(parts[parts.length - 2]);
+        } else if (typeof p === 'object' && p != null) {
+          if (p.target != null) target = Number(p.target);
+          if (p.published != null) published = Number(p.published);
         }
       }
       return {
         containerName: cname,
         containerPort: Number.isFinite(target as number) ? (target as number) : null,
+        publishedHostPort: Number.isFinite(published as number) ? (published as number) : null,
       };
     }
   } catch {}
-  return { containerName: fallbackContainerName, containerPort: null };
+  return { containerName: fallbackContainerName, containerPort: null, publishedHostPort: null };
 }
 
 // command argv builder, no shell interpolation

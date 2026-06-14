@@ -517,16 +517,23 @@ export class ApplicationDeployService implements OnModuleInit {
       log('> docker compose up -d');
       await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], envFile, 300_000);
 
-      // Pull container name + port from the first service so Caddy has a
-      // reverse-proxy target. The user's compose already declared them.
+      // Pull container name + ports from the first service. containerPort is
+      // the IN-container port (Caddy reverse-proxy target); the PUBLISHED host
+      // port is what the user reaches the app at and what the dashboard URL
+      // shows. Prefer the caller's hostPort (e.g. carried by an import), then
+      // the compose's published port, and only fall back to the container port.
       const info = readComposeContainerInfo(finalCompose, containerName(slug));
+      const publishedPort = opts.hostPort ?? info.publishedHostPort ?? null;
       await this.prisma.application.update({
         where: { id: appId },
         data: {
           status: AppStatus.RUNNING,
           containerName: info.containerName,
           containerPort: info.containerPort,
-          port: info.containerPort,
+          // `port` drives the public URL — use the published host port when we
+          // have one, else the container port (single-value compose case).
+          port: publishedPort ?? info.containerPort,
+          ...(publishedPort != null ? { hostPort: publishedPort } : {}),
         },
       });
       this.proxy.regenerate().catch(() => {});

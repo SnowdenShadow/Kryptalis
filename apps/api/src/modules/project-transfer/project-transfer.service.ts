@@ -647,6 +647,9 @@ export class ProjectTransferService {
           if (app.startCommand) dto.startCommand = app.startCommand;
           if (app.port) dto.port = app.port;
           if (app.hostPort) dto.hostPort = app.hostPort;
+          // Note: customPort is not a create-DTO field (it's derived from
+          // hostPort/domain at deploy time). The published host port carried by
+          // hostPort + the compose's own publish drives the URL after import.
           const created = await this.applications.create(userId, dto);
           appNameToId[app.name] = (created as any).id;
         } catch (e: any) {

@@ -371,13 +371,17 @@ describe('runComposeOnlyDeploy', () => {
     );
     expect(doc.networks.dockcontrol_apps).toEqual({ external: true, name: 'dockcontrol-apps' });
 
+    // The compose publishes "8080:80" → containerPort (Caddy target) is the
+    // in-container 80, but the PUBLISHED host port 8080 is what the user
+    // reaches the app at, so `port` (URL) + `hostPort` reflect 8080.
     expect(prisma.application.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: 'RUNNING',
           containerName: 'my-web',
           containerPort: 80,
-          port: 80,
+          port: 8080,
+          hostPort: 8080,
         }),
       }),
     );
