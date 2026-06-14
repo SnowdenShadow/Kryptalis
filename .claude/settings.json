@@ -134,7 +134,9 @@
       "Bash(node_modules/.bin/vitest run *)",
       "Bash(node -e \"const S=/^[a-zA-Z0-9][a-zA-Z0-9_.-]*\\\\$/;const v='\\\\${HOSTDIR}';console.log\\('SAFE_VOLUME_NAME passes?',S.test\\(v\\)\\)\")",
       "Bash(sed -n '18,22p' README.md)",
-      "Bash(sed -n '18,22p;36,40p' INSTALL.md)"
+      "Bash(sed -n '18,22p;36,40p' INSTALL.md)",
+      "Bash(cd /c/Users/Snowden/Desktop/Kryptalis-dev/apps/api/src/modules/project-transfer; echo \"=== mes appels tar ===\"; grep -n \"force-local\\\\|execFileAsync\\('tar'\" project-transfer.service.ts; echo \"=== le backup \\(qui MARCHE en prod\\) utilise-t-il force-local ? ===\"; grep -n \"force-local\\\\|'tar'\" ../backups/backups.service.ts | head)",
+      "Read(//c/Users/Snowden/Desktop/backups/**)"
     ],
     "additionalDirectories": [
       "C:\\Users\\Snowden\\Desktop\\Kryptalis-dev\\apps\\agent\\internal\\poller",

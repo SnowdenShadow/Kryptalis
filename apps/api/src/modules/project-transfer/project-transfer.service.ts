@@ -37,10 +37,15 @@ const SAFE_IMAGE_RE = /^[a-zA-Z0-9][a-zA-Z0-9._\-/:@]{0,254}$/;
 
 const execFileAsync = promisify(execFile);
 
-// GNU tar treats a backslash as an escape and a "drive:" prefix as a remote
-// host. Feed it forward-slash paths (accepted on Linux AND Windows) so the
-// same code path works in prod (Linux) and in dev/test (Windows).
-const tarPath = (p: string): string => p.replace(/\\/g, '/');
+// Cross-platform tar shim. In production the API runs on Alpine where `tar` is
+// BusyBox, which does NOT understand GNU's `--force-local` (an unknown flag
+// makes it exit non-zero → the whole export/import 500s). On Windows dev/test
+// the path carries a drive letter (`C:\...`) that GNU tar mistakes for an rsh
+// host, so there we DO need `--force-local` + forward-slash paths. Branch on
+// the platform: Linux/Alpine gets the plain invocation backups already use.
+const isWin = process.platform === 'win32';
+const tarPath = (p: string): string => (isWin ? p.replace(/\\/g, '/') : p);
+const tarArgs = (...rest: string[]): string[] => (isWin ? ['--force-local', ...rest] : rest);
 
 // Runtime dir convention shared with backups/agent. Transfer staging lives in
 // .dockcontrol/project-transfer/<id>/.
@@ -240,9 +245,7 @@ export class ProjectTransferService {
       // finally removes it even if encryption throws mid-stream — it must never
       // be left on disk outside the cleaned-up set.
       plainTar = path.join(XFER_DIR, `${id}.tar.gz`);
-      // --force-local: treat a path with a ':' (Windows drive letter) as a
-      // local file, not a remote rsh host. No-op on Linux paths.
-      await execFileAsync('tar', ['--force-local', '-czf', tarPath(plainTar), '-C', tarPath(dir), '.'], { maxBuffer: 64 * 1024 * 1024 });
+      await execFileAsync('tar', tarArgs('-czf', tarPath(plainTar), '-C', tarPath(dir), '.'), { maxBuffer: 64 * 1024 * 1024 });
       const archivePath = path.join(XFER_DIR, `${id}.dctproj`);
       await encryptFileTo(plainTar, archivePath, opts.passphrase);
 
@@ -363,7 +366,7 @@ export class ProjectTransferService {
       // additionally verify post-extraction that nothing escaped extractDir.
       const extractDir = path.join(dir, 'x');
       fs.mkdirSync(extractDir, { recursive: true });
-      await execFileAsync('tar', ['--force-local', '-xzf', tarPath(plainTar), '-C', tarPath(extractDir)], { maxBuffer: 64 * 1024 * 1024 });
+      await execFileAsync('tar', tarArgs('-xzf', tarPath(plainTar), '-C', tarPath(extractDir)), { maxBuffer: 64 * 1024 * 1024 });
       await fs.promises.unlink(plainTar).catch(() => undefined);
       await this.assertExtractionConfined(extractDir);
 
