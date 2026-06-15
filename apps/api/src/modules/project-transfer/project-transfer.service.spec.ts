@@ -285,3 +285,111 @@ describe('ProjectTransferService — parse / import safety', () => {
     expect(result.manifest.applications[0].dockerComposeFile).toContain('ghost:5');
   });
 });
+
+/**
+ * Data round-trip (PrestaShop-style): export marks a bundled DB dataInVolume +
+ * carries the app's volume tar with a remappable key; import skips the bundled
+ * DB's standalone create, threads the volume seed into the app deploy, and
+ * replays a STANDALONE DB dump. Docker-touching internals are stubbed so the
+ * test stays runtime-free.
+ */
+describe('ProjectTransferService — data restore (includeData)', () => {
+  let prisma: any;
+  let svc: ProjectTransferService;
+  beforeEach(() => { prisma = makePrisma(); svc = makeService(prisma); });
+
+  // A compose app with a bundled MariaDB sidecar (PrestaShop shape) + a
+  // separate standalone Postgres in the same project.
+  const prestaProject = {
+    id: 'p1', name: 'Shop', description: null,
+    applications: [{
+      id: 'presta00aaaa', name: 'prestashop', displayName: null, framework: 'DOCKER_COMPOSE',
+      gitUrl: null, gitBranch: null, dockerImage: null,
+      dockerComposeFile: 'services:\n  prestashop:\n    image: prestashop/prestashop\n    volumes:\n      - data:/var/www/html\n',
+      buildCommand: null, startCommand: null, port: 8090, hostPort: 8090, containerPort: 80,
+      customPort: false, envVars: null,
+    }],
+    databases: [
+      { id: 'bundled1', name: 'prestashop', type: 'MARIADB', username: 'ps', password: 'x', port: 3306, autoImported: true, host: 'dockcontrol-prestashop-db-presta00aaaa' },
+      { id: 'standalone1', name: 'analytics', type: 'POSTGRESQL', username: 'a', password: 'y', port: 5432, autoImported: false, host: '' },
+    ],
+    domains: [],
+  };
+
+  function stubExportDocker(volKeys: string[]) {
+    // exportLocalAppVolumes lists volumes then tars each. Stub both so no
+    // docker runs; produce real (empty) tar files on disk so the archive packs.
+    vi.spyOn(svc as any, 'dumpLocalDatabase').mockImplementation(async (db: any, dir: string) => {
+      const rel = `databases/${db.name}.sql.gz`;
+      fs.writeFileSync(`${dir}/${rel}`, 'SQLDUMP'); // dir/databases exists (mkdir at export start)
+      return rel;
+    });
+    vi.spyOn(svc as any, 'exportLocalAppVolumes').mockImplementation(async (app: any, dir: string, entry: any) => {
+      entry.volumes = entry.volumes || [];
+      for (const key of volKeys) {
+        const rel = `volumes/prestashop-presta00aaaa_${key}.tar.gz`;
+        fs.writeFileSync(`${dir}/volumes/prestashop-presta00aaaa_${key}.tar.gz`, 'TAR');
+        entry.volumeFiles.push(rel);
+        entry.volumes.push({ file: rel, key });
+      }
+    });
+  }
+
+  it('export: bundled DB → dataInVolume (no SQL dump); standalone DB → dumpFile; app carries volume keys', async () => {
+    prisma.project.findUnique.mockResolvedValue(prestaProject);
+    stubExportDocker(['data']);
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: true, passphrase: PASS });
+    created.push(archivePath);
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+    const { manifest, stagedId } = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(stagedId));
+
+    const bundled = manifest.databases.find((d) => d.name === 'prestashop')!;
+    const standalone = manifest.databases.find((d) => d.name === 'analytics')!;
+    expect(bundled.dataInVolume).toBe(true);
+    expect(bundled.dumpFile).toBeUndefined();
+    expect(standalone.dataInVolume).toBeFalsy();
+    expect(standalone.dumpFile).toBe('databases/analytics.sql.gz');
+    expect(manifest.applications[0].volumes).toEqual([
+      { file: 'volumes/prestashop-presta00aaaa_data.tar.gz', key: 'data' },
+    ]);
+  });
+
+  it('import: skips the bundled DB create, threads volume seed into the app deploy, replays the standalone dump', async () => {
+    prisma.project.findUnique.mockResolvedValue(prestaProject);
+    stubExportDocker(['data']);
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: true, passphrase: PASS });
+    created.push(archivePath);
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+
+    const appsCreate = vi.fn().mockResolvedValue({ id: 'newapp' });
+    const dbCreate = vi.fn().mockResolvedValue({ id: 'newdb' });
+    const restoreDbDump = vi.fn().mockResolvedValue(undefined);
+    (svc as any).applications = { create: appsCreate };
+    (svc as any).projects = { create: vi.fn().mockResolvedValue({ id: 'np' }) };
+    (svc as any).databases = { create: dbCreate, restoreDbDump };
+    (svc as any).domains = { create: vi.fn() };
+
+    const parsed = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(parsed.stagedId));
+    created.push(`${(svc as any).stagingDir(parsed.stagedId)}-restore`);
+    await svc.applyImport('u2', parsed.stagedId, { passphrase: PASS });
+
+    // Bundled DB is NOT created standalone (only the analytics one is).
+    expect(dbCreate).toHaveBeenCalledTimes(1);
+    expect(dbCreate.mock.calls[0][1].name).toBe('analytics');
+
+    // App deploy receives the volume seed with the remappable key + a parked
+    // tar path (outside the staging dir, since staging is wiped in finally).
+    const dto = appsCreate.mock.calls[0][1];
+    expect(dto.restoreVolumes).toHaveLength(1);
+    expect(dto.restoreVolumes[0].key).toBe('data');
+    expect(dto.restoreVolumes[0].tarPath).toMatch(/-restore[\\/].*_data\.tar\.gz$/);
+
+    // Standalone dump is replayed against the freshly-created DB id.
+    expect(restoreDbDump).toHaveBeenCalledTimes(1);
+    expect(restoreDbDump.mock.calls[0][0]).toBe('newdb');
+  });
+});

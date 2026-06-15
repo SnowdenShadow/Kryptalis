@@ -17,6 +17,7 @@ import {
   FolderKanban,
   Rocket,
   Link as LinkIcon,
+  Download,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -260,6 +261,42 @@ export default function DatabasesPage() {
     onError: (err: Error) => toastError(err),
   });
 
+  // One-click dump download. Streams the dump through the auth-aware
+  // rawFetch (shares the access-token refresh pipeline), then materializes
+  // the response as a blob so the browser saves it with the server-suggested
+  // filename. We hold a per-row in-flight id so the button shows a spinner.
+  const [exportingId, setExportingId] = useState<string | null>(null);
+  async function handleExport(id: string) {
+    setExportingId(id);
+    try {
+      const res = await api.rawFetch(`/databases/${id}/export`);
+      if (!res.ok) {
+        // The API returns JSON {message} for the BadRequest cases (remote
+        // server, unsupported engine) — surface that message verbatim.
+        let msg = `Export failed (${res.status})`;
+        try { const j = await res.json(); if (j?.message) msg = j.message; } catch {}
+        throw new Error(msg);
+      }
+      const disp = res.headers.get('Content-Disposition') || '';
+      const m = /filename="([^"]+)"/.exec(disp);
+      const filename = m?.[1] || `database-${id}.sql`;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(t('toast.dbExported') || 'Database exported');
+    } catch (err) {
+      toastError(err as Error);
+    } finally {
+      setExportingId(null);
+    }
+  }
+
   const deletingDb = databases.find((db) => db.id === deleteId);
 
   return (
@@ -410,6 +447,25 @@ export default function DatabasesPage() {
                       </div>
                     </div>
                     <div className="flex gap-1">
+                      {/* Export (download dump) — read-only, so it's safe for
+                          BOTH auto-imported (parent-app-owned) and manually
+                          provisioned DBs. Only when the container is up. */}
+                      {!deploying && running && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground hover:text-primary"
+                          disabled={exportingId === db.id}
+                          onClick={() => handleExport(db.id)}
+                          title={t('databases.actionExport') || 'Export (download dump)'}
+                        >
+                          {exportingId === db.id ? (
+                            <Loader2 size={14} className="animate-spin" />
+                          ) : (
+                            <Download size={14} />
+                          )}
+                        </Button>
+                      )}
                       {/* Auto-imported DBs are owned by the parent app's
                           compose stack — start/stop/delete must go through
                           the application page so the whole stack stays

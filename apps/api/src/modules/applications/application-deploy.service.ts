@@ -34,6 +34,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
 import * as crypto from 'crypto';
+import { spawn } from 'child_process';
 
 /**
  * Deployment pipeline for applications: git-clone deploys, docker-image
@@ -429,7 +430,20 @@ export class ApplicationDeployService implements OnModuleInit {
     appId: string,
     name: string,
     composeYaml: string,
-    opts: { envVars?: Record<string, string> | null; hostPort?: number },
+    opts: {
+      envVars?: Record<string, string> | null;
+      hostPort?: number;
+      /**
+       * Project-transfer data restore. Each entry seeds a docker volume from
+       * a tar BEFORE the stack boots — so a bundled-DB app (PrestaShop's
+       * MariaDB, WordPress, …) starts on its RESTORED datadir instead of
+       * running its first-boot installer on an empty volume. `key` is the
+       * volume name with its compose-project prefix stripped (carried in the
+       * .dctproj manifest); we rebuild the TARGET name from THIS deploy's own
+       * appDir so source/target prefixes can never drift. Local deploys only.
+       */
+      restoreVolumes?: { key: string; tarPath: string }[];
+    },
   ) {
     // Remote project → the agent writes + runs the user's compose on its host.
     const remoteForCompose = await this.resolveRemoteServer(appId);
@@ -514,6 +528,31 @@ export class ApplicationDeployService implements OnModuleInit {
       log('> docker compose pull');
       try { await dockerCompose(appDir, ['pull'], envFile, 300_000); } catch {}
       await removeCollidingContainers(finalCompose, log);
+
+      // Project-transfer restore: seed the stack's volumes from the imported
+      // tars BEFORE `up`, so a bundled-DB app boots on its restored datadir
+      // (no first-boot installer on an empty volume). Volume name = THIS
+      // deploy's compose-project prefix + the manifest's remappable key.
+      if (opts.restoreVolumes?.length) {
+        const targetPrefix = `${path.basename(appDir)}_`;
+        for (const v of opts.restoreVolumes) {
+          const volName = `${targetPrefix}${v.key}`;
+          try {
+            await execFileAsync('docker', ['volume', 'create', volName], { timeout: 15_000 });
+            await this.restoreTarIntoVolume(v.tarPath, volName);
+            log(`> restored volume ${volName}`);
+          } catch (e: any) {
+            // A failed restore must not silently boot an empty stack — fail the
+            // deploy so the operator sees the data didn't come over.
+            throw new Error(`volume restore failed for ${volName}: ${e?.message || e}`);
+          } finally {
+            // The tar was parked outside the (now-deleted) import staging dir;
+            // we own it here — drop it once consumed so it doesn't linger.
+            try { fs.unlinkSync(v.tarPath); } catch {}
+          }
+        }
+      }
+
       log('> docker compose up -d');
       await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], envFile, 300_000);
 
@@ -591,6 +630,37 @@ export class ApplicationDeployService implements OnModuleInit {
       this.proxy.regenerate().catch(() => {});
       this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
+  }
+
+  /**
+   * Stream a host tar.gz into a docker volume via a throwaway busybox helper
+   * (mirror of BackupsService.restoreVolume's untar, but the tar lives on the
+   * host fs here). The volume must already exist and have no running consumer
+   * — the caller creates it and runs this BEFORE `docker compose up`.
+   */
+  private async restoreTarIntoVolume(tarPath: string, volumeName: string): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(
+        'docker',
+        ['run', '--rm', '-i', '-v', `${volumeName}:/data`, 'busybox', 'tar', '-xzf', '-', '-C', '/data'],
+        { stdio: ['pipe', 'ignore', 'pipe'] },
+      );
+      const timer = setTimeout(() => child.kill('SIGKILL'), 30 * 60_000);
+      let stderr = '';
+      child.stderr.on('data', (d: Buffer) => { if (stderr.length < 8192) stderr += d.toString(); });
+      const src = fs.createReadStream(tarPath);
+      src.once('error', (err) => { clearTimeout(timer); try { child.kill('SIGKILL'); } catch {} reject(err); });
+      src.pipe(child.stdin);
+      // A helper that exits early closes stdin — swallow the EPIPE; the exit
+      // code carries the real error.
+      child.stdin.once('error', () => undefined);
+      child.once('error', (err) => { clearTimeout(timer); reject(err); });
+      child.once('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(`volume untar exited ${code}: ${stderr.trim().slice(0, 300)}`));
+      });
+    });
   }
 
   /**

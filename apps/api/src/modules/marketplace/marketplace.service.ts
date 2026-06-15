@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException, ForbiddenException, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
-import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate } from './templates';
+import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate, domainPinEnv } from './templates';
 import { checkVolumeSafety } from './dto/install-custom.dto';
 import { projectNetworkName, listComposeContainerNames, remoteAppSlug } from '../applications/applications.helpers';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
@@ -402,6 +402,32 @@ export class MarketplaceService implements OnModuleInit {
 
     // Custom env override from the install request — written as a .env file alongside compose
     const envOverride = data.envVars || {};
+
+    // Web apps that bake their public URL into their DB/config on first boot
+    // (PrestaShop ps_shop_url, WordPress siteurl, Ghost url, Nextcloud
+    // trusted_domains, Gitea ROOT_URL) auto-detect that URL from the FIRST
+    // HTTP request's Host header. If the first hit arrives via the container's
+    // own published port (http://domain:8090) the app freezes `domain:8090`
+    // into every generated link forever, and the whole site then redirects to
+    // the port. Pin the clean hostname up front so the app is born on the
+    // right domain regardless of which path the first request takes.
+    //
+    // ONLY in clean-URL mode (customPort=false → Caddy serves https://domain
+    // on :443). In port-pinned mode the user explicitly wants the :port URL,
+    // so we leave the app's own detection alone. domainPinEnv is merged UNDER
+    // the user's form env — an explicit value from the install dialog wins.
+    if (data.domainId && !customPort) {
+      const dom = await this.prisma.domain.findUnique({
+        where: { id: data.domainId },
+        select: { domain: true },
+      });
+      if (dom?.domain && !isLocalHost(dom.domain)) {
+        const pin = domainPinEnv(data.appSlug, dom.domain);
+        for (const [k, v] of Object.entries(pin)) {
+          if (envOverride[k] === undefined || envOverride[k] === '') envOverride[k] = v;
+        }
+      }
+    }
 
     // Keep the app's canonical name ("Roundcube") so slugify() in
     // applications.service produces a stable slug. Per-instance differentiation

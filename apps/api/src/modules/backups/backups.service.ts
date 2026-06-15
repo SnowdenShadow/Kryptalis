@@ -30,6 +30,7 @@ import {
 } from './backup-storage.util';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { slugify, resolveAppDir } from '../applications/applications.helpers';
+import { resolveDbContainer, dumpPlan, restorePlan } from '../databases/db-dump.util';
 import { AgentService, AgentTaskCompletion } from '../agent/agent.service';
 import { deterministicVolumeNames } from '../agent/volume-naming.util';
 import { execFile, spawn } from 'child_process';
@@ -682,10 +683,11 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
   // ── backup job (dump engine) ───────────────────────────────────────
 
+  // Thin alias over the shared helper (kept so the manifest-building call
+  // sites read naturally). Auto-imported rows store the real container_name
+  // in `host`; manual rows use the dockcontrol-db-<name> scheme.
   private dbContainerName(db: { name: string; host: string; autoImported: boolean }): string {
-    // Auto-imported rows store the real container_name in `host`; manually
-    // provisioned rows use the dockcontrol-db-<name> scheme (databases.service).
-    return db.autoImported ? db.host : `dockcontrol-db-${db.name}`;
+    return resolveDbContainer(db);
   }
 
   private async dumpDatabases(
@@ -699,78 +701,42 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     await fs.promises.mkdir(dir, { recursive: true });
 
     for (const db of dbs) {
-      const container = this.dbContainerName(db);
+      const container = resolveDbContainer(db);
       const password = this.encryption.decrypt(db.password);
       // Auto-imported rows don't track the logical database name (name is a
       // display label) — dump the whole instance instead.
       const dumpAll = db.autoImported;
-      let file: string;
-      switch (db.type) {
-        case 'POSTGRESQL': {
-          file = `${db.id}.sql`;
-          const args = dumpAll
-            ? ['exec', container, 'pg_dumpall', '-U', db.username, '--clean', '--if-exists']
-            : ['exec', container, 'pg_dump', '-U', db.username, '--clean', '--if-exists', '-d', db.name];
-          await this.runCommandToFile('docker', args, path.join(dir, file), 1_800_000);
-          break;
-        }
-        case 'MYSQL':
-        case 'MARIADB': {
-          file = `${db.id}.sql`;
-          // Password rides in a temp --env-file (not `-e MYSQL_PWD=…` on the
-          // host argv) so it never appears in the host's process list.
-          await this.withMysqlPwdEnvFile(password, [], (exec) =>
-            this.runCommandToFile(
-              'docker',
-              [
-                ...exec, container,
-                'mysqldump', '-u', db.username,
-                ...(dumpAll ? ['--all-databases'] : ['--databases', db.name]),
-              ],
-              path.join(dir, file),
-              1_800_000,
-            ),
-          );
-          break;
-        }
-        case 'MONGODB': {
-          file = `${db.id}.archive`;
-          const args = [
-            'exec', container,
-            'mongodump', '--archive', '--quiet',
-            '--username', db.username, '--password', password,
-            '--authenticationDatabase', 'admin',
-            ...(dumpAll ? [] : ['--db', db.name]),
-          ];
-          await this.runCommandToFile('docker', args, path.join(dir, file), 1_800_000);
-          break;
-        }
-        case 'REDIS':
-        case 'KEYDB': {
-          file = `${db.id}.rdb`;
-          // REDISCLI_AUTH instead of -a so the password never shows up in
-          // the host's process list (same reason mysqldump gets MYSQL_PWD).
-          const envArgs = password ? ['-e', `REDISCLI_AUTH=${password}`] : [];
-          await execFileAsync(
+      // Command shapes come from the shared helper (single source of truth,
+      // kept symmetric with restoreDatabase below).
+      const plan = dumpPlan({ ...db, password }, container, { dumpAll });
+      if (!plan) {
+        // DRAGONFLY / CLICKHOUSE have no portable exec-based dump path yet;
+        // their data is still covered by includeVolumes.
+        this.logger.warn(
+          `Backup: skipping database "${db.name}" — no dump strategy for type ${db.type}.`,
+        );
+        continue;
+      }
+      const file = `${db.id}.${plan.ext}`;
+      const outPath = path.join(dir, file);
+      // Redis/KeyDB need a synchronous SAVE before the rdb is readable.
+      if (plan.prepArgv) {
+        await execFileAsync('docker', plan.prepArgv, { timeout: 300_000 });
+      }
+      if (plan.envFileContent) {
+        // MySQL/MariaDB: password via a temp --env-file (never on the host
+        // argv). withMysqlPwdEnvFile writes 0600 + unlinks; splice its
+        // `--env-file` token right after `exec`.
+        await this.withMysqlPwdEnvFile(password, [], (exec) =>
+          this.runCommandToFile(
             'docker',
-            ['exec', ...envArgs, container, 'redis-cli', 'SAVE'],
-            { timeout: 300_000 },
-          );
-          await this.runCommandToFile(
-            'docker',
-            ['exec', container, 'cat', '/data/dump.rdb'],
-            path.join(dir, file),
-            600_000,
-          );
-          break;
-        }
-        default:
-          // DRAGONFLY / CLICKHOUSE have no portable exec-based dump path yet;
-          // their data is still covered by includeVolumes.
-          this.logger.warn(
-            `Backup: skipping database "${db.name}" — no dump strategy for type ${db.type}.`,
-          );
-          continue;
+            [exec[0], ...exec.slice(1), ...plan.argv.slice(1)],
+            outPath,
+            1_800_000,
+          ),
+        );
+      } else {
+        await this.runCommandToFile('docker', plan.argv, outPath, 1_800_000);
       }
       manifest.databases.push({
         id: db.id,
@@ -1229,64 +1195,34 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         `database "${entry.name}" no longer exists in the registry — recreate it first, then restore.`,
       );
     }
-    const container = this.dbContainerName(db);
+    const container = resolveDbContainer(db);
     const password = this.encryption.decrypt(db.password);
     const file = path.join(extractDir, 'databases', path.basename(entry.file));
     if (!fs.existsSync(file)) {
       throw new Error(`dump file for database "${entry.name}" is missing from the archive.`);
     }
 
-    switch (db.type) {
-      case 'POSTGRESQL': {
-        const targetDb = entry.dumpAll ? 'postgres' : db.name;
-        await this.runCommandWithInputFile(
-          'docker',
-          ['exec', '-i', container, 'psql', '-U', db.username, '-d', targetDb],
-          file,
-          1_800_000,
-        );
-        break;
-      }
-      case 'MYSQL':
-      case 'MARIADB': {
-        // Password rides in a temp --env-file (not `-e MYSQL_PWD=…` on the
-        // host argv) so it never appears in the host's process list.
-        await this.withMysqlPwdEnvFile(password, ['-i'], (exec) =>
-          this.runCommandWithInputFile(
-            'docker',
-            [...exec, container, 'mysql', '-u', db.username],
-            file,
-            1_800_000,
-          ),
-        );
-        break;
-      }
-      case 'MONGODB': {
-        await this.runCommandWithInputFile(
-          'docker',
-          [
-            'exec', '-i', container,
-            'mongorestore', '--archive', '--drop',
-            '--username', db.username, '--password', password,
-            '--authenticationDatabase', 'admin',
-          ],
-          file,
-          1_800_000,
-        );
-        break;
-      }
-      case 'REDIS':
-      case 'KEYDB': {
-        await execFileAsync(
-          'docker',
-          ['cp', file, `${container}:/data/dump.rdb`],
-          { timeout: 300_000 },
-        );
-        await execFileAsync('docker', ['restart', container], { timeout: 120_000 });
-        break;
-      }
-      default:
-        throw new Error(`no restore strategy for database type ${db.type}.`);
+    // Restore command shapes come from the shared helper (symmetric with
+    // dumpPlan). dumpAll must match how the dump was taken — it steers the
+    // Postgres target db (maintenance `postgres` for pg_dumpall vs the db's
+    // own name for a single-db pg_dump). entry.dumpAll was recorded at dump time.
+    const plan = restorePlan({ ...db, password }, container, { dumpAll: !!entry.dumpAll });
+    if (!plan) throw new Error(`no restore strategy for database type ${db.type}.`);
+
+    if (plan.mode === 'copy-restart') {
+      // Redis/KeyDB: drop the rdb in and restart so it loads on boot.
+      await execFileAsync('docker', ['cp', file, `${plan.copyTo!.container}:${plan.copyTo!.path}`], { timeout: 300_000 });
+      await execFileAsync('docker', ['restart', plan.copyTo!.container], { timeout: 120_000 });
+      return;
+    }
+
+    // stdin replay (SQL / Mongo). MySQL/MariaDB password via temp --env-file.
+    if (plan.envFileContent) {
+      await this.withMysqlPwdEnvFile(password, ['-i'], (exec) =>
+        this.runCommandWithInputFile('docker', [...exec, ...plan.argv.slice(2)], file, 1_800_000),
+      );
+    } else {
+      await this.runCommandWithInputFile('docker', plan.argv, file, 1_800_000);
     }
   }
 

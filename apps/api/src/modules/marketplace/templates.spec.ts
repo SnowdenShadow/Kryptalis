@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
-import { COMPOSE_TEMPLATES, PORT_MAP, renderCustomComposeTemplate } from './templates';
+import { COMPOSE_TEMPLATES, PORT_MAP, renderCustomComposeTemplate, domainPinEnv } from './templates';
 
 /**
  * Consistency checks between the three places a marketplace app's ports
@@ -72,6 +72,56 @@ describe('marketplace catalog / PORT_MAP / template consistency', () => {
   it('no default host port lands on an HTTPS-looking port (dashboard would link https:// to an HTTP listener)', () => {
     for (const app of catalog.apps) {
       expect(HTTPS_PORTS, `${app.slug} defaults to TLS-looking port ${app.ports[0]}`).not.toContain(app.ports[0]);
+    }
+  });
+});
+
+describe('domainPinEnv — public-domain pinning for web apps', () => {
+  const DOMAIN = 'shop.example.com';
+
+  it('PrestaShop pins PS_DOMAIN to the bare host', () => {
+    expect(domainPinEnv('prestashop', DOMAIN)).toEqual({ PS_DOMAIN: DOMAIN });
+  });
+
+  it('WordPress overrides WP_HOME + WP_SITEURL via a single-line config-extra', () => {
+    const env = domainPinEnv('wordpress', DOMAIN);
+    expect(env.WORDPRESS_CONFIG_EXTRA).toContain(`WP_HOME','https://${DOMAIN}'`);
+    expect(env.WORDPRESS_CONFIG_EXTRA).toContain(`WP_SITEURL','https://${DOMAIN}'`);
+    // Must stay single-line — the .env writer escapes newlines and would
+    // otherwise corrupt the injected PHP.
+    expect(env.WORDPRESS_CONFIG_EXTRA).not.toContain('\n');
+  });
+
+  it('Ghost / Nextcloud / Gitea pin their authoritative URL var', () => {
+    expect(domainPinEnv('ghost', DOMAIN)).toEqual({ url: `https://${DOMAIN}` });
+    expect(domainPinEnv('nextcloud', DOMAIN)).toMatchObject({
+      NEXTCLOUD_TRUSTED_DOMAINS: DOMAIN,
+      OVERWRITEHOST: DOMAIN,
+      OVERWRITEPROTOCOL: 'https',
+    });
+    expect(domainPinEnv('gitea', DOMAIN)).toMatchObject({
+      GITEA__server__ROOT_URL: `https://${DOMAIN}/`,
+      GITEA__server__DOMAIN: DOMAIN,
+    });
+  });
+
+  it('returns {} for apps that read the Host header live (no baked URL)', () => {
+    for (const slug of ['portainer', 'grafana', 'postgresql', 'redis', 'adminer']) {
+      expect(domainPinEnv(slug, DOMAIN)).toEqual({});
+    }
+  });
+
+  it('CRITICAL: every app domainPinEnv targets MUST declare env_file .env in its template', () => {
+    // The injected vars are written to the install .env. A template without
+    // `env_file: - .env` would silently drop them (this is exactly the bug
+    // WordPress had). Lock it: if domainPinEnv returns vars for a slug, the
+    // template must consume .env.
+    for (const slug of Object.keys(COMPOSE_TEMPLATES)) {
+      const pins = domainPinEnv(slug, DOMAIN);
+      if (Object.keys(pins).length === 0) continue;
+      const tpl = COMPOSE_TEMPLATES[slug].compose;
+      expect(tpl, `${slug}: domainPinEnv emits vars but template has no 'env_file: - .env'`)
+        .toMatch(/env_file:\s*\n\s*-\s*\.env/);
     }
   });
 });

@@ -50,8 +50,23 @@ export interface DctprojApp {
    * passphrase, base64-encoded. Empty string when the app has no env.
    */
   envEncrypted?: string;
-  /** Archive-relative paths of this app's volume tars (empty if no data). */
+  /**
+   * Archive-relative paths of this app's volume tars (empty if no data).
+   * LEGACY (v1.0): just the path — the source volume name is the tar basename.
+   * Kept for backward-compat reads. New exports ALSO populate `volumes` below
+   * with the remappable key so the importer can compute the TARGET volume name
+   * (the source/target compose-project prefix differs across installs).
+   */
   volumeFiles: string[];
+  /**
+   * Per-volume descriptor for cross-install remapping. `file` is the
+   * archive-relative tar path; `key` is the source volume name with its
+   * compose-project prefix stripped (e.g. `prestashop_data_<oldId>`). The
+   * importer rebuilds the target name as `<targetPrefix>_<key>` so the data
+   * lands in the volume the freshly-deployed stack actually mounts.
+   * Optional for backward-compat with v1.0 archives (fall back to volumeFiles).
+   */
+  volumes?: { file: string; key: string }[];
   /**
    * True when the app's compose mounts the docker socket or host paths (or is
    * otherwise unsafe to run from an untrusted archive). Such apps are NOT
@@ -69,8 +84,17 @@ export interface DctprojDb {
   /** DB password re-encrypted under the transfer passphrase, base64. */
   passwordEncrypted: string;
   port?: number;
-  /** Archive-relative path of the SQL dump (present only when includesData). */
+  /** Archive-relative path of the SQL dump (present only when includesData
+   *  AND this is a standalone DB — see dataInVolume). */
   dumpFile?: string;
+  /**
+   * True for an auto-imported (bundled) DB whose data lives inside its parent
+   * app's docker volume (e.g. PrestaShop's MariaDB). For these we do NOT emit
+   * a separate SQL dump — the volume tar already carries the full datadir, and
+   * the app restores it before first boot. Dumping SQL too would be redundant
+   * and risks an inconsistent double-restore.
+   */
+  dataInVolume?: boolean;
 }
 
 export interface DctprojDomain {

@@ -8,12 +8,14 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateDatabaseDto } from './dto/create-database.dto';
 import { DbType } from '@prisma/client';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import { randomBytes, randomInt } from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { detectDatabasesInCompose, type DetectedDb } from './compose-db-detect';
+import { resolveDbContainer, dumpPlan, restorePlan } from './db-dump.util';
 import {
   assertProjectAccess,
   listAccessibleProjectIds,
@@ -526,6 +528,183 @@ export class DatabasesService {
 
     await this.prisma.database.delete({ where: { id } });
     return { message: 'Database deleted' };
+  }
+
+  // ── export (one-click dump download) ───────────────────────────────
+  //
+  // Streams a logical dump of a single database for the user to download.
+  // Reuses the exact dump command shapes proven in BackupsService so the
+  // output is restore-compatible with that flow.
+  //
+  // Scope (kept deliberately narrow — fail loud rather than half-work):
+  //   - LOCAL server only. Remote-server DBs run on a machine this API can't
+  //     `docker exec` into; those are covered by the Backups module (agent
+  //     dump → S3). We point the user there instead of shipping a fragile
+  //     parallel remote path.
+  //   - Engines with a portable exec dump: Postgres / MySQL / MariaDB /
+  //     Mongo / Redis / KeyDB. ClickHouse / Dragonfly have no dump strategy
+  //     (same gap as Backups) → 400.
+  //   - Auto-imported rows dump the WHOLE instance (the logical db name isn't
+  //     tracked — `name` is a display label); manual rows dump their one db.
+  //
+  // Returns a child-process stdout stream + the suggested filename. The
+  // controller pipes it straight to the HTTP response (no temp file on disk).
+  async exportDump(
+    userId: string,
+    id: string,
+  ): Promise<{ stream: NodeJS.ReadableStream; filename: string; cleanup?: () => void }> {
+    const db = await this.assertDbAccess(userId, id, 'DEVELOPER');
+    const server = await this.resolveDbServer(id);
+    if (!this.isDbLocal(server)) {
+      throw new BadRequestException(
+        'This database runs on a remote server. Use Backups (Backups → Create) to dump it — remote dumps are handled by the agent.',
+      );
+    }
+
+    const autoImported = (db as any).autoImported as boolean;
+    const dumpable = {
+      name: db.name,
+      type: db.type,
+      username: db.username,
+      password: this.dbPassword(db),
+      autoImported,
+      host: db.host,
+    };
+    const container = resolveDbContainer(dumpable);
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '');
+    const safeName = (db.name || 'database').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 64);
+
+    // Single source of truth for the dump command shapes (shared with Backups
+    // + project-transfer). Auto-imported rows dump the WHOLE instance — the
+    // logical db name isn't tracked (name is a display label).
+    const plan = dumpPlan(dumpable, container, { dumpAll: autoImported });
+    if (!plan) {
+      throw new BadRequestException(
+        `Export not supported for ${db.type}. Use the database's own GUI (e.g. DBGate) to export.`,
+      );
+    }
+
+    // Redis needs a synchronous SAVE before the rdb is readable.
+    if (plan.prepArgv) {
+      await execFileAsync('docker', plan.prepArgv, { timeout: 300_000 });
+    }
+
+    // Engines that take the password via env (MySQL/MariaDB) get a 0600 temp
+    // --env-file spliced after `exec`, never the host argv (ps leak). Unlinked
+    // by cleanup() once the stream is fully consumed.
+    let argv = plan.argv;
+    let cleanup: (() => void) | undefined;
+    if (plan.envFileContent) {
+      const envFile = path.join(os.tmpdir(), `dockcontrol-export-${randomBytes(8).toString('hex')}.env`);
+      fs.writeFileSync(envFile, plan.envFileContent, { mode: 0o600 });
+      argv = [plan.argv[0], '--env-file', envFile, ...plan.argv.slice(1)];
+      cleanup = () => { try { fs.unlinkSync(envFile); } catch {} };
+    }
+
+    // Spawn `docker <argv>` and hand the stdout stream back as the download
+    // body. A non-zero exit can't un-send bytes already streamed, so we
+    // re-emit the failure on the stdout stream — the controller's error
+    // handler destroys the HTTP response, giving the client a failed transfer
+    // rather than a silently truncated dump.
+    const child = spawn('docker', argv, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (d: Buffer) => { if (stderr.length < 8192) stderr += d.toString(); });
+    child.once('close', (code) => {
+      if (code !== 0) child.stdout.emit('error', new Error(`dump exited ${code}: ${stderr.trim().slice(0, 300)}`));
+    });
+    child.once('error', (err) => child.stdout.emit('error', err));
+
+    return { stream: child.stdout, filename: `${safeName}-${stamp}.${plan.ext}`, cleanup };
+  }
+
+  /**
+   * Replay a gzip'd SQL/archive dump into a freshly-created LOCAL database
+   * (project-transfer import of a STANDALONE db). Waits for the container to
+   * accept connections, then streams gunzip → the engine's restore command
+   * (shared restorePlan, symmetric with the export dump).
+   *
+   * `gzPath` is a host file the caller owns; we do NOT delete it (the caller's
+   * cleanup does). Best-effort: logs + throws on failure so the importer can
+   * surface a warning, but never leaves a half-applied silent success.
+   *
+   * Redis (.rdb, copy-restart) isn't reachable this way — its data travels via
+   * its volume tar in practice; we only handle the stdin-replay engines here.
+   */
+  async restoreDbDump(dbId: string, gzPath: string): Promise<void> {
+    const db = await this.prisma.database.findUnique({ where: { id: dbId } });
+    if (!db) throw new NotFoundException('Database not found');
+    const dumpable = {
+      name: db.name, type: db.type, username: db.username,
+      password: this.dbPassword(db), autoImported: (db as any).autoImported, host: db.host,
+    };
+    const container = resolveDbContainer(dumpable);
+    // dumpAll mirrors how the dump was taken (auto-imported = whole instance);
+    // standalone project-transfer dumps are single-db. Steers the Postgres
+    // target db so tables don't land in the wrong database.
+    const plan = restorePlan(dumpable, container, { dumpAll: !!dumpable.autoImported });
+    if (!plan || plan.mode !== 'stdin') {
+      throw new BadRequestException(`No stdin restore strategy for ${db.type}.`);
+    }
+
+    // Wait until the container exists AND the engine answers (a fresh DB
+    // container can take a while to initialise on first boot).
+    await this.waitForDbReady(container, db.type, dumpable.username, dumpable.password);
+
+    // MySQL/MariaDB password via temp --env-file spliced after `exec -i`.
+    let argv = plan.argv;
+    let envFile: string | undefined;
+    if (plan.envFileContent) {
+      envFile = path.join(os.tmpdir(), `dockcontrol-restore-${randomBytes(8).toString('hex')}.env`);
+      fs.writeFileSync(envFile, plan.envFileContent, { mode: 0o600 });
+      // argv = ['exec','-i',container,...] → insert env-file after 'exec'.
+      argv = [argv[0], argv[1], '--env-file', envFile, ...argv.slice(2)];
+    }
+
+    try {
+      const zlib = await import('zlib');
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn('docker', argv, { stdio: ['pipe', 'ignore', 'pipe'] });
+        const timer = setTimeout(() => child.kill('SIGKILL'), 30 * 60_000);
+        let stderr = '';
+        child.stderr.on('data', (d: Buffer) => { if (stderr.length < 8192) stderr += d.toString(); });
+        const src = fs.createReadStream(gzPath);
+        const gz = zlib.createGunzip();
+        src.once('error', (err) => { clearTimeout(timer); try { child.kill('SIGKILL'); } catch {} reject(err); });
+        gz.once('error', (err) => { clearTimeout(timer); try { child.kill('SIGKILL'); } catch {} reject(err); });
+        src.pipe(gz).pipe(child.stdin);
+        child.stdin.once('error', () => undefined); // early-exit EPIPE; code carries the error
+        child.once('error', (err) => { clearTimeout(timer); reject(err); });
+        child.once('close', (code) => {
+          clearTimeout(timer);
+          if (code === 0) resolve();
+          else reject(new Error(`restore exited ${code}: ${stderr.trim().slice(0, 300)}`));
+        });
+      });
+    } finally {
+      if (envFile) { try { fs.unlinkSync(envFile); } catch {} }
+    }
+  }
+
+  /** Poll until a DB container answers a trivial query (or time out ~90s). */
+  private async waitForDbReady(container: string, type: string, user: string, pass: string): Promise<void> {
+    const t = (type || '').toUpperCase();
+    const probe: string[] | null =
+      t === 'POSTGRESQL' ? ['exec', container, 'pg_isready', '-U', user]
+      : t === 'MYSQL' || t === 'MARIADB' ? ['exec', '-e', `MYSQL_PWD=${pass}`, container, 'mysqladmin', 'ping', '-u', user, '--silent']
+      : t === 'MONGODB' ? ['exec', container, 'mongosh', '--quiet', '--eval', 'db.runCommand({ ping: 1 })']
+      : null;
+    if (!probe) return;
+    const deadline = Date.now() + 90_000;
+    // small fixed backoff loop — first boot of a DB image (initdb) is the slow case
+    while (Date.now() < deadline) {
+      try {
+        await execFileAsync('docker', probe, { timeout: 10_000 });
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 3_000));
+      }
+    }
+    throw new Error(`database container ${container} did not become ready within 90s`);
   }
 
   // ── link / unlink ──────────────────────────────────────────────────

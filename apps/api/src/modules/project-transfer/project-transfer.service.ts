@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { execFile } from 'child_process';
@@ -31,6 +32,8 @@ import {
 } from './dctproj-manifest';
 import { checkImportedComposeSafety } from './dctproj-compose-guard';
 import { slugify, resolveAppDir, findComposePath, APPS_DIR } from '../applications/applications.helpers';
+import { appVolumePrefix } from '../agent/volume-naming.util';
+import { resolveDbContainer, dumpPlan, restorePlan } from '../databases/db-dump.util';
 
 // A docker image reference: [registry[:port]/]name[:tag|@sha256:...]. No shell
 // metacharacters or control chars. Mirrors the marketplace custom-install guard.
@@ -241,8 +244,17 @@ export class ProjectTransferService {
           port: db.port ?? undefined,
         };
         if (opts.includeData) {
-          const dumpRel = await this.dumpLocalDatabase(db, dir);
-          if (dumpRel) entry.dumpFile = dumpRel;
+          // Auto-imported (bundled) DBs live INSIDE their parent app's docker
+          // volume — that volume tar already carries the full datadir and is
+          // restored before the app's first boot. Emitting a SQL dump too
+          // would be redundant and risk an inconsistent double-restore. Mark
+          // it so the importer knows the data comes from the volume, not SQL.
+          if (db.autoImported) {
+            entry.dataInVolume = true;
+          } else {
+            const dumpRel = await this.dumpLocalDatabase(db, dir);
+            if (dumpRel) entry.dumpFile = dumpRel;
+          }
         }
         manifest.databases.push(entry);
       }
@@ -304,13 +316,25 @@ export class ProjectTransferService {
     }
   }
 
-  /** Tar each of a LOCAL app's docker volumes into the staging volumes/ dir. */
+  /**
+   * Tar each of a LOCAL app's docker volumes into the staging volumes/ dir.
+   *
+   * Records BOTH the legacy `volumeFiles` (path only) and the new `volumes`
+   * descriptor carrying the REMAPPABLE key = the volume name with the
+   * compose-project prefix stripped. On import the project prefix differs
+   * (new app id), so the importer rebuilds `<targetPrefix>_<key>` to land the
+   * data in the volume the freshly-deployed stack actually mounts.
+   *
+   * Uses the canonical appVolumePrefix() (the same resolveAppDir-based naming
+   * Backups + remote volume enumeration use) instead of a local slug regex,
+   * so source filtering can't drift from how compose actually names volumes.
+   */
   private async exportLocalAppVolumes(app: { name: string; id: string }, dir: string, entry: DctprojApp): Promise<void> {
     try {
       const { stdout } = await execFileAsync('docker', ['volume', 'ls', '--format', '{{.Name}}'], { timeout: 15_000 });
-      const slug = app.name.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'app';
-      const prefix = `${slug}-${app.id.slice(0, 12)}`;
+      const prefix = appVolumePrefix(app.name, app.id); // `<slug>-<id12>_`
       const volumes = stdout.trim().split('\n').filter(Boolean).filter((v) => v.startsWith(prefix));
+      entry.volumes = entry.volumes || [];
       for (const vol of volumes) {
         const rel = path.posix.join('volumes', `${path.basename(vol)}.tar.gz`);
         const out = path.join(dir, rel);
@@ -318,6 +342,7 @@ export class ProjectTransferService {
         // buffered in memory).
         await this.dockerTarVolumeToFile(vol, out);
         entry.volumeFiles.push(rel);
+        entry.volumes.push({ file: rel, key: vol.slice(prefix.length) });
       }
     } catch (e: any) {
       this.logger.warn(`export volumes for ${app.name}: ${e?.message || e}`);
@@ -340,20 +365,46 @@ export class ProjectTransferService {
     });
   }
 
-  /** Dump a LOCAL database to the staging databases/ dir, returns the rel path. */
-  private async dumpLocalDatabase(db: { name: string; type: string; username: string; password: string }, dir: string): Promise<string | null> {
-    const container = `dockcontrol-db-${db.name}`;
-    const rel = path.posix.join('databases', `${db.name}.sql.gz`);
+  /**
+   * Dump a LOCAL standalone database to the staging databases/ dir, returns
+   * the rel path (or null when the engine has no SQL dump, e.g. Redis whose
+   * data rides its volume tar). Auto-imported (bundled) DBs are NOT dumped
+   * here — they are filtered out by the caller (their data is in the parent
+   * app's volume). So this always runs with autoImported=false / dumpAll=false.
+   *
+   * Command shapes + the gzip envelope come from the shared db-dump helper
+   * (resolveDbContainer fixes the old `dockcontrol-db-<name>` assumption;
+   * password rides a 0600 --env-file, never the host argv).
+   */
+  private async dumpLocalDatabase(
+    db: { name: string; type: string; username: string; password: string; autoImported?: boolean; host?: string },
+    dir: string,
+  ): Promise<string | null> {
+    const dumpable = {
+      name: db.name, type: db.type, username: db.username, password: db.password,
+      autoImported: false, host: db.host || '',
+    };
+    const container = resolveDbContainer(dumpable);
+    const plan = dumpPlan(dumpable, container, { dumpAll: false });
+    if (!plan) return null; // Redis/others — data rides the volume tar instead.
+    const rel = path.posix.join('databases', `${db.name}.${plan.ext}.gz`);
     const out = path.join(dir, rel);
+
+    let envFile: string | undefined;
+    let argv = plan.argv;
     try {
+      if (plan.prepArgv) await execFileAsync('docker', plan.prepArgv, { timeout: 300_000 });
+      if (plan.envFileContent) {
+        envFile = path.join(os.tmpdir(), `dockcontrol-xfer-dump-${crypto.randomBytes(8).toString('hex')}.env`);
+        fs.writeFileSync(envFile, plan.envFileContent, { mode: 0o600 });
+        argv = [plan.argv[0], '--env-file', envFile, ...plan.argv.slice(1)];
+      }
       const { spawn } = await import('child_process');
-      const dumpArgs = this.dumpArgvFor(db, container);
-      if (!dumpArgs) return null;
       await new Promise<void>((resolve, reject) => {
         const ws = fs.createWriteStream(out);
         const { createGzip } = require('zlib');
         const gz = createGzip();
-        const child = spawn('docker', dumpArgs.argv, { env: { ...process.env, ...dumpArgs.env } });
+        const child = spawn('docker', argv);
         const timer = setTimeout(() => child.kill('SIGKILL'), 30 * 60_000);
         child.stdout.pipe(gz).pipe(ws);
         child.once('error', (err) => { clearTimeout(timer); ws.destroy(); reject(err); });
@@ -367,19 +418,9 @@ export class ProjectTransferService {
     } catch (e: any) {
       this.logger.warn(`dump db ${db.name}: ${e?.message || e}`);
       return null;
+    } finally {
+      if (envFile) { try { fs.unlinkSync(envFile); } catch {} }
     }
-  }
-
-  private dumpArgvFor(db: { name: string; type: string; username: string; password: string }, container: string): { argv: string[]; env: Record<string, string> } | null {
-    const t = (db.type || '').toUpperCase();
-    if (t === 'POSTGRES' || t === 'POSTGRESQL') {
-      return { argv: ['exec', '-e', `PGPASSWORD=${db.password}`, container, 'pg_dump', '-U', db.username, '-d', db.name], env: {} };
-    }
-    if (t === 'MYSQL' || t === 'MARIADB') {
-      return { argv: ['exec', '-e', `MYSQL_PWD=${db.password}`, container, 'mysqldump', '-u', db.username, db.name], env: {} };
-    }
-    // Redis/others: no SQL dump (data rides the volume tar instead).
-    return null;
   }
 
   // ── IMPORT: PARSE (review only, no mutation) ────────────────────────
@@ -525,6 +566,19 @@ export class ProjectTransferService {
       if (typeof a.name !== 'string') throw new BadRequestException('Malformed application entry.');
       if (!Array.isArray(a.volumeFiles)) a.volumeFiles = [];
       for (const v of a.volumeFiles) if (!safeRel(v)) throw new BadRequestException('Unsafe volume path in archive.');
+      // New per-volume descriptors (cross-install remap). Optional — v1.0
+      // archives carry only volumeFiles. Validate the tar path AND the key
+      // (the key becomes part of a docker volume name → reject anything that
+      // isn't a plain volume-name segment).
+      if (a.volumes !== undefined) {
+        if (!Array.isArray(a.volumes)) throw new BadRequestException('Malformed application volumes.');
+        for (const v of a.volumes) {
+          if (!v || !safeRel(v.file)) throw new BadRequestException('Unsafe volume path in archive.');
+          if (typeof v.key !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(v.key)) {
+            throw new BadRequestException('Unsafe volume key in archive.');
+          }
+        }
+      }
       // CRITICAL: an imported compose is attacker-controlled. Screen it for
       // host bind-mounts / docker.sock / privileged BEFORE it can ever be
       // written to disk and run — create()'s parse-only check does NOT.
@@ -584,9 +638,34 @@ export class ProjectTransferService {
         serverId: opts.targetServerId,
       } as any);
 
+      // Restore artifacts (volume tars + standalone DB dumps) must outlive
+      // this method: app deploys are async and consume them AFTER applyImport
+      // returns, but the finally below wipes the staging dir. Move them to a
+      // sibling restore dir that the TTL sweeper still reaps (it matches the
+      // xfer_ prefix), and consumers self-delete each file once applied.
+      const restoreDir = path.join(XFER_DIR, `${stagedId}-restore`);
+      if (manifest.includesData) fs.mkdirSync(restoreDir, { recursive: true });
+      // Park an artifact outside staging; returns the new absolute path.
+      const park = (rel: string): string => {
+        const src = path.join(extractDir, rel);
+        const dst = path.join(restoreDir, path.basename(rel));
+        fs.renameSync(src, dst);
+        return dst;
+      };
+
       // 2) Databases — recreate via the validated create path.
+      //    BUNDLED (auto-imported, dataInVolume) DBs are NOT created here: they
+      //    live inside their parent app's compose stack, so the app deploy's
+      //    own importFromAppCompose re-registers them and the app's volume
+      //    restore brings their data. Creating a standalone container for them
+      //    would spawn a phantom DB. STANDALONE DBs are created + (optionally)
+      //    replayed from their SQL dump.
       const dbNameToId: Record<string, string> = {};
       for (const db of manifest.databases) {
+        if (db.dataInVolume) {
+          // Data rides the parent app's volume tar — nothing to do here.
+          continue;
+        }
         try {
           const created = await this.databases.create(userId, {
             name: db.name,
@@ -594,9 +673,19 @@ export class ProjectTransferService {
             projectId: project.id,
             serverId: opts.targetServerId,
           } as any);
-          dbNameToId[db.name] = (created as any).id;
+          const newDbId = (created as any).id;
+          dbNameToId[db.name] = newDbId;
           if (manifest.includesData && db.dumpFile) {
-            warnings.push(`db ${db.name}: data restore from the archive dump is queued separately — verify after deploy.`);
+            // Replay the dump once the fresh container accepts connections.
+            // Fire-and-forget with self-cleanup: the container boot (pull +
+            // initdb) can take minutes, so we must NOT block the import HTTP
+            // request on it. restoreDbDump waits for readiness internally.
+            const dumpPath = park(db.dumpFile);
+            void this.databases
+              .restoreDbDump(newDbId, dumpPath)
+              .catch((e) => this.logger.warn(`restore dump for db ${db.name}: ${e?.message || e}`))
+              .finally(() => { try { fs.unlinkSync(dumpPath); } catch {} });
+            warnings.push(`db ${db.name}: data is being restored in the background once the container is ready — verify shortly after deploy.`);
           }
         } catch (e: any) {
           warnings.push(`db ${db.name}: ${e?.message || e}`);
@@ -659,6 +748,26 @@ export class ProjectTransferService {
           // Note: customPort is not a create-DTO field (it's derived from
           // hostPort/domain at deploy time). The published host port carried by
           // hostPort + the compose's own publish drives the URL after import.
+
+          // Data restore: hand the compose deploy this app's volume seeds so it
+          // populates them BEFORE `up` (bundled DBs boot on restored data, not
+          // a fresh installer). Only compose apps carry volumes; `volumes`
+          // (new) wins over legacy `volumeFiles` (path-only, no remap key).
+          if (manifest.includesData && app.dockerComposeFile) {
+            const vols = app.volumes && app.volumes.length
+              ? app.volumes
+              // Legacy v1.0 archive: derive the key from the tar basename by
+              // stripping a leading `<slug>-<id>_` prefix if present; the
+              // deploy rebuilds the target name from its own prefix anyway.
+              : (app.volumeFiles || []).map((f) => {
+                  const baseNoExt = path.basename(f).replace(/\.tar\.gz$/, '');
+                  const us = baseNoExt.indexOf('_');
+                  return { file: f, key: us >= 0 ? baseNoExt.slice(us + 1) : baseNoExt };
+                });
+            if (vols.length) {
+              dto.restoreVolumes = vols.map((v) => ({ key: v.key, tarPath: park(v.file) }));
+            }
+          }
           const created = await this.applications.create(userId, dto);
           appNameToId[app.name] = (created as any).id;
         } catch (e: any) {

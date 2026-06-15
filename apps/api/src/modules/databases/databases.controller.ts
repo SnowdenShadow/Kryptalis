@@ -1,6 +1,7 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, Query, UseGuards, Res } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { DatabasesService } from './databases.service';
 import { CreateDatabaseDto } from './dto/create-database.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -45,6 +46,36 @@ export class DatabasesController {
   @ApiOperation({ summary: 'Stop database' })
   stop(@CurrentUser('id') userId: string, @Param('id') id: string) {
     return this.svc.stop(userId, id);
+  }
+
+  @Get(':id/export')
+  @ApiOperation({ summary: 'Export (download) a logical dump of the database' })
+  async export(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Res() res: Response,
+  ) {
+    const { stream, filename, cleanup } = await this.svc.exportDump(userId, id);
+    // RFC 5987 filename + ASCII fallback — blocks Content-Disposition header
+    // injection via CRLF/" in the (sanitized) basename.
+    const asciiSafe = filename.replace(/[^\x20-\x7e]/g, '_');
+    const encoded = encodeURIComponent(filename);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${asciiSafe}"; filename*=UTF-8''${encoded}`,
+    );
+    res.setHeader('Content-Type', 'application/octet-stream');
+    const done = () => { if (cleanup) cleanup(); };
+    stream.on('end', done);
+    stream.on('close', done);
+    stream.on('error', (err: Error) => {
+      done();
+      // Headers may already be sent (streaming started) — destroy so the
+      // client sees a failed transfer instead of a truncated, silently
+      // corrupt dump.
+      try { res.destroy(err); } catch {}
+    });
+    stream.pipe(res);
   }
 
   @Patch(':id/parent')

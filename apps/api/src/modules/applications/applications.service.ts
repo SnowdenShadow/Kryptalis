@@ -114,6 +114,7 @@ export class ApplicationsService {
       envVars: dtoEnvVars,
       hostPort: dtoHostPort,
       serverId: dtoServerId,
+      restoreVolumes: dtoRestoreVolumes,
       ...dbData
     } = dto;
 
@@ -428,6 +429,9 @@ export class ApplicationsService {
       this.deployService.runComposeOnlyDeploy(deployment.id, app.id, dto.name, composeContent, {
         envVars: dto.envVars,
         hostPort: dtoHostPort,
+        // Internal (project-transfer): seed volumes from imported tars before
+        // the stack boots so a bundled-DB app restores onto its datadir.
+        restoreVolumes: dtoRestoreVolumes,
       }).catch(() => {});
     } else if (dockerfileContent) {
       // Raw Dockerfile + optional context files — we build the image

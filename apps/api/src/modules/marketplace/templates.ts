@@ -119,6 +119,8 @@ networks:
       - dockcontrol-apps
     ports:
       - "__HOST_PORT__:80"
+    env_file:
+      - .env
     environment:
       # container_name, NOT the bare service name: the service-name alias
       # lives on the SHARED dockcontrol-apps network, so two WordPress
@@ -910,6 +912,67 @@ if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
 `,
   },
 };
+
+/**
+ * Per-app env that pins the PUBLIC domain/URL for web apps that bake their
+ * site address into their DB/config on first boot (and would otherwise
+ * auto-detect it from the FIRST HTTP request's Host header — including the
+ * container's own published `:port`, which then gets frozen into every
+ * generated link forever).
+ *
+ * Applied ONLY in clean-URL mode: the app is served at https://<domain> on
+ * Caddy's :443, so we hand the app the clean hostname up front. The result
+ * is deterministic regardless of which path the first request takes.
+ *
+ * Returns {} for apps that don't persist a domain (plain DBs, DB GUIs,
+ * dashboards like Portainer/Grafana that read the Host header live per
+ * request). The caller merges this UNDER the user's form env — an explicit
+ * value from the install dialog always wins.
+ *
+ * NOTE: the matching templates MUST declare `env_file: - .env` so these
+ * vars actually reach the container (the install path writes them to .env).
+ */
+export function domainPinEnv(slug: string, domain: string): Record<string, string> {
+  const https = `https://${domain}`;
+  switch (slug) {
+    case 'prestashop':
+      // ps_shop_url / ps_shop_domain_ssl. PS_ENABLE_SSL is already 1 in the
+      // template, so the shop serves https on the clean host.
+      return { PS_DOMAIN: domain };
+    case 'wordpress':
+      // WordPress writes siteurl/home into wp_options on install. WP_HOME +
+      // WP_SITEURL constants in wp-config.php OVERRIDE the DB values at
+      // runtime, so the clean domain wins even if the install request came
+      // in on host:port. Single line (no newlines) — the .env writer escapes
+      // newlines and would corrupt the PHP otherwise.
+      return {
+        WORDPRESS_CONFIG_EXTRA: `define('WP_HOME','${https}'); define('WP_SITEURL','${https}');`,
+      };
+    case 'ghost':
+      // Ghost's `url` is authoritative for every generated link (admin,
+      // feeds, canonical tags). Setting it fixes all of them at once.
+      return { url: https };
+    case 'nextcloud':
+      // TRUSTED_DOMAINS is mandatory — Nextcloud hard-refuses any host not in
+      // the list ("Access through untrusted domain"). OVERWRITEHOST/PROTOCOL
+      // make it generate https://<domain> links behind Caddy's TLS termination.
+      return {
+        NEXTCLOUD_TRUSTED_DOMAINS: domain,
+        OVERWRITEHOST: domain,
+        OVERWRITEPROTOCOL: 'https',
+      };
+    case 'gitea':
+      // ROOT_URL is baked into app.ini on first boot; the GITEA__ env vars
+      // re-assert it on every start so clone URLs / OAuth callbacks / webhooks
+      // all use the clean host.
+      return {
+        GITEA__server__ROOT_URL: `${https}/`,
+        GITEA__server__DOMAIN: domain,
+      };
+    default:
+      return {};
+  }
+}
 
 export const PORT_MAP: Record<string, number> = {
   // 9090, NOT 9000: minio's template hard-publishes 9000:9000 (S3 API), and

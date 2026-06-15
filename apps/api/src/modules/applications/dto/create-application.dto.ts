@@ -169,4 +169,14 @@ export class CreateApplicationDto {
   @IsOptional()
   @IsString()
   serverId?: string;
+
+  /**
+   * INTERNAL — not part of the public API. Deliberately UNDECORATED so the
+   * global ValidationPipe (`whitelist: true`) STRIPS it from any HTTP request
+   * body: it can only be set by in-process callers (ProjectTransferService),
+   * never by a client. Carries docker-volume seeds (key + on-disk tar path)
+   * that runComposeOnlyDeploy restores BEFORE the stack boots, so an imported
+   * bundled-DB app starts on its restored datadir. compose-only deploys only.
+   */
+  restoreVolumes?: { key: string; tarPath: string }[];
 }
