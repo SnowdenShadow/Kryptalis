@@ -534,16 +534,43 @@ function wireDbRow(prisma: ReturnType<typeof makePrisma>, row: Record<string, an
 }
 
 describe('lifecycle', () => {
-  it('auto-imported DBs refuse start/stop/remove (managed by the parent app)', async () => {
+  it('auto-imported DBs refuse start/stop (managed by the parent app)', async () => {
     const { service, prisma } = makeService();
     mockAssert.mockResolvedValue('ADMIN' as any);
     wireDbRow(prisma, { id: 'db1', projectId: 'p1', name: 'pg@abc123', autoImported: true });
 
     await expect(service.start('u1', 'db1')).rejects.toThrow(BadRequestException);
     await expect(service.stop('u1', 'db1')).rejects.toThrow(BadRequestException);
-    await expect(service.remove('u1', 'db1')).rejects.toThrow(BadRequestException);
     expect(findExec((c) => c.cmd === 'docker')).toBeUndefined();
     expect(prisma.database.delete).not.toHaveBeenCalled();
+  });
+
+  it('auto-imported DB remove: tears down the REAL sidecar container (host) + drops the row + warns', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('ADMIN' as any);
+    // Bundled row: real container_name lives in `host`; parent app still linked.
+    wireDbRow(prisma, {
+      id: 'db1', projectId: 'p1', applicationId: 'app1',
+      name: 'prestashop', autoImported: true, host: 'dockcontrol-prestashop-db-abc123',
+    });
+    // inspect → report one named volume so we exercise the volume rm path.
+    handlers.push((cmd, args) =>
+      cmd === 'docker' && args[0] === 'inspect' ? { stdout: 'prestashop-abc123_data \n' } : undefined,
+    );
+
+    const res = await service.remove('u1', 'db1');
+
+    // Removes the bundled container by its REAL name (not dockcontrol-db-<name>).
+    const rm = findExec((c) => c.cmd === 'docker' && c.args[0] === 'rm' && c.args.includes('dockcontrol-prestashop-db-abc123'));
+    expect(rm).toBeTruthy();
+    // Drops the discovered named volume.
+    const volRm = findExec((c) => c.cmd === 'docker' && c.args[0] === 'volume' && c.args[1] === 'rm' && c.args.includes('prestashop-abc123_data'));
+    expect(volRm).toBeTruthy();
+    // NEVER touches the standalone dockcontrol-db-<name> container.
+    expect(findExec((c) => c.cmd === 'docker' && c.args.includes('dockcontrol-db-prestashop'))).toBeUndefined();
+    expect(prisma.database.delete).toHaveBeenCalledWith({ where: { id: 'db1' } });
+    // Warns that the parent app's stack is now incomplete.
+    expect(res.message).toMatch(/incomplete|redeploy|delete the application/i);
   });
 
   it('start runs compose up -d in the db dir', async () => {

@@ -471,22 +471,37 @@ export default function DatabasesPage() {
                           the application page so the whole stack stays
                           consistent. We show a quick jump-link instead. */}
                       {db.autoImported ? (
-                        db.application ? (
-                          <Link
-                            href={`/dashboard/applications/${db.application.id}`}
-                            onClick={(e: MouseEvent<HTMLAnchorElement>) => e.stopPropagation()}
-                          >
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-8 text-xs"
-                              title={t('databases.manageInAppTitle')}
+                        <>
+                          {db.application && (
+                            <Link
+                              href={`/dashboard/applications/${db.application.id}`}
+                              onClick={(e: MouseEvent<HTMLAnchorElement>) => e.stopPropagation()}
                             >
-                              <Rocket size={12} className="mr-1" />
-                              {t('databases.manageInApp')}
-                            </Button>
-                          </Link>
-                        ) : null
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-8 text-xs"
+                                title={t('databases.manageInAppTitle')}
+                              >
+                                <Rocket size={12} className="mr-1" />
+                                {t('databases.manageInApp')}
+                              </Button>
+                            </Link>
+                          )}
+                          {/* Bundled DBs ARE deletable now (backend tears down
+                              the real sidecar container + warns). The confirm
+                              dialog carries the "stack becomes incomplete"
+                              caveat for auto-imported rows. */}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => setDeleteId(db.id)}
+                            title={t('databases.actionDelete') || 'Delete'}
+                          >
+                            <Trash2 size={15} />
+                          </Button>
+                        </>
                       ) : (
                         <>
                           {!deploying && running && (
@@ -755,6 +770,12 @@ export default function DatabasesPage() {
             {t('databases.deleteConfirmAfter')}
           </DialogDescription>
         </DialogHeader>
+        {deletingDb?.autoImported && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+            {t('databases.deleteBundledWarning') ||
+              'This database is bundled in an application. Deleting it removes its container now, but the app\'s stack will be incomplete — redeploying the app recreates it. To remove it for good, delete the application.'}
+          </div>
+        )}
         <DialogFooter>
           <Button variant="outline" onClick={() => setDeleteId(null)}>
             {t('common.cancel')}

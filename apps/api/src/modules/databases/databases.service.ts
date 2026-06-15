@@ -494,14 +494,62 @@ export class DatabasesService {
 
   async remove(userId: string, id: string) {
     const db = await this.assertDbAccess(userId, id, 'ADMIN');
-    if ((db as any).autoImported) {
-      throw new BadRequestException(
-        'This database is managed by its parent application. Delete the application to remove it.',
-      );
+    const server = await this.resolveDbServer(id);
+    const autoImported = (db as any).autoImported as boolean;
+
+    // ── Auto-imported (bundled) DB: lives inside its parent app's compose
+    //    stack, NOT in DBS_DIR. There's no standalone compose dir to `down`,
+    //    so we tear down the real sidecar CONTAINER (its name is stored in
+    //    `host`, resolved via the shared helper) + drop its volume, then the
+    //    row. We deliberately allow this now (was a hard 400): a bundled DB is
+    //    a database like any other. CAVEAT surfaced in the return message: if
+    //    the parent app still exists, its stack is now incomplete and a
+    //    redeploy of the app will re-create the sidecar (and re-import the
+    //    row) — to remove it for good, delete the application.
+    if (autoImported) {
+      const container = resolveDbContainer(db); // = db.host for bundled rows
+      if (this.isDbLocal(server)) {
+        // Discover the container's named volumes BEFORE removing it (after
+        // `rm` the mounts are gone). Best-effort throughout — a missing
+        // container/volume must not block the row delete.
+        let volumes: string[] = [];
+        try {
+          const { stdout } = await execFileAsync(
+            'docker',
+            ['inspect', '--format', '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}', container],
+            { timeout: 10_000 },
+          );
+          volumes = stdout.trim().split(/\s+/).filter(Boolean);
+        } catch {}
+        try { await execFileAsync('docker', ['rm', '-f', container], { timeout: 15_000 }); } catch {}
+        for (const v of volumes) {
+          try { await execFileAsync('docker', ['volume', 'rm', '-f', v], { timeout: 10_000 }); } catch {}
+        }
+      } else if (server) {
+        // Remote: ask the agent to remove just this container + its volumes.
+        try {
+          await this.agent.enqueueTask(server.id, 'REMOVE', {
+            slug: `db-${db.name}`,
+            containerName: container,
+            purgeVolumes: true,
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error(`[databases] failed to enqueue remote REMOVE for bundled "${db.name}":`, err);
+        }
+      }
+      await this.prisma.database.delete({ where: { id } });
+      const appId = (db as any).applicationId as string | null;
+      return {
+        message: appId
+          ? 'Database removed. It was bundled in an application — that app\'s stack is now incomplete, and redeploying the app will recreate this database. Delete the application to remove it permanently.'
+          : 'Database removed.',
+      };
     }
+
+    // ── Standalone DB: managed in its own DBS_DIR compose stack. ───────
     const containerName = `dockcontrol-db-${db.name}`;
     const slug = `db-${db.name}`;
-    const server = await this.resolveDbServer(id);
 
     if (this.isDbLocal(server)) {
       const dbDir = path.join(DBS_DIR, db.name);

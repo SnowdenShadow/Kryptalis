@@ -70,6 +70,9 @@ function makeService() {
   const notifications = { sendUserInvited: vi.fn(), sendUserAddedToProject: vi.fn() };
   const ops = { redeploy: vi.fn().mockResolvedValue({ message: 'ok' }) };
   const encryption = { decrypt: vi.fn((v: string) => v) };
+  // ApplicationsService.remove() — project teardown delegates per-app cleanup
+  // to it now (single source of truth). Default: resolves; tests assert calls.
+  const applications = { remove: vi.fn().mockResolvedValue({ message: 'Application deleted' }) };
   const service = new ProjectsService(
     prisma as any,
     admin as any,
@@ -79,8 +82,9 @@ function makeService() {
     notifications as any,
     ops as any,
     encryption as any,
+    applications as any,
   );
-  return { service, prisma, admin, agent, proxy, mailServer, notifications, ops, encryption };
+  return { service, prisma, admin, agent, proxy, mailServer, notifications, ops, encryption, applications };
 }
 
 const mockAssert = vi.mocked(assertProjectAccess);
@@ -303,6 +307,74 @@ describe('removeMember', () => {
     const res = await service.removeMember('p1', 'actor', 'm1');
     expect(res).toEqual({ message: 'Member removed' });
     expect(prisma.projectMember.delete).toHaveBeenCalledWith({ where: { id: 'm1' } });
+  });
+});
+
+describe('remove (project teardown)', () => {
+  function setupRemove(project: any) {
+    const ctx = makeService();
+    const { prisma } = ctx;
+    mockAssert.mockResolvedValue('OWNER');
+    prisma.project.findUnique.mockResolvedValue(project);
+    // domain.deleteMany + project.delete are hit at the end of remove().
+    (prisma as any).domain = { deleteMany: vi.fn().mockResolvedValue({ count: 0 }) };
+    prisma.project.delete.mockResolvedValue({});
+    return ctx;
+  }
+
+  const localProject = {
+    id: 'p1', name: 'Shop', serverId: 'srv1', server: { id: 'srv1', host: 'localhost' },
+    applications: [
+      { id: 'prestaapp01', name: 'prestashop', server: { id: 'srv1', host: 'localhost' } },
+    ],
+    // A bundled DB (rides the app) + a standalone DB.
+    databases: [
+      { id: 'bundled1', name: 'prestashop', autoImported: true },
+      { id: 'standalone1', name: 'analytics', autoImported: false },
+    ],
+    domains: [],
+  };
+
+  it('delegates each app teardown to applications.remove() (the real, dir-resolving path)', async () => {
+    const { service, applications } = setupRemove(localProject);
+    await service.remove('p1', 'u1');
+    expect(applications.remove).toHaveBeenCalledTimes(1);
+    expect(applications.remove).toHaveBeenCalledWith('u1', 'prestaapp01');
+  });
+
+  it('does NOT re-clean bundled DBs (they went with their app); only standalone DBs hit the DB loop', async () => {
+    // Remote project so the standalone DB-loop path enqueues an agent REMOVE we
+    // can observe (the local path shells docker directly, not mocked here).
+    const remoteProject = {
+      ...localProject,
+      serverId: 'srvR', server: { id: 'srvR', host: '203.0.113.5' },
+      applications: [{ id: 'prestaapp01', name: 'prestashop', server: { id: 'srvR', host: '203.0.113.5' } }],
+    };
+    const { service, agent } = setupRemove(remoteProject);
+    await service.remove('p1', 'u1');
+    // Standalone DB → agent REMOVE for dockcontrol-db-analytics.
+    expect(agent.enqueueTask).toHaveBeenCalledWith(
+      'srvR', 'REMOVE', expect.objectContaining({ containerName: 'dockcontrol-db-analytics' }),
+    );
+    // Bundled DB → NEVER cleaned by the DB loop (it left with its app).
+    expect(agent.enqueueTask).not.toHaveBeenCalledWith(
+      expect.anything(), 'REMOVE', expect.objectContaining({ containerName: 'dockcontrol-db-prestashop' }),
+    );
+  });
+
+  it('still deletes the project row + domains at the end', async () => {
+    const { service, prisma } = setupRemove(localProject);
+    await service.remove('p1', 'u1');
+    expect((prisma as any).domain.deleteMany).toHaveBeenCalledWith({ where: { projectId: 'p1' } });
+    expect(prisma.project.delete).toHaveBeenCalledWith({ where: { id: 'p1' } });
+  });
+
+  it('one app cleanup failure does not abort the whole teardown', async () => {
+    const { service, prisma, applications } = setupRemove(localProject);
+    applications.remove.mockRejectedValueOnce(new Error('docker hiccup'));
+    await service.remove('p1', 'u1');
+    // Despite the app failure, the project is still deleted (best-effort).
+    expect(prisma.project.delete).toHaveBeenCalledWith({ where: { id: 'p1' } });
   });
 });
 

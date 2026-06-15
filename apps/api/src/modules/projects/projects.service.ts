@@ -20,6 +20,7 @@ import { AgentService, AgentTaskCompletion, AgentTaskType } from '../agent/agent
 import { appVolumePrefix, dbVolumePrefix } from '../agent/volume-naming.util';
 import { slugify, remoteAppSlug, RESERVED_HOST_PORTS } from '../applications/applications.helpers';
 import { ApplicationOpsService } from '../applications/application-ops.service';
+import { ApplicationsService } from '../applications/applications.service';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -103,6 +104,7 @@ export class ProjectsService implements OnModuleInit {
     private notifications: NotificationsService,
     private ops: ApplicationOpsService,
     private encryption: EncryptionService,
+    private applications: ApplicationsService,
   ) {}
 
   onModuleInit() {
@@ -242,7 +244,7 @@ export class ProjectsService implements OnModuleInit {
         // app.server: per-app placement — cleanup must run on the server
         // each app ACTUALLY lives on, not blindly on the project default.
         applications: { select: { id: true, name: true, server: { select: { id: true, host: true } } } },
-        databases: { select: { id: true, name: true } },
+        databases: { select: { id: true, name: true, autoImported: true } },
         domains: { select: { id: true, domain: true } },
       },
     });
@@ -262,54 +264,32 @@ export class ProjectsService implements OnModuleInit {
     const isLocal = isLocalHost(project.server?.host);
 
     // ── Applications ────────────────────────────────────────────────
-    // LOCAL: drive docker compose + fs cleanup directly (the agent loop
-    // wouldn't run before the cascade nukes the rows). MULTI: enqueue REMOVE
-    // on the remote agent. purgeVolumes=true — user explicitly deleted the
-    // project, no recovery path expected.
+    // Delegate to ApplicationsService.remove() — the single source of truth
+    // for tearing an app down. It resolves the on-disk dir correctly
+    // (resolveAppDir, which knows the real per-instance vs legacy path even
+    // after a rename), runs `compose down -v --rmi local` so the WHOLE stack
+    // goes (incl. a bundled DB sidecar like PrestaShop's MariaDB), has the
+    // belt-and-suspenders `docker rm` under both naming schemes, drops the
+    // project network, AND purges the auto-imported DB rows. The previous
+    // inline copy here had drifted (it slugged the current name, missing the
+    // real dir → leaked the PrestaShop + sidecar containers). Best-effort per
+    // app: one failure must not abort the rest of the project teardown.
     for (const app of project.applications) {
-      const slug = slugify(app.name);
-      // Per-app placement: clean up on the server the app RESOLVES to
-      // (app.server wins over the project default).
-      const appServer = app.server ?? project.server;
-      const appIsLocal = isLocalHost(appServer?.host);
-      if (appIsLocal) {
-        // Marketplace multi-install apps live in <slug>-<id12>; legacy installs
-        // in <slug>. Try the per-instance dir first, then fall back.
-        const id12 = app.id.slice(0, 12);
-        const perInstanceDir = path.join(PROJ_APPS_DIR, `${slug}-${id12}`);
-        const legacyDir = path.join(PROJ_APPS_DIR, slug);
-        for (const dir of [perInstanceDir, legacyDir]) {
-          if (fs.existsSync(dir)) {
-            // --rmi local purges locally-BUILT images (the per-app
-            // `<slug>-<id>-web:latest` ones) so they don't accumulate.
-            // Pulled images like postgres:16 are shared → not touched.
-            try { await execFileAsync('docker', ['compose', 'down', '-v', '--rmi', 'local', '--remove-orphans'], { cwd: dir, timeout: 90_000 }); } catch {}
-            try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-          }
-        }
-        // belt + suspenders: kill orphan containers under both naming schemes
-        try { await execFileAsync('docker', ['rm', '-f', `dockcontrol-${slug}`], { timeout: 10_000 }); } catch {}
-        try { await execFileAsync('docker', ['rm', '-f', `dockcontrol-${slug}-${id12}`], { timeout: 10_000 }); } catch {}
-      } else if (appServer) {
-        try {
-          // slug: per-instance convention (new remote deploys);
-          // legacySlug: bare slug for pre-convention installs. The agent's
-          // resolveTaskDir tries slug first, then legacySlug.
-          await this.agent.enqueueTask(appServer.id, 'REMOVE', {
-            slug: `${slug}-${app.id.slice(0, 12)}`,
-            legacySlug: slug,
-            containerName: `dockcontrol-${slug}`,
-            purgeVolumes: true,
-          });
-        } catch {}
+      try {
+        await this.applications.remove(userId, app.id);
+      } catch (err: any) {
+        this.logger.warn(`project remove: app "${app.name}" cleanup failed: ${err?.message || err}`);
       }
     }
 
-    // ── Databases ───────────────────────────────────────────────────
-    // databases.service stores compose dir as DBS_DIR/<db.name> (no slug) and
-    // names containers dockcontrol-db-<db.name>. Match those exactly or LOCAL
-    // cleanup misses the bind-mount + leaks the postgres/redis container.
+    // ── Databases (STANDALONE only) ─────────────────────────────────
+    // Bundled (auto-imported) DBs live in their parent app's compose stack and
+    // were already torn down + their rows purged by applications.remove above
+    // — skip them here (a second `docker rm` would be a confusing no-op).
+    // Standalone DBs have their OWN DBS_DIR/<name> compose dir + the
+    // dockcontrol-db-<name> container; clean those exactly.
     for (const db of project.databases) {
+      if (db.autoImported) continue;
       const containerName = `dockcontrol-db-${db.name}`;
       const slug = `db-${db.name}`;
       if (isLocal) {
