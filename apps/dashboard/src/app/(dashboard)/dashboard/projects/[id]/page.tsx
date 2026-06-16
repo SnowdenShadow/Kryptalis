@@ -98,6 +98,7 @@ export default function ProjectDetailPage() {
   const [migrateIncludePinned, setMigrateIncludePinned] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [exportIncludeData, setExportIncludeData] = useState(false);
+  const [exportIncludeImages, setExportIncludeImages] = useState(false);
   const [exportPassphrase, setExportPassphrase] = useState('');
   const [exportConfirm, setExportConfirm] = useState('');
   const timeAgo = useMemo(
@@ -251,7 +252,7 @@ export default function ProjectDetailPage() {
     mutationFn: async () => {
       const { downloadToken, filename } = await api.post<{ downloadToken: string; filename: string }>(
         `/projects/${id}/export`,
-        { includeData: exportIncludeData, passphrase: exportPassphrase },
+        { includeData: exportIncludeData, includeImages: exportIncludeImages, passphrase: exportPassphrase },
       );
       const res = await api.rawFetch(`/projects/transfer/download/${downloadToken}`);
       const blob = await res.blob();
@@ -268,6 +269,7 @@ export default function ProjectDetailPage() {
       toast.success(t('projects.export.success'));
       setShowExport(false);
       setExportIncludeData(false);
+      setExportIncludeImages(false);
       setExportPassphrase('');
       setExportConfirm('');
     },
@@ -1078,7 +1080,7 @@ export default function ProjectDetailPage() {
       </Dialog>
 
       {/* Export Dialog */}
-      <Dialog open={showExport} onClose={() => { setShowExport(false); setExportPassphrase(''); setExportConfirm(''); }}>
+      <Dialog open={showExport} onClose={() => { setShowExport(false); setExportIncludeImages(false); setExportPassphrase(''); setExportConfirm(''); }}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Download size={16} /> {t('projects.export.title')}
@@ -1097,6 +1099,24 @@ export default function ProjectDetailPage() {
             <span>
               <span className="font-medium">{t('projects.export.includeData')}</span>
               <span className="text-muted-foreground block">{t('projects.export.includeDataDesc')}</span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-2 text-xs cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={exportIncludeImages}
+              onChange={(e) => setExportIncludeImages(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">
+                {t('projects.export.includeImages') || 'Include Docker images (exact, no rebuild)'}
+              </span>
+              <span className="text-muted-foreground block">
+                {t('projects.export.includeImagesDesc') ||
+                  'Bundles each app’s images so the import runs the EXACT same binary — no pull, no rebuild. Much larger archive (GBs).'}
+              </span>
             </span>
           </label>
 
@@ -1133,7 +1153,7 @@ export default function ProjectDetailPage() {
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => { setShowExport(false); setExportPassphrase(''); setExportConfirm(''); }}>{t('common.cancel')}</Button>
+          <Button variant="outline" onClick={() => { setShowExport(false); setExportIncludeImages(false); setExportPassphrase(''); setExportConfirm(''); }}>{t('common.cancel')}</Button>
           <Button
             disabled={!exportPassValid || !exportPassMatch || exportMutation.isPending}
             onClick={() => exportMutation.mutate()}

@@ -115,6 +115,7 @@ export class ApplicationsService {
       hostPort: dtoHostPort,
       serverId: dtoServerId,
       restoreVolumes: dtoRestoreVolumes,
+      loadImages: dtoLoadImages,
       ...dbData
     } = dto;
 
@@ -432,6 +433,9 @@ export class ApplicationsService {
         // Internal (project-transfer): seed volumes from imported tars before
         // the stack boots so a bundled-DB app restores onto its datadir.
         restoreVolumes: dtoRestoreVolumes,
+        // Internal (project-transfer): load the exact bundled images + rewrite
+        // the compose to consume them (no pull/rebuild) before the stack boots.
+        loadImages: dtoLoadImages,
       }).catch(() => {});
     } else if (dockerfileContent) {
       // Raw Dockerfile + optional context files — we build the image

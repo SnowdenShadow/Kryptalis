@@ -442,6 +442,56 @@ describe('runComposeOnlyDeploy', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════
+// rewriteComposeForLoadedImages (project-transfer image bundling)
+// ═══════════════════════════════════════════════════════════════════
+
+describe('rewriteComposeForLoadedImages', () => {
+  const noop = () => {};
+  const rewrite = (svc: any, yamlStr: string, tags: string[], slug = 'my-app') =>
+    yaml.load(svc.rewriteComposeForLoadedImages(yamlStr, tags, slug, noop)) as any;
+
+  it('pins pull_policy: missing on every service (registry images run as-is)', () => {
+    const { service } = makeService();
+    const doc = rewrite(service,
+      'services:\n  web:\n    image: prestashop/prestashop:8\n  db:\n    image: mariadb:11\n',
+      ['prestashop/prestashop:8', 'mariadb:11'],
+    );
+    expect(doc.services.web.pull_policy).toBe('missing');
+    expect(doc.services.db.pull_policy).toBe('missing');
+  });
+
+  it('converts a build: service to image: the canonical built tag (no rebuild)', () => {
+    const { service } = makeService();
+    // imageName('my-app') === 'dockcontrol/my-app:latest' — that tag must be in
+    // savedImages for the rewrite to bind it.
+    const doc = rewrite(service,
+      'services:\n  app:\n    build:\n      context: .\n',
+      ['dockcontrol/my-app:latest'],
+    );
+    expect(doc.services.app.build).toBeUndefined();
+    expect(doc.services.app.image).toBe('dockcontrol/my-app:latest');
+    expect(doc.services.app.pull_policy).toBe('missing');
+  });
+
+  it('keeps an explicit image on a build+image service when it was saved', () => {
+    const { service } = makeService();
+    const doc = rewrite(service,
+      'services:\n  app:\n    build: .\n    image: ghcr.io/me/app:1.2\n',
+      ['ghcr.io/me/app:1.2'],
+    );
+    expect(doc.services.app.build).toBeUndefined();
+    expect(doc.services.app.image).toBe('ghcr.io/me/app:1.2');
+  });
+
+  it('returns the input unchanged on unparseable YAML (fail-soft)', () => {
+    const { service } = makeService();
+    const bad = ':\n  not: [valid';
+    const out = (service as any).rewriteComposeForLoadedImages(bad, ['x:1'], 'my-app', noop);
+    expect(out).toBe(bad);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
 // runDockerfileOnlyDeploy
 // ═══════════════════════════════════════════════════════════════════
 

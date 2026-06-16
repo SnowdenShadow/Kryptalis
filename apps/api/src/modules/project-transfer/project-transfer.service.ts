@@ -31,9 +31,10 @@ import {
   DomainStrategy,
 } from './dctproj-manifest';
 import { checkImportedComposeSafety } from './dctproj-compose-guard';
-import { slugify, resolveAppDir, findComposePath, APPS_DIR } from '../applications/applications.helpers';
+import { slugify, resolveAppDir, findComposePath, APPS_DIR, imageName } from '../applications/applications.helpers';
 import { appVolumePrefix } from '../agent/volume-naming.util';
 import { resolveDbContainer, dumpPlan, restorePlan } from '../databases/db-dump.util';
+import * as yaml from 'js-yaml';
 
 // A docker image reference: [registry[:port]/]name[:tag|@sha256:...]. No shell
 // metacharacters or control chars. Mirrors the marketplace custom-install guard.
@@ -57,10 +58,15 @@ const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.
 const XFER_DIR = path.join(DATA_DIR, 'project-transfer');
 
 // Hard cap on an uploaded .dctproj (defence against zip-bomb / OOM). Reuses
-// the agent transfer cap when set, else 2 GiB.
+// the agent transfer cap when set, else 20 GiB. The default is generous
+// because an image-bundled export (docker save of a full stack) is routinely
+// multiple GB — a 2 GiB cap rejected every real PrestaShop/WordPress image
+// export. The cap is read once before the manifest is known (it's inside the
+// encrypted archive), so it can't be conditioned on includesImages; operators
+// who never bundle images can lower it via AGENT_TRANSFER_MAX_BYTES.
 const MAX_IMPORT_BYTES = (() => {
   const raw = Number(process.env.AGENT_TRANSFER_MAX_BYTES);
-  return Number.isFinite(raw) && raw > 0 ? raw : 2 * 1024 * 1024 * 1024;
+  return Number.isFinite(raw) && raw > 0 ? raw : 20 * 1024 * 1024 * 1024;
 })();
 
 /**
@@ -153,7 +159,7 @@ export class ProjectTransferService {
   async exportProject(
     userId: string,
     projectId: string,
-    opts: { includeData: boolean; passphrase: string },
+    opts: { includeData: boolean; includeImages?: boolean; passphrase: string },
   ): Promise<{ archivePath: string; filename: string }> {
     if (!opts.passphrase || opts.passphrase.length < 12) {
       throw new BadRequestException('Passphrase must be at least 12 characters.');
@@ -174,6 +180,7 @@ export class ProjectTransferService {
     const dir = this.stagingDir(id);
     fs.mkdirSync(path.join(dir, 'databases'), { recursive: true });
     fs.mkdirSync(path.join(dir, 'volumes'), { recursive: true });
+    if (opts.includeImages) fs.mkdirSync(path.join(dir, 'images'), { recursive: true });
     let plainTar: string | undefined;
 
     try {
@@ -182,6 +189,7 @@ export class ProjectTransferService {
         exportedAt: new Date().toISOString(),
         source: { appVersion: process.env.DOCKCONTROL_VERSION || undefined },
         includesData: !!opts.includeData,
+        includesImages: !!opts.includeImages,
         project: { name: project.name, description: project.description || undefined },
         applications: [],
         databases: [],
@@ -231,6 +239,12 @@ export class ProjectTransferService {
         // not imported anyway).
         if (opts.includeData && !requiresHostAccess) {
           await this.exportLocalAppVolumes(app, dir, entry);
+        }
+        // Images: `docker save` every image the stack resolves to, so the
+        // import runs the EXACT same binary (no pull, no rebuild). LOCAL apps
+        // only (same remote caveat as volumes). Skip host-access apps.
+        if (opts.includeImages && !requiresHostAccess) {
+          await this.exportAppImages(app, dir, entry);
         }
         manifest.applications.push(entry);
       }
@@ -366,6 +380,77 @@ export class ProjectTransferService {
   }
 
   /**
+   * `docker save` every image the LOCAL app's stack resolves to into a single
+   * gzip'd tar under images/, so the import runs the EXACT same binary (no
+   * pull, no rebuild). Records the tar path + the captured tags on the entry
+   * (the importer rewrites the compose to consume them).
+   *
+   * Image enumeration: `docker compose --project-directory <appDir> config
+   * --images` returns every resolved image of the stack (incl. the default tag
+   * of a `build:` service), handling ${VAR}/defaults/multi-service. Fallback:
+   * parse the compose `image:` lines + the built-image tag (imageName(slug)).
+   */
+  private async exportAppImages(app: { name: string; id: string }, dir: string, entry: DctprojApp): Promise<void> {
+    try {
+      const slug = slugify(app.name);
+      const appDir = resolveAppDir(slug, app.id);
+      let tags: string[] = [];
+      try {
+        const { stdout } = await execFileAsync(
+          'docker',
+          ['compose', '--project-directory', appDir, 'config', '--images'],
+          { timeout: 30_000 },
+        );
+        tags = stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+      } catch {
+        // Fallback: lift `image:` lines off the compose + the built tag.
+        const composeFile = entry.dockerComposeFile || this.readAppComposeFromDisk(app) || '';
+        try {
+          const doc: any = yaml.load(composeFile);
+          for (const svc of Object.values<any>(doc?.services || {})) {
+            if (typeof svc?.image === 'string' && svc.image) tags.push(svc.image);
+            else if (svc?.build) tags.push(imageName(slug)); // locally-built default tag
+          }
+        } catch {}
+      }
+      // Dedup + keep only well-formed refs (they get spliced into compose).
+      tags = Array.from(new Set(tags)).filter((t) => SAFE_IMAGE_RE.test(t));
+      if (tags.length === 0) {
+        this.logger.warn(`export images for ${app.name}: no images resolved — skipping`);
+        return;
+      }
+      const rel = path.posix.join('images', `${slug}-${app.id.slice(0, 12)}.images.tar.gz`);
+      await this.dockerSaveToFile(tags, path.join(dir, rel));
+      entry.imageArchive = rel;
+      entry.savedImages = tags;
+    } catch (e: any) {
+      this.logger.warn(`export images for ${app.name}: ${e?.message || e}`);
+    }
+  }
+
+  /** Stream `docker save <tags...>` → gzip → outPath (never buffered in RAM). */
+  private async dockerSaveToFile(tags: string[], outPath: string): Promise<void> {
+    const { spawn } = await import('child_process');
+    await new Promise<void>((resolve, reject) => {
+      const ws = fs.createWriteStream(outPath);
+      const { createGzip } = require('zlib');
+      const gz = createGzip();
+      // No shell: argv array. `docker save` writes a tar stream to stdout.
+      const child = spawn('docker', ['save', ...tags]);
+      const timer = setTimeout(() => child.kill('SIGKILL'), 60 * 60_000); // images can be big
+      let stderr = '';
+      child.stderr.on('data', (d: Buffer) => { if (stderr.length < 8192) stderr += d.toString(); });
+      child.stdout.pipe(gz).pipe(ws);
+      child.once('error', (err) => { clearTimeout(timer); ws.destroy(); reject(err); });
+      child.once('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(`docker save exited ${code}: ${stderr.trim().slice(0, 300)}`));
+      });
+    });
+  }
+
+  /**
    * Dump a LOCAL standalone database to the staging databases/ dir, returns
    * the rel path (or null when the engine has no SQL dump, e.g. Redis whose
    * data rides its volume tar). Auto-imported (bundled) DBs are NOT dumped
@@ -471,6 +556,7 @@ export class ProjectTransferService {
 
       const warnings: string[] = [];
       if (!manifest.includesData) warnings.push('This archive contains configuration only — databases and volumes will start empty.');
+      if (manifest.includesImages) warnings.push('This archive bundles Docker images — the import will run the EXACT same images (no pull/rebuild).');
       const remoteSourced = manifest.applications.some((a) => a.volumeFiles.length === 0) && manifest.includesData;
       if (remoteSourced) warnings.push('Some app volumes were not bundled (remote-source export) — those apps may start with empty data.');
       // Surface non-portable apps at the REVIEW step so the operator knows
@@ -596,6 +682,20 @@ export class ProjectTransferService {
           throw new BadRequestException(`Imported app "${a.name}" has an invalid docker image reference.`);
         }
       }
+      // Bundled-image fields (docker save tar + the tags it carries). The tar
+      // path must not escape the archive; every tag must be a clean image ref
+      // (they're spliced into `docker load`-derived compose `image:` lines).
+      if (a.imageArchive !== undefined && !safeRel(a.imageArchive)) {
+        throw new BadRequestException('Unsafe image archive path in archive.');
+      }
+      if (a.savedImages !== undefined) {
+        if (!Array.isArray(a.savedImages)) throw new BadRequestException('Malformed savedImages.');
+        for (const tag of a.savedImages) {
+          if (typeof tag !== 'string' || !SAFE_IMAGE_RE.test(tag)) {
+            throw new BadRequestException(`Imported app "${a.name}" has an invalid saved image tag.`);
+          }
+        }
+      }
     }
     for (const d of raw.databases) {
       if (typeof d.name !== 'string' || typeof d.type !== 'string') throw new BadRequestException('Malformed database entry.');
@@ -644,9 +744,11 @@ export class ProjectTransferService {
       // sibling restore dir that the TTL sweeper still reaps (it matches the
       // xfer_ prefix), and consumers self-delete each file once applied.
       const restoreDir = path.join(XFER_DIR, `${stagedId}-restore`);
-      if (manifest.includesData) fs.mkdirSync(restoreDir, { recursive: true });
-      // Park an artifact outside staging; returns the new absolute path.
+      // Park an artifact outside staging; returns the new absolute path. Lazily
+      // mkdirs the restore dir so it exists for data OR image restore (either
+      // can be the first to park).
       const park = (rel: string): string => {
+        fs.mkdirSync(restoreDir, { recursive: true });
         const src = path.join(extractDir, rel);
         const dst = path.join(restoreDir, path.basename(rel));
         fs.renameSync(src, dst);
@@ -767,6 +869,14 @@ export class ProjectTransferService {
             if (vols.length) {
               dto.restoreVolumes = vols.map((v) => ({ key: v.key, tarPath: park(v.file) }));
             }
+          }
+
+          // Image restore: hand the deploy the bundled `docker save` tar so it
+          // loads + pins the EXACT images (no pull/rebuild) before boot. Park
+          // it outside staging (the finally below wipes staging; the deploy
+          // unlinks the parked tar once loaded). Compose apps only.
+          if (manifest.includesImages && app.dockerComposeFile && app.imageArchive && app.savedImages?.length) {
+            dto.loadImages = { tarPath: park(app.imageArchive), tags: app.savedImages };
           }
           const created = await this.applications.create(userId, dto);
           appNameToId[app.name] = (created as any).id;

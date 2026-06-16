@@ -50,6 +50,7 @@ export class ProjectTransferController {
   ) {
     const { archivePath, filename } = await this.svc.exportProject(userId, id, {
       includeData: !!dto.includeData,
+      includeImages: !!dto.includeImages,
       passphrase: dto.passphrase,
     });
     const tok = this.token();

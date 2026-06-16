@@ -179,4 +179,14 @@ export class CreateApplicationDto {
    * bundled-DB app starts on its restored datadir. compose-only deploys only.
    */
   restoreVolumes?: { key: string; tarPath: string }[];
+
+  /**
+   * INTERNAL — same UNDECORATED/stripped-by-whitelist contract as
+   * restoreVolumes above. Carries a `docker save` tar (on-disk path) + the
+   * exact image tags it holds. runComposeOnlyDeploy `docker load`s it and
+   * rewrites the compose to consume the loaded images (build:→image:,
+   * pull_policy: missing) BEFORE `up`, so the imported stack runs the EXACT
+   * same image with no pull/rebuild. compose-only deploys only.
+   */
+  loadImages?: { tarPath: string; tags: string[] };
 }

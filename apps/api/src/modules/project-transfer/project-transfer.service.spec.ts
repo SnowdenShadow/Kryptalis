@@ -393,3 +393,94 @@ describe('ProjectTransferService — data restore (includeData)', () => {
     expect(restoreDbDump.mock.calls[0][0]).toBe('newdb');
   });
 });
+
+/**
+ * Image round-trip: export with includeImages bundles a `docker save` tar +
+ * the captured tags in the manifest; import threads them into the app deploy
+ * as `loadImages` (parked outside staging) so the stack runs the EXACT image.
+ */
+describe('ProjectTransferService — image bundling (includeImages)', () => {
+  let prisma: any;
+  let svc: ProjectTransferService;
+  beforeEach(() => { prisma = makePrisma(); svc = makeService(prisma); });
+
+  const composeProject = {
+    id: 'p1', name: 'Shop', description: null,
+    applications: [{
+      id: 'presta00aaaa', name: 'prestashop', displayName: null, framework: 'DOCKER_COMPOSE',
+      gitUrl: null, gitBranch: null, dockerImage: null,
+      dockerComposeFile: 'services:\n  prestashop:\n    image: prestashop/prestashop:8\n',
+      buildCommand: null, startCommand: null, port: 8090, hostPort: 8090, containerPort: 80,
+      customPort: false, envVars: null,
+    }],
+    databases: [],
+    domains: [],
+  };
+
+  // Stub the docker save helper so no docker runs; write a fake tar on disk so
+  // the archive packs + the importer can park it.
+  function stubImageExport(tags: string[]) {
+    vi.spyOn(svc as any, 'exportAppImages').mockImplementation(async (app: any, dir: string, entry: any) => {
+      const rel = `images/prestashop-presta00aaaa.images.tar.gz`;
+      fs.writeFileSync(`${dir}/${rel}`, 'IMAGETAR');
+      entry.imageArchive = rel;
+      entry.savedImages = tags;
+    });
+  }
+
+  it('export: manifest carries includesImages + imageArchive + savedImages', async () => {
+    prisma.project.findUnique.mockResolvedValue(composeProject);
+    stubImageExport(['prestashop/prestashop:8']);
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: false, includeImages: true, passphrase: PASS });
+    created.push(archivePath);
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+    const { manifest, stagedId, warnings } = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(stagedId));
+
+    expect(manifest.includesImages).toBe(true);
+    expect(manifest.applications[0].imageArchive).toBe('images/prestashop-presta00aaaa.images.tar.gz');
+    expect(manifest.applications[0].savedImages).toEqual(['prestashop/prestashop:8']);
+    expect(warnings.some((w) => /bundles Docker images/i.test(w))).toBe(true);
+  });
+
+  it('import: threads loadImages (parked tar + tags) into the app deploy', async () => {
+    prisma.project.findUnique.mockResolvedValue(composeProject);
+    stubImageExport(['prestashop/prestashop:8']);
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: false, includeImages: true, passphrase: PASS });
+    created.push(archivePath);
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+
+    const appsCreate = vi.fn().mockResolvedValue({ id: 'newapp' });
+    (svc as any).applications = { create: appsCreate };
+    (svc as any).projects = { create: vi.fn().mockResolvedValue({ id: 'np' }) };
+    (svc as any).databases = { create: vi.fn(), restoreDbDump: vi.fn() };
+    (svc as any).domains = { create: vi.fn() };
+
+    const parsed = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(parsed.stagedId));
+    created.push(`${(svc as any).stagingDir(parsed.stagedId)}-restore`);
+    await svc.applyImport('u2', parsed.stagedId, { passphrase: PASS });
+
+    const dto = appsCreate.mock.calls[0][1];
+    expect(dto.loadImages).toBeDefined();
+    expect(dto.loadImages.tags).toEqual(['prestashop/prestashop:8']);
+    // Parked outside staging (staging is wiped in finally; deploy unlinks it).
+    expect(dto.loadImages.tarPath).toMatch(/-restore[\\/].*\.images\.tar\.gz$/);
+  });
+
+  it('config-only export (no includeImages) carries no image archive', async () => {
+    prisma.project.findUnique.mockResolvedValue(composeProject);
+    const saveSpy = vi.spyOn(svc as any, 'exportAppImages');
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: false, passphrase: PASS });
+    created.push(archivePath);
+    expect(saveSpy).not.toHaveBeenCalled();
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+    const { manifest, stagedId } = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(stagedId));
+    expect(manifest.includesImages).toBeFalsy();
+    expect(manifest.applications[0].imageArchive).toBeUndefined();
+  });
+});

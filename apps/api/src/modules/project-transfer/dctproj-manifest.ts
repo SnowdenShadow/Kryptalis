@@ -20,6 +20,14 @@ export interface DctprojManifest {
   };
   /** Whether DB dumps + volume tars are bundled (false = config-only clone). */
   includesData: boolean;
+  /**
+   * Whether each app's Docker IMAGES are bundled as `docker save` tars (heavy:
+   * the archive grows by the full image size, often GBs). When true the import
+   * `docker load`s them and runs the stack on the EXACT same image — no pull,
+   * no rebuild — so `:latest` drift / a vanished build context can't change
+   * the running binary. Independent of includesData.
+   */
+  includesImages?: boolean;
   project: {
     name: string;
     description?: string;
@@ -67,6 +75,19 @@ export interface DctprojApp {
    * Optional for backward-compat with v1.0 archives (fall back to volumeFiles).
    */
   volumes?: { file: string; key: string }[];
+  /**
+   * Archive-relative path of this app's `docker save` tar (gzip'd), present
+   * only when the export bundled images. Holds EVERY image the stack resolves
+   * to (the app + its sidecars, e.g. PrestaShop + MariaDB). The importer
+   * `docker load`s it before `up`.
+   */
+  imageArchive?: string;
+  /**
+   * The exact image tags captured in `imageArchive`, in stack order. Used at
+   * import to rewrite the compose so it consumes the loaded images
+   * (`build:`→`image:<tag>`, `pull_policy: missing`) instead of pulling/building.
+   */
+  savedImages?: string[];
   /**
    * True when the app's compose mounts the docker socket or host paths (or is
    * otherwise unsafe to run from an untrusted archive). Such apps are NOT

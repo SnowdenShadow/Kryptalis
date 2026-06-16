@@ -443,6 +443,14 @@ export class ApplicationDeployService implements OnModuleInit {
        * appDir so source/target prefixes can never drift. Local deploys only.
        */
       restoreVolumes?: { key: string; tarPath: string }[];
+      /**
+       * Project-transfer with bundled images: a `docker save` tar (on-disk
+       * path) + the exact tags it holds. We `docker load` it and rewrite the
+       * compose to consume those images (build→image, pull_policy: missing)
+       * BEFORE `up`, so the stack runs the EXACT same binary — no pull, no
+       * rebuild. Local deploys only.
+       */
+      loadImages?: { tarPath: string; tags: string[] };
     },
   ) {
     // Remote project → the agent writes + runs the user's compose on its host.
@@ -503,6 +511,13 @@ export class ApplicationDeployService implements OnModuleInit {
       let finalCompose = composeYaml;
       if (projectNet) finalCompose = attachProjectNetwork(finalCompose, projectNet);
       finalCompose = attachSharedAppsNetwork(finalCompose);
+      // Project-transfer with bundled images: rewrite the stack to CONSUME the
+      // images we're about to `docker load` — drop every `build:` (→ image:
+      // the saved tag) and set `pull_policy: missing` so `up` never pulls or
+      // rebuilds. The exact saved binary runs.
+      if (opts.loadImages?.tags?.length) {
+        finalCompose = this.rewriteComposeForLoadedImages(finalCompose, opts.loadImages.tags, slug, log);
+      }
       fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), finalCompose);
       log('> wrote docker-compose.yml');
 
@@ -525,9 +540,29 @@ export class ApplicationDeployService implements OnModuleInit {
         log(`! could not write .env: ${err?.message || err}`);
       }
 
-      log('> docker compose pull');
-      try { await dockerCompose(appDir, ['pull'], envFile, 300_000); } catch {}
+      // Skip the pull entirely when images are bundled — we load them below
+      // and the rewritten compose pins pull_policy: missing. Pulling would
+      // defeat the whole "exact same image" guarantee (and may fail offline).
+      if (!opts.loadImages?.tags?.length) {
+        log('> docker compose pull');
+        try { await dockerCompose(appDir, ['pull'], envFile, 300_000); } catch {}
+      }
       await removeCollidingContainers(finalCompose, log);
+
+      // Project-transfer: load the bundled images BEFORE `up` so the rewritten
+      // compose (pull_policy: missing, build→image) finds them locally. A load
+      // failure must fail the deploy — booting would silently pull/Errno.
+      if (opts.loadImages?.tarPath) {
+        try {
+          await this.dockerLoadFromFile(opts.loadImages.tarPath);
+          log(`> loaded ${opts.loadImages.tags.length} bundled image(s)`);
+        } catch (e: any) {
+          throw new Error(`image load failed: ${e?.message || e}`);
+        } finally {
+          // Parked outside the (now-deleted) import staging dir — we own it.
+          try { fs.unlinkSync(opts.loadImages.tarPath); } catch {}
+        }
+      }
 
       // Project-transfer restore: seed the stack's volumes from the imported
       // tars BEFORE `up`, so a bundled-DB app boots on its restored datadir
@@ -661,6 +696,81 @@ export class ApplicationDeployService implements OnModuleInit {
         else reject(new Error(`volume untar exited ${code}: ${stderr.trim().slice(0, 300)}`));
       });
     });
+  }
+
+  /**
+   * `docker load` a (gzip'd) `docker save` tar produced by the exporter,
+   * restoring every bundled image under its original tag. Streamed via stdin
+   * → gunzip → `docker load`, so a multi-GB archive never lands in memory.
+   */
+  private async dockerLoadFromFile(gzPath: string): Promise<void> {
+    const zlib = await import('zlib');
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('docker', ['load'], { stdio: ['pipe', 'pipe', 'pipe'] });
+      const timer = setTimeout(() => child.kill('SIGKILL'), 60 * 60_000);
+      let stderr = '';
+      child.stderr.on('data', (d: Buffer) => { if (stderr.length < 8192) stderr += d.toString(); });
+      // docker load chatters image names on stdout — drain so it can't block.
+      child.stdout.on('data', () => {});
+      const src = fs.createReadStream(gzPath);
+      const gz = zlib.createGunzip();
+      src.once('error', (err) => { clearTimeout(timer); try { child.kill('SIGKILL'); } catch {} reject(err); });
+      gz.once('error', (err) => { clearTimeout(timer); try { child.kill('SIGKILL'); } catch {} reject(err); });
+      src.pipe(gz).pipe(child.stdin);
+      child.stdin.once('error', () => undefined);
+      child.once('error', (err) => { clearTimeout(timer); reject(err); });
+      child.once('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) resolve();
+        else reject(new Error(`docker load exited ${code}: ${stderr.trim().slice(0, 300)}`));
+      });
+    });
+  }
+
+  /**
+   * Rewrite an imported compose so it runs the LOADED images instead of
+   * pulling/building:
+   *   - every service with a `build:` block → drop build, set `image:` to the
+   *     matching saved tag (the built-image default tag is `dockcontrol/<slug>:latest`,
+   *     so we map a build service to the saved tag that equals imageName(slug)
+   *     when present, else leave its existing image: if it already had one).
+   *   - every service → `pull_policy: missing` so `up` uses the local image.
+   *
+   * `savedTags` is the authoritative list from the manifest (already validated).
+   * We only ever SET image refs to a tag that exists in savedTags, so a hostile
+   * manifest can't inject an arbitrary image here.
+   */
+  private rewriteComposeForLoadedImages(
+    composeYaml: string,
+    savedTags: string[],
+    slug: string,
+    log: (line: string) => void,
+  ): string {
+    try {
+      const doc: any = yaml.load(composeYaml);
+      if (!doc?.services || typeof doc.services !== 'object') return composeYaml;
+      const tagSet = new Set(savedTags);
+      const builtTag = imageName(slug); // dockcontrol/<slug>:latest
+      for (const svc of Object.values<any>(doc.services)) {
+        if (!svc || typeof svc !== 'object') continue;
+        if (svc.build) {
+          delete svc.build;
+          // Prefer the service's explicit image (if it was saved), else the
+          // canonical built tag (if saved). Never invent a tag.
+          if (typeof svc.image === 'string' && tagSet.has(svc.image)) {
+            // keep svc.image as-is
+          } else if (tagSet.has(builtTag)) {
+            svc.image = builtTag;
+          }
+        }
+        // Pin to the local image regardless of how it got here.
+        svc.pull_policy = 'missing';
+      }
+      return yaml.dump(doc, { lineWidth: 200 });
+    } catch (e: any) {
+      log(`! could not rewrite compose for loaded images (${e?.message || e}); using as-is`);
+      return composeYaml;
+    }
   }
 
   /**
