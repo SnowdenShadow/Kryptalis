@@ -731,6 +731,29 @@ describe('importFromAppCompose', () => {
     );
   });
 
+  it('DB service WITHOUT container_name: resolves the REAL compose container via docker ps (no orphan)', async () => {
+    const { service, prisma } = makeService();
+    // App exists → resolveLiveComposeContainer can compute the project + query.
+    prisma.application.findUnique.mockResolvedValue({ name: 'My Shop' });
+    // docker ps (label-filtered) reports the real compose container name.
+    handlers.push((cmd, args) =>
+      cmd === 'docker' && args[0] === 'ps'
+        ? { stdout: 'my-shop-abc123def456-cache-1\n' }
+        : undefined,
+    );
+    const compose = `services:\n  cache:\n    image: redis:7\n`;
+    await service.importFromAppCompose({
+      applicationId: 'abc123def4567890', projectId: 'p1', serverId: 'srv1', composeYaml: compose,
+    });
+    // host is the REAL container, not the bare service name 'cache' — so
+    // status/export/restore/delete all target the live container (no orphan).
+    expect(prisma.database.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ host: 'my-shop-abc123def456-cache-1' }),
+      }),
+    );
+  });
+
   it('is idempotent on redeploy: existing (applicationId, serviceName) rows are updated, not duplicated', async () => {
     const { service, prisma } = makeService();
     prisma.database.findFirst.mockResolvedValue({ id: 'existing-row' });

@@ -33,7 +33,6 @@ import * as fs from 'fs';
 
 const execFileAsync = promisify(execFile);
 const PROJ_DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-const PROJ_APPS_DIR = path.join(PROJ_DATA_DIR, 'apps');
 const PROJ_DBS_DIR = path.join(PROJ_DATA_DIR, 'databases');
 
 /** Stream a command's stdout to a file (no shell, never buffered in memory). */
@@ -241,25 +240,14 @@ export class ProjectsService implements OnModuleInit {
       where: { id },
       include: {
         server: { select: { id: true, host: true } },
-        // app.server: per-app placement — cleanup must run on the server
-        // each app ACTUALLY lives on, not blindly on the project default.
-        applications: { select: { id: true, name: true, server: { select: { id: true, host: true } } } },
+        // Per-app teardown is delegated to applications.remove() (which
+        // resolves each app's own server), so we only need id + name here.
+        applications: { select: { id: true, name: true } },
         databases: { select: { id: true, name: true, autoImported: true } },
         domains: { select: { id: true, domain: true } },
       },
     });
     if (!project) throw new NotFoundException('Project not found');
-
-    // Match applications.service slugify (NFKD + diacritic strip) so on-disk
-    // dir lookups hit the same path the install step wrote.
-    const slugify = (n: string) =>
-      n
-        .toLowerCase()
-        .normalize('NFKD')
-        .replace(/[̀-ͯ]/g, '')
-        .replace(/[^a-z0-9-]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 48) || 'app';
 
     const isLocal = isLocalHost(project.server?.host);
 

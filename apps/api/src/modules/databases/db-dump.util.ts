@@ -119,6 +119,15 @@ export function dumpPlan(
       };
     }
     case 'MONGODB': {
+      // KNOWN LIMITATION (pre-existing, also in Backups): the Mongo password
+      // is on the `docker exec` argv (visible via `ps`/proc to a co-located
+      // process during the dump window). Unlike MySQL (MYSQL_PWD env-file) and
+      // Redis (REDISCLI_AUTH env), mongodump has no password ENV — the off-argv
+      // fix is a `--config <yaml>` file docker-cp'd into the container, which
+      // needs the recent mongodb-database-tools and a live Mongo to verify.
+      // Deferred rather than shipped blind against a working path. Local-only,
+      // medium severity. If addressed: surface a configFileContent descriptor
+      // here + have every caller cp it in, symmetric with restorePlan.
       const inner = [
         'mongodump', '--archive', '--quiet',
         '--username', db.username, '--password', db.password,

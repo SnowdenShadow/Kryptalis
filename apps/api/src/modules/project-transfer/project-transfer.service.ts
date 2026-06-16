@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as zlib from 'zlib';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -33,7 +34,8 @@ import {
 import { checkImportedComposeSafety } from './dctproj-compose-guard';
 import { slugify, resolveAppDir, findComposePath, APPS_DIR, imageName } from '../applications/applications.helpers';
 import { appVolumePrefix } from '../agent/volume-naming.util';
-import { resolveDbContainer, dumpPlan, restorePlan } from '../databases/db-dump.util';
+import { resolveDbContainer, dumpPlan } from '../databases/db-dump.util';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
 import * as yaml from 'js-yaml';
 
 // A docker image reference: [registry[:port]/]name[:tag|@sha256:...]. No shell
@@ -433,8 +435,7 @@ export class ProjectTransferService {
     const { spawn } = await import('child_process');
     await new Promise<void>((resolve, reject) => {
       const ws = fs.createWriteStream(outPath);
-      const { createGzip } = require('zlib');
-      const gz = createGzip();
+      const gz = zlib.createGzip();
       // No shell: argv array. `docker save` writes a tar stream to stdout.
       const child = spawn('docker', ['save', ...tags]);
       const timer = setTimeout(() => child.kill('SIGKILL'), 60 * 60_000); // images can be big
@@ -487,8 +488,7 @@ export class ProjectTransferService {
       const { spawn } = await import('child_process');
       await new Promise<void>((resolve, reject) => {
         const ws = fs.createWriteStream(out);
-        const { createGzip } = require('zlib');
-        const gz = createGzip();
+        const gz = zlib.createGzip();
         const child = spawn('docker', argv);
         const timer = setTimeout(() => child.kill('SIGKILL'), 30 * 60_000);
         child.stdout.pipe(gz).pipe(ws);
@@ -738,6 +738,33 @@ export class ProjectTransferService {
         serverId: opts.targetServerId,
       } as any);
 
+      // Data/image restore (volume untar, SQL replay, docker load) runs on the
+      // LOCAL docker daemon inside runComposeOnlyDeploy. When the target is a
+      // REMOTE server, the deploy is dispatched to that server's agent and the
+      // local restore blocks are SKIPPED — so bundled tars would never be
+      // consumed and the stack would silently boot empty / re-pull. Detect that
+      // up front and DON'T park/thread the artifacts (they'd orphan), warning
+      // the operator instead of importing a misleadingly-"complete" project.
+      // (Shipping the tars through the agent chain is deferred — same caveat as
+      // remote-SOURCE export.)
+      let dataRestorable = true;
+      try {
+        const targetServer = await this.prisma.server.findUnique({
+          where: { id: project.serverId },
+          select: { host: true },
+        });
+        if (targetServer) dataRestorable = isLocalHost(targetServer.host);
+      } catch {
+        // Couldn't resolve the server — assume local (the platform host) and
+        // let the restore run; a genuinely remote target would simply no-op the
+        // local restore blocks downstream.
+      }
+      if (!dataRestorable && (manifest.includesData || manifest.includesImages)) {
+        warnings.push(
+          'Target is a remote server — bundled data and images are NOT restored across the agent yet. Apps deploy from their compose (images re-pulled/rebuilt) and start with empty data. Import onto the platform host to restore data/images, or restore manually after deploy.',
+        );
+      }
+
       // Restore artifacts (volume tars + standalone DB dumps) must outlive
       // this method: app deploys are async and consume them AFTER applyImport
       // returns, but the finally below wipes the staging dir. Move them to a
@@ -763,31 +790,60 @@ export class ProjectTransferService {
       //    would spawn a phantom DB. STANDALONE DBs are created + (optionally)
       //    replayed from their SQL dump.
       const dbNameToId: Record<string, string> = {};
+      // Did the export actually bundle ANY app volume data? A bundled
+      // (dataInVolume) DB relies on its parent app's volume tar; if the volume
+      // export silently failed (or this is a config-only/remote archive), that
+      // tar isn't here and the DB will boot empty — warn rather than imply it
+      // came over. (The manifest has no DB→app link, so we check globally.)
+      const anyAppVolumes = manifest.applications.some(
+        (a) => (a.volumes && a.volumes.length) || (a.volumeFiles && a.volumeFiles.length),
+      );
       for (const db of manifest.databases) {
         if (db.dataInVolume) {
           // Data rides the parent app's volume tar — nothing to do here.
+          if (manifest.includesData && dataRestorable && !anyAppVolumes) {
+            warnings.push(`db ${db.name}: bundled in an app but no volume data was found in the archive — it will start EMPTY.`);
+          }
           continue;
         }
         try {
+          // Preserve the ORIGINAL credentials (decrypted from the passphrase
+          // envelope) so an imported app's DATABASE_URL / connection string
+          // still authenticates against the recreated DB. Without this, create()
+          // mints a fresh username + random password and every app pointing at
+          // the DB by its old creds breaks. password may be '' (no envelope).
+          const dbPassword = db.passwordEncrypted
+            ? decryptBuffer(Buffer.from(db.passwordEncrypted, 'base64'), opts.passphrase).toString()
+            : undefined;
           const created = await this.databases.create(userId, {
             name: db.name,
             type: db.type,
             projectId: project.id,
             serverId: opts.targetServerId,
+            username: db.username || undefined,
+            password: dbPassword || undefined,
           } as any);
           const newDbId = (created as any).id;
           dbNameToId[db.name] = newDbId;
-          if (manifest.includesData && db.dumpFile) {
-            // Replay the dump once the fresh container accepts connections.
-            // Fire-and-forget with self-cleanup: the container boot (pull +
-            // initdb) can take minutes, so we must NOT block the import HTTP
-            // request on it. restoreDbDump waits for readiness internally.
-            const dumpPath = park(db.dumpFile);
-            void this.databases
-              .restoreDbDump(newDbId, dumpPath)
-              .catch((e) => this.logger.warn(`restore dump for db ${db.name}: ${e?.message || e}`))
-              .finally(() => { try { fs.unlinkSync(dumpPath); } catch {} });
-            warnings.push(`db ${db.name}: data is being restored in the background once the container is ready — verify shortly after deploy.`);
+          if (manifest.includesData && db.dumpFile && dataRestorable) {
+            const engine = (db.type || '').toUpperCase();
+            // Redis/KeyDB dumps are .rdb files restored by copy-restart, NOT a
+            // stdin replay — restoreDbDump only handles the stdin engines
+            // (SQL / Mongo), so don't pretend we're restoring one. Surface it.
+            if (engine === 'REDIS' || engine === 'KEYDB') {
+              warnings.push(`db ${db.name}: ${engine} data is NOT transferred (no portable restore for a standalone ${engine} dump) — repopulate it after import.`);
+            } else {
+              // Replay the dump once the fresh container accepts connections.
+              // Fire-and-forget with self-cleanup: the container boot (pull +
+              // initdb) can take minutes, so we must NOT block the import HTTP
+              // request on it. restoreDbDump waits for readiness internally.
+              const dumpPath = park(db.dumpFile);
+              void this.databases
+                .restoreDbDump(newDbId, dumpPath)
+                .catch((e) => this.logger.warn(`restore dump for db ${db.name}: ${e?.message || e}`))
+                .finally(() => { try { fs.unlinkSync(dumpPath); } catch {} });
+              warnings.push(`db ${db.name}: data is being restored in the background once the container is ready — verify shortly after deploy.`);
+            }
           }
         } catch (e: any) {
           warnings.push(`db ${db.name}: ${e?.message || e}`);
@@ -851,11 +907,18 @@ export class ProjectTransferService {
           // hostPort/domain at deploy time). The published host port carried by
           // hostPort + the compose's own publish drives the URL after import.
 
+          // Track tars parked for THIS app so a create() that throws before the
+          // (async) deploy can consume them doesn't leave decrypted data on disk
+          // for the full session TTL — we unlink them in the catch.
+          const parkedForApp: string[] = [];
+
           // Data restore: hand the compose deploy this app's volume seeds so it
           // populates them BEFORE `up` (bundled DBs boot on restored data, not
           // a fresh installer). Only compose apps carry volumes; `volumes`
           // (new) wins over legacy `volumeFiles` (path-only, no remap key).
-          if (manifest.includesData && app.dockerComposeFile) {
+          // Skipped for a remote target — the deploy runs on the agent, which
+          // can't see these local tars.
+          if (manifest.includesData && dataRestorable && app.dockerComposeFile) {
             const vols = app.volumes && app.volumes.length
               ? app.volumes
               // Legacy v1.0 archive: derive the key from the tar basename by
@@ -867,19 +930,34 @@ export class ProjectTransferService {
                   return { file: f, key: us >= 0 ? baseNoExt.slice(us + 1) : baseNoExt };
                 });
             if (vols.length) {
-              dto.restoreVolumes = vols.map((v) => ({ key: v.key, tarPath: park(v.file) }));
+              dto.restoreVolumes = vols.map((v) => {
+                const tarPath = park(v.file);
+                parkedForApp.push(tarPath);
+                return { key: v.key, tarPath };
+              });
             }
           }
 
           // Image restore: hand the deploy the bundled `docker save` tar so it
           // loads + pins the EXACT images (no pull/rebuild) before boot. Park
           // it outside staging (the finally below wipes staging; the deploy
-          // unlinks the parked tar once loaded). Compose apps only.
-          if (manifest.includesImages && app.dockerComposeFile && app.imageArchive && app.savedImages?.length) {
-            dto.loadImages = { tarPath: park(app.imageArchive), tags: app.savedImages };
+          // unlinks the parked tar once loaded). Compose apps only; local target.
+          if (manifest.includesImages && dataRestorable && app.dockerComposeFile && app.imageArchive && app.savedImages?.length) {
+            const tarPath = park(app.imageArchive);
+            parkedForApp.push(tarPath);
+            dto.loadImages = { tarPath, tags: app.savedImages };
           }
-          const created = await this.applications.create(userId, dto);
-          appNameToId[app.name] = (created as any).id;
+
+          try {
+            const created = await this.applications.create(userId, dto);
+            appNameToId[app.name] = (created as any).id;
+          } catch (createErr) {
+            // create() runs all its validation synchronously and can throw
+            // BEFORE dispatching the deploy that would consume + unlink the
+            // parked tars. Clean them here so decrypted data isn't left on disk.
+            for (const p of parkedForApp) { try { fs.unlinkSync(p); } catch {} }
+            throw createErr;
+          }
         } catch (e: any) {
           const base = `app ${app.name}: ${e?.message || e}`;
           // A git app with no provider picked is the usual private-repo failure

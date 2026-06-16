@@ -22,6 +22,9 @@ function makePrisma() {
   return {
     project: { findUnique: vi.fn(), findFirst: vi.fn() },
     domain: { findUnique: vi.fn() },
+    // applyImport resolves the target server to decide if data/images can be
+    // restored locally. Default: a local host (so restore threading runs).
+    server: { findUnique: vi.fn().mockResolvedValue({ host: 'localhost' }) },
   } as any;
 }
 
@@ -380,6 +383,10 @@ describe('ProjectTransferService — data restore (includeData)', () => {
     // Bundled DB is NOT created standalone (only the analytics one is).
     expect(dbCreate).toHaveBeenCalledTimes(1);
     expect(dbCreate.mock.calls[0][1].name).toBe('analytics');
+    // The ORIGINAL credentials are preserved so imported apps' connection
+    // strings keep working (not regenerated).
+    expect(dbCreate.mock.calls[0][1].username).toBe('a');
+    expect(dbCreate.mock.calls[0][1].password).toBe('y');
 
     // App deploy receives the volume seed with the remappable key + a parked
     // tar path (outside the staging dir, since staging is wiped in finally).
@@ -391,6 +398,71 @@ describe('ProjectTransferService — data restore (includeData)', () => {
     // Standalone dump is replayed against the freshly-created DB id.
     expect(restoreDbDump).toHaveBeenCalledTimes(1);
     expect(restoreDbDump.mock.calls[0][0]).toBe('newdb');
+  });
+
+  it('import onto a REMOTE target: does NOT thread restore artifacts, warns instead (no silent empty boot)', async () => {
+    prisma.project.findUnique.mockResolvedValue(prestaProject);
+    stubExportDocker(['data']);
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: true, passphrase: PASS });
+    created.push(archivePath);
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+    // Target server resolves REMOTE → local restore blocks would be skipped by
+    // the deploy, so applyImport must not thread tars (they'd orphan) + must warn.
+    prisma.server.findUnique.mockResolvedValue({ host: '203.0.113.9' });
+
+    const appsCreate = vi.fn().mockResolvedValue({ id: 'newapp' });
+    const restoreDbDump = vi.fn().mockResolvedValue(undefined);
+    (svc as any).applications = { create: appsCreate };
+    (svc as any).projects = { create: vi.fn().mockResolvedValue({ id: 'np', serverId: 'remote1' }) };
+    (svc as any).databases = { create: vi.fn().mockResolvedValue({ id: 'newdb' }), restoreDbDump };
+    (svc as any).domains = { create: vi.fn() };
+
+    const parsed = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(parsed.stagedId));
+    created.push(`${(svc as any).stagingDir(parsed.stagedId)}-restore`);
+    const res = await svc.applyImport('u2', parsed.stagedId, { passphrase: PASS, targetServerId: 'remote1' });
+
+    expect(appsCreate.mock.calls[0][1].restoreVolumes).toBeUndefined();
+    expect(restoreDbDump).not.toHaveBeenCalled();
+    expect(res.warnings.some((w) => /remote server/i.test(w))).toBe(true);
+  });
+
+  it('standalone Redis: warns the data is NOT transferred instead of pretending to restore', async () => {
+    const redisProject = {
+      ...prestaProject,
+      databases: [
+        { id: 'r1', name: 'cache', type: 'REDIS', username: 'default', password: '', port: 6379, autoImported: false, host: '' },
+      ],
+    };
+    prisma.project.findUnique.mockResolvedValue(redisProject);
+    // Redis standalone export emits an .rdb.gz dumpFile (stub it).
+    vi.spyOn(svc as any, 'dumpLocalDatabase').mockImplementation(async (db: any, dir: string) => {
+      const rel = `databases/${db.name}.rdb.gz`;
+      fs.writeFileSync(`${dir}/${rel}`, 'RDB');
+      return rel;
+    });
+    vi.spyOn(svc as any, 'exportLocalAppVolumes').mockResolvedValue(undefined);
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: true, passphrase: PASS });
+    created.push(archivePath);
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+    prisma.server.findUnique.mockResolvedValue({ host: 'localhost' });
+
+    const restoreDbDump = vi.fn().mockResolvedValue(undefined);
+    (svc as any).applications = { create: vi.fn().mockResolvedValue({ id: 'a' }) };
+    (svc as any).projects = { create: vi.fn().mockResolvedValue({ id: 'np', serverId: 'srv1' }) };
+    (svc as any).databases = { create: vi.fn().mockResolvedValue({ id: 'newredis' }), restoreDbDump };
+    (svc as any).domains = { create: vi.fn() };
+
+    const parsed = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(parsed.stagedId));
+    created.push(`${(svc as any).stagingDir(parsed.stagedId)}-restore`);
+    const res = await svc.applyImport('u2', parsed.stagedId, { passphrase: PASS });
+
+    // No misleading "restoring" — Redis dump replay is not attempted.
+    expect(restoreDbDump).not.toHaveBeenCalled();
+    expect(res.warnings.some((w) => /REDIS data is NOT transferred/i.test(w))).toBe(true);
   });
 });
 

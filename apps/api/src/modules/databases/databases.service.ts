@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   NotFoundException,
   ConflictException,
   BadRequestException,
@@ -16,6 +17,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { detectDatabasesInCompose, type DetectedDb } from './compose-db-detect';
 import { resolveDbContainer, dumpPlan, restorePlan } from './db-dump.util';
+import { slugify, resolveAppDir } from '../applications/applications.helpers';
 import {
   assertProjectAccess,
   listAccessibleProjectIds,
@@ -203,6 +205,8 @@ volumes:
 
 @Injectable()
 export class DatabasesService {
+  private readonly logger = new Logger(DatabasesService.name);
+
   constructor(
     private prisma: PrismaService,
     private agent: AgentService,
@@ -416,13 +420,7 @@ export class DatabasesService {
     });
 
     return Promise.all(dbs.map(async (db) => {
-      // Auto-imported rows store the real container_name in `host` (it's
-      // the address other services use). Manually-provisioned rows use
-      // the legacy `dockcontrol-db-<name>` scheme.
-      const status = await this.getContainerStatus(
-        (db as any).autoImported ? db.host : db.name,
-        (db as any).autoImported,
-      );
+      const status = await this.getContainerStatus(resolveDbContainer(db as any));
       const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name, this.connHost((db as any).server));
       return { ...db, status, connectionString };
     }));
@@ -439,10 +437,7 @@ export class DatabasesService {
       },
     });
     if (!db) throw new NotFoundException('Database not found');
-    const status = await this.getContainerStatus(
-      (db as any).autoImported ? db.host : db.name,
-      (db as any).autoImported,
-    );
+    const status = await this.getContainerStatus(resolveDbContainer(db as any));
     const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name, this.connHost((db as any).server));
     return { ...db, status, connectionString };
   }
@@ -533,9 +528,8 @@ export class DatabasesService {
             containerName: container,
             purgeVolumes: true,
           });
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.error(`[databases] failed to enqueue remote REMOVE for bundled "${db.name}":`, err);
+        } catch (err: any) {
+          this.logger.warn(`failed to enqueue remote REMOVE for bundled "${db.name}": ${err?.message || err}`);
         }
       }
       await this.prisma.database.delete({ where: { id } });
@@ -696,7 +690,7 @@ export class DatabasesService {
 
     // Wait until the container exists AND the engine answers (a fresh DB
     // container can take a while to initialise on first boot).
-    await this.waitForDbReady(container, db.type, dumpable.username, dumpable.password);
+    await this.waitForDbReady(container, db.type, dumpable.username);
 
     // MySQL/MariaDB password via temp --env-file spliced after `exec -i`.
     let argv = plan.argv;
@@ -734,11 +728,15 @@ export class DatabasesService {
   }
 
   /** Poll until a DB container answers a trivial query (or time out ~90s). */
-  private async waitForDbReady(container: string, type: string, user: string, pass: string): Promise<void> {
+  private async waitForDbReady(container: string, type: string, user: string): Promise<void> {
     const t = (type || '').toUpperCase();
+    // Liveness only — we never auth here. `mysqladmin ping` reports success even
+    // on access-denied (the server answered), which is all the readiness gate
+    // needs, and it keeps the DB password OFF the host process argv (a `-e
+    // MYSQL_PWD=` here would leak it via ps for every 3s retry).
     const probe: string[] | null =
       t === 'POSTGRESQL' ? ['exec', container, 'pg_isready', '-U', user]
-      : t === 'MYSQL' || t === 'MARIADB' ? ['exec', '-e', `MYSQL_PWD=${pass}`, container, 'mysqladmin', 'ping', '-u', user, '--silent']
+      : t === 'MYSQL' || t === 'MARIADB' ? ['exec', container, 'mysqladmin', 'ping', '--silent']
       : t === 'MONGODB' ? ['exec', container, 'mongosh', '--quiet', '--eval', 'db.runCommand({ ping: 1 })']
       : null;
     if (!probe) return;
@@ -837,16 +835,15 @@ export class DatabasesService {
     }
   }
 
-  private async getContainerStatus(nameOrContainer: string, isAutoImported = false): Promise<string> {
-    // Auto-imported rows pass the literal container_name; manual rows pass
-    // the DB name and we prepend the legacy dockcontrol-db- prefix.
-    const target = isAutoImported ? nameOrContainer : `dockcontrol-db-${nameOrContainer}`;
+  // Takes the ALREADY-RESOLVED container name (callers use resolveDbContainer,
+  // the single source of truth for auto-imported vs standalone naming).
+  private async getContainerStatus(container: string): Promise<string> {
     try {
       // execFile: arbitrary container_name strings from auto-imported rows
       // never touch a shell.
       const { stdout } = await execFileAsync(
         'docker',
-        ['inspect', '--format', '{{.State.Status}}', target],
+        ['inspect', '--format', '{{.State.Status}}', container],
         { timeout: 5000 },
       );
       return stdout.trim() || 'unknown';
@@ -906,10 +903,19 @@ export class DatabasesService {
         // @@unique constraint is on (applicationId, serviceName) — `name` can
         // collide across apps freely.
         const displayName = `${db.serviceName}@${opts.applicationId.slice(0, 6)}`;
-        // Host = container_name on the project network. Other apps in the
-        // same project can reach this DB via that hostname directly; the
-        // UI shows it so users can copy it into their service config.
-        const host = db.containerName;
+        // Host = the DB's REAL container_name (other apps reach it by this name;
+        // the UI shows it; lifecycle ops docker-exec into it). The detector
+        // returns an explicit container_name when the compose declares one, else
+        // it falls back to the bare SERVICE name (== db.serviceName) and asks
+        // the caller to resolve the real one. When that happens we ask docker
+        // for the actual container of this compose service — otherwise `host`
+        // would be a name no container answers to, and status/export/restore/
+        // DELETE would all silently target nothing (orphaning the real
+        // container on delete). resolveLiveComposeContainer falls back to the
+        // detector value if docker can't be reached.
+        const host = db.containerName === db.serviceName
+          ? await this.resolveLiveComposeContainer(opts.applicationId, db.serviceName)
+          : db.containerName;
         const port = db.hostPort ?? db.containerPort;
 
         if (existing) {
@@ -958,6 +964,39 @@ export class DatabasesService {
     }
 
     return { created, updated, skipped };
+  }
+
+  /**
+   * Resolve the REAL docker container_name of a bundled DB service that the
+   * compose did NOT name explicitly. Compose names such a container
+   * `<project>-<service>-N` where project = the app dir basename. We ask docker
+   * for the live container carrying the compose service+project labels (robust
+   * against the `-1`/`-2` suffix + name sanitization). Falls back to the bare
+   * service name if docker is unreachable or nothing matches (no worse than the
+   * previous behaviour, and a redeploy re-runs this).
+   */
+  private async resolveLiveComposeContainer(applicationId: string, serviceName: string): Promise<string> {
+    try {
+      const app = await this.prisma.application.findUnique({
+        where: { id: applicationId },
+        select: { name: true },
+      });
+      if (!app) return serviceName;
+      const project = path.basename(resolveAppDir(slugify(app.name), applicationId));
+      const { stdout } = await execFileAsync(
+        'docker',
+        [
+          'ps', '--format', '{{.Names}}',
+          '--filter', `label=com.docker.compose.project=${project}`,
+          '--filter', `label=com.docker.compose.service=${serviceName}`,
+        ],
+        { timeout: 10_000 },
+      );
+      const name = stdout.trim().split('\n').map((s) => s.trim()).find(Boolean);
+      return name || serviceName;
+    } catch {
+      return serviceName;
+    }
   }
 
   // ── cleanup helper for ApplicationsService ─────────────────────────
