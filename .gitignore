@@ -46,8 +46,13 @@ docker/data/
 
 # Runtime DockControl
 apps/api/.dockcontrol/
-# Legacy runtime dir (pre-rename) — still on disk until `docker compose down`,
-# then rename to .dockcontrol. Kept ignored so stale DKIM/secrets aren't committed.
+# Auto-managed Caddy port-publish override (now lives under .dockcontrol; the
+# old install location was the repo root — ignore both so a generated file is
+# never committed).
+.dockcontrol/docker-compose.override.yml
+docker-compose.override.yml
+# Legacy runtime dir (pre-rename) — may still be on disk on old installs until
+# `docker compose down`. Kept ignored so stale DKIM/secrets aren't committed.
 apps/api/.kryptalis/
 *.sock
 *.lock
@@ -59,4 +64,3 @@ graphify-out/
 # Playwright
 apps/dashboard/test-results/
 apps/dashboard/playwright-report/
-apps/api/.kryptalis/

@@ -108,6 +108,8 @@ export enum AppFramework {
   STATIC = 'STATIC',
   DOCKER = 'DOCKER',
   DOCKER_COMPOSE = 'DOCKER_COMPOSE',
+  /** Classic Apache + PHP shared-hosting site (selectable PHP version). */
+  PHP_SITE = 'PHP_SITE',
 }
 
 export enum UserRole {

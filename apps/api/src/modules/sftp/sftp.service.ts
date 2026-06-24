@@ -1139,7 +1139,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     if (scope === 'app') {
       const app = await this.prisma.application.findUnique({
         where: { id: scopeId },
-        select: { name: true, id: true, dockerImage: true, containerName: true },
+        select: { name: true, id: true, dockerImage: true, containerName: true, framework: true },
       });
       if (!app) throw new NotFoundException('Application not found');
       return [{ dir: 'app', source: await this.computeChrootSourceForApp(app) }];
@@ -1148,7 +1148,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       where: { id: scopeId },
       select: {
         applications: {
-          select: { name: true, id: true, dockerImage: true, containerName: true },
+          select: { name: true, id: true, dockerImage: true, containerName: true, framework: true },
         },
       },
     });
@@ -1182,7 +1182,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async computeChrootSourceForApp(
-    app: { name: string; id: string; dockerImage: string | null; containerName: string | null },
+    app: { name: string; id: string; dockerImage: string | null; containerName: string | null; framework?: string | null },
   ): Promise<string> {
     const slug = this.slugify(app.name);
     const id12 = app.id.slice(0, 12);
@@ -1190,6 +1190,12 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     // Path inside the sftp container. docker-compose maps host
     // .dockcontrol/apps → /data/apps.
     const hostFsPath = `/data/apps/${slug}-${id12}`;
+
+    // PHP_SITE: the Apache docroot is the app's public/ subdir (the generated
+    // Dockerfile/docker-compose.yml live one level up). Drop the SFTP user
+    // straight into public/ so they upload web files there and never see — or
+    // overwrite — the platform's infra files.
+    if (app.framework === 'PHP_SITE') return `${hostFsPath}/public`;
 
     // No live container → fall back to host-fs (git deploys land
     // there before/without ever being containerised).

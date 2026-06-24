@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
+import { DATA_DIR, APPS_DIR, DBS_DIR, TMP_DIR } from '../../common/paths';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
 import * as dockerFs from './docker-fs';
@@ -61,12 +62,10 @@ import { remoteAppSlug, slugify as appSlugify } from '../applications/applicatio
  * CRLF; cross-project access by id; admin bypass on unlinked DBs.
  */
 
-const ROOT_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-const APPS_DIR = path.join(ROOT_DIR, 'apps');
-const DBS_DIR = path.join(ROOT_DIR, 'databases');
-// Upload staging area — same volume as APPS_DIR/DBS_DIR so the final
-// move into place is an atomic rename() instead of a second full copy.
-const TMP_DIR = path.join(ROOT_DIR, 'tmp');
+// Runtime paths from the shared common/paths module (single source of truth).
+// TMP_DIR is the upload staging area — same volume as APPS_DIR/DBS_DIR so the
+// final move into place is an atomic rename() instead of a second full copy.
+const ROOT_DIR = DATA_DIR;
 
 interface ResolvedPath {
   scope: 'app' | 'db';

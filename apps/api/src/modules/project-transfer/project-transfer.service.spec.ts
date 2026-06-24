@@ -7,6 +7,17 @@ vi.mock('../../common/rbac/project-access', () => ({
 }));
 
 import { ProjectTransferService } from './project-transfer.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
+
+// A REAL EncryptionService with a fixed test key — so the decrypt-before-wrap
+// behaviour is exercised against actual AES-256-GCM, not a stub. DB passwords
+// are stored encrypted at rest (v1.<iv>.<tag>.<ct>); export must decrypt them
+// to plaintext BEFORE re-wrapping under the transfer passphrase.
+function makeEncryption(): EncryptionService {
+  const enc = new EncryptionService({ get: () => 'test-encryption-key-32-characters!!' } as any);
+  enc.onModuleInit();
+  return enc;
+}
 
 /**
  * End-to-end-ish service tests WITHOUT Docker: config-only export (includeData
@@ -35,7 +46,7 @@ function makeEnv() {
   } as any;
 }
 
-function makeService(prisma: any) {
+function makeService(prisma: any, encryption: EncryptionService = makeEncryption()) {
   return new ProjectTransferService(
     prisma,
     {} as any, // applications
@@ -43,6 +54,7 @@ function makeService(prisma: any) {
     {} as any, // databases
     {} as any, // projects
     {} as any, // domains
+    encryption,
   );
 }
 
@@ -102,6 +114,44 @@ describe('ProjectTransferService — export', () => {
     expect(result.manifest.databases[0].passwordEncrypted).not.toContain('p@ss');
     expect(result.manifest.domains[0].domain).toBe('app.example.com');
     expect(result.warnings.some((w) => /configuration only/i.test(w))).toBe(true);
+  });
+
+  it('decrypts the at-rest DB password before re-wrapping it (round-trips to plaintext, not the v1 ciphertext)', async () => {
+    // Regression guard for the data-corruption bug: Database.password is stored
+    // ENCRYPTED at rest. The export used to wrap that ciphertext verbatim, so an
+    // imported DB ended up with the literal "v1.iv.tag.ct" blob as its password
+    // (broken auth) and mysqldump/mongodump auth'd with the blob → empty dumps.
+    // Here the mock password is a REAL ciphertext; the manifest password, once
+    // unwrapped from the passphrase envelope, must equal the ORIGINAL plaintext.
+    const enc = makeEncryption();
+    svc = makeService(prisma, enc);
+    const realPlaintext = 'sup3r-s3cret-db-p@ss';
+    const ciphertext = enc.encrypt(realPlaintext);
+    expect(ciphertext).toMatch(/^v1\./); // sanity: it really is encrypted at rest
+
+    prisma.project.findUnique.mockResolvedValue({
+      ...sampleProject,
+      databases: [
+        { id: 'db1', name: 'maindb', type: 'POSTGRES', username: 'u', password: ciphertext, port: 5432, autoImported: false },
+      ],
+    });
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: false, passphrase: PASS });
+    created.push(archivePath);
+
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+    const result = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(result.stagedId));
+
+    // Unwrap the passphrase envelope exactly as applyImport does, then assert
+    // it is the original plaintext — NOT the v1 ciphertext.
+    const { decryptBuffer } = await import('./dctproj-crypto');
+    const unwrapped = decryptBuffer(
+      Buffer.from(result.manifest.databases[0].passwordEncrypted!, 'base64'),
+      PASS,
+    ).toString();
+    expect(unwrapped).toBe(realPlaintext);
+    expect(unwrapped).not.toMatch(/^v1\./);
   });
 });
 

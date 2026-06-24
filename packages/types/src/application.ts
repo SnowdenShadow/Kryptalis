@@ -6,6 +6,8 @@ export interface CreateApplicationRequest {
   name: string;
   projectId: string;
   framework: AppFramework;
+  /** PHP runtime version for framework=PHP_SITE (e.g. "8.3"). */
+  phpVersion?: string;
   gitUrl?: string;
   gitBranch?: string;
   gitProvider?: GitProvider;
@@ -61,6 +63,8 @@ export interface ApplicationResponse {
   displayName?: string | null;
   projectId: string;
   framework: `${AppFramework}`;
+  /** PHP runtime version when framework is PHP_SITE (e.g. "8.3"). */
+  phpVersion?: string | null;
   status: `${ApplicationStatus}`;
   gitUrl: string | null;
   gitBranch: string | null;

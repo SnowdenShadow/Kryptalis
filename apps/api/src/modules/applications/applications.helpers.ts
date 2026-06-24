@@ -7,10 +7,13 @@ import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
+// DATA_DIR / APPS_DIR are defined ONCE in common/paths. Import locally (this
+// file uses APPS_DIR) and re-export so the many call sites that import them
+// from this helper keep working unchanged.
+import { DATA_DIR, APPS_DIR } from '../../common/paths';
 
 export const execFileAsync = promisify(execFile);
-export const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-export const APPS_DIR = path.join(DATA_DIR, 'apps');
+export { DATA_DIR, APPS_DIR };
 
 // ── helpers ──────────────────────────────────────────────────────────────
 

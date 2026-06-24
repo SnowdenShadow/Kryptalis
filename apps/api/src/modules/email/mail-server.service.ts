@@ -16,10 +16,9 @@ import { EncryptionService } from '../../common/crypto/encryption.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
+import { DATA_DIR, MAIL_DIR } from '../../common/paths';
 
 const execFileAsync = promisify(execFile);
-const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-const MAIL_DIR = path.join(DATA_DIR, 'mail');
 // When the API runs in a container, the docker daemon on the host resolves
 // bind-mount source paths against the HOST filesystem, not the API container's
 // filesystem. Set DOCKCONTROL_HOST_DATA_DIR to the host path that the API's

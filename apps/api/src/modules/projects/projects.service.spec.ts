@@ -73,6 +73,9 @@ function makeService() {
   // ApplicationsService.remove() — project teardown delegates per-app cleanup
   // to it now (single source of truth). Default: resolves; tests assert calls.
   const applications = { remove: vi.fn().mockResolvedValue({ message: 'Application deleted' }) };
+  // DatabasesService.remove() — standalone-DB teardown delegates to it so each
+  // DB is torn down on its OWN server (per-DB placement). Default: resolves.
+  const databases = { remove: vi.fn().mockResolvedValue({ message: 'Database deleted' }) };
   const service = new ProjectsService(
     prisma as any,
     admin as any,
@@ -83,8 +86,9 @@ function makeService() {
     ops as any,
     encryption as any,
     applications as any,
+    databases as any,
   );
-  return { service, prisma, admin, agent, proxy, mailServer, notifications, ops, encryption, applications };
+  return { service, prisma, admin, agent, proxy, mailServer, notifications, ops, encryption, applications, databases };
 }
 
 const mockAssert = vi.mocked(assertProjectAccess);
@@ -342,24 +346,23 @@ describe('remove (project teardown)', () => {
     expect(applications.remove).toHaveBeenCalledWith('u1', 'prestaapp01');
   });
 
-  it('does NOT re-clean bundled DBs (they went with their app); only standalone DBs hit the DB loop', async () => {
-    // Remote project so the standalone DB-loop path enqueues an agent REMOVE we
-    // can observe (the local path shells docker directly, not mocked here).
-    const remoteProject = {
-      ...localProject,
-      serverId: 'srvR', server: { id: 'srvR', host: '203.0.113.5' },
-      applications: [{ id: 'prestaapp01', name: 'prestashop', server: { id: 'srvR', host: '203.0.113.5' } }],
-    };
-    const { service, agent } = setupRemove(remoteProject);
+  it('delegates standalone DB teardown to databases.remove() (its OWN server); skips bundled DBs', async () => {
+    const { service, databases } = setupRemove(localProject);
     await service.remove('p1', 'u1');
-    // Standalone DB → agent REMOVE for dockcontrol-db-analytics.
-    expect(agent.enqueueTask).toHaveBeenCalledWith(
-      'srvR', 'REMOVE', expect.objectContaining({ containerName: 'dockcontrol-db-analytics' }),
-    );
-    // Bundled DB → NEVER cleaned by the DB loop (it left with its app).
-    expect(agent.enqueueTask).not.toHaveBeenCalledWith(
-      expect.anything(), 'REMOVE', expect.objectContaining({ containerName: 'dockcontrol-db-prestashop' }),
-    );
+    // Standalone DB → databases.remove() with its row id (which resolves the
+    // DB's OWN server, so a DB placed off-project is torn down on the right host).
+    expect(databases.remove).toHaveBeenCalledTimes(1);
+    expect(databases.remove).toHaveBeenCalledWith('u1', 'standalone1');
+    // Bundled DB → NEVER hits the standalone loop (it left with its app).
+    expect(databases.remove).not.toHaveBeenCalledWith('u1', 'bundled1');
+  });
+
+  it('one DB cleanup failure does not abort the whole teardown', async () => {
+    const { service, prisma, databases } = setupRemove(localProject);
+    databases.remove.mockRejectedValueOnce(new Error('docker hiccup'));
+    await service.remove('p1', 'u1');
+    // Teardown still completes: the project row is deleted.
+    expect(prisma.project.delete).toHaveBeenCalledWith({ where: { id: 'p1' } });
   });
 
   it('still deletes the project row + domains at the end', async () => {

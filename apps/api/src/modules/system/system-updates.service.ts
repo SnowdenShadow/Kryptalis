@@ -102,6 +102,29 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   // all run update.sh at the same time.
   private updating = false;
 
+  // Guard so watchUpdateCompletion() never runs two concurrent tickers (the
+  // spawn path and the boot-recovery path could otherwise both poll the marker
+  // and race readUpdateResult()+unlink — flipping a real rc==0 into ERROR).
+  private watching = false;
+
+  // The latest SHA an update FAILED on. While latestSha still equals this, we
+  // report ERROR (not UP_TO_DATE, even though the new code is on disk) and do
+  // NOT auto-re-run — otherwise a commit with a broken build/migration would
+  // be retried every 60s forever, and a half-updated install would masquerade
+  // as up to date. Cleared when a NEW commit appears or on a manual forceUpdate.
+  private lastFailedSha: string | null = null;
+
+  // Hard ceiling on how long an update may run before the watcher treats a
+  // still-present marker as a dead updater. The wrapper's own
+  // `up -d --wait --wait-timeout 300` bounds the run, so this is a backstop for
+  // the case where the whole docker:cli container died (OOM, daemon restart)
+  // without ever clearing the marker. Generous because build + image pull on a
+  // small VPS can legitimately take many minutes — keyed off the MARKER's mtime
+  // (a true wall-clock age of the whole run), NOT the log mtime (which stalls
+  // for minutes during a single long `RUN`/`pull` layer and used to trigger a
+  // false "stuck" → a SECOND concurrent updater).
+  private readonly MAX_UPDATE_MS = 30 * 60 * 1000;
+
   // ── Lifecycle ─────────────────────────────────────────────────────
 
   async onModuleInit(): Promise<void> {
@@ -114,8 +137,8 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
       this.state.status = 'UPDATING';
       this.state.message = 'Recovering from in-progress update…';
       this.updating = true;
-      // Watch for the marker to disappear (update.sh removes it on exit)
-      // OR for the log file to stop growing for > 60s (treat as done).
+      // Watch for the marker to disappear (the wrapper removes it on exit, after
+      // recording the rc) OR for the run to exceed MAX_UPDATE_MS (dead updater).
       this.watchUpdateCompletion();
     }
 
@@ -162,8 +185,16 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Poll the marker + log file mtime to detect end-of-update post-restart. */
+  /**
+   * Poll the marker file to detect end-of-update post-restart. Idempotent: a
+   * second invocation (e.g. boot recovery firing while the spawn-path watcher
+   * still runs) returns immediately, so only ONE ticker ever races the
+   * marker-gone → readUpdateResult()+unlink path.
+   */
   private watchUpdateCompletion(): void {
+    if (this.watching) return;
+    this.watching = true;
+    const stop = () => { this.watching = false; };
     const tick = async () => {
       try {
         if (!fs.existsSync(this.UPDATING_MARKER)) {
@@ -180,34 +211,50 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
           // the marker was cleared out-of-band — so we surface ERROR rather
           // than falsely reporting UP_TO_DATE while stale code keeps running.
           if (rc === 0) {
+            // Clean success — drop any sticky failure for this SHA.
+            this.lastFailedSha = null;
             this.state.status = 'UP_TO_DATE';
             this.state.message =
               this.state.currentSha && this.state.currentSha === this.state.latestSha
                 ? `Updated to ${this.short(this.state.currentSha)}.`
                 : `Update finished (${this.short(this.state.currentSha)}).`;
-          } else if (rc !== null) {
-            this.state.status = 'ERROR';
-            this.state.message = `Update failed (exit ${rc}). Check the log.`;
           } else {
+            // Remember the SHA we tried to reach so poll() stays ERROR and does
+            // NOT auto-re-run it every tick (broken-commit retry loop) and does
+            // not flip to UP_TO_DATE just because the new SHA is now on disk.
+            this.lastFailedSha = this.state.latestSha;
             this.state.status = 'ERROR';
             this.state.message =
-              'Update ended without recording a result — it may have failed. Check the log.';
+              rc !== null
+                ? `Update failed (exit ${rc}). Check the log.`
+                : 'Update ended without recording a result — it may have failed. Check the log.';
           }
           // Consume the result so the next run starts from a clean slate.
           try { fs.unlinkSync(this.RESULT_FILE); } catch {}
           this.updating = false;
+          stop();
           return;
         }
-        // Stale marker check: log file untouched for > 5 min → assume crashed
-        if (fs.existsSync(this.LOG_FILE)) {
-          const stat = fs.statSync(this.LOG_FILE);
-          if (Date.now() - stat.mtimeMs > 5 * 60 * 1000) {
+        // Dead-updater backstop: key off the MARKER's own mtime (true wall-clock
+        // age of the run), NOT the log mtime. The log stalls for minutes during
+        // a single long build/pull layer, which used to trip a 5-min "stuck"
+        // check and spawn a SECOND concurrent updater. The marker is written
+        // once at run start and never touched again, so its age is the honest
+        // run duration. Only the genuine case — the whole updater container died
+        // without clearing the marker — trips this.
+        try {
+          const markerAge = Date.now() - fs.statSync(this.UPDATING_MARKER).mtimeMs;
+          if (markerAge > this.MAX_UPDATE_MS) {
+            this.lastFailedSha = this.state.latestSha;
             this.state.status = 'ERROR';
-            this.state.message = 'Update appears stuck. Check the log.';
+            this.state.message = 'Update appears stuck (updater did not finish). Check the log.';
             this.updating = false;
             try { fs.unlinkSync(this.UPDATING_MARKER); } catch {}
+            stop();
             return;
           }
+        } catch {
+          // Marker vanished between existsSync and statSync — next tick handles it.
         }
         setTimeout(tick, 2000);
       } catch (e) {
@@ -266,6 +313,10 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     if (!this.state.repo) {
       throw new BadRequestException('No repo configured.');
     }
+    // Manual retry overrides the sticky-failure guard: the operator has chosen
+    // to try again (presumably after fixing the cause), so don't let a prior
+    // lastFailedSha short-circuit this run.
+    this.lastFailedSha = null;
     void this.runUpdate().catch((e) =>
       this.logger.warn(`forced update failed: ${e?.message || e}`),
     );
@@ -345,11 +396,27 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // A SHA that just failed to update stays ERROR — even if `git reset` already
+    // landed it on disk (currentSha === sha) so it would otherwise read as
+    // "up to date". Keeps the dashboard honest about a half-updated/broken
+    // install and stops the 60s auto-retry loop on a known-bad commit. Cleared
+    // automatically once a NEWER commit appears (sha !== lastFailedSha below),
+    // or by a manual forceUpdate().
+    if (this.lastFailedSha && sha === this.lastFailedSha) {
+      this.state.status = 'ERROR';
+      this.state.message =
+        `Last update to ${this.short(sha)} failed. Fix the cause and retry from the dashboard, or push a new commit.`;
+      return;
+    }
+
     if (this.state.currentSha === sha) {
       this.state.status = 'UP_TO_DATE';
       this.state.message = `Up to date on ${this.state.branch} (${this.short(sha)}).`;
       return;
     }
+
+    // A genuinely newer commit supersedes any prior failure — allow it to run.
+    this.lastFailedSha = null;
 
     // New commit available → run the update.
     this.state.status = 'UPDATE_AVAILABLE';
@@ -376,6 +443,13 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     try {
       fs.mkdirSync(path.dirname(this.UPDATING_MARKER), { recursive: true });
       fs.writeFileSync(this.UPDATING_MARKER, new Date().toISOString());
+      // Seed the log file NOW so it always exists for the dashboard tail even if
+      // the docker:cli updater never starts (image pull fails, daemon restart,
+      // OOM) and never reaches update.sh's own `date > LOG_FILE`. The watcher's
+      // backstop keys off the MARKER mtime, not the log, so recovery no longer
+      // depends on the log existing — but a present log keeps the UI from
+      // showing an empty panel during the window before update.sh writes.
+      try { fs.writeFileSync(this.LOG_FILE, `[${new Date().toISOString()}] update queued…\n`); } catch {}
       // Drop any stale result from a prior run so the watcher can't read an
       // old rc before the wrapper records this run's.
       try { fs.unlinkSync(this.RESULT_FILE); } catch {}

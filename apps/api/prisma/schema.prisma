@@ -335,6 +335,10 @@ model Application {
   portMapping       Json?
   webhookSecret     String?
   autoDeploy        Boolean         @default(true)
+  // PHP runtime version for PHP_SITE apps (e.g. "8.3"). Selected at create
+  // time, baked into the php:<version>-apache image as a build ARG. NULL for
+  // every other framework. Changing it triggers an image rebuild on redeploy.
+  phpVersion        String?
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
 
@@ -347,6 +351,7 @@ model Application {
   portBindings     DomainPortBinding[]
   databases        Database[]
   sftpAccounts     SftpAccount[]
+  cronJobs         CronJob[]
 
   @@index([projectId])
   @@index([serverId])
@@ -368,6 +373,10 @@ enum AppFramework {
   STATIC
   DOCKER
   DOCKER_COMPOSE
+  // Classic "shared hosting" site: an Apache + PHP container (selectable PHP
+  // version) serving files the user uploads via SFTP, with a live bind-mounted
+  // docroot — no git repo, no rebuild on file change.
+  PHP_SITE
 }
 
 enum AppStatus {
@@ -948,4 +957,40 @@ model Notification {
 
   @@index([userId, createdAt])
   @@map("notifications")
+}
+
+// ─── Cron jobs ───────────────────────────────────────────────────────
+//
+// User-scheduled command that runs INSIDE an application's container on a
+// standard 5-field cron expression. Works uniformly for Docker apps and PHP
+// sites (both are containers): the scheduler resolves the app's container and
+// runs the command via `docker exec` (local) or an EXEC agent task (remote) —
+// the exact primitive ApplicationOpsService.execCommand already wires.
+//
+// The single API process is the only scheduler (no leader election); a 60s
+// tick + a lastRunAt watermark (compared against previousOccurrence) decides
+// what's due. Granularity is one minute; a run missed while the API was down
+// is skipped, not caught up (lastRunAt jumps forward on the next tick).
+model CronJob {
+  id            String   @id @default(cuid())
+  name          String
+  // Standard 5-field cron expression (validated against the cron parser).
+  schedule      String
+  // Shell command run as `sh -c <command>` inside the app container.
+  command       String
+  enabled       Boolean  @default(true)
+  // Watermark: the occurrence already honoured. NULL = never run (createdAt
+  // is used as the floor so a brand-new job doesn't fire for past occurrences).
+  lastRunAt     DateTime?
+  // Outcome of the most recent run, surfaced in the dashboard.
+  lastExitCode  Int?
+  lastOutput    String?
+  applicationId String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId])
+  @@map("cron_jobs")
 }

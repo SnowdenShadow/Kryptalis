@@ -32,6 +32,7 @@ import { SystemModule } from './modules/system/system.module';
 import { HealthModule } from './modules/health/health.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { ProjectTransferModule } from './modules/project-transfer/project-transfer.module';
+import { CronModule } from './modules/cron/cron.module';
 
 @Module({
   imports: [
@@ -105,6 +106,7 @@ import { ProjectTransferModule } from './modules/project-transfer/project-transf
     HealthModule,
     NotificationsModule,
     ProjectTransferModule,
+    CronModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

@@ -10,6 +10,7 @@ import { AppStatus } from '@prisma/client';
 import { AgentService } from '../agent/agent.service';
 import { DeploymentTargetService } from '../deployment-target/deployment-target.service';
 import { ApplicationDeployService } from './application-deploy.service';
+import { DEFAULT_PHP_VERSION } from './php-site.constants';
 import { ApplicationEnvService } from './application-env.service';
 import {
   execFileAsync,
@@ -184,6 +185,23 @@ export class ApplicationOpsService {
         envVars: this.env.decryptEnvVars(app.envVars),
       });
       return { message: 'Image re-pulled and stack recreated', deploymentId: deployment.id };
+    }
+
+    // PHP_SITE: no git/image — regenerate the php:<ver>-apache stack. Picks up
+    // a changed PHP version (rebuilds the image) and leaves the live docroot
+    // bind mount (the user's SFTP files) untouched.
+    if (app.framework === 'PHP_SITE') {
+      const deployment = await this.prisma.deployment.create({
+        data: { applicationId: app.id, status: 'PENDING', triggeredById: userId },
+      });
+      await this.deploy.runPhpSiteDeploy(
+        deployment.id,
+        app.id,
+        app.name,
+        app.phpVersion || DEFAULT_PHP_VERSION,
+        { hostPort: app.hostPort ?? undefined, envVars: this.env.decryptEnvVars(app.envVars) },
+      );
+      return { message: 'PHP site rebuilt and recreated', deploymentId: deployment.id };
     }
 
     // Marketplace / compose-only app: no git URL, no docker image, but a

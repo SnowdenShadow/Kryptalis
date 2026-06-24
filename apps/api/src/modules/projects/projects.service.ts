@@ -21,6 +21,7 @@ import { appVolumePrefix, dbVolumePrefix } from '../agent/volume-naming.util';
 import { slugify, remoteAppSlug, RESERVED_HOST_PORTS } from '../applications/applications.helpers';
 import { ApplicationOpsService } from '../applications/application-ops.service';
 import { ApplicationsService } from '../applications/applications.service';
+import { DatabasesService } from '../databases/databases.service';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -32,8 +33,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 
 const execFileAsync = promisify(execFile);
-const PROJ_DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-const PROJ_DBS_DIR = path.join(PROJ_DATA_DIR, 'databases');
 
 /** Stream a command's stdout to a file (no shell, never buffered in memory). */
 function runCommandToFile(cmd: string, args: string[], outPath: string, timeoutMs: number): Promise<void> {
@@ -104,6 +103,7 @@ export class ProjectsService implements OnModuleInit {
     private ops: ApplicationOpsService,
     private encryption: EncryptionService,
     private applications: ApplicationsService,
+    private databases: DatabasesService,
   ) {}
 
   onModuleInit() {
@@ -274,27 +274,21 @@ export class ProjectsService implements OnModuleInit {
     // Bundled (auto-imported) DBs live in their parent app's compose stack and
     // were already torn down + their rows purged by applications.remove above
     // — skip them here (a second `docker rm` would be a confusing no-op).
-    // Standalone DBs have their OWN DBS_DIR/<name> compose dir + the
-    // dockcontrol-db-<name> container; clean those exactly.
+    //
+    // Delegate standalone teardown to DatabasesService.remove(), which resolves
+    // each DB's OWN server (resolveDbServer) and tears it down local-or-remote
+    // accordingly. The previous inline copy derived local-vs-remote from the
+    // PROJECT's server and enqueued the REMOVE to project.serverId — so a DB
+    // placed on a DIFFERENT server than its project (per-DB placement, allowed
+    // by databases.create) leaked its container + volume on the wrong host and
+    // was never removed. Best-effort per DB: one failure must not abort the
+    // rest of the project teardown.
     for (const db of project.databases) {
       if (db.autoImported) continue;
-      const containerName = `dockcontrol-db-${db.name}`;
-      const slug = `db-${db.name}`;
-      if (isLocal) {
-        const dbDir = path.join(PROJ_DBS_DIR, db.name);
-        if (fs.existsSync(dbDir)) {
-          try { await execFileAsync('docker', ['compose', 'down', '-v', '--remove-orphans'], { cwd: dbDir, timeout: 30_000 }); } catch {}
-          try { fs.rmSync(dbDir, { recursive: true, force: true }); } catch {}
-        }
-        try { await execFileAsync('docker', ['rm', '-f', containerName], { timeout: 10_000 }); } catch {}
-      } else {
-        try {
-          await this.agent.enqueueTask(project.serverId, 'REMOVE', {
-            slug,
-            containerName,
-            purgeVolumes: true,
-          });
-        } catch {}
+      try {
+        await this.databases.remove(userId, db.id);
+      } catch (err: any) {
+        this.logger.warn(`project remove: database "${db.name}" cleanup failed: ${err?.message || err}`);
       }
     }
 

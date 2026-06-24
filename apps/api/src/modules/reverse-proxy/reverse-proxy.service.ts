@@ -4,11 +4,10 @@ import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 import { PrismaService } from '../../prisma/prisma.service';
+import { PROXY_DIR } from '../../common/paths';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 
 const execFileAsync = promisify(execFile);
-const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-const PROXY_DIR = path.join(DATA_DIR, 'reverse-proxy');
 const CONTAINER_NAME = 'dockcontrol-caddy';
 // docker-compose.override.yml lives at the install root on the host and
 // is bind-mounted into the API container at /app/install-root/. The API

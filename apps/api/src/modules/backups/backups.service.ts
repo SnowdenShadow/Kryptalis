@@ -41,12 +41,10 @@ import * as os from 'os';
 import * as path from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
+// Runtime path from the shared common/paths module (single source of truth).
+import { BACKUPS_DIR } from '../../common/paths';
 
 const execFileAsync = promisify(execFile);
-
-// Same runtime-dir convention as databases/applications/files services.
-const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
 
 /** Manifest written at the archive root — restore is driven entirely by it. */
 interface BackupManifest {

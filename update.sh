@@ -66,6 +66,15 @@ run() {
   return "$_rc"
 }
 
+# Remember the SHA we're on BEFORE the reset, so a later build failure can
+# roll the working tree back to it. Without this, a failed build leaves new
+# source on disk but the OLD image running — the API then reads the new SHA off
+# .git/HEAD and reports "up to date" while stale code is actually serving
+# (disk/runtime split-brain). Rollback is scoped to the BUILD failure only:
+# once `up` has started recreating containers (and migrations may have run) we
+# do NOT roll code back — that could pair old code with a forward-migrated DB.
+PREV_SHA=$(git rev-parse HEAD 2>/dev/null || echo "")
+
 log "→ fetching origin/$BRANCH"
 if ! run git fetch --depth=1 origin "$BRANCH"; then
   log "ERR: git fetch failed"
@@ -85,9 +94,29 @@ chmod +x "$INSTALL_DIR/install.sh" 2>/dev/null || true
 log "→ docker compose pull"
 run docker compose pull || true
 
-log "→ docker compose up -d --build --remove-orphans"
-if ! run docker compose up -d --build --remove-orphans; then
-  log "ERR: docker compose up failed"
+# Build BEFORE up so a build failure rolls the tree back cleanly — no container
+# has been touched yet at this point (compose recreates containers only at `up`).
+log "→ docker compose build"
+if ! run docker compose build; then
+  log "ERR: docker compose build failed"
+  if [ -n "$PREV_SHA" ]; then
+    log "→ rolling working tree back to $PREV_SHA (build failed before any container changed)"
+    run git reset --hard "$PREV_SHA" || true
+  fi
+  exit 1
+fi
+
+# `--wait` makes the exit code reflect REAL health, not just "containers
+# started". The api entrypoint (docker-start.sh) runs `prisma migrate deploy`
+# before `node dist/main`; a failed migration crashloops the container under
+# `restart: unless-stopped`. Plain `up -d` returns 0 the instant the container
+# is STARTED, so a crash-looping API used to be reported as a successful update.
+# With `--wait --wait-timeout`, compose blocks until every service is healthy
+# (or the timeout elapses) and returns non-zero otherwise — so the wrapper
+# records a real failure and the dashboard shows ERROR instead of "✓ up to date".
+log "→ docker compose up -d --wait --wait-timeout 300 --remove-orphans"
+if ! run docker compose up -d --wait --wait-timeout 300 --remove-orphans; then
+  log "ERR: docker compose up failed or the stack did not become healthy in time"
   exit 1
 fi
 

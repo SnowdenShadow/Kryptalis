@@ -18,9 +18,9 @@
 
 set -eu
 
-# `sed -i.bak` on .env leaves a .env.bak containing every secret. Clean it
-# on ANY exit (success, error, or interrupt) so a failed run can't strand a
-# world-readable copy of the secrets next to .env.
+# Edits now go through sed_inplace (tmpfile + atomic mv, never a .bak). This
+# trap is belt-and-braces: sweep any stale .env.bak a PRIOR installer version
+# (which used `sed -i.bak`) may have left behind, on ANY exit.
 cleanup() {
   [ -n "${INSTALL_DIR:-}" ] && rm -f "$INSTALL_DIR/.env.bak" 2>/dev/null || true
   rm -f .env.bak 2>/dev/null || true
@@ -37,6 +37,27 @@ say()  { printf '\033[1;36m▶\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m⚠\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m✖\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Edit a file in place WITHOUT ever writing a world-readable backup next to it.
+# `sed -i.bak` left a .env.bak holding every secret (umask-default perms) that
+# only the EXIT trap cleaned up — a flicker of plaintext secrets at the install
+# root. Instead: sed to a 0600 temp file in the SAME dir (so the final mv is an
+# atomic same-filesystem rename), preserve the original mode, then mv over it.
+#   sed_inplace SCRIPT FILE
+sed_inplace() {
+  _si_script=$1
+  _si_file=$2
+  _si_tmp=$(mktemp "${_si_file}.XXXXXX") || die "mktemp failed for $_si_file"
+  chmod 600 "$_si_tmp"
+  if sed "$_si_script" "$_si_file" > "$_si_tmp"; then
+    # Match the target's existing mode (.env is 0600) before swapping in.
+    chmod --reference="$_si_file" "$_si_tmp" 2>/dev/null || chmod 600 "$_si_tmp"
+    mv -f "$_si_tmp" "$_si_file"
+  else
+    rm -f "$_si_tmp"
+    die "sed edit of $_si_file failed"
+  fi
+}
 
 [ "$(id -u)" -eq 0 ] || die "Run as root (sudo)"
 
@@ -230,10 +251,7 @@ else
   CURRENT_URL=$(grep -E '^PUBLIC_API_URL=' .env | head -1 | cut -d= -f2- || true)
   if [ "$CURRENT_URL" != "$PUBLIC_API_URL_RESOLVED" ]; then
     say "PUBLIC_API_URL changed: $CURRENT_URL → $PUBLIC_API_URL_RESOLVED"
-    sed -i.bak "s|^PUBLIC_API_URL=.*|PUBLIC_API_URL=$PUBLIC_API_URL_RESOLVED|" .env
-    # sed -i.bak inherits the default umask (often 0022 → world-readable);
-    # the .bak holds every secret, so lock it down before the trap removes it.
-    chmod 600 .env.bak 2>/dev/null || true
+    sed_inplace "s|^PUBLIC_API_URL=.*|PUBLIC_API_URL=$PUBLIC_API_URL_RESOLVED|" .env
     NEEDS_DASHBOARD_REBUILD=1
   else
     ok ".env already exists — leaving it alone"
@@ -257,19 +275,15 @@ fi
 # path-stable no matter where compose is invoked from. Rewritten on every
 # install run so a moved checkout self-heals.
 set_env_var() {
-  # set_env_var KEY VALUE — idempotent upsert into .env
+  # set_env_var KEY VALUE — idempotent upsert into .env (no .bak ever written).
   if grep -qE "^$1=" .env; then
-    sed -i.bak "s|^$1=.*|$1=$2|" .env
-    # The .bak copy holds every secret; sed creates it with the default
-    # umask (world-readable). Restrict it before the EXIT trap removes it.
-    chmod 600 .env.bak 2>/dev/null || true
+    sed_inplace "s|^$1=.*|$1=$2|" .env
   else
     printf '%s=%s\n' "$1" "$2" >> .env
   fi
 }
 set_env_var DOCKCONTROL_HOST_INSTALL_DIR "$INSTALL_DIR"
 set_env_var DOCKCONTROL_HOST_DATA_DIR "$INSTALL_DIR/.dockcontrol"
-rm -f .env.bak
 ok "Host paths pinned: DOCKCONTROL_HOST_INSTALL_DIR=$INSTALL_DIR"
 
 # ─── 7. seed the Caddyfile so Caddy can mount it on first boot ──────

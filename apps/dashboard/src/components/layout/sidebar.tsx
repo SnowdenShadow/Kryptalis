@@ -20,6 +20,8 @@ import {
   ShieldAlert,
   ChevronLeft,
   ChevronRight,
+  FileCode2,
+  Clock,
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { cn } from '@/lib/utils';
@@ -41,6 +43,8 @@ const navigation: Array<{
   { key: 'nav.server', href: '/dashboard/servers', icon: Server, multiOnly: true, adminOnly: true, badge: 'servers' },
   { key: 'nav.projects', href: '/dashboard/projects', icon: FolderKanban },
   { key: 'nav.applications', href: '/dashboard/applications', icon: Rocket, badge: 'applications' },
+  { key: 'nav.php', href: '/dashboard/php', icon: FileCode2 },
+  { key: 'nav.cron', href: '/dashboard/cron', icon: Clock },
   { key: 'nav.domains', href: '/dashboard/domains', icon: Globe },
   // Docker (@Roles on /docker) and Monitoring (/servers/local*) are
   // admin-only API surfaces — hide them from regular users.

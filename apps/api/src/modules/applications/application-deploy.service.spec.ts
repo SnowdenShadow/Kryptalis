@@ -28,6 +28,7 @@ vi.mock('fs', () => {
     existsSync: vi.fn(),
     writeFileSync: vi.fn(),
     readFileSync: vi.fn(),
+    readdirSync: vi.fn(),
     mkdirSync: vi.fn(),
     rmSync: vi.fn(),
     renameSync: vi.fn(),
@@ -56,6 +57,7 @@ const vfs = fs as unknown as {
   existsSync: ReturnType<typeof vi.fn>;
   writeFileSync: ReturnType<typeof vi.fn>;
   readFileSync: ReturnType<typeof vi.fn>;
+  readdirSync: ReturnType<typeof vi.fn>;
   mkdirSync: ReturnType<typeof vi.fn>;
   rmSync: ReturnType<typeof vi.fn>;
   renameSync: ReturnType<typeof vi.fn>;
@@ -74,6 +76,14 @@ function installFsDefaults() {
     const v = vfs.__files.get(norm(p));
     if (v === undefined) throw new Error(`ENOENT: ${p}`);
     return v;
+  });
+  vfs.readdirSync.mockImplementation((p: any) => {
+    const pre = norm(p).replace(/\/$/, '') + '/';
+    const names = new Set<string>();
+    for (const k of vfs.__files.keys()) {
+      if (k.startsWith(pre)) names.add(k.slice(pre.length).split('/')[0]);
+    }
+    return [...names];
   });
   vfs.mkdirSync.mockImplementation((p: any) => {
     vfs.__dirs.add(norm(p));
@@ -1223,5 +1233,93 @@ describe('runDeploy — remote server delegation', () => {
     const data = lastDeploymentData(prisma);
     expect(data.status).toBe('FAILED');
     expect(data.deployLogs).toContain('agent boom');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// runPhpSiteDeploy (Apache + selectable PHP version, SFTP docroot)
+// ═══════════════════════════════════════════════════════════════════
+
+describe('runPhpSiteDeploy', () => {
+  const dockerfileOf = (dir: string) => vfs.__files.get(norm(path.join(dir, 'Dockerfile')));
+
+  it('writes a parametrized Dockerfile + compose with build arg, bind-mount docroot, then build + up', async () => {
+    const { service, prisma } = makeService();
+
+    await service.runPhpSiteDeploy('dep1', APP_ID, APP_NAME, '8.2', {});
+
+    const dockerfile = dockerfileOf(appDir())!;
+    expect(dockerfile).toContain('ARG PHP_VERSION');
+    expect(dockerfile).toContain('FROM php:${PHP_VERSION}-apache');
+
+    const doc = readComposeDoc();
+    expect(doc.services.app.build).toEqual({ context: '.', args: { PHP_VERSION: '8.2' } });
+    expect(doc.services.app.container_name).toBe('dockcontrol-my-app');
+    expect(doc.services.app.networks).toEqual(['dockcontrol_project', 'dockcontrol_apps']);
+    // LIVE docroot bind mount → public/ subdir, served with no rebuild.
+    expect(doc.services.app.volumes).toHaveLength(1);
+    expect(norm(doc.services.app.volumes[0])).toMatch(/\/apps\/my-app-[^/]+\/public:\/var\/www\/html$/);
+
+    // build BEFORE up (build failure must roll back before any container changes).
+    expect(findExec((c) => c.cmd === 'docker' && c.args.join(' ') === 'compose build')).toBeTruthy();
+    expect(findExec((c) => c.cmd === 'docker' && c.args.join(' ') === 'compose up -d --remove-orphans')).toBeTruthy();
+
+    // Persists the two fields Caddy's mainLinked gate needs + the version.
+    expect(prisma.application.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: 'RUNNING', framework: 'PHP_SITE', phpVersion: '8.2',
+          containerName: 'dockcontrol-my-app', containerPort: 80, port: 80,
+        }),
+      }),
+    );
+    expect(lastAppStatus(prisma)).toBe('RUNNING');
+  });
+
+  it('seeds a starter public/index.php on first deploy', async () => {
+    const { service } = makeService();
+    await service.runPhpSiteDeploy('dep1', APP_ID, APP_NAME, '8.3', {});
+    const indexPath = norm(path.join(appDir(), 'public', 'index.php'));
+    expect(vfs.__files.has(indexPath)).toBe(true);
+    expect(vfs.__files.get(indexPath)).toContain('<?php');
+  });
+
+  it('falls back to the default PHP version for an out-of-range value', async () => {
+    const { service } = makeService();
+    await service.runPhpSiteDeploy('dep1', APP_ID, APP_NAME, '5.6' as any, {});
+    expect(readComposeDoc().services.app.build.args.PHP_VERSION).toBe('8.3');
+  });
+
+  it('publishes a host port only when one was chosen', async () => {
+    const { service } = makeService();
+    await service.runPhpSiteDeploy('dep1', APP_ID, APP_NAME, '8.3', { hostPort: 8090 });
+    expect(readComposeDoc().services.app.ports).toEqual(['8090:80']);
+  });
+
+  it('build failure → app ERROR, deployment FAILED', async () => {
+    const { service, prisma } = makeService();
+    handlers.push((cmd, args) =>
+      cmd === 'docker' && args[0] === 'compose' && args[1] === 'build'
+        ? new Error('build blew up') : undefined,
+    );
+    await service.runPhpSiteDeploy('dep1', APP_ID, APP_NAME, '8.3', {});
+    expect(lastAppStatus(prisma)).toBe('ERROR');
+    expect(deploymentStatuses(prisma)).toContain('FAILED');
+  });
+
+  it('a remote-placed PHP site is refused (bind mount needs the local host daemon)', async () => {
+    const { service, prisma } = makeService();
+    // Place the app on a remote server.
+    prisma.application.findUnique.mockResolvedValue({
+      projectId: 'proj1', serverId: 'remoteSrv',
+      server: { id: 'remoteSrv', host: '203.0.113.7' },
+      project: { serverId: 'remoteSrv', server: { id: 'remoteSrv', host: '203.0.113.7' } },
+      domains: [],
+    });
+    await service.runPhpSiteDeploy('dep1', APP_ID, APP_NAME, '8.3', {});
+    expect(lastAppStatus(prisma)).toBe('ERROR');
+    const data = lastDeploymentData(prisma);
+    expect(data.status).toBe('FAILED');
+    expect(data.deployLogs).toMatch(/local host/i);
   });
 });

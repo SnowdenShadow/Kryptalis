@@ -6,6 +6,11 @@ import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { AgentService } from '../agent/agent.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { detectStack, FRAMEWORK_DOCKERFILES, FRAMEWORK_INTERNAL_PORT } from './dockerfile-templates';
+import {
+  DEFAULT_PHP_VERSION,
+  PHP_SITE_CONTAINER_PORT,
+  isSupportedPhpVersion,
+} from './php-site.constants';
 import { DatabasesService } from '../databases/databases.service';
 import { ApplicationEnvService } from './application-env.service';
 import {
@@ -187,6 +192,201 @@ export class ApplicationDeployService implements OnModuleInit {
     } catch (err: any) {
       const msg = err?.message || 'remote deploy failed';
       buildLogs.push(`✖ ${msg}`);
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: { status: AppStatus.ERROR },
+      });
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.FAILED,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          deployLogs: msg.slice(0, 10_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+    }
+  }
+
+  /**
+   * "Classic shared hosting" deploy: an Apache + PHP container (the user picks
+   * the PHP version) serving files uploaded over SFTP, with a LIVE bind-mounted
+   * docroot — no git repo, no rebuild when the user changes a .php file.
+   *
+   * Shape, mirroring runDockerImageDeploy but with a parametrized build:
+   *   - Dockerfile:  ARG PHP_VERSION / FROM php:${PHP_VERSION}-apache  (version
+   *     is a build ARG so 7.4–8.3 all share one template; PHP_VERSION is NOT a
+   *     secret, so it's set explicitly in build.args, never via injectComposeEnv).
+   *   - docker-compose.yml:  build: { context: ., args: { PHP_VERSION } }, the
+   *     container joined to dockcontrol-apps (+ project net) as containerName,
+   *     and volumes: [ <hostAppDir>/public : /var/www/html ]. The docroot is the
+   *     app's own public/ subdir, NOT the appDir root — that keeps the generated
+   *     Dockerfile/compose out of the web root AND out of what an SFTP user can
+   *     see/overwrite (the SFTP chroot binds appDir at /home/<user>/app).
+   *   - persists containerName + containerPort=80 so Caddy's mainLinked gate
+   *     goes live and the domain proxies to the site.
+   *
+   * A starter public/index.php is seeded on FIRST deploy only (never clobbers
+   * files the user already uploaded).
+   */
+  async runPhpSiteDeploy(
+    deploymentId: string,
+    appId: string,
+    name: string,
+    phpVersion: string,
+    opts: { envVars?: Record<string, string>; hostPort?: number },
+  ) {
+    const slug = slugify(name);
+    const containerNm = containerName(slug);
+    const appDir = resolveAppDir(slug, appId);
+    // Host path the docker daemon resolves the bind mount against (same story
+    // as marketplace __HOST_APP_DIR__): the daemon runs on the HOST, so the
+    // mount SOURCE must be a host path, even though the API writes the seed
+    // files to its own in-container appDir. Default to in-container for dev.
+    const hostDataDir = process.env.DOCKCONTROL_HOST_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
+    const hostAppDir = path.join(hostDataDir, 'apps', path.basename(appDir));
+    const hostDocroot = path.join(hostAppDir, 'public');
+    const started = Date.now();
+    const buildLogs: string[] = [];
+    const log = (line: string) => { buildLogs.push(line); };
+
+    // Build args carry the user's PHP version. A compose `build.args` map can't
+    // forward an undefined value, so resolve to a known-good default defensively
+    // (the DTO already constrains it to SUPPORTED_PHP_VERSIONS).
+    const version = isSupportedPhpVersion(phpVersion) ? phpVersion : DEFAULT_PHP_VERSION;
+
+    // PHP site stacks need a host bind mount, so they can't be shipped to a
+    // remote agent the way image/compose deploys are (the agent owns its own
+    // /opt/dockcontrol/apps tree). Guard: PHP sites are local-host only for now.
+    const remote = await this.resolveRemoteServer(appId);
+    if (remote) {
+      const msg =
+        'PHP sites are only supported on the local host for now (they bind-mount a docroot the host daemon must see). Deploy on the platform server, or use a Git/Docker app for a remote target.';
+      log(`✖ ${msg}`);
+      await this.prisma.application.update({ where: { id: appId }, data: { status: AppStatus.ERROR } });
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { status: DeploymentStatus.FAILED, buildLogs: buildLogs.join('\n'), deployLogs: msg, duration: Date.now() - started, finishedAt: new Date() },
+      });
+      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
+      return;
+    }
+
+    try {
+      await ensureSharedAppsNetwork();
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: { status: DeploymentStatus.DEPLOYING, startedAt: new Date() },
+      });
+      log(`> deploying PHP ${version} site (Apache)`);
+
+      // Resolve / create the per-project network (same multi-app discovery as
+      // every other deploy path) so sibling apps resolve each other by name.
+      const appRow = await this.prisma.application.findUnique({
+        where: { id: appId },
+        select: { projectId: true },
+      });
+      const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
+      if (projectNet) {
+        try {
+          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5000 });
+        } catch {
+          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
+        }
+      }
+
+      // REDEPLOY: bring the old stack down WITHOUT -v (the docroot is a host
+      // bind mount, not a named volume, so it survives regardless — but be
+      // explicit). Then PRESERVE the user's uploaded public/ across the dir
+      // refresh by only (re)writing the infra files, never touching public/.
+      const hadDir = fs.existsSync(appDir);
+      if (hadDir) {
+        try { await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 60_000); } catch {}
+      }
+      fs.mkdirSync(appDir, { recursive: true });
+      fs.mkdirSync(path.join(appDir, 'public'), { recursive: true });
+
+      // Seed a starter index.php ONLY when the docroot is still empty — never
+      // clobber files the user has uploaded over SFTP.
+      const docroot = path.join(appDir, 'public');
+      const docrootEmpty = (() => {
+        try { return fs.readdirSync(docroot).length === 0; } catch { return true; }
+      })();
+      if (docrootEmpty) {
+        fs.writeFileSync(
+          path.join(docroot, 'index.php'),
+          `<?php\n// Starter page generated by DockControl — replace it with your own files\n// (upload over SFTP). PHP version: ${version}.\nheader('Content-Type: text/html; charset=utf-8');\n?>\n<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><title>${name}</title></head>\n<body style="font-family:system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem">\n  <h1>It works 🎉</h1>\n  <p>Your PHP site <strong>${name}</strong> is live on PHP <?= PHP_VERSION ?> (Apache).</p>\n  <p>Upload your files over SFTP into <code>public/</code> to replace this page.</p>\n</body></html>\n`,
+        );
+        log('> seeded public/index.php (first deploy)');
+      }
+
+      // Parametrized Dockerfile: one template, version chosen at build time.
+      fs.writeFileSync(
+        path.join(appDir, 'Dockerfile'),
+        `# syntax=docker/dockerfile:1\n# Generated by DockControl for a PHP_SITE app. Do not edit — regenerated on redeploy.\nARG PHP_VERSION=${DEFAULT_PHP_VERSION}\nFROM php:\${PHP_VERSION}-apache\n# Serve from /var/www/html (Apache default docroot); the user's files are\n# bind-mounted there at runtime, so the image itself ships empty.\nRUN a2enmod rewrite\nEXPOSE 80\n`,
+      );
+
+      const env = opts.envVars || {};
+      const publishHost = opts.hostPort;
+      const networks = ['dockcontrol_apps'];
+      if (projectNet) networks.unshift('dockcontrol_project');
+      const composeDoc: any = {
+        services: {
+          app: {
+            build: { context: '.', args: { PHP_VERSION: version } },
+            image: imageName(slug),
+            container_name: containerNm,
+            restart: 'unless-stopped',
+            ...(Object.keys(env).length ? { environment: { ...env } } : {}),
+            ...(publishHost ? { ports: [`${publishHost}:80`] } : {}),
+            // LIVE docroot bind mount — SFTP-uploaded files served with no rebuild.
+            volumes: [`${hostDocroot}:/var/www/html`],
+            networks,
+          },
+        },
+        networks: {
+          ...(projectNet ? { dockcontrol_project: { external: true, name: projectNet } } : {}),
+          dockcontrol_apps: { external: true, name: 'dockcontrol-apps' },
+        },
+      };
+      const compose = yaml.dump(composeDoc, { lineWidth: 200 });
+      fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), compose);
+      log('> wrote Dockerfile + docker-compose.yml');
+
+      log('> docker compose build');
+      await dockerCompose(appDir, ['build'], undefined, 600_000);
+      await removeCollidingContainers(compose, log);
+      log('> docker compose up -d');
+      await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], undefined, 180_000);
+
+      await this.prisma.application.update({
+        where: { id: appId },
+        data: {
+          status: AppStatus.RUNNING,
+          framework: 'PHP_SITE',
+          phpVersion: version,
+          containerName: containerNm,
+          containerPort: PHP_SITE_CONTAINER_PORT,
+          port: PHP_SITE_CONTAINER_PORT,
+        },
+      });
+      this.proxy.regenerate().catch(() => {});
+      await this.prisma.deployment.update({
+        where: { id: deploymentId },
+        data: {
+          status: DeploymentStatus.RUNNING,
+          buildLogs: buildLogs.join('\n').slice(0, 50_000),
+          duration: Date.now() - started,
+          finishedAt: new Date(),
+        },
+      });
+      this.notifyDeploymentOutcome(deploymentId, name, 'success');
+    } catch (err: any) {
+      const msg = err?.message || 'PHP site deploy failed';
+      log(`✖ ${msg}`);
       await this.prisma.application.update({
         where: { id: appId },
         data: { status: AppStatus.ERROR },

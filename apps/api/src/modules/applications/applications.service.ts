@@ -18,6 +18,7 @@ import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { AgentService } from '../agent/agent.service';
 import { DatabasesService } from '../databases/databases.service';
 import { ApplicationDeployService } from './application-deploy.service';
+import { DEFAULT_PHP_VERSION } from './php-site.constants';
 import { ApplicationOpsService } from './application-ops.service';
 import { ApplicationNetworkService } from './application-network.service';
 import { ApplicationEnvService } from './application-env.service';
@@ -142,11 +143,18 @@ export class ApplicationsService {
     // happen inside a single Prisma $transaction so either both
     // succeed or neither does.
 
+    // A PHP_SITE is its OWN deploy source: it has no git/image/compose/
+    // dockerfile input, but the platform generates a php:<ver>-apache stack and
+    // serves an SFTP-uploaded docroot. So it must count as a real source for
+    // the blank-scaffold guards below (a domain + the deploy are exactly the
+    // point of the feature), AND be excluded from the mutually-exclusive count.
+    const isPhpSite = dto.framework === 'PHP_SITE';
+
     // 1) Blank scaffold + domain = nonsense. There's no service to
-    // route the domain to, ever. A raw compose/Dockerfile counts as a
-    // real source — only refuse when ALL deploy inputs are absent.
+    // route the domain to, ever. A raw compose/Dockerfile (or a PHP site)
+    // counts as a real source — only refuse when ALL deploy inputs are absent.
     const isBlankScaffold =
-      !dto.gitUrl && !dto.dockerImage && !composeContent && !dockerfileContent;
+      !dto.gitUrl && !dto.dockerImage && !composeContent && !dockerfileContent && !isPhpSite;
     if (isBlankScaffold && (dtoDomainId || dtoDomainString)) {
       throw new BadRequestException(
         'Cannot attach a domain to a blank app — add a Git URL, Docker image, Compose file, or Dockerfile first.',
@@ -446,6 +454,14 @@ export class ApplicationsService {
         envVars: dto.envVars,
         hostPort: dtoHostPort,
         contextFiles,
+      }).catch(() => {});
+    } else if (isPhpSite) {
+      // PHP_SITE: no git/image/compose/dockerfile — the platform generates a
+      // php:<ver>-apache stack with a live bind-mounted docroot the user fills
+      // over SFTP. phpVersion is DTO-validated against SUPPORTED_PHP_VERSIONS.
+      this.deployService.runPhpSiteDeploy(deployment.id, app.id, dto.name, dto.phpVersion || DEFAULT_PHP_VERSION, {
+        envVars: dto.envVars,
+        hostPort: dtoHostPort,
       }).catch(() => {});
     } else {
       await this.prisma.application.update({ where: { id: app.id }, data: { status: 'STOPPED' } });

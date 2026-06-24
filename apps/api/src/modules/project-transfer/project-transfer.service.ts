@@ -12,6 +12,8 @@ import * as zlib from 'zlib';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { PrismaService } from '../../prisma/prisma.service';
+import { EncryptionService } from '../../common/crypto/encryption.service';
+import { XFER_DIR } from '../../common/paths';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { ApplicationsService } from '../applications/applications.service';
 import { ApplicationEnvService } from '../applications/application-env.service';
@@ -54,10 +56,8 @@ const isWin = process.platform === 'win32';
 const tarPath = (p: string): string => (isWin ? p.replace(/\\/g, '/') : p);
 const tarArgs = (...rest: string[]): string[] => (isWin ? ['--force-local', ...rest] : rest);
 
-// Runtime dir convention shared with backups/agent. Transfer staging lives in
-// .dockcontrol/project-transfer/<id>/.
-const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-const XFER_DIR = path.join(DATA_DIR, 'project-transfer');
+// Transfer staging lives in .dockcontrol/project-transfer/<id>/ (XFER_DIR from
+// the shared common/paths module).
 
 // Hard cap on an uploaded .dctproj (defence against zip-bomb / OOM). Reuses
 // the agent transfer cap when set, else 20 GiB. The default is generous
@@ -111,6 +111,7 @@ export class ProjectTransferService {
     private databases: DatabasesService,
     private projects: ProjectsService,
     private domains: DomainsService,
+    private encryption: EncryptionService,
   ) {
     if (!fs.existsSync(XFER_DIR)) fs.mkdirSync(XFER_DIR, { recursive: true });
     // Periodic sweep of expired parse sessions (no live timer under tests).
@@ -252,11 +253,21 @@ export class ProjectTransferService {
       }
 
       for (const db of project.databases) {
+        // Database.password is stored ENCRYPTED at rest (DatabasesService
+        // writes this.encryption.encrypt(password)). Decrypt to the real
+        // plaintext BEFORE re-wrapping under the export passphrase — exactly
+        // as the app envVars are decrypted above (this.env.decryptEnvVars).
+        // Wrapping the ciphertext directly (the old bug) produced archives
+        // whose imported DBs carried the literal "v1.iv.tag.ct" blob as their
+        // password (broken auth) AND whose mysqldump/mongodump auth'd with
+        // that blob and silently emitted empty dumps. Legacy plaintext rows
+        // pass through decrypt() unchanged.
+        const dbPasswordPlain = this.encryption.decrypt(db.password || '');
         const entry: DctprojDb = {
           name: db.name,
           type: db.type,
           username: db.username,
-          passwordEncrypted: encryptBuffer(Buffer.from(db.password || ''), opts.passphrase).toString('base64'),
+          passwordEncrypted: encryptBuffer(Buffer.from(dbPasswordPlain || ''), opts.passphrase).toString('base64'),
           port: db.port ?? undefined,
         };
         if (opts.includeData) {
@@ -268,7 +279,7 @@ export class ProjectTransferService {
           if (db.autoImported) {
             entry.dataInVolume = true;
           } else {
-            const dumpRel = await this.dumpLocalDatabase(db, dir);
+            const dumpRel = await this.dumpLocalDatabase({ ...db, password: dbPasswordPlain }, dir);
             if (dumpRel) entry.dumpFile = dumpRel;
           }
         }

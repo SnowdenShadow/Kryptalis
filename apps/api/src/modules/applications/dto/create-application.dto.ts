@@ -2,6 +2,7 @@ import {
   IsString,
   IsOptional,
   IsEnum,
+  IsIn,
   IsInt,
   IsObject,
   Min,
@@ -11,6 +12,7 @@ import {
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AppFramework, GitProviderType } from '@prisma/client';
+import { SUPPORTED_PHP_VERSIONS } from '../php-site.constants';
 
 export class CreateApplicationDto {
   @ApiProperty({ example: 'my-app' })
@@ -31,6 +33,18 @@ export class CreateApplicationDto {
   @ApiProperty({ enum: AppFramework, example: AppFramework.DOCKER })
   @IsEnum(AppFramework)
   framework: AppFramework;
+
+  @ApiProperty({
+    required: false,
+    enum: SUPPORTED_PHP_VERSIONS as unknown as string[],
+    example: '8.3',
+    description: 'PHP runtime version — only for framework=PHP_SITE (Apache + mod_php).',
+  })
+  @IsOptional()
+  @IsIn(SUPPORTED_PHP_VERSIONS as unknown as string[], {
+    message: `phpVersion must be one of: ${SUPPORTED_PHP_VERSIONS.join(', ')}`,
+  })
+  phpVersion?: string;
 
   @ApiProperty({ required: false, example: 'https://github.com/user/repo.git' })
   @IsOptional()

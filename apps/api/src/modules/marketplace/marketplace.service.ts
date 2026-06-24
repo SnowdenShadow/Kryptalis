@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException, ForbiddenException, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
+import { APPS_DIR } from '../../common/paths';
 import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate, domainPinEnv } from './templates';
 import { checkVolumeSafety } from './dto/install-custom.dto';
 import { projectNetworkName, listComposeContainerNames, remoteAppSlug } from '../applications/applications.helpers';
@@ -90,9 +91,6 @@ function loadCatalog(): MarketplaceApp[] {
 }
 
 const APPS: MarketplaceApp[] = loadCatalog();
-
-const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-const APPS_DIR = path.join(DATA_DIR, 'apps');
 
 // Webmail apps that bind to a specific DockControl mail server. Multi-install
 // is allowed (one instance per mail server) — uniqueness is enforced on

@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
+import { TRANSFERS_DIR } from '../../common/paths';
 import { randomBytes, randomUUID } from 'crypto';
 import { TaskType } from '@prisma/client';
 import * as fs from 'fs';
@@ -30,12 +31,10 @@ export interface AgentTaskCompletion {
 
 export type AgentTaskCompletionHandler = (task: AgentTaskCompletion) => Promise<void>;
 
-// Same runtime-dir convention as backups/databases/files services. Transfer
-// staging lives in .dockcontrol/transfers/<taskId>/<fileName> — written by the
-// authenticated agent upload endpoint (or staged locally by the API for
-// downloads) and removed when the task chain terminates.
-const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-const TRANSFERS_DIR = path.join(DATA_DIR, 'transfers');
+// Transfer staging lives in .dockcontrol/transfers/<taskId>/<fileName> —
+// written by the authenticated agent upload endpoint (or staged locally by the
+// API for downloads) and removed when the task chain terminates. Path comes
+// from the shared common/paths module (single source of truth).
 
 /** Per-file transfer size cap. Generous by default (10 GB) — volume tars and
  *  full-server backup archives flow through here. Override with

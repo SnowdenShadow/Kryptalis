@@ -23,6 +23,7 @@ import {
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
 import { EncryptionService } from '../../common/crypto/encryption.service';
+import { DBS_DIR } from '../../common/paths';
 import { AgentService } from '../agent/agent.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 
@@ -31,8 +32,6 @@ import { isLocalHost } from '../deployment-target/deployment-target.service';
 const execFileAsync = promisify(execFile);
 const compose = (args: string[], opts: { cwd?: string; timeout?: number } = {}) =>
   execFileAsync('docker', ['compose', ...args], opts);
-const DATA_DIR = process.env.DOCKCONTROL_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
-const DBS_DIR = path.join(DATA_DIR, 'databases');
 
 const DB_CONFIGS: Record<string, { image: string; defaultPort: number; portBase: number; compose: (name: string, user: string, pass: string, port: number) => string }> = {
   POSTGRESQL: {
