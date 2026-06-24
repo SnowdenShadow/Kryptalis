@@ -498,6 +498,51 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     return { message: 'SFTP account deleted' };
   }
 
+  /**
+   * Deprovision every SFTP account bound to an application — used by
+   * ApplicationsService.remove() BEFORE the app row is deleted (the FK cascade
+   * drops the SftpAccount rows but NOT the OS-level sshd user/chroot/password
+   * inside the sftp container, which would otherwise survive as a ghost login
+   * whose chroot target — the now-deleted app dir — no longer exists).
+   *
+   * Best-effort and self-contained: it resolves accounts from the DB, removes
+   * each from its container (local docker exec, or remote agent via a post-
+   * delete sync), then deletes the rows so the later app delete's cascade is a
+   * no-op. Never throws — a cleanup failure must not block the app deletion.
+   */
+  async deprovisionForApplication(applicationId: string): Promise<void> {
+    let accounts: { id: string; username: string }[] = [];
+    try {
+      accounts = await this.prisma.sftpAccount.findMany({
+        where: { applicationId },
+        select: { id: true, username: true },
+      }) as any;
+    } catch (e) {
+      this.logger.warn(`deprovisionForApplication(${applicationId}): list failed: ${(e as Error).message}`);
+      return;
+    }
+    if (!accounts.length) return;
+
+    const remoteServer = await this.resolveRemoteSftpServer('app', applicationId).catch(() => null);
+    for (const acc of accounts) {
+      try {
+        if (!remoteServer) {
+          await this.removeAccountFromContainer(acc.username);
+        }
+        await this.prisma.sftpAccount.delete({ where: { id: acc.id } }).catch(() => undefined);
+      } catch (e) {
+        this.logger.warn(`deprovisionForApplication: could not remove "${acc.username}": ${(e as Error).message}`);
+      }
+    }
+    if (remoteServer) {
+      // Rows are gone → a full-state push no longer contains them, so the agent
+      // drops the OS accounts on its embedded server.
+      await this.syncRemoteSftpAccounts(remoteServer.id).catch((e) =>
+        this.logger.warn(`remote SFTP sync after app delete failed (heals on next sync): ${e?.message || e}`),
+      );
+    }
+  }
+
   // ── Sync / sweep ──────────────────────────────────────────────────
 
   /**
@@ -1142,6 +1187,16 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
         select: { name: true, id: true, dockerImage: true, containerName: true, framework: true },
       });
       if (!app) throw new NotFoundException('Application not found');
+      // A PHP_SITE's docroot is its public/ subdir, created by the first deploy.
+      // Creating an SFTP account before that first deploy would bind-mount (and
+      // root-create) an empty public/ that the platform hadn't provisioned yet.
+      // containerName is set only on a SUCCESSFUL deploy, so use it as the
+      // "has been deployed at least once" signal and fail with a clear message.
+      if (app.framework === 'PHP_SITE' && !app.containerName) {
+        throw new BadRequestException(
+          'Deploy this PHP site at least once before creating an SFTP account — its public/ folder is created on first deploy.',
+        );
+      }
       return [{ dir: 'app', source: await this.computeChrootSourceForApp(app) }];
     }
     const project = await this.prisma.project.findUnique({

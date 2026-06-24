@@ -143,6 +143,7 @@ function makeService() {
     ops as any,
     {} as any, // network
     {} as any, // env
+    { deprovisionForApplication: vi.fn().mockResolvedValue(undefined) } as any, // sftp
   );
   return { service, prisma, agent, proxy, ops };
 }
@@ -436,6 +437,7 @@ describe('attachDatabase / detachDatabase', () => {
       ops as any,
       {} as any,
       env as any,
+      { deprovisionForApplication: vi.fn().mockResolvedValue(undefined) } as any, // sftp
     );
     return { service, prisma, ops, databases, env };
   }

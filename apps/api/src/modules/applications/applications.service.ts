@@ -19,6 +19,7 @@ import { AgentService } from '../agent/agent.service';
 import { DatabasesService } from '../databases/databases.service';
 import { ApplicationDeployService } from './application-deploy.service';
 import { DEFAULT_PHP_VERSION } from './php-site.constants';
+import { SftpService } from '../sftp/sftp.service';
 import { ApplicationOpsService } from './application-ops.service';
 import { ApplicationNetworkService } from './application-network.service';
 import { ApplicationEnvService } from './application-env.service';
@@ -71,6 +72,7 @@ export class ApplicationsService {
     private ops: ApplicationOpsService,
     private network: ApplicationNetworkService,
     private env: ApplicationEnvService,
+    private sftp: SftpService,
   ) {}
 
   // ── access control (RBAC via ProjectMember) ───────────────────────
@@ -624,6 +626,12 @@ export class ApplicationsService {
         purgeVolumes: true,
       });
     }
+
+    // Deprovision OS-level SFTP accounts BEFORE the app delete. The FK cascade
+    // (schema onDelete) drops the SftpAccount ROWS, but the sshd user, chroot,
+    // password, and dropin inside the sftp container would otherwise survive as
+    // a ghost login pointing at a now-deleted app dir. Best-effort.
+    try { await this.sftp.deprovisionForApplication(id); } catch {}
 
     // Purge auto-imported Database rows BEFORE the app delete. The
     // schema uses SetNull cascade for application → database (so manual
