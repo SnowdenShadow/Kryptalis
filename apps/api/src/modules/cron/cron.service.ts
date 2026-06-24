@@ -156,23 +156,45 @@ export class CronService implements OnModuleInit, OnModuleDestroy {
   private async execute(job: { id: string; applicationId: string; command: string }, actorId?: string) {
     if (this.running.has(job.id)) return;
     this.running.add(job.id);
+    const ranAt = new Date();
     try {
       const userId = actorId ?? (await this.resolveActor(job.applicationId));
       if (!userId) {
         this.logger.warn(`Cron job ${job.id}: no authorized actor for app ${job.applicationId} — skipping.`);
+        await this.recordRun(job.id, ranAt, -1, 'Skipped: no authorized owner for this app.');
         return;
       }
-      const res = await this.ops.execCommand(userId, job.applicationId, job.command);
-      await this.prisma.cronJob.update({
-        where: { id: job.id },
-        data: {
-          lastExitCode: res.exitCode,
-          lastOutput: (res.output || '').slice(0, 4000),
-        },
+
+      // Guard: if the app isn't running, `docker exec` fails with a raw, cryptic
+      // docker error ("No such container" / "is not running"). Surface a clear,
+      // distinct message instead so the user understands the cause.
+      const app = await this.prisma.application.findUnique({
+        where: { id: job.applicationId },
+        select: { status: true, name: true },
       });
+      if (app && app.status !== 'RUNNING') {
+        await this.recordRun(
+          job.id, ranAt, -1,
+          `Skipped: the application "${app.name}" is ${app.status?.toLowerCase?.() || 'not running'}. ` +
+          `Start it before this job can run its command.`,
+        );
+        return;
+      }
+
+      const res = await this.ops.execCommand(userId, job.applicationId, job.command);
+      await this.recordRun(job.id, ranAt, res.exitCode, res.output || '');
     } finally {
       this.running.delete(job.id);
     }
+  }
+
+  /** Persist a run's outcome — lastRunAt is set on EVERY execution (manual or
+   *  scheduled), so the dashboard's "Last run" reflects the most recent run. */
+  private async recordRun(jobId: string, ranAt: Date, exitCode: number, output: string) {
+    await this.prisma.cronJob.update({
+      where: { id: jobId },
+      data: { lastRunAt: ranAt, lastExitCode: exitCode, lastOutput: output.slice(0, 4000) },
+    }).catch((e) => this.logger.warn(`Cron job ${jobId}: could not record run: ${(e as Error).message}`));
   }
 
   // ── helpers ─────────────────────────────────────────────────────────

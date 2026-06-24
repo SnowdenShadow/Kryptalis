@@ -15,6 +15,7 @@ import {
   Database as DatabaseIcon,
   FolderOpen,
   Unlink,
+  Settings2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -99,6 +100,17 @@ export default function PhpSitesPage() {
     onError: (err: Error) => toastError(err),
   });
 
+  // Change a site's PHP version → PATCH triggers an image rebuild + redeploy.
+  const versionMutation = useMutation({
+    mutationFn: ({ id, phpVersion }: { id: string; phpVersion: string }) =>
+      api.patch(`/applications/${id}`, { phpVersion }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['applications'] });
+      toast.success(t('php.versionChanged'));
+    },
+    onError: (err: Error) => toastError(err),
+  });
+
   function closeCreate() {
     setShowCreate(false);
     setName('');
@@ -170,9 +182,21 @@ export default function PhpSitesPage() {
                         <span className="font-medium truncate">{site.name}</span>
                       </div>
                       <div className="flex items-center gap-1.5 mt-1.5">
-                        <Badge className="bg-indigo-500/20 text-indigo-400 border-transparent">
-                          PHP {site.phpVersion || '8.3'}
-                        </Badge>
+                        {/* Inline PHP-version switcher — changing it rebuilds the image. */}
+                        <div className="inline-flex items-center gap-1 rounded bg-indigo-500/20 text-indigo-400 pl-2 pr-1 py-0.5 text-xs">
+                          <span>PHP</span>
+                          <select
+                            value={site.phpVersion || '8.3'}
+                            onChange={(e) => versionMutation.mutate({ id: site.id, phpVersion: e.target.value })}
+                            disabled={versionMutation.isPending}
+                            className="bg-transparent outline-none cursor-pointer font-medium [&>option]:bg-zinc-900 [&>option]:text-foreground"
+                            title={t('php.changeVersion')}
+                          >
+                            {PHP_VERSIONS.map((v) => (
+                              <option key={v} value={v}>{v}</option>
+                            ))}
+                          </select>
+                        </div>
                         {site.project?.name && (
                           <span className="text-xs text-muted-foreground truncate">
                             {site.project.name}
@@ -221,6 +245,15 @@ export default function PhpSitesPage() {
                     >
                       <FolderOpen size={12} />
                       {t('php.manageFiles')}
+                    </Link>
+                    {/* The generic app-detail page gives PHP sites logs,
+                        deployments history, terminal and start/stop/restart. */}
+                    <Link
+                      href={`/dashboard/applications/${site.id}`}
+                      className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+                    >
+                      <Settings2 size={12} />
+                      {t('php.details')}
                     </Link>
                   </div>
                 </CardContent>

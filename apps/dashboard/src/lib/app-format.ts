@@ -45,6 +45,7 @@ export const FRAMEWORK_LABELS: Record<string, string> = {
   STATIC: 'Static',
   DOCKER: 'Docker',
   DOCKER_COMPOSE: 'Compose',
+  PHP_SITE: 'PHP / Apache',
 };
 
 export const HTTPS_PORTS = [443, 8443, 9443];

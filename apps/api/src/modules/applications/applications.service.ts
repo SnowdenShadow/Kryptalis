@@ -544,7 +544,7 @@ export class ApplicationsService {
   }
 
   async update(userId: string, id: string, dto: UpdateApplicationDto) {
-    await this.assertOwnership(userId, id, 'DEVELOPER');
+    const existing = await this.assertOwnership(userId, id, 'DEVELOPER');
     // Empty string on displayName means "revert to canonical name".
     const data: any = { ...dto };
     if (dto.displayName !== undefined && dto.displayName.trim() === '') {
@@ -558,9 +558,20 @@ export class ApplicationsService {
     if (dto.envVars !== undefined) {
       data.envVars = this.env.encryptEnvVars(dto.envVars);
     }
+    // Changing a PHP site's version only matters for PHP_SITE apps — it rebuilds
+    // the php:<ver>-apache image. Drop it for everything else so it can't write
+    // a stray column on a non-PHP app.
+    const phpVersionChanged =
+      dto.phpVersion !== undefined &&
+      existing.framework === 'PHP_SITE' &&
+      dto.phpVersion !== existing.phpVersion;
+    if (dto.phpVersion !== undefined && existing.framework !== 'PHP_SITE') {
+      delete data.phpVersion;
+    }
     const result = await this.prisma.application.update({ where: { id }, data });
-    // if port changed and app is running, redeploy to apply
-    if (dto.port !== undefined) {
+    // Redeploy to apply: a port change, OR a PHP version change (rebuilds the
+    // image with the new ARG PHP_VERSION).
+    if (dto.port !== undefined || phpVersionChanged) {
       this.redeploy(userId, id).catch(() => {});
     }
     return this.withDisplayName(result);
@@ -1058,8 +1069,17 @@ export class ApplicationsService {
     });
 
     // Redeploy so the new environment block takes effect in the container.
-    await this.ops.redeploy(userId, id).catch(() => undefined);
-    return { message: `Database "${dbName}" attached. Connection details injected as DB_* env vars.`, envKeys: Object.keys(dbEnv) };
+    // Surface the REAL outcome: if the redeploy fails, the env is persisted but
+    // the running container doesn't have the vars yet — tell the user so they
+    // don't believe the site can reach the DB when it can't.
+    const redeployed = await this.ops.redeploy(userId, id).then(() => true).catch(() => false);
+    return {
+      message: redeployed
+        ? `Database "${dbName}" attached. Connection details injected as DB_* env vars; the site is redeploying.`
+        : `Database "${dbName}" linked and env vars saved, but the redeploy did not start — open the site and redeploy it manually to apply.`,
+      redeployed,
+      envKeys: Object.keys(dbEnv),
+    };
   }
 
   /** Detach a database: unlink it and strip the injected DB_* env vars, then redeploy. */
@@ -1079,8 +1099,8 @@ export class ApplicationsService {
       where: { id },
       data: { envVars: this.env.encryptEnvVars(stripped) as any },
     });
-    await this.ops.redeploy(userId, id).catch(() => undefined);
-    return { message: `Database "${dbName}" detached.` };
+    const redeployed = await this.ops.redeploy(userId, id).then(() => true).catch(() => false);
+    return { message: `Database "${dbName}" detached.`, redeployed };
   }
 
   // ── webhooks ──────────────────────────────────────────────────────

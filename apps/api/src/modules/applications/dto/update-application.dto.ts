@@ -2,6 +2,7 @@ import {
   IsString,
   IsOptional,
   IsEnum,
+  IsIn,
   IsInt,
   IsObject,
   Min,
@@ -9,6 +10,7 @@ import {
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AppFramework, GitProviderType } from '@prisma/client';
+import { SUPPORTED_PHP_VERSIONS } from '../php-site.constants';
 
 export class UpdateApplicationDto {
   // Note: `name` is intentionally NOT exposed here. It's the slug source and
@@ -66,4 +68,15 @@ export class UpdateApplicationDto {
   @IsOptional()
   @IsObject()
   envVars?: Record<string, string>;
+
+  @ApiProperty({
+    required: false,
+    enum: SUPPORTED_PHP_VERSIONS as unknown as string[],
+    description: 'Change a PHP_SITE app\'s PHP version — triggers an image rebuild + redeploy.',
+  })
+  @IsOptional()
+  @IsIn(SUPPORTED_PHP_VERSIONS as unknown as string[], {
+    message: `phpVersion must be one of: ${SUPPORTED_PHP_VERSIONS.join(', ')}`,
+  })
+  phpVersion?: string;
 }

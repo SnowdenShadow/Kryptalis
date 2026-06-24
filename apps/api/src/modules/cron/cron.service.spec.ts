@@ -17,7 +17,11 @@ function makePrisma() {
       delete: vi.fn().mockResolvedValue({}),
     },
     application: {
+      // Superset shape: resolveActor reads project.members; the run-status
+      // guard reads status + name. Default to a RUNNING app owned by owner1.
       findUnique: vi.fn().mockResolvedValue({
+        status: 'RUNNING',
+        name: 'app',
         project: { members: [{ userId: 'owner1' }] },
       }),
     },
@@ -112,6 +116,27 @@ describe('CronService.runDueJobs', () => {
     ]);
     await svc.runDueJobs(now);
     expect(ops.execCommand).not.toHaveBeenCalled();
+  });
+
+  it('does NOT exec when the app is not running — records a clear skip message instead', async () => {
+    const { svc, ops, prisma: p } = makeService(prisma);
+    p.application.findUnique.mockResolvedValue({
+      status: 'STOPPED', name: 'web', project: { members: [{ userId: 'owner1' }] },
+    });
+    const now = new Date(2026, 5, 24, 14, 5, 0);
+    p.cronJob.findMany.mockResolvedValue([
+      { id: 'j1', name: 'tick', schedule: '*/5 * * * *', command: 'echo hi', enabled: true, applicationId: 'app1', lastRunAt: new Date(2026, 5, 24, 14, 0, 0), createdAt: new Date(2026, 5, 24, 13, 0, 0) },
+    ]);
+
+    await svc.runDueJobs(now);
+    await flush();
+
+    expect(ops.execCommand).not.toHaveBeenCalled();
+    // A clear, distinct skip outcome was recorded (not a raw docker error).
+    const recorded = p.cronJob.update.mock.calls.map((c: any) => c[0].data).find((d: any) => typeof d.lastOutput === 'string');
+    expect(recorded.lastOutput).toMatch(/stopped|not running/i);
+    expect(recorded.lastExitCode).toBe(-1);
+    expect(recorded.lastRunAt).toBeInstanceOf(Date);
   });
 
   it('one job failing to launch does not stop the others', async () => {

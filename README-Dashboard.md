@@ -86,6 +86,36 @@ Features:
 
 ---
 
+## PHP / Apache Hosting
+
+Classic shared-hosting for PHP sites — no Docker knowledge required.
+
+Features:
+
+* Pick the PHP version per site (7.4 / 8.0 / 8.1 / 8.2 / 8.3) — change it anytime, the image rebuilds automatically.
+* Serves both static `.html` and executable `.php` (Apache + mod_php).
+* Bundled extensions: `pdo_mysql`, `mysqli`, `pdo_pgsql` + `gd`, `zip`, `intl`, `opcache`, `bcmath` — WordPress, Laravel, Symfony, PrestaShop run out of the box.
+* Upload your files over **SFTP** into the site's `public/` folder — served live, no rebuild.
+* **Attach a managed database** from the site card: its connection details are injected as `DB_HOST` / `DB_PORT` / `DB_DATABASE` / `DB_USERNAME` / `DB_PASSWORD` / `DATABASE_URL` env vars (read them with `getenv()`), and survive redeploys.
+* Attach a domain for automatic HTTPS (Let's Encrypt via Caddy). The first request to a new domain may briefly fail while the certificate is issued, then works.
+* Full lifecycle (logs, deployment history, terminal, start / stop / restart) via the site's **Details** page.
+
+---
+
+## Cron Jobs
+
+Schedule a command to run periodically inside an application or PHP site.
+
+Features:
+
+* **Simple schedule builder** (every N minutes / hourly / daily / weekly / monthly) with dropdowns — or an **Advanced** raw 5-field cron expression for power users. A plain-language preview always shows what will happen.
+* Commands run as `sh -c` inside the app's container (works for Docker apps and PHP sites alike).
+* **Test now** button runs the job immediately and shows the captured output + exit code.
+* Edit, enable/disable, and delete jobs from the list.
+* The scheduler runs inside the API (one process, minute granularity). A run missed while the platform is down is skipped rather than replayed.
+
+---
+
 ## File Manager
 
 Integrated web file explorer.

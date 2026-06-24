@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/) · Versioning: [SemVer](
 
 ## [Unreleased]
 
+### Added — PHP/Apache hosting, cron jobs, DB attach (2026-06-25)
+
+**PHP / Apache shared hosting**
+- New `PHP_SITE` application type: one `php:<version>-apache` container per site, with a selectable PHP version (7.4–8.3) that can be changed after creation (rebuilds the image + redeploys). Serves static `.html` and executable `.php`.
+- The generated image bundles the database drivers (`pdo_mysql`, `mysqli`, `pdo_pgsql`) and a common web pack (`gd`, `zip`, `intl`, `opcache`, `bcmath`) so WordPress / Laravel / Symfony / PrestaShop run out of the box.
+- Files are uploaded over SFTP into the site's `public/` docroot (bind-mounted, served live with no rebuild). SFTP drops the user directly into `public/`.
+- New dashboard page **PHP Sites** with create dialog, inline version switcher, DB manager, and links to SFTP + the app-detail page (logs / deployments / lifecycle).
+
+**Attach a database to a site**
+- Managed databases now join their **project network** at create time, so a sibling app/site reaches them by container name.
+- New `attachDatabase`/`detachDatabase`: links a managed DB to an app and injects `DB_HOST`/`DB_PORT`/`DB_DATABASE`/`DB_USERNAME`/`DB_PASSWORD`/`DATABASE_URL` (in-network host + internal port) into its env, surviving redeploys. Cross-host attach is refused with a clear message; pre-existing DBs are connected to the project network on attach (repair path).
+
+**Cron jobs**
+- New `CronJob` model + scheduler (60 s tick, minute granularity, single API process). Commands run as `sh -c` inside the target app/site container, locally or via a remote EXEC agent task.
+- Dashboard **Cron Jobs** page: simple frequency builder + advanced raw-cron mode with a plain-language preview, edit/enable/disable/delete, a **Test** button that runs the job now and shows captured output + exit code.
+- Guards: jobs against a stopped app record a clear "app not running" outcome instead of a raw docker error; empty name/command rejected at the DTO.
+
+### Fixed
+- `CreateApplicationDto`: the internal `restoreVolumes`/`loadImages` fields are now `declare`-only — under `target: ES2022` they were emitted as `undefined` instance properties and `forbidNonWhitelisted` rejected **every** application-create request with "property restoreVolumes should not exist".
+- `install.sh` / `update.sh`: `docker compose pull` now pulls only the registry images (postgres, caddy) by name — a bare pull tried to fetch the locally-built `dockcontrol-sftp` image and printed a scary "pull access denied" error + layer-progress spam. The final install summary box no longer mis-aligns on variable-width IPs.
+
 ### Fixed — reliability & security hardening pass (2026-06-10)
 
 **Critical**

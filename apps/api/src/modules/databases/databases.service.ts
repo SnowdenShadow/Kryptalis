@@ -808,9 +808,6 @@ export class DatabasesService {
     dbId: string,
     applicationId: string,
   ): Promise<{ envVars: Record<string, string>; dbName: string }> {
-    // assertDbAccess in setParent verifies the caller can manage this DB AND
-    // (via the project check) the target application's project.
-    await this.setParent(userId, dbId, { applicationId });
     const db = await this.prisma.database.findUnique({ where: { id: dbId } });
     if (!db) throw new NotFoundException('Database not found');
     if (db.autoImported) {
@@ -820,6 +817,50 @@ export class DatabasesService {
         'This database is bundled inside another application and cannot be attached separately.',
       );
     }
+
+    // Cross-host guard: DB_HOST is the DB container_name, which only resolves
+    // over a docker network on the SAME host. If the DB and the app run on
+    // different servers, the injected hostname never resolves and the PHP
+    // connection fails at runtime with a cryptic DNS error. Refuse early with a
+    // clear message instead of "succeeding" into a broken state.
+    const app = await this.prisma.application.findUnique({
+      where: { id: applicationId },
+      select: {
+        projectId: true,
+        server: { select: { host: true } },
+        project: { select: { server: { select: { host: true } } } },
+      },
+    });
+    if (!app) throw new NotFoundException('Application not found');
+    const appHost = app.server?.host ?? app.project?.server?.host ?? null;
+    const dbServer = await this.resolveDbServer(dbId);
+    const dbHost = dbServer?.host ?? null;
+    const sameHost =
+      (isLocalHost(appHost) && isLocalHost(dbHost)) ||
+      (!!appHost && !!dbHost && appHost === dbHost);
+    if (!sameHost) {
+      throw new BadRequestException(
+        `The database runs on a different server than this application. Container-network attach only works when both are on the same host. ` +
+        `Move one of them, or connect using the database's published host:port + DATABASE_URL manually.`,
+      );
+    }
+
+    // assertDbAccess in setParent verifies the caller can manage this DB AND
+    // (via the project check) the target application's project.
+    await this.setParent(userId, dbId, { applicationId });
+
+    // Repair path: a DB created before the project-network code, or one whose
+    // container was started outside launchContainer, may not be on the app's
+    // project network — so its container_name wouldn't resolve from the app.
+    // Idempotently connect it now (local host only; remote DBs are guarded
+    // above to be same-host, but cross-daemon `network connect` isn't possible
+    // from here so we only repair local).
+    if (this.isDbLocal(dbServer)) {
+      await this.ensureDbOnProjectNetwork(resolveDbContainer({
+        name: db.name, autoImported: db.autoImported, host: db.host,
+      }), projectNetworkName(app.projectId!));
+    }
+
     return {
       envVars: this.buildDbEnvVars({
         name: db.name,
@@ -831,6 +872,29 @@ export class DatabasesService {
       }),
       dbName: db.name,
     };
+  }
+
+  /**
+   * Idempotently connect a DB container to a project network — repairs DBs that
+   * predate the create-time network join. Creates the network first if missing.
+   * Best-effort: a failure here doesn't block the attach (the env is still
+   * injected; the user can redeploy/repair), but it's logged.
+   */
+  private async ensureDbOnProjectNetwork(container: string, net: string): Promise<void> {
+    await this.ensureProjectNetwork(net);
+    try {
+      // Already connected? `network connect` errors if so — check first to keep
+      // logs clean. The container may not exist yet (still pulling) — tolerate.
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['inspect', '--format', '{{json .NetworkSettings.Networks}}', container],
+        { timeout: 5_000 },
+      );
+      if (stdout.includes(`"${net}"`)) return; // already a member
+      await execFileAsync('docker', ['network', 'connect', net, container], { timeout: 10_000 });
+    } catch (e) {
+      this.logger.warn(`Could not connect ${container} to ${net}: ${(e as Error).message}`);
+    }
   }
 
   /** Unlink a DB from its application (soft link only — container untouched). */

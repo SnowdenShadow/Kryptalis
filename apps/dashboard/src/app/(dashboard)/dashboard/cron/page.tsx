@@ -13,6 +13,9 @@ import {
   CheckCircle2,
   XCircle,
   CalendarClock,
+  ChevronDown,
+  ChevronRight,
+  Pencil,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -60,6 +63,8 @@ export default function CronJobsPage() {
   const queryClient = useQueryClient();
 
   const [showCreate, setShowCreate] = useState(false);
+  // When set, the dialog is in EDIT mode for this job id (otherwise create).
+  const [editId, setEditId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [applicationId, setApplicationId] = useState('');
   // Schedule has two editors: a SIMPLE builder (frequency + time dropdowns) and
@@ -70,6 +75,15 @@ export default function CronJobsPage() {
   const [advancedSchedule, setAdvancedSchedule] = useState('');
   const [command, setCommand] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  // Job ids whose run-output panel is expanded.
+  const [openOutput, setOpenOutput] = useState<Set<string>>(new Set());
+  const toggleOutput = (id: string) =>
+    setOpenOutput((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   // The effective cron expression sent to the API.
   const schedule = scheduleMode === 'simple' ? buildCron(simple) : advancedSchedule.trim();
@@ -94,6 +108,17 @@ export default function CronJobsPage() {
     onError: (err: Error) => toastError(err),
   });
 
+  const updateMutation = useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
+      api.patch(`/cron-jobs/${id}`, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['cron-jobs'] });
+      toast.success(t('cron.updated'));
+      closeCreate();
+    },
+    onError: (err: Error) => toastError(err),
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/cron-jobs/${id}`),
     onSuccess: () => {
@@ -105,10 +130,14 @@ export default function CronJobsPage() {
   });
 
   const runMutation = useMutation({
-    mutationFn: (id: string) => api.post(`/cron-jobs/${id}/run`, {}),
-    onSuccess: () => {
+    mutationFn: (id: string) => api.post<CronJob>(`/cron-jobs/${id}/run`, {}),
+    onSuccess: (job) => {
       queryClient.invalidateQueries({ queryKey: ['cron-jobs'] });
-      toast.success(t('cron.ranNow'));
+      // Auto-open the output panel so the user SEES the result of their test run.
+      if (job?.id) setOpenOutput((prev) => new Set(prev).add(job.id));
+      if (job?.lastExitCode === 0) toast.success(t('cron.runOk'));
+      else if (job?.lastExitCode != null) toast.error(t('cron.runFailed', { code: String(job.lastExitCode) }));
+      else toast.success(t('cron.ranNow'));
     },
     onError: (err: Error) => toastError(err),
   });
@@ -122,6 +151,7 @@ export default function CronJobsPage() {
 
   function closeCreate() {
     setShowCreate(false);
+    setEditId(null);
     setName('');
     setApplicationId('');
     setScheduleMode('simple');
@@ -130,15 +160,41 @@ export default function CronJobsPage() {
     setCommand('');
   }
 
+  // Open the dialog pre-filled to EDIT an existing job. Seeds the simple builder
+  // from the stored expression when it fits the subset, else opens advanced mode.
+  function openEdit(job: CronJob) {
+    setEditId(job.id);
+    setName(job.name);
+    setApplicationId(job.applicationId);
+    setCommand(job.command);
+    const s = parseToSimple(job.schedule);
+    if (s) {
+      setSimple(s);
+      setScheduleMode('simple');
+    } else {
+      setAdvancedSchedule(job.schedule);
+      setScheduleMode('advanced');
+    }
+    setShowCreate(true);
+  }
+
   function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim() || !applicationId || !schedule || !command.trim()) return;
-    createMutation.mutate({
-      name: name.trim(),
-      applicationId,
-      schedule,
-      command: command.trim(),
-    });
+    if (editId) {
+      // Edit: PATCH only the editable fields (applicationId is immutable here).
+      updateMutation.mutate({
+        id: editId,
+        body: { name: name.trim(), schedule, command: command.trim() },
+      });
+    } else {
+      createMutation.mutate({
+        name: name.trim(),
+        applicationId,
+        schedule,
+        command: command.trim(),
+      });
+    }
   }
 
   // Localized plain-language description of the current expression, for the
@@ -223,23 +279,72 @@ export default function CronJobsPage() {
                       <Terminal size={12} />
                       <code className="truncate">{job.command}</code>
                     </div>
+
+                    {/* Last run summary + a button to reveal the captured output. */}
+                    {job.lastRunAt && (
+                      <div className="flex flex-wrap items-center gap-2 mt-2 text-xs">
+                        <span className="text-muted-foreground">
+                          {t('cron.lastRun')}: {new Date(job.lastRunAt).toLocaleString()}
+                        </span>
+                        {job.lastExitCode != null && (
+                          <Badge
+                            className={
+                              job.lastExitCode === 0
+                                ? 'bg-success/15 text-success border-transparent'
+                                : 'bg-destructive/15 text-destructive border-transparent'
+                            }
+                          >
+                            {job.lastExitCode === 0
+                              ? t('cron.exitOk')
+                              : t('cron.exitCode', { code: String(job.lastExitCode) })}
+                          </Badge>
+                        )}
+                        {(job.lastOutput || job.lastExitCode != null) && (
+                          <button
+                            onClick={() => toggleOutput(job.id)}
+                            className="inline-flex items-center gap-1 text-primary hover:underline"
+                          >
+                            {openOutput.has(job.id) ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                            {openOutput.has(job.id) ? t('cron.hideOutput') : t('cron.viewOutput')}
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Captured stdout/stderr of the most recent run. */}
+                    {openOutput.has(job.id) && (
+                      <pre className="mt-2 max-h-56 overflow-auto rounded-md bg-zinc-950 border border-zinc-800 p-2.5 text-[11px] leading-relaxed text-foreground/80 whitespace-pre-wrap break-words">
+                        {job.lastOutput && job.lastOutput.trim() ? job.lastOutput : t('cron.noOutput')}
+                      </pre>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1 shrink-0">
+                    {/* Action-oriented label: the button DOES the opposite of the
+                        current state (the current state is shown as a badge). */}
                     <button
                       onClick={() => toggleMutation.mutate({ id: job.id, enabled: !job.enabled })}
                       className="text-xs px-2 py-1 rounded hover:bg-zinc-800 text-muted-foreground"
-                      title={job.enabled ? t('common.disabled') : t('common.enabled')}
                     >
-                      {job.enabled ? t('common.enabled') : t('common.disabled')}
+                      {job.enabled ? t('cron.disable') : t('cron.enable')}
                     </button>
                     <button
                       onClick={() => runMutation.mutate(job.id)}
-                      className="p-1.5 rounded hover:bg-zinc-800 text-muted-foreground hover:text-primary"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs bg-primary/10 text-primary hover:bg-primary/20 disabled:opacity-50"
                       title={t('cron.runNow')}
                       disabled={runMutation.isPending}
                     >
-                      <Play size={15} />
+                      {runMutation.isPending && runMutation.variables === job.id
+                        ? <Loader2 size={13} className="animate-spin" />
+                        : <Play size={13} />}
+                      {t('cron.test')}
+                    </button>
+                    <button
+                      onClick={() => openEdit(job)}
+                      className="p-1.5 rounded hover:bg-zinc-800 text-muted-foreground hover:text-foreground"
+                      title={t('common.edit')}
+                    >
+                      <Pencil size={15} />
                     </button>
                     <button
                       onClick={() => setDeleteId(job.id)}
@@ -261,7 +366,7 @@ export default function CronJobsPage() {
         <Dialog open={showCreate} onClose={closeCreate}>
           <form onSubmit={handleCreate}>
             <DialogHeader>
-              <DialogTitle>{t('cron.create')}</DialogTitle>
+              <DialogTitle>{editId ? t('cron.edit') : t('cron.create')}</DialogTitle>
               <DialogDescription>{t('cron.subtitle')}</DialogDescription>
             </DialogHeader>
 
@@ -279,7 +384,14 @@ export default function CronJobsPage() {
 
               <div>
                 <Label htmlFor="cron-app">{t('cron.app')}</Label>
-                <Select id="cron-app" value={applicationId} onChange={(e) => setApplicationId(e.target.value)}>
+                {/* The target app is fixed once created (the job's container is
+                    resolved from it). Disable in edit mode. */}
+                <Select
+                  id="cron-app"
+                  value={applicationId}
+                  onChange={(e) => setApplicationId(e.target.value)}
+                  disabled={!!editId}
+                >
                   <option value="">—</option>
                   {apps.map((a) => (
                     <option key={a.id} value={a.id}>{a.name}</option>
@@ -369,10 +481,10 @@ export default function CronJobsPage() {
               </Button>
               <Button
                 type="submit"
-                disabled={!name.trim() || !applicationId || !schedule.trim() || !command.trim() || createMutation.isPending}
+                disabled={!name.trim() || !applicationId || !schedule.trim() || !command.trim() || createMutation.isPending || updateMutation.isPending}
               >
-                {createMutation.isPending && <Loader2 size={14} className="mr-1.5 animate-spin" />}
-                {t('common.create')}
+                {(createMutation.isPending || updateMutation.isPending) && <Loader2 size={14} className="mr-1.5 animate-spin" />}
+                {editId ? t('common.save') : t('common.create')}
               </Button>
             </DialogFooter>
           </form>

@@ -1,4 +1,4 @@
-import { IsString, IsBoolean, IsOptional, MaxLength, Validate, ValidatorConstraint, ValidatorConstraintInterface } from 'class-validator';
+import { IsString, IsBoolean, IsOptional, IsNotEmpty, MaxLength, Validate, ValidatorConstraint, ValidatorConstraintInterface } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { isValidCron, CRON_SCHEDULE_MESSAGE } from '../cron-schedule.util';
 
@@ -16,11 +16,13 @@ export class IsCronConstraint implements ValidatorConstraintInterface {
 export class CreateCronJobDto {
   @ApiProperty({ example: 'Clear cache' })
   @IsString()
+  @IsNotEmpty()
   @MaxLength(64)
   name: string;
 
   @ApiProperty({ example: 'clx...', description: 'Application the command runs inside.' })
   @IsString()
+  @IsNotEmpty()
   applicationId: string;
 
   @ApiProperty({ example: '*/5 * * * *', description: 'Standard 5-field cron expression.' })
@@ -30,6 +32,7 @@ export class CreateCronJobDto {
 
   @ApiProperty({ example: 'php artisan cache:clear', description: 'Shell command run as `sh -c` inside the container.' })
   @IsString()
+  @IsNotEmpty()
   @MaxLength(2000)
   command: string;
 
