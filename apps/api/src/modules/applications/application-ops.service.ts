@@ -493,7 +493,16 @@ export class ApplicationOpsService {
   async execCommand(userId: string, id: string, command: string) {
     const app = await assertAppOwnership(this.prisma, userId, id);
     const slug = slugify(app.name);
-    const cname = resolveContainerName(slug, id);
+    // Prefer the container name the deploy ACTUALLY persisted (app.containerName)
+    // over the on-disk heuristic. The heuristic (resolveContainerName) appends a
+    // -<id12> suffix whenever the per-instance dir exists, but several deploy
+    // paths — PHP sites, docker-image, dockerfile — write a per-instance DIR yet
+    // name the container WITHOUT the suffix (containerName(slug)). That mismatch
+    // made `docker exec` (cron + terminal) target a non-existent name
+    // ("No such container: dockcontrol-<slug>-<id12>"). The stored value is the
+    // source of truth; fall back to the heuristic only for legacy rows that
+    // never persisted one.
+    const cname = app.containerName || resolveContainerName(slug, id);
     const server = await resolveAppServer(this.prisma, id);
 
     if (!isAppLocal(server) && server) {
