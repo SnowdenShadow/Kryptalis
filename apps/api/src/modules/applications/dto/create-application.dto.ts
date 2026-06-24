@@ -185,22 +185,29 @@ export class CreateApplicationDto {
   serverId?: string;
 
   /**
-   * INTERNAL — not part of the public API. Deliberately UNDECORATED so the
-   * global ValidationPipe (`whitelist: true`) STRIPS it from any HTTP request
-   * body: it can only be set by in-process callers (ProjectTransferService),
-   * never by a client. Carries docker-volume seeds (key + on-disk tar path)
-   * that runComposeOnlyDeploy restores BEFORE the stack boots, so an imported
-   * bundled-DB app starts on its restored datadir. compose-only deploys only.
+   * INTERNAL — not part of the public API. Set only by in-process callers
+   * (ProjectTransferService), never by a client. Carries docker-volume seeds
+   * (key + on-disk tar path) that runComposeOnlyDeploy restores BEFORE the
+   * stack boots, so an imported bundled-DB app starts on its restored datadir.
+   * compose-only deploys only.
+   *
+   * MUST be `declare`: under target ES2022 (useDefineForClassFields), a plain
+   * field declaration emits a real instance property initialised to `undefined`
+   * — which the global ValidationPipe's `forbidNonWhitelisted` then rejects on
+   * EVERY create request ("property restoreVolumes should not exist"), even
+   * when the client never sent it. `declare` makes it type-only (no emit), so
+   * the property is genuinely absent unless an in-process caller assigns it.
    */
-  restoreVolumes?: { key: string; tarPath: string }[];
+  declare restoreVolumes?: { key: string; tarPath: string }[];
 
   /**
-   * INTERNAL — same UNDECORATED/stripped-by-whitelist contract as
-   * restoreVolumes above. Carries a `docker save` tar (on-disk path) + the
-   * exact image tags it holds. runComposeOnlyDeploy `docker load`s it and
-   * rewrites the compose to consume the loaded images (build:→image:,
-   * pull_policy: missing) BEFORE `up`, so the imported stack runs the EXACT
-   * same image with no pull/rebuild. compose-only deploys only.
+   * INTERNAL — same in-process-only contract as restoreVolumes above (and the
+   * same `declare` requirement for the same ES2022 reason). Carries a
+   * `docker save` tar (on-disk path) + the exact image tags it holds.
+   * runComposeOnlyDeploy `docker load`s it and rewrites the compose to consume
+   * the loaded images (build:→image:, pull_policy: missing) BEFORE `up`, so the
+   * imported stack runs the EXACT same image with no pull/rebuild. compose-only
+   * deploys only.
    */
-  loadImages?: { tarPath: string; tags: string[] };
+  declare loadImages?: { tarPath: string; tags: string[] };
 }

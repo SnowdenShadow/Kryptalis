@@ -333,15 +333,25 @@ fi
 # IMPORTANT: when PUBLIC_API_URL changes we MUST rebuild the dashboard without
 # cache, otherwise Next reuses the old inlined URL and the browser keeps calling
 # the wrong origin (CORS error).
-say "Pulling images & starting DockControl..."
-docker compose pull 2>&1 | grep -vE "Skipped|^$" || true
+say "Pulling base images & starting DockControl..."
+# Pre-pull ONLY the registry images by NAME (postgres + caddy). The other
+# services (api, sftp, dashboard) have a `build:` and no registry copy — a
+# bare `docker compose pull` tries to fetch dockcontrol-sftp:latest and prints
+# a scary "pull access denied" error + a build WARNING even though all is well
+# (they're built by `up --build` below). Naming the two pullable services
+# avoids that entirely and works on every Compose version (no flag needed).
+# --quiet drops the per-layer progress spam.
+docker compose pull --quiet postgres caddy 2>/dev/null || true
 
 if [ "$NEEDS_DASHBOARD_REBUILD" = "1" ]; then
-  say "Rebuilding dashboard with --no-cache so Next picks up the new PUBLIC_API_URL"
+  say "Rebuilding dashboard (so it calls $PUBLIC_API_URL_RESOLVED) — this takes a couple of minutes..."
   docker compose build --no-cache dashboard
+  ok "Dashboard rebuilt"
 fi
 
+say "Building & starting all services (first run compiles the API + dashboard — a few minutes)..."
 docker compose up -d --build --remove-orphans
+ok "Containers started"
 
 # ─── 8b. auto-update ─────────────────────────────────────────────────
 # Auto-update is handled BY THE API ITSELF (system-updates.service.ts):

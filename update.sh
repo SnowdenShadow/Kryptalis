@@ -91,8 +91,18 @@ fi
 chmod +x "$INSTALL_DIR/update.sh" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/install.sh" 2>/dev/null || true
 
-log "→ docker compose pull"
-run docker compose pull || true
+log "→ docker compose pull (base images only)"
+# Pre-pull ONLY the registry images by NAME (postgres + caddy). The other
+# services (api/sftp/dashboard) have a `build:` and no registry copy, so a bare
+# pull errors on dockcontrol-sftp:latest with a scary "pull access denied".
+# Naming the two pullable services avoids that on every Compose version. Pull is
+# best-effort (the build below makes what's missing), so we keep its output OUT
+# of the log/dashboard tail and just record a clean one-line result.
+if docker compose pull --quiet postgres caddy >/dev/null 2>&1; then
+  log "  base images up to date"
+else
+  log "  (base image pull skipped — images will be built)"
+fi
 
 # Build BEFORE up so a build failure rolls the tree back cleanly — no container
 # has been touched yet at this point (compose recreates containers only at `up`).
