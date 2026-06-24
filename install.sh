@@ -399,20 +399,22 @@ while :; do
 done
 
 # ─── 10. final hint ─────────────────────────────────────────────────
+# A bordered box can't stay aligned: $HOST_IP is variable-width and the
+# arrow/check glyphs are multi-byte, so a fixed right-edge `│` always drifts.
+# Use a simple left rule (a leading bar + indent) — robust at any terminal
+# width and with any IP length, and it still reads as a highlighted block.
 HOST_IP=$(curl -fsSL --max-time 3 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
-cat <<EOF
+RULE='─────────────────────────────────────────────'
+printf '\n\033[1;32m%s\033[0m\n' "$RULE"
+printf '\033[1;32m  DockControl is ready\033[0m\n'
+printf '%s\n\n' "$RULE"
+printf '  Dashboard:  \033[1;36mhttp://%s:3000\033[0m\n' "$HOST_IP"
+printf '  API:        \033[1;36mhttp://%s:4000/api\033[0m\n\n' "$HOST_IP"
+printf '  Open the dashboard and create the first account.\n'
+printf '  The first user to register becomes SUPERADMIN automatically.\n'
+printf '\033[1;32m%s\033[0m\n' "$RULE"
 
-╭───────────────────────────────────────────────────────────╮
-│  DockControl is ready                                       │
-├───────────────────────────────────────────────────────────┤
-│                                                           │
-│  Dashboard: http://$HOST_IP:3000
-│  API:       http://$HOST_IP:4000/api
-│                                                           │
-│  → Open the dashboard and create the first account.       │
-│    The first user gets SUPERADMIN automatically.          │
-│                                                           │
-╰───────────────────────────────────────────────────────────╯
+cat <<EOF
 
 Useful commands:
   cd $INSTALL_DIR
