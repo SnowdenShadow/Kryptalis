@@ -12,6 +12,7 @@ import {
   Terminal,
   CheckCircle2,
   XCircle,
+  CalendarClock,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -31,6 +32,14 @@ import {
 import type { ApplicationResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
+import {
+  buildCron,
+  parseToSimple,
+  describeCron,
+  DEFAULT_SIMPLE,
+  type SimpleSchedule,
+  type CronFrequency,
+} from '@/lib/cron-builder';
 
 interface CronJob {
   id: string;
@@ -53,9 +62,17 @@ export default function CronJobsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState('');
   const [applicationId, setApplicationId] = useState('');
-  const [schedule, setSchedule] = useState('');
+  // Schedule has two editors: a SIMPLE builder (frequency + time dropdowns) and
+  // an ADVANCED raw-cron input. `simple` drives the expression in simple mode;
+  // `advancedSchedule` holds the raw string in advanced mode.
+  const [scheduleMode, setScheduleMode] = useState<'simple' | 'advanced'>('simple');
+  const [simple, setSimple] = useState<SimpleSchedule>(DEFAULT_SIMPLE);
+  const [advancedSchedule, setAdvancedSchedule] = useState('');
   const [command, setCommand] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
+
+  // The effective cron expression sent to the API.
+  const schedule = scheduleMode === 'simple' ? buildCron(simple) : advancedSchedule.trim();
 
   const { data: jobs = [], isLoading } = useQuery<CronJob[]>({
     queryKey: ['cron-jobs'],
@@ -107,20 +124,37 @@ export default function CronJobsPage() {
     setShowCreate(false);
     setName('');
     setApplicationId('');
-    setSchedule('');
+    setScheduleMode('simple');
+    setSimple(DEFAULT_SIMPLE);
+    setAdvancedSchedule('');
     setCommand('');
   }
 
   function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!name.trim() || !applicationId || !schedule.trim() || !command.trim()) return;
+    if (!name.trim() || !applicationId || !schedule || !command.trim()) return;
     createMutation.mutate({
       name: name.trim(),
       applicationId,
-      schedule: schedule.trim(),
+      schedule,
       command: command.trim(),
     });
   }
+
+  // Localized plain-language description of the current expression, for the
+  // preview line shown under the schedule editor.
+  const scheduleHuman = describeCron(schedule, {
+    everyMinutes: (n) => t('cron.descEveryMinutes', { n: String(n) }),
+    hourlyAt: (m) => t('cron.descHourly', { m }),
+    dailyAt: (time) => t('cron.descDaily', { time }),
+    weeklyAt: (day, time) => t('cron.descWeekly', { day, time }),
+    monthlyAt: (day, time) => t('cron.descMonthly', { day: String(day), time }),
+    weekdayNames: [
+      t('cron.sun'), t('cron.mon'), t('cron.tue'), t('cron.wed'),
+      t('cron.thu'), t('cron.fri'), t('cron.sat'),
+    ],
+    raw: (e) => t('cron.descRaw', { expr: e }),
+  });
 
   return (
     <div className="space-y-6">
@@ -254,18 +288,66 @@ export default function CronJobsPage() {
               </div>
 
               <div>
-                <Label htmlFor="cron-schedule">{t('cron.schedule')}</Label>
-                <Input
-                  id="cron-schedule"
-                  value={schedule}
-                  onChange={(e) => setSchedule(e.target.value)}
-                  placeholder="*/5 * * * *"
-                  className="font-mono"
-                />
-                <p className="flex items-center gap-1 text-xs text-muted-foreground mt-1.5">
-                  <Info size={12} />
-                  {t('cron.scheduleHint')}
-                </p>
+                <div className="flex items-center justify-between">
+                  <Label>{t('cron.schedule')}</Label>
+                  {/* Simple ↔ Advanced toggle */}
+                  <div className="flex text-xs rounded-md overflow-hidden border border-zinc-700">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // Carry the advanced expression into the simple form when possible.
+                        const s = parseToSimple(advancedSchedule.trim() || schedule);
+                        if (s) setSimple(s);
+                        setScheduleMode('simple');
+                      }}
+                      className={
+                        'px-2.5 py-1 ' +
+                        (scheduleMode === 'simple' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-zinc-800')
+                      }
+                    >
+                      {t('cron.modeSimple')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // Seed the advanced box with whatever the simple form built.
+                        setAdvancedSchedule(buildCron(simple));
+                        setScheduleMode('advanced');
+                      }}
+                      className={
+                        'px-2.5 py-1 ' +
+                        (scheduleMode === 'advanced' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-zinc-800')
+                      }
+                    >
+                      {t('cron.modeAdvanced')}
+                    </button>
+                  </div>
+                </div>
+
+                {scheduleMode === 'simple' ? (
+                  <ScheduleBuilder simple={simple} onChange={setSimple} t={t} />
+                ) : (
+                  <>
+                    <Input
+                      id="cron-schedule"
+                      value={advancedSchedule}
+                      onChange={(e) => setAdvancedSchedule(e.target.value)}
+                      placeholder="*/5 * * * *"
+                      className="font-mono mt-1"
+                    />
+                    <p className="flex items-center gap-1 text-xs text-muted-foreground mt-1.5">
+                      <Info size={12} />
+                      {t('cron.scheduleHint')}
+                    </p>
+                  </>
+                )}
+
+                {/* Plain-language preview — always shown so the user sees what will happen. */}
+                <div className="flex items-center gap-1.5 mt-2 text-xs text-primary/90">
+                  <CalendarClock size={13} />
+                  <span>{scheduleHuman}</span>
+                  <code className="ml-auto px-1.5 py-0.5 rounded bg-zinc-900 text-[11px] text-muted-foreground">{schedule || '—'}</code>
+                </div>
               </div>
 
               <div>
@@ -318,6 +400,96 @@ export default function CronJobsPage() {
             </Button>
           </DialogFooter>
         </Dialog>
+      )}
+    </div>
+  );
+}
+
+// ─── Simple schedule builder (frequency + time dropdowns) ─────────────
+function ScheduleBuilder({
+  simple,
+  onChange,
+  t,
+}: {
+  simple: SimpleSchedule;
+  onChange: (s: SimpleSchedule) => void;
+  t: (key: string, vars?: Record<string, string>) => string;
+}) {
+  const set = (patch: Partial<SimpleSchedule>) => onChange({ ...simple, ...patch });
+  const hours = Array.from({ length: 24 }, (_, i) => i);
+  const minutes = Array.from({ length: 60 }, (_, i) => i);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const weekdays = [
+    t('cron.sun'), t('cron.mon'), t('cron.tue'), t('cron.wed'),
+    t('cron.thu'), t('cron.fri'), t('cron.sat'),
+  ];
+
+  return (
+    <div className="mt-1 space-y-2">
+      {/* Frequency */}
+      <Select
+        value={simple.frequency}
+        onChange={(e) => set({ frequency: e.target.value as CronFrequency })}
+      >
+        <option value="minutes">{t('cron.freqMinutes')}</option>
+        <option value="hourly">{t('cron.freqHourly')}</option>
+        <option value="daily">{t('cron.freqDaily')}</option>
+        <option value="weekly">{t('cron.freqWeekly')}</option>
+        <option value="monthly">{t('cron.freqMonthly')}</option>
+      </Select>
+
+      {/* Frequency-specific controls */}
+      {simple.frequency === 'minutes' && (
+        <div className="flex items-center gap-2 text-sm">
+          <span className="text-muted-foreground">{t('cron.every')}</span>
+          <Input
+            type="number"
+            min={1}
+            max={59}
+            value={simple.everyMinutes}
+            onChange={(e) => set({ everyMinutes: Number(e.target.value) })}
+            className="w-20"
+          />
+          <span className="text-muted-foreground">{t('cron.minutesUnit')}</span>
+        </div>
+      )}
+
+      {simple.frequency === 'hourly' && (
+        <div className="flex items-center gap-2 text-sm">
+          <span className="text-muted-foreground">{t('cron.atMinute')}</span>
+          <Select value={String(simple.minute)} onChange={(e) => set({ minute: Number(e.target.value) })} className="w-24">
+            {minutes.map((m) => <option key={m} value={m}>:{pad(m)}</option>)}
+          </Select>
+        </div>
+      )}
+
+      {(simple.frequency === 'daily' || simple.frequency === 'weekly' || simple.frequency === 'monthly') && (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          {simple.frequency === 'weekly' && (
+            <>
+              <span className="text-muted-foreground">{t('cron.onDay')}</span>
+              <Select value={String(simple.weekday)} onChange={(e) => set({ weekday: Number(e.target.value) })} className="w-32">
+                {weekdays.map((d, i) => <option key={i} value={i}>{d}</option>)}
+              </Select>
+            </>
+          )}
+          {simple.frequency === 'monthly' && (
+            <>
+              <span className="text-muted-foreground">{t('cron.onDayOfMonth')}</span>
+              <Select value={String(simple.monthday)} onChange={(e) => set({ monthday: Number(e.target.value) })} className="w-20">
+                {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => <option key={d} value={d}>{d}</option>)}
+              </Select>
+            </>
+          )}
+          <span className="text-muted-foreground">{t('cron.atTime')}</span>
+          <Select value={String(simple.hour)} onChange={(e) => set({ hour: Number(e.target.value) })} className="w-20">
+            {hours.map((h) => <option key={h} value={h}>{pad(h)}</option>)}
+          </Select>
+          <span className="text-muted-foreground">:</span>
+          <Select value={String(simple.atMinute)} onChange={(e) => set({ atMinute: Number(e.target.value) })} className="w-20">
+            {minutes.map((m) => <option key={m} value={m}>{pad(m)}</option>)}
+          </Select>
+        </div>
       )}
     </div>
   );
