@@ -891,3 +891,66 @@ describe('docker argv safety', () => {
     expect(res.status).toBe('not running');
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// project-network attach + in-network connection info (PHP-site DB link)
+// ═══════════════════════════════════════════════════════════════════
+
+describe('project network attach', () => {
+  it('the launched DB compose joins the project network so siblings reach it by name', async () => {
+    const { service, prisma } = makeService();
+    wireLocalCreate(prisma);
+
+    await service.create('u1', { name: 'sitedb', type: 'MYSQL', projectId: 'p1' } as any);
+    await flushAsync();
+
+    const writeCall = mockFs.writeFileSync.mock.calls.find((c) =>
+      String(c[0]).replace(/\\/g, '/').endsWith('/databases/sitedb/docker-compose.yml'),
+    );
+    expect(writeCall).toBeTruthy();
+    const doc: any = yaml.load(writeCall![1] as string);
+    // Service joined the project network + the top-level external network declared.
+    expect(doc.services.sitedb.networks).toContain('dockcontrol_project');
+    expect(doc.networks.dockcontrol_project).toEqual({
+      external: true, name: 'dockcontrol_proj_p1',
+    });
+    // The project network is ensured (inspect, then create on miss).
+    const inspect = findExec((c) => c.cmd === 'docker' && c.args[0] === 'network' && c.args[1] === 'inspect');
+    expect(inspect).toBeTruthy();
+  });
+});
+
+describe('inNetworkConnectionInfo / buildDbEnvVars', () => {
+  it('advertises the container_name + INTERNAL port (not localhost / host port)', () => {
+    const { service } = makeService();
+    const info = (service as any).inNetworkConnectionInfo({
+      name: 'shopdb', type: 'MYSQL', username: 'shop', password: 'enc(s3cret)', autoImported: false, host: '',
+    });
+    expect(info.host).toBe('dockcontrol-db-shopdb'); // container name, NOT localhost
+    expect(info.port).toBe(3306); // MySQL internal port, NOT the published host port
+    expect(info.password).toBe('s3cret'); // decrypted
+    expect(info.url).toBe('mysql://shop:s3cret@dockcontrol-db-shopdb:3306/shopdb');
+  });
+
+  it('builds the DB_* env block sites read via getenv()', () => {
+    const { service } = makeService();
+    const env = service.buildDbEnvVars({
+      name: 'shopdb', type: 'POSTGRESQL', username: 'shop', password: 'enc(pw)', autoImported: false, host: '',
+    });
+    expect(env.DB_HOST).toBe('dockcontrol-db-shopdb');
+    expect(env.DB_PORT).toBe('5432');
+    expect(env.DB_DATABASE).toBe('shopdb');
+    expect(env.DB_USERNAME).toBe('shop');
+    expect(env.DB_PASSWORD).toBe('pw');
+    expect(env.DB_CONNECTION).toBe('pgsql');
+    expect(env.DATABASE_URL).toContain('postgresql://shop:pw@dockcontrol-db-shopdb:5432/shopdb');
+  });
+
+  it('auto-imported (bundled) DB uses its stored host as the in-network name', () => {
+    const { service } = makeService();
+    const info = (service as any).inNetworkConnectionInfo({
+      name: 'wp', type: 'MARIADB', username: 'wp', password: 'enc(x)', autoImported: true, host: 'dockcontrol-wp-db-abc123',
+    });
+    expect(info.host).toBe('dockcontrol-wp-db-abc123');
+  });
+});

@@ -204,6 +204,32 @@ export class ApplicationsController {
     return this.svc.setEnv(userId, id, envVars);
   }
 
+  @Get(':id/databases')
+  @ApiOperation({ summary: 'List managed databases attached to this app' })
+  listDatabases(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.listDatabases(userId, id);
+  }
+
+  @Post(':id/databases/:databaseId')
+  @ApiOperation({ summary: 'Attach a managed database + inject DB_* env vars, then redeploy' })
+  attachDatabase(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Param('databaseId') databaseId: string,
+  ) {
+    return this.svc.attachDatabase(userId, id, databaseId);
+  }
+
+  @Delete(':id/databases/:databaseId')
+  @ApiOperation({ summary: 'Detach a managed database + strip its DB_* env vars, then redeploy' })
+  detachDatabase(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Param('databaseId') databaseId: string,
+  ) {
+    return this.svc.detachDatabase(userId, id, databaseId);
+  }
+
   @Get(':id/webhook')
   @ApiOperation({ summary: 'Get webhook URL + secret for git auto-deploy' })
   getWebhook(@CurrentUser('id') userId: string, @Param('id') id: string) {

@@ -1026,6 +1026,63 @@ export class ApplicationsService {
     return this.env.setEnv(userId, id, envVars);
   }
 
+  // ── databases attached to an app ──────────────────────────────────
+
+  /** Managed databases linked to this app (soft applicationId link). */
+  async listDatabases(userId: string, id: string) {
+    await this.assertOwnership(userId, id, 'VIEWER');
+    return this.databases.findAll(userId, { applicationId: id });
+  }
+
+  /**
+   * Attach a managed database to an app and inject its connection details as
+   * env vars (DB_HOST/DB_PORT/DB_DATABASE/DB_USERNAME/DB_PASSWORD/DATABASE_URL),
+   * then redeploy so they reach the container. The DB joins the app's PROJECT
+   * network at create time, so DB_HOST (its container_name) is reachable.
+   * Idempotent: re-attaching refreshes the env block.
+   */
+  async attachDatabase(userId: string, id: string, databaseId: string) {
+    await this.assertOwnership(userId, id, 'DEVELOPER');
+    // Link + get the in-network env vars (access to the DB is checked inside).
+    const { envVars: dbEnv, dbName } = await this.databases.linkToApplication(userId, databaseId, id);
+
+    // Merge into the app's existing env (user-set keys preserved; the DB_* keys
+    // are owned by this flow and overwritten on each attach).
+    const current = this.env.decryptEnvVars(
+      (await this.prisma.application.findUnique({ where: { id }, select: { envVars: true } }))?.envVars,
+    );
+    const merged = { ...current, ...dbEnv };
+    await this.prisma.application.update({
+      where: { id },
+      data: { envVars: this.env.encryptEnvVars(merged) as any },
+    });
+
+    // Redeploy so the new environment block takes effect in the container.
+    await this.ops.redeploy(userId, id).catch(() => undefined);
+    return { message: `Database "${dbName}" attached. Connection details injected as DB_* env vars.`, envKeys: Object.keys(dbEnv) };
+  }
+
+  /** Detach a database: unlink it and strip the injected DB_* env vars, then redeploy. */
+  async detachDatabase(userId: string, id: string, databaseId: string) {
+    await this.assertOwnership(userId, id, 'DEVELOPER');
+    const { dbName } = await this.databases.unlinkFromApplication(userId, databaseId);
+
+    const current = this.env.decryptEnvVars(
+      (await this.prisma.application.findUnique({ where: { id }, select: { envVars: true } }))?.envVars,
+    );
+    // Strip only the keys this flow injects, leave user-set vars intact.
+    const stripped: Record<string, string> = {};
+    for (const [k, v] of Object.entries(current)) {
+      if (!(DatabasesService.DB_ENV_KEYS as readonly string[]).includes(k)) stripped[k] = v;
+    }
+    await this.prisma.application.update({
+      where: { id },
+      data: { envVars: this.env.encryptEnvVars(stripped) as any },
+    });
+    await this.ops.redeploy(userId, id).catch(() => undefined);
+    return { message: `Database "${dbName}" detached.` };
+  }
+
   // ── webhooks ──────────────────────────────────────────────────────
 
   async getWebhook(userId: string, id: string) {

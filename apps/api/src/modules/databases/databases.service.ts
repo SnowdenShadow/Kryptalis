@@ -17,7 +17,12 @@ import * as os from 'os';
 import * as path from 'path';
 import { detectDatabasesInCompose, type DetectedDb } from './compose-db-detect';
 import { resolveDbContainer, dumpPlan, restorePlan } from './db-dump.util';
-import { slugify, resolveAppDir } from '../applications/applications.helpers';
+import {
+  slugify,
+  resolveAppDir,
+  attachProjectNetwork,
+  projectNetworkName,
+} from '../applications/applications.helpers';
 import {
   assertProjectAccess,
   listAccessibleProjectIds,
@@ -369,10 +374,14 @@ export class DatabasesService {
     if (this.isDbLocal(server)) {
       // Deliberately not awaited — container start can take minutes (pull);
       // the row is returned as 'deploying' and status polling reflects
-      // reality. launchContainer logs its own failures.
-      void this.launchContainer(dto.name, dto.type, username, password, hostPort);
+      // reality. launchContainer logs its own failures. Pass projectId so the
+      // DB joins its project network → sibling apps/sites reach it by name.
+      void this.launchContainer(dto.name, dto.type, username, password, hostPort, projectId);
     } else if (server) {
-      const composeYaml = config.compose(dto.name, username, password, hostPort);
+      // Remote: attach the project network to the shipped compose too, so a
+      // remote app in the same project can resolve the DB by container_name.
+      let composeYaml = config.compose(dto.name, username, password, hostPort);
+      if (projectId) composeYaml = attachProjectNetwork(composeYaml, projectNetworkName(projectId));
       await this.agent.enqueueTask(server.id, 'DEPLOY', {
         slug: `db-${dto.name}`,
         appName: `db-${dto.name}`,
@@ -786,6 +795,54 @@ export class DatabasesService {
     });
   }
 
+  /**
+   * Link a DB to an application AND return the in-network env-var block to
+   * inject into that app. Used by ApplicationsService.attachDatabase to wire a
+   * managed DB into a site/app: it sets the soft applicationId link (so the DB
+   * survives the app being deleted) and hands back DB_HOST/DB_PORT/… built from
+   * the DB's container_name + internal port (container-to-container reachable).
+   * Access is gated by assertDbAccess(ADMIN) inside setParent.
+   */
+  async linkToApplication(
+    userId: string,
+    dbId: string,
+    applicationId: string,
+  ): Promise<{ envVars: Record<string, string>; dbName: string }> {
+    // assertDbAccess in setParent verifies the caller can manage this DB AND
+    // (via the project check) the target application's project.
+    await this.setParent(userId, dbId, { applicationId });
+    const db = await this.prisma.database.findUnique({ where: { id: dbId } });
+    if (!db) throw new NotFoundException('Database not found');
+    if (db.autoImported) {
+      // Bundled DBs already live in their parent app's stack with their creds
+      // wired in — re-injecting into a DIFFERENT app is almost never intended.
+      throw new BadRequestException(
+        'This database is bundled inside another application and cannot be attached separately.',
+      );
+    }
+    return {
+      envVars: this.buildDbEnvVars({
+        name: db.name,
+        type: db.type,
+        username: db.username,
+        password: db.password,
+        autoImported: db.autoImported,
+        host: db.host,
+      }),
+      dbName: db.name,
+    };
+  }
+
+  /** Unlink a DB from its application (soft link only — container untouched). */
+  async unlinkFromApplication(userId: string, dbId: string): Promise<{ dbName: string }> {
+    const db = await this.assertDbAccess(userId, dbId, 'ADMIN');
+    await this.prisma.database.update({
+      where: { id: dbId },
+      data: { applicationId: null },
+    });
+    return { dbName: db.name };
+  }
+
   // ── helpers ────────────────────────────────────────────────────────
 
   /**
@@ -815,13 +872,33 @@ export class DatabasesService {
     );
   }
 
-  private async launchContainer(name: string, type: string, user: string, pass: string, port: number) {
+  private async launchContainer(
+    name: string,
+    type: string,
+    user: string,
+    pass: string,
+    port: number,
+    projectId?: string | null,
+  ) {
     const config = DB_CONFIGS[type];
     if (!config) return;
 
     const dbDir = path.join(DBS_DIR, name);
     if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
-    fs.writeFileSync(path.join(dbDir, 'docker-compose.yml'), config.compose(name, user, pass, port));
+
+    // Join the DB container to its PROJECT network so apps/sites in the SAME
+    // project can reach it by container_name (dockcontrol-db-<name>) — without
+    // exposing it to every container on the global bridge. Without this the DB
+    // sits on its own per-stack default bridge and a sibling PHP/site container
+    // cannot resolve its hostname (only the published host port worked, and
+    // that's not reachable as a hostname from inside another container).
+    let composeYaml = config.compose(name, user, pass, port);
+    if (projectId) {
+      const net = projectNetworkName(projectId);
+      await this.ensureProjectNetwork(net);
+      composeYaml = attachProjectNetwork(composeYaml, net);
+    }
+    fs.writeFileSync(path.join(dbDir, 'docker-compose.yml'), composeYaml);
 
     try {
       await compose(['pull'], { cwd: dbDir, timeout: 120000 });
@@ -831,6 +908,17 @@ export class DatabasesService {
       // container didn't start; status polling will show 'not running'.
       // eslint-disable-next-line no-console
       console.error(`[databases] failed to launch container for "${name}":`, err);
+    }
+  }
+
+  /** Idempotently create a project network (external bridge) if it's missing. */
+  private async ensureProjectNetwork(net: string): Promise<void> {
+    try {
+      await execFileAsync('docker', ['network', 'inspect', net], { timeout: 5_000 });
+    } catch {
+      try {
+        await execFileAsync('docker', ['network', 'create', net], { timeout: 10_000 });
+      } catch {}
     }
   }
 
@@ -1026,4 +1114,93 @@ export class DatabasesService {
       default: return `${host}:${port}`;
     }
   }
+
+  /**
+   * Connection coordinates a SIBLING container in the same project uses to
+   * reach this DB over the docker network — host = the DB's container_name
+   * (resolved by resolveDbContainer: dockcontrol-db-<name> for standalone, the
+   * stored `host` for auto-imported), port = the engine's INTERNAL default
+   * port (5432/3306/6379/…), NOT the published host port. This is what gets
+   * injected into a PHP site's env vars on attach. Returns the decrypted
+   * password — callers must treat the result as a secret.
+   */
+  inNetworkConnectionInfo(db: {
+    name: string;
+    type: string;
+    username: string;
+    password: string;
+    autoImported?: boolean;
+    host?: string;
+  }): {
+    host: string;
+    port: number;
+    name: string;
+    username: string;
+    password: string;
+    url: string;
+  } {
+    const container = resolveDbContainer({
+      name: db.name,
+      autoImported: !!db.autoImported,
+      host: db.host || '',
+    });
+    const internalPort = DB_CONFIGS[db.type]?.defaultPort ?? 0;
+    const password = this.dbPassword(db);
+    return {
+      host: container,
+      port: internalPort,
+      name: db.name,
+      username: db.username,
+      password,
+      url: this.getConnectionString(db.type, db.username, password, internalPort, db.name, container),
+    };
+  }
+
+  /**
+   * The env-var block injected into an app/site when a DB is attached. A fixed,
+   * namespaced key set so detach can remove exactly these without clobbering
+   * user-set env. Values use the in-network host/port (container-to-container).
+   */
+  buildDbEnvVars(db: {
+    name: string;
+    type: string;
+    username: string;
+    password: string;
+    autoImported?: boolean;
+    host?: string;
+  }): Record<string, string> {
+    const c = this.inNetworkConnectionInfo(db);
+    return {
+      DB_CONNECTION: this.dbConnectionKind(db.type),
+      DB_HOST: c.host,
+      DB_PORT: String(c.port),
+      DB_DATABASE: c.name,
+      DB_NAME: c.name,
+      DB_USERNAME: c.username,
+      DB_USER: c.username,
+      DB_PASSWORD: c.password,
+      DATABASE_URL: c.url,
+    };
+  }
+
+  /** Laravel-style DB_CONNECTION value for the engine. */
+  private dbConnectionKind(type: string): string {
+    switch (type) {
+      case 'POSTGRESQL': return 'pgsql';
+      case 'MYSQL': return 'mysql';
+      case 'MARIADB': return 'mariadb';
+      case 'MONGODB': return 'mongodb';
+      case 'REDIS':
+      case 'KEYDB':
+      case 'DRAGONFLY': return 'redis';
+      case 'CLICKHOUSE': return 'clickhouse';
+      default: return type.toLowerCase();
+    }
+  }
+
+  /** The canonical set of env-var keys attach injects (used by detach to strip). */
+  static readonly DB_ENV_KEYS = [
+    'DB_CONNECTION', 'DB_HOST', 'DB_PORT', 'DB_DATABASE', 'DB_NAME',
+    'DB_USERNAME', 'DB_USER', 'DB_PASSWORD', 'DATABASE_URL',
+  ] as const;
 }

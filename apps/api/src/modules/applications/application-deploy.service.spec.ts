@@ -1251,6 +1251,14 @@ describe('runPhpSiteDeploy', () => {
     const dockerfile = dockerfileOf(appDir())!;
     expect(dockerfile).toContain('ARG PHP_VERSION');
     expect(dockerfile).toContain('FROM php:${PHP_VERSION}-apache');
+    // The image MUST bundle the DB drivers — without them `new PDO('mysql:...')`
+    // fails with "could not find driver". Plus the common web extension pack.
+    expect(dockerfile).toContain('docker-php-ext-install');
+    expect(dockerfile).toContain('pdo_mysql');
+    expect(dockerfile).toContain('mysqli');
+    expect(dockerfile).toContain('pdo_pgsql');
+    expect(dockerfile).toContain('gd');
+    expect(dockerfile).toContain('a2enmod rewrite');
 
     const doc = readComposeDoc();
     expect(doc.services.app.build).toEqual({ context: '.', args: { PHP_VERSION: '8.2' } });

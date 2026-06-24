@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus,
@@ -11,6 +12,9 @@ import {
   Globe,
   KeyRound,
   Info,
+  Database as DatabaseIcon,
+  FolderOpen,
+  Unlink,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -27,7 +31,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import type { ApplicationResponse } from '@dockcontrol/types';
+import type { ApplicationResponse, DatabaseResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { publicAppUrl } from '@/lib/app-format';
@@ -51,6 +55,8 @@ export default function PhpSitesPage() {
   const [domainChoice, setDomainChoice] = useState(''); // '', 'new', or an existing domain id
   const [newDomain, setNewDomain] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  // The PHP site whose database panel is open (null = closed).
+  const [manageDbSite, setManageDbSite] = useState<ApplicationResponse | null>(null);
 
   // The app list is shared; we just filter to PHP_SITE apps client-side.
   const { data: apps = [], isLoading } = useQuery<ApplicationResponse[]>({
@@ -190,18 +196,32 @@ export default function PhpSitesPage() {
                     </div>
                   )}
 
-                  <div className="flex items-center gap-2 mt-3">
+                  <div className="flex flex-wrap items-center gap-3 mt-3 text-xs">
                     {url && (
                       <a
                         href={url}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                        className="inline-flex items-center gap-1 text-primary hover:underline"
                       >
                         <ExternalLink size={12} />
                         {t('php.openSite')}
                       </a>
                     )}
+                    <button
+                      onClick={() => setManageDbSite(site)}
+                      className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+                    >
+                      <DatabaseIcon size={12} />
+                      {t('php.databases')}
+                    </button>
+                    <Link
+                      href="/dashboard/sftp"
+                      className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+                    >
+                      <FolderOpen size={12} />
+                      {t('php.manageFiles')}
+                    </Link>
                   </div>
                 </CardContent>
               </Card>
@@ -326,6 +346,168 @@ export default function PhpSitesPage() {
           </DialogFooter>
         </Dialog>
       )}
+
+      {/* Per-site database manager */}
+      {manageDbSite && (
+        <PhpDatabaseDialog site={manageDbSite} onClose={() => setManageDbSite(null)} />
+      )}
     </div>
+  );
+}
+
+// ─── Database manager for a PHP site ──────────────────────────────────
+//
+// Lists the managed databases attached to the site (with the DB_* env vars
+// that were injected into the container), lets the user attach an existing
+// project database, or create+attach a new one in one shot.
+function PhpDatabaseDialog({ site, onClose }: { site: ApplicationResponse; onClose: () => void }) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const [attachId, setAttachId] = useState('');
+  const [newDbName, setNewDbName] = useState('');
+  const [newDbType, setNewDbType] = useState('MYSQL');
+
+  // DBs already attached to this site.
+  const { data: attached = [], isLoading } = useQuery<DatabaseResponse[]>({
+    queryKey: ['app-databases', site.id],
+    queryFn: () => api.get(`/applications/${site.id}/databases`),
+  });
+  // Candidate DBs in the same project, not auto-imported, not already on this app.
+  const { data: projectDbs = [] } = useQuery<DatabaseResponse[]>({
+    queryKey: ['databases', 'project', site.projectId],
+    queryFn: () => api.get(`/databases?projectId=${site.projectId}`),
+  });
+  const candidates = projectDbs.filter(
+    (d) => !d.autoImported && d.applicationId !== site.id,
+  );
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['app-databases', site.id] });
+    queryClient.invalidateQueries({ queryKey: ['databases'] });
+    queryClient.invalidateQueries({ queryKey: ['applications'] });
+  };
+
+  const attachMutation = useMutation({
+    mutationFn: (databaseId: string) => api.post(`/applications/${site.id}/databases/${databaseId}`, {}),
+    onSuccess: () => { invalidate(); setAttachId(''); toast.success(t('php.dbAttached')); },
+    onError: (err: Error) => toastError(err),
+  });
+  const detachMutation = useMutation({
+    mutationFn: (databaseId: string) => api.delete(`/applications/${site.id}/databases/${databaseId}`),
+    onSuccess: () => { invalidate(); toast.success(t('php.dbDetached')); },
+    onError: (err: Error) => toastError(err),
+  });
+  // Create a DB pre-attached to this site, then inject its creds (attach).
+  const createMutation = useMutation({
+    mutationFn: async () => {
+      const created: any = await api.post('/databases', {
+        name: newDbName.trim(),
+        type: newDbType,
+        projectId: site.projectId,
+        applicationId: site.id,
+      });
+      // Inject its connection env into the site + redeploy.
+      if (created?.id) await api.post(`/applications/${site.id}/databases/${created.id}`, {});
+      return created;
+    },
+    onSuccess: () => { invalidate(); setNewDbName(''); toast.success(t('php.dbCreated')); },
+    onError: (err: Error) => toastError(err),
+  });
+
+  return (
+    <Dialog open onClose={onClose}>
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-2">
+          <DatabaseIcon size={18} />
+          {t('php.databases')} — {site.name}
+        </DialogTitle>
+        <DialogDescription>{t('php.dbHint')}</DialogDescription>
+      </DialogHeader>
+
+      <div className="space-y-4 py-2">
+        {/* Attached list */}
+        {isLoading ? (
+          <div className="flex justify-center py-6"><Loader2 className="animate-spin text-muted-foreground" size={18} /></div>
+        ) : attached.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t('php.dbNone')}</p>
+        ) : (
+          <div className="space-y-2">
+            {attached.map((db) => (
+              <div key={db.id} className="rounded-lg border border-zinc-800 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Badge className="bg-teal-500/20 text-teal-400 border-transparent">{db.type}</Badge>
+                    <span className="font-medium truncate">{db.name}</span>
+                  </div>
+                  <button
+                    onClick={() => detachMutation.mutate(db.id)}
+                    className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-red-400"
+                    disabled={detachMutation.isPending}
+                  >
+                    <Unlink size={12} />
+                    {t('php.dbDetach')}
+                  </button>
+                </div>
+                {/* Injected env var names (values stay server-side / in the container) */}
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {['DB_HOST', 'DB_PORT', 'DB_DATABASE', 'DB_USERNAME', 'DB_PASSWORD', 'DATABASE_URL'].map((k) => (
+                    <code key={k} className="px-1.5 py-0.5 rounded bg-zinc-900 text-[11px] text-foreground/70">{k}</code>
+                  ))}
+                </div>
+                <p className="mt-1.5 text-[11px] text-muted-foreground">{t('php.dbEnvHint')}</p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Attach existing */}
+        <div className="border-t border-zinc-800 pt-3">
+          <Label>{t('php.dbAttachExisting')}</Label>
+          <div className="flex gap-2 mt-1">
+            <Select value={attachId} onChange={(e) => setAttachId(e.target.value)}>
+              <option value="">—</option>
+              {candidates.map((d) => (
+                <option key={d.id} value={d.id}>{d.name} ({d.type})</option>
+              ))}
+            </Select>
+            <Button
+              type="button"
+              onClick={() => attachId && attachMutation.mutate(attachId)}
+              disabled={!attachId || attachMutation.isPending}
+            >
+              {attachMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : t('php.dbAttach')}
+            </Button>
+          </div>
+        </div>
+
+        {/* Create + attach */}
+        <div className="border-t border-zinc-800 pt-3">
+          <Label>{t('php.dbCreateNew')}</Label>
+          <div className="flex gap-2 mt-1">
+            <Input
+              value={newDbName}
+              onChange={(e) => setNewDbName(e.target.value)}
+              placeholder="my-db"
+            />
+            <Select value={newDbType} onChange={(e) => setNewDbType(e.target.value)} className="max-w-[10rem]">
+              <option value="MYSQL">MySQL</option>
+              <option value="MARIADB">MariaDB</option>
+              <option value="POSTGRESQL">PostgreSQL</option>
+            </Select>
+            <Button
+              type="button"
+              onClick={() => newDbName.trim() && createMutation.mutate()}
+              disabled={!newDbName.trim() || createMutation.isPending}
+            >
+              {createMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : t('common.create')}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <DialogFooter>
+        <Button variant="ghost" onClick={onClose}>{t('common.close')}</Button>
+      </DialogFooter>
+    </Dialog>
   );
 }

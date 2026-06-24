@@ -403,3 +403,75 @@ describe('moveServer', () => {
     );
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════
+// attach / detach database (env injection)
+// ═══════════════════════════════════════════════════════════════════
+
+describe('attachDatabase / detachDatabase', () => {
+  function makeServiceWithDb() {
+    const prisma = makePrisma();
+    const ops = { redeploy: vi.fn().mockResolvedValue({ id: 'dep-1' }) };
+    const databases = {
+      linkToApplication: vi.fn().mockResolvedValue({
+        envVars: { DB_HOST: 'dockcontrol-db-shopdb', DB_PORT: '3306', DB_USER: 'shop', DB_PASSWORD: 'pw', DATABASE_URL: 'mysql://shop:pw@dockcontrol-db-shopdb:3306/shopdb' },
+        dbName: 'shopdb',
+      }),
+      unlinkFromApplication: vi.fn().mockResolvedValue({ dbName: 'shopdb' }),
+      findAll: vi.fn().mockResolvedValue([]),
+    };
+    // Real env (de)serialization shape: passthrough so we can read what gets stored.
+    const env = {
+      decryptEnvVars: vi.fn((raw: any) => (raw && raw.__plain) || {}),
+      encryptEnvVars: vi.fn((v: any) => ({ __plain: v })),
+    };
+    const service = new ApplicationsService(
+      prisma as any,
+      { regenerate: vi.fn() } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      databases as any,
+      {} as any,
+      ops as any,
+      {} as any,
+      env as any,
+    );
+    return { service, prisma, ops, databases, env };
+  }
+
+  it('attach: links the DB, merges DB_* into envVars, and redeploys', async () => {
+    const { service, prisma, ops, databases, env } = makeServiceWithDb();
+    prisma.application.findUnique.mockResolvedValue({ id: 'a1', projectId: 'p1', envVars: { __plain: { EXISTING: 'keep' } } });
+
+    const res = await service.attachDatabase('u1', 'a1', 'db1');
+
+    expect(databases.linkToApplication).toHaveBeenCalledWith('u1', 'db1', 'a1');
+    // Merged: user key preserved + DB_* added.
+    const stored = (prisma.application.update.mock.calls.at(-1) as any)[0].data.envVars.__plain;
+    expect(stored.EXISTING).toBe('keep');
+    expect(stored.DB_HOST).toBe('dockcontrol-db-shopdb');
+    expect(stored.DATABASE_URL).toContain('mysql://');
+    // Redeploy so the new env reaches the container.
+    expect(ops.redeploy).toHaveBeenCalledWith('u1', 'a1');
+    expect(res.envKeys).toContain('DB_HOST');
+    void env;
+  });
+
+  it('detach: unlinks the DB, strips ONLY the DB_* keys, and redeploys', async () => {
+    const { service, prisma, ops, databases } = makeServiceWithDb();
+    prisma.application.findUnique.mockResolvedValue({
+      id: 'a1', projectId: 'p1',
+      envVars: { __plain: { EXISTING: 'keep', DB_HOST: 'x', DB_PORT: '3306', DATABASE_URL: 'mysql://...' } },
+    });
+
+    await service.detachDatabase('u1', 'a1', 'db1');
+
+    expect(databases.unlinkFromApplication).toHaveBeenCalledWith('u1', 'db1');
+    const stored = (prisma.application.update.mock.calls.at(-1) as any)[0].data.envVars.__plain;
+    expect(stored.EXISTING).toBe('keep'); // user key survives
+    expect(stored.DB_HOST).toBeUndefined(); // injected keys stripped
+    expect(stored.DATABASE_URL).toBeUndefined();
+    expect(ops.redeploy).toHaveBeenCalledWith('u1', 'a1');
+  });
+});
