@@ -623,7 +623,7 @@ describe('install — webmail (roundcube) mail-server wiring', () => {
     ).rejects.toThrow(/Multiple mail servers exist/);
   });
 
-  it('domainId given → compose patched to ssl://mail.<domain> with the real IMAPS/submission ports', async () => {
+  it('domainId given → mail host/ports injected via .env (compose reads ${VAR:-default})', async () => {
     const { service, prisma } = makeService();
     prisma.mailServer.findUnique.mockResolvedValue({
       imapsPort: 9930,
@@ -637,12 +637,40 @@ describe('install — webmail (roundcube) mail-server wiring', () => {
       'u1',
     );
 
-    const compose = writtenFile('docker-compose.yml')!;
-    expect(compose).toContain('ROUNDCUBEMAIL_DEFAULT_HOST: ssl://mail.acme.io');
-    expect(compose).toContain('ROUNDCUBEMAIL_DEFAULT_PORT: "9930"');
-    expect(compose).toContain('ROUNDCUBEMAIL_SMTP_SERVER: tls://mail.acme.io');
-    expect(compose).toContain('ROUNDCUBEMAIL_SMTP_PORT: "5870"');
-    expect(compose).not.toContain('host.docker.internal:993'); // legacy default gone
+    // The compose keeps the ${VAR:-default} placeholders; the resolved values
+    // land in the .env so docker-compose interpolation picks them up.
+    const env = writtenFile('.env')!;
+    expect(env).toContain('ROUNDCUBEMAIL_DEFAULT_HOST=ssl://mail.acme.io');
+    expect(env).toContain('ROUNDCUBEMAIL_DEFAULT_PORT=9930');
+    expect(env).toContain('ROUNDCUBEMAIL_SMTP_SERVER=tls://mail.acme.io');
+    expect(env).toContain('ROUNDCUBEMAIL_SMTP_PORT=5870');
+  });
+
+  it('caller supplies ROUNDCUBEMAIL_DEFAULT_HOST env → no "pick a Domain" 409, uses the provided env', async () => {
+    const { service, prisma } = makeService();
+    // Multiple mail servers exist — the legacy path would 409. But the caller
+    // (email module install-webmail flow) already provides the mail env, so we
+    // skip auto-resolution entirely and serve the webmail on the chosen domain.
+    prisma.mailServer.findMany.mockResolvedValue([{ id: 'ms1' }, { id: 'ms2' }]);
+    prisma.mailServer.count.mockResolvedValue(2);
+
+    await service.install(
+      {
+        appSlug: 'roundcube',
+        projectId: 'p1',
+        domainId: 'serve-here',
+        envVars: {
+          ROUNDCUBEMAIL_DEFAULT_HOST: 'ssl://mail.enopya.com',
+          ROUNDCUBEMAIL_DEFAULT_PORT: '993',
+          ROUNDCUBEMAIL_SMTP_SERVER: 'tls://mail.enopya.com',
+          ROUNDCUBEMAIL_SMTP_PORT: '587',
+        },
+      },
+      'u1',
+    );
+
+    const env = writtenFile('.env')!;
+    expect(env).toContain('ROUNDCUBEMAIL_DEFAULT_HOST=ssl://mail.enopya.com');
   });
 });
 

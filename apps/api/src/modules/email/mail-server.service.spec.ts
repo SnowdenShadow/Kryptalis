@@ -964,6 +964,9 @@ describe('antispam config', () => {
 
     const actions = vfs.__files.get(`${DIR}/config/rspamd/override.d/actions.conf`)!;
     expect(actions).toContain('reject = 4');
+    // DMS already wraps this file in `actions { … }` — we must NOT re-wrap it,
+    // else rspamd sees `actions { actions { … } }` and crash-loops.
+    expect(actions).not.toContain('actions {');
 
     // Maps written + referenced only when the lists are non-empty.
     expect(vfs.__files.get(`${DIR}/config/rspamd/whitelist.map`)).toContain('friend@good.com');

@@ -339,8 +339,17 @@ export class MarketplaceService implements OnModuleInit {
     // Pre-compute auto-resolved values for webmail-style apps that need to
     // point at an existing DockControl mail server. The compose template is
     // patched on the fly with these substitutions.
+    //
+    // EXCEPTION: when the caller already provides the IMAP host env
+    // (ROUNDCUBEMAIL_DEFAULT_HOST) — e.g. the email module's "install webmail"
+    // flow, which knows EXACTLY which mail server to bind and uses `domainId`
+    // only to choose WHERE the webmail is served — we skip the auto-resolution
+    // (and its "pick a Domain" 409). The provided env wins via the .env below.
+    const callerProvidedMailEnv = isWebmail && !!data.envVars?.ROUNDCUBEMAIL_DEFAULT_HOST;
+    // Auto-resolved Roundcube mail env (legacy path: caller didn't supply it).
+    let autoWebmailEnv: Record<string, string> = {};
     let composeContent = template.compose;
-    if (isWebmail) {
+    if (isWebmail && !callerProvidedMailEnv) {
       // Find the target mail server. Priority:
       //   1. domainId from the install request
       //   2. only ONE mail server installed → use it
@@ -377,29 +386,24 @@ export class MarketplaceService implements OnModuleInit {
         // The mail server's TLS cert is issued for mail.<domain>, so any other
         // hostname would fail the certificate validation. Roundcube must hit
         // the public host:port the mail server actually publishes.
+        //
+        // We inject via the .env (the template reads ${VAR:-default}) instead of
+        // string-replacing the compose, so this stays correct even as the
+        // template evolves. The .env override wins.
         const mailHost = `mail.${domain.domain}`;
-        composeContent = composeContent
-          .replace(
-            /ROUNDCUBEMAIL_DEFAULT_HOST: tls:\/\/host\.docker\.internal/g,
-            `ROUNDCUBEMAIL_DEFAULT_HOST: ssl://${mailHost}`,
-          )
-          .replace(
-            /ROUNDCUBEMAIL_DEFAULT_PORT: "993"/g,
-            `ROUNDCUBEMAIL_DEFAULT_PORT: "${mailServer.imapsPort}"`,
-          )
-          .replace(
-            /ROUNDCUBEMAIL_SMTP_SERVER: tls:\/\/host\.docker\.internal/g,
-            `ROUNDCUBEMAIL_SMTP_SERVER: tls://${mailHost}`,
-          )
-          .replace(
-            /ROUNDCUBEMAIL_SMTP_PORT: "587"/g,
-            `ROUNDCUBEMAIL_SMTP_PORT: "${mailServer.submissionPort}"`,
-          );
+        autoWebmailEnv = {
+          ROUNDCUBEMAIL_DEFAULT_HOST: `ssl://${mailHost}`,
+          ROUNDCUBEMAIL_DEFAULT_PORT: String(mailServer.imapsPort),
+          ROUNDCUBEMAIL_SMTP_SERVER: `tls://${mailHost}`,
+          ROUNDCUBEMAIL_SMTP_PORT: String(mailServer.submissionPort),
+        };
       }
     }
 
-    // Custom env override from the install request — written as a .env file alongside compose
-    const envOverride = data.envVars || {};
+    // Custom env override from the install request — written as a .env file
+    // alongside compose. The caller's explicit env wins over the auto-resolved
+    // webmail env (which only fills in when the caller didn't provide it).
+    const envOverride = { ...autoWebmailEnv, ...(data.envVars || {}) };
 
     // Web apps that bake their public URL into their DB/config on first boot
     // (PrestaShop ps_shop_url, WordPress siteurl, Ghost url, Nextcloud

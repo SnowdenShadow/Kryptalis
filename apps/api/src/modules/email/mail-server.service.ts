@@ -948,9 +948,14 @@ export class MailServerService implements OnApplicationBootstrap {
     const reject = cfg.spamAction === 'reject' ? cfg.spamThreshold : 999;
     const addHeader = Math.max(1, cfg.spamThreshold - 2);
     const greylist = Math.max(1, cfg.spamThreshold - 3);
+    // IMPORTANT: docker-mailserver's rspamd/override.d/actions.conf is ALREADY
+    // wrapped in an `actions { … }` section by DMS. We must write ONLY the
+    // bare key = value lines — re-wrapping them in `actions { }` produces
+    // `actions { actions { … } }` which rspamd rejects (crash-loops the
+    // container). See lua_cfg_transform "nested section: actions" error.
     fs.writeFileSync(
       path.join(overrideDir, 'actions.conf'),
-      `# Managed by DockControl — do not edit by hand.\nactions {\n  reject = ${reject};\n  add_header = ${addHeader};\n  greylist = ${greylist};\n}\n`,
+      `# Managed by DockControl — do not edit by hand.\nreject = ${reject};\nadd_header = ${addHeader};\ngreylist = ${greylist};\n`,
     );
 
     // Sender white/black lists via multimap.

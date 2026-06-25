@@ -477,10 +477,13 @@ networks:
     ports:
       - "__HOST_PORT__:80"
     environment:
-      ROUNDCUBEMAIL_DEFAULT_HOST: tls://host.docker.internal
-      ROUNDCUBEMAIL_DEFAULT_PORT: "993"
-      ROUNDCUBEMAIL_SMTP_SERVER: tls://host.docker.internal
-      ROUNDCUBEMAIL_SMTP_PORT: "587"
+      # \${VAR:-default} so a .env (DockControl's "install webmail" flow injects
+      # the real mail host/ports) overrides the placeholder. Escaped here because
+      # this is a JS template literal — the \$ stays literal in the YAML.
+      ROUNDCUBEMAIL_DEFAULT_HOST: "\${ROUNDCUBEMAIL_DEFAULT_HOST:-tls://host.docker.internal}"
+      ROUNDCUBEMAIL_DEFAULT_PORT: "\${ROUNDCUBEMAIL_DEFAULT_PORT:-993}"
+      ROUNDCUBEMAIL_SMTP_SERVER: "\${ROUNDCUBEMAIL_SMTP_SERVER:-tls://host.docker.internal}"
+      ROUNDCUBEMAIL_SMTP_PORT: "\${ROUNDCUBEMAIL_SMTP_PORT:-587}"
       ROUNDCUBEMAIL_DB_TYPE: sqlite
       ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: 25M
     extra_hosts:
