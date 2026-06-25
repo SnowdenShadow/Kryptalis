@@ -10,10 +10,16 @@ vi.mock('child_process', () => ({
   spawn: vi.fn(),
 }));
 
-// RBAC project check (used by create() for project-scoped backups) — mocked so
-// the scope tests don't need full membership fixtures.
+// RBAC helpers — mocked so the scope tests don't need full membership
+// fixtures. listAccessibleProjectIds mirrors the real shape: admin → every
+// project (prisma.project.findMany), else the member/owned set the test seeded
+// via grantProjects (prisma.project.findMany also returns that set).
 vi.mock('../../common/rbac/project-access', () => ({
   assertProjectAccess: vi.fn().mockResolvedValue(undefined),
+  listAccessibleProjectIds: vi.fn(async (prisma: any) => {
+    const rows = await prisma.project.findMany({ select: { id: true } });
+    return rows.map((p: any) => p.id);
+  }),
 }));
 
 vi.mock('fs', () => {
@@ -61,7 +67,7 @@ function makePrisma() {
     },
     user: { findUnique: vi.fn() },
     server: { findMany: vi.fn(), findUnique: vi.fn() },
-    project: { findUnique: vi.fn() },
+    project: { findUnique: vi.fn(), findMany: vi.fn().mockResolvedValue([]) },
     projectMember: { findMany: vi.fn() },
     database: { findMany: vi.fn(), findUnique: vi.fn() },
     application: { findMany: vi.fn() },
@@ -104,6 +110,17 @@ function grantAccess(prisma: ReturnType<typeof makePrisma>, serverIds: string[])
   );
 }
 
+/** Admin user — reaches every server + every backup (incl. server-wide). */
+function grantAdmin(prisma: ReturnType<typeof makePrisma>, serverIds: string[]) {
+  prisma.user.findUnique.mockResolvedValue({ role: 'ADMIN' });
+  prisma.server.findMany.mockResolvedValue(serverIds.map((id) => ({ id })));
+}
+
+/** Non-admin who is a member of the given projectIds (for project-scoped access). */
+function grantProjects(prisma: ReturnType<typeof makePrisma>, projectIds: string[]) {
+  prisma.project.findMany.mockResolvedValue(projectIds.map((id) => ({ id })));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockFs.existsSync.mockReturnValue(true);
@@ -125,14 +142,21 @@ describe('access control', () => {
     expect(prisma.projectMember.findMany).not.toHaveBeenCalled();
   });
 
-  it('non-admins are scoped to their project servers', async () => {
+  it('non-admins see ONLY backups of their own projects (not other projects on the server)', async () => {
     const { service, prisma } = makeService();
     grantAccess(prisma, ['s1']);
+    grantProjects(prisma, ['p1', 'p2']); // member of p1, p2
     prisma.backup.findMany.mockResolvedValue([]);
 
     await service.findAll('u1');
+    // Scoped to the user's projects → excludes other projects + server-wide (null).
     expect(prisma.backup.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { serverId: { in: ['s1'] } } }),
+      expect.objectContaining({
+        where: expect.objectContaining({
+          serverId: { in: ['s1'] },
+          projectId: { in: ['p1', 'p2'] },
+        }),
+      }),
     );
   });
 
@@ -150,12 +174,32 @@ describe('access control', () => {
     await expect(service.findOne('u1', 'b1')).rejects.toThrow(NotFoundException);
   });
 
-  it('findOne forbids a backup on an inaccessible server', async () => {
+  it('findOne forbids a backup of a project the user is NOT a member of', async () => {
     const { service, prisma } = makeService();
     grantAccess(prisma, ['s1']);
-    prisma.backup.findUnique.mockResolvedValue({ id: 'b1', serverId: 's2' });
+    grantProjects(prisma, ['p1']); // member of p1 only
+    prisma.backup.findUnique.mockResolvedValue({ id: 'b1', serverId: 's1', projectId: 'pOther' });
 
     await expect(service.findOne('u1', 'b1')).rejects.toThrow(ForbiddenException);
+  });
+
+  it('findOne allows a backup of the user\'s OWN project', async () => {
+    const { service, prisma } = makeService();
+    grantAccess(prisma, ['s1']);
+    grantProjects(prisma, ['p1']);
+    const row = { id: 'b1', serverId: 's1', projectId: 'p1' };
+    prisma.backup.findUnique.mockResolvedValue(row);
+
+    await expect(service.findOne('u1', 'b1')).resolves.toBe(row);
+  });
+
+  it('findOne forbids a non-admin from a SERVER-WIDE backup (projectId null)', async () => {
+    const { service, prisma } = makeService();
+    grantAccess(prisma, ['s1']);
+    grantProjects(prisma, ['p1']);
+    prisma.backup.findUnique.mockResolvedValue({ id: 'b1', serverId: 's1', projectId: null });
+
+    await expect(service.findOne('u1', 'b1')).rejects.toThrow(/administrators/i);
   });
 });
 
@@ -173,24 +217,24 @@ describe('create', () => {
 
   it('400s on a remote target when S3 is not configured', async () => {
     const { service, prisma } = makeService();
-    grantAccess(prisma, ['s1']);
+    grantAdmin(prisma, ['s1']); // admin can do a server-wide backup → reaches the S3 check
 
     await expect(
-      service.create('u1', { name: 'b', serverId: 's1', target: 'S3' } as any),
+      service.create('admin', { name: 'b', serverId: 's1', target: 'S3' } as any),
     ).rejects.toThrow(BadRequestException);
     expect(prisma.backup.create).not.toHaveBeenCalled();
   });
 
   it('returns the PENDING row and launches the job in the background', async () => {
     const { service, prisma } = makeService();
-    grantAccess(prisma, ['s1']);
+    grantAdmin(prisma, ['s1']); // server-wide backup is admin-only
     const row = { id: 'b1', status: 'PENDING' };
     prisma.backup.create.mockResolvedValue(row);
     const job = vi
       .spyOn(service as any, 'runBackupJob')
       .mockResolvedValue(undefined);
 
-    const res = await service.create('u1', {
+    const res = await service.create('admin', {
       name: 'b',
       serverId: 's1',
       target: 'LOCAL',
@@ -242,17 +286,26 @@ describe('create', () => {
     ).rejects.toThrow(NotFoundException);
   });
 
-  it('a whole-server backup (no projectId) persists projectId null', async () => {
+  it('ADMIN can create a whole-server backup (projectId null)', async () => {
     const { service, prisma } = makeService();
-    grantAccess(prisma, ['s1']);
+    grantAdmin(prisma, ['s1']);
     prisma.backup.create.mockResolvedValue({ id: 'b1', status: 'PENDING' });
     vi.spyOn(service as any, 'runBackupJob').mockResolvedValue(undefined);
 
-    await service.create('u1', { name: 'b', serverId: 's1', target: 'LOCAL' } as any);
+    await service.create('admin', { name: 'b', serverId: 's1', target: 'LOCAL' } as any);
 
     expect(prisma.backup.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ projectId: null }) }),
     );
+  });
+
+  it('a NON-admin CANNOT create a whole-server backup (must pick a project)', async () => {
+    const { service, prisma } = makeService();
+    grantAccess(prisma, ['s1']); // non-admin, member on s1
+    await expect(
+      service.create('u1', { name: 'b', serverId: 's1', target: 'LOCAL' } as any),
+    ).rejects.toThrow(/administrators only|Choose a project/i);
+    expect(prisma.backup.create).not.toHaveBeenCalled();
   });
 });
 
@@ -291,10 +344,14 @@ describe('exporters honour project scope', () => {
 describe('restore', () => {
   function setup(backup: Record<string, unknown>) {
     const ctx = makeService();
-    grantAccess(ctx.prisma, ['s1']);
+    // Admin actor: these tests exercise the restore GUARDS (status / filename /
+    // sha256), not the access policy — so use an admin to pass the access gate
+    // for a server-wide row. Access policy has its own dedicated tests below.
+    grantAdmin(ctx.prisma, ['s1']);
     ctx.prisma.backup.findUnique.mockResolvedValue({
       id: 'b1',
       serverId: 's1',
+      projectId: null,
       target: 'LOCAL',
       status: 'COMPLETED',
       ...backup,
@@ -379,17 +436,18 @@ describe('restore', () => {
 describe('remove', () => {
   it('unlinks the local file best-effort and deletes the row', async () => {
     const { service, prisma } = makeService();
-    grantAccess(prisma, ['s1']);
+    grantAdmin(prisma, ['s1']); // server-wide row → admin access; test is about file unlink
     prisma.backup.findUnique.mockResolvedValue({
       id: 'b1',
       serverId: 's1',
+      projectId: null,
       target: 'LOCAL',
       filename: 'b1.tar.gz',
     });
     mockFs.promises.unlink.mockRejectedValue(new Error('ENOENT'));
     prisma.backup.delete.mockResolvedValue({});
 
-    const res = await service.remove('u1', 'b1');
+    const res = await service.remove('admin', 'b1');
 
     expect(mockFs.promises.unlink).toHaveBeenCalledWith(
       expect.stringContaining('b1.tar.gz'),
@@ -759,7 +817,7 @@ describe('remote backups', () => {
 
   it('restore on a remote server stages the archive and queues a RESTORE task', async () => {
     const { service, prisma, agent } = makeService();
-    grantAccess(prisma, ['s1']);
+    grantAdmin(prisma, ['s1']); // server-wide row → admin; test is about the remote restore flow
     // The shared verify/extract gate runs before the remote branch — let the
     // promisified `tar -xzf` succeed.
     vi.mocked(execFile).mockImplementation(((...args: any[]) => {
@@ -769,6 +827,7 @@ describe('remote backups', () => {
     prisma.backup.findUnique.mockResolvedValue({
       id: 'b1',
       serverId: 's1',
+      projectId: null,
       target: 'LOCAL',
       status: 'COMPLETED',
       filename: 'b1.tar.gz',
@@ -788,7 +847,7 @@ describe('remote backups', () => {
       }),
     );
 
-    const res = await service.restore('u1', 'b1');
+    const res = await service.restore('admin', 'b1');
 
     // Archive staged under a local transfer id the agent can download from.
     expect(mockFs.promises.copyFile).toHaveBeenCalledWith(

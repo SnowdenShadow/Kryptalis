@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus,
@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/dialog';
 import type { BackupResponse, RestoreBackupResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
@@ -158,12 +159,25 @@ export default function BackupsPage() {
   });
   const serverId = server?.id || '';
 
+  // Admins may create a WHOLE-SERVER backup (every project). Regular users must
+  // scope to one of their own projects — the 'whole server' option is hidden
+  // and the picker defaults to their first project.
+  const { user } = useAuthStore();
+  const isAdmin = !!user?.role && (user.role === 'ADMIN' || user.role === 'SUPERADMIN');
+
   // Projects (for the scope selector + resolving a backup's project name).
   const { data: projects = [] } = useQuery<{ id: string; name: string }[]>({
     queryKey: ['projects'],
     queryFn: () => api.get('/projects'),
   });
   const projectName = (id?: string | null) => projects.find((p) => p.id === id)?.name;
+
+  // Non-admins can't do whole-server backups → default the scope to a project.
+  useEffect(() => {
+    if (!isAdmin && !projectId && projects.length > 0) {
+      setProjectId(projects[0].id);
+    }
+  }, [isAdmin, projectId, projects]);
 
   const { data: backups = [], isLoading } = useQuery<Backup[]>({
     queryKey: ['backups'],
@@ -255,6 +269,8 @@ export default function BackupsPage() {
   function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim() || !serverId) return;
+    // Non-admins must scope to a project (whole-server backups are admin-only).
+    if (!isAdmin && !projectId) return;
     if (resolvedSchedule === null) return; // invalid custom time — input shows the error
     createMutation.mutate({
       name: name.trim(),
@@ -478,7 +494,8 @@ export default function BackupsPage() {
               value={projectId}
               onChange={(e) => setProjectId(e.target.value)}
             >
-              <option value="">{t('backups.wholeServer')}</option>
+              {/* Whole-server backups are admin-only. */}
+              {isAdmin && <option value="">{t('backups.wholeServer')}</option>}
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}

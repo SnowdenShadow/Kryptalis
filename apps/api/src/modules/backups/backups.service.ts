@@ -15,7 +15,7 @@ import {
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { PrismaService } from '../../prisma/prisma.service';
-import { assertProjectAccess } from '../../common/rbac/project-access';
+import { assertProjectAccess, listAccessibleProjectIds } from '../../common/rbac/project-access';
 import { SystemConfigService } from '../system/system-config.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -243,8 +243,16 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private async assertBackupAccess(userId: string, backupId: string) {
     const backup = await this.prisma.backup.findUnique({ where: { id: backupId } });
     if (!backup) throw new NotFoundException('Backup not found');
-    const allowed = await this.accessibleServerIds(userId);
-    if (!allowed.includes(backup.serverId)) {
+
+    if (await this.isAdmin(userId)) return backup; // admins reach any backup
+
+    // Non-admins: a PROJECT-scoped backup is reachable only if they're a member
+    // of that project; a SERVER-WIDE backup (projectId null) is admin-only.
+    if (!backup.projectId) {
+      throw new ForbiddenException('Server-wide backups are managed by administrators.');
+    }
+    const projectIds = await listAccessibleProjectIds(this.prisma, userId);
+    if (!projectIds.includes(backup.projectId)) {
       throw new ForbiddenException('You do not have access to this backup.');
     }
     return backup;
@@ -1296,9 +1304,10 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       throw new ForbiddenException('You do not have access to this server.');
     }
 
+    const admin = await this.isAdmin(userId);
+
     // Project-scoped backup: the project must exist, live ON this server, and
-    // the caller must have at least DEVELOPER access to it. Omitting projectId
-    // keeps the legacy whole-server behaviour (gated by the server check above).
+    // the caller must have at least DEVELOPER access to it.
     let projectId: string | null = null;
     if (dto.projectId) {
       const project = await this.prisma.project.findUnique({
@@ -1311,6 +1320,12 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       }
       await assertProjectAccess(this.prisma, userId, dto.projectId, 'DEVELOPER');
       projectId = project.id;
+    } else if (!admin) {
+      // A SERVER-WIDE backup (no project) dumps every project on the host — an
+      // admin-only operation. Regular users must scope to one of their projects.
+      throw new ForbiddenException(
+        'Choose a project to back up. Whole-server backups are available to administrators only.',
+      );
     }
 
     const target = (dto.target || 'LOCAL') as 'LOCAL' | 'S3' | 'R2' | 'B2';
@@ -1346,7 +1361,20 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
   async findAll(userId: string, serverId?: string) {
     const allowed = await this.accessibleServerIds(userId);
+
+    // Visibility scoping:
+    //  - ADMIN / SUPERADMIN: every backup on every accessible server, including
+    //    server-wide rows (projectId null).
+    //  - Regular users: ONLY backups of the projects they're a member of. They
+    //    must NOT see other users' project backups (same server) nor the
+    //    admin-wide server snapshots. So we filter on projectId ∈ their projects
+    //    AND exclude projectId-null rows for non-admins.
+    const admin = await this.isAdmin(userId);
     const where: any = { serverId: { in: allowed } };
+    if (!admin) {
+      const projectIds = await listAccessibleProjectIds(this.prisma, userId);
+      where.projectId = { in: projectIds }; // implicitly excludes null (server-wide)
+    }
     if (serverId) {
       if (!allowed.includes(serverId)) {
         throw new ForbiddenException('You do not have access to this server.');
