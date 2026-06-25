@@ -171,7 +171,7 @@ export function UpdatesTab() {
           </CardHeader>
           <CardContent>
             <pre className="font-mono text-[11px] bg-muted/30 rounded p-3 overflow-x-auto max-h-96 whitespace-pre-wrap break-all">
-              {logData?.log?.trim() || '(empty)'}
+              {logData?.log?.trim() || t('admin.updates.logEmpty')}
             </pre>
           </CardContent>
         </Card>
