@@ -239,6 +239,17 @@ export default function AdminPage() {
     );
   };
 
+  // Mirror the backend RBAC so the UI never offers a doomed action:
+  //  - you cannot act on YOUR OWN account (no self-suspend / self-demote / self-delete)
+  //  - an ADMIN cannot modify another ADMIN/SUPERADMIN (only SUPERADMIN can)
+  const isSelf = (u: AdminUser) => u.id === me?.id;
+  const canModify = (u: AdminUser) => {
+    if (isSelf(u)) return false;
+    if (me?.role === 'SUPERADMIN') return true;
+    // me is ADMIN here (USER/VIEWER never reach this page)
+    return u.role !== 'ADMIN' && u.role !== 'SUPERADMIN';
+  };
+
   // All hooks have run — safe to bail out now (redirect happens in effect).
   if (!isAdmin) return null;
 
@@ -325,35 +336,40 @@ export default function AdminPage() {
               <Input className="pl-9" placeholder={t('admin.searchUser')} value={userSearch}
                 onChange={(e) => setUserSearch(e.target.value)} />
             </div>
-            <Select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as Role | '')} className="w-40 h-9">
-              <option value="">{t('admin.allRoles')}</option>
-              <option value="SUPERADMIN">SUPERADMIN</option>
-              <option value="ADMIN">ADMIN</option>
-              <option value="USER">USER</option>
-              <option value="VIEWER">VIEWER</option>
-            </Select>
-            <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as Status | '')} className="w-40 h-9">
-              <option value="">{t('admin.allStatuses')}</option>
-              <option value="ACTIVE">ACTIVE</option>
-              <option value="SUSPENDED">SUSPENDED</option>
-              <option value="BANNED">BANNED</option>
-              <option value="PENDING_VERIFICATION">PENDING_VERIFICATION</option>
-              <option value="PENDING_APPROVAL">PENDING_APPROVAL</option>
-            </Select>
-            <Button onClick={() => setCreateOpen(true)}><UserPlus size={14} /> {t('admin.createUser')}</Button>
+            {/* Fixed-width wrappers — the Select's internal div is w-full. */}
+            <div className="w-44 shrink-0">
+              <Select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as Role | '')}>
+                <option value="">{t('admin.allRoles')}</option>
+                <option value="SUPERADMIN">SUPERADMIN</option>
+                <option value="ADMIN">ADMIN</option>
+                <option value="USER">USER</option>
+                <option value="VIEWER">VIEWER</option>
+              </Select>
+            </div>
+            <div className="w-48 shrink-0">
+              <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as Status | '')}>
+                <option value="">{t('admin.allStatuses')}</option>
+                <option value="ACTIVE">ACTIVE</option>
+                <option value="SUSPENDED">SUSPENDED</option>
+                <option value="BANNED">BANNED</option>
+                <option value="PENDING_VERIFICATION">PENDING_VERIFICATION</option>
+                <option value="PENDING_APPROVAL">PENDING_APPROVAL</option>
+              </Select>
+            </div>
+            <Button onClick={() => setCreateOpen(true)} className="shrink-0"><UserPlus size={14} /> {t('admin.createUser')}</Button>
           </div>
 
           <Card>
-            <CardContent className="p-0">
+            <CardContent className="p-0 overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="border-b border-border bg-muted/30">
-                  <tr className="text-left text-muted-foreground">
-                    <th className="px-4 py-2 font-medium">{t('admin.user')}</th>
-                    <th className="px-4 py-2 font-medium">{t('admin.role')}</th>
-                    <th className="px-4 py-2 font-medium">{t('admin.status')}</th>
-                    <th className="px-4 py-2 font-medium text-right">{t('admin.resources')}</th>
-                    <th className="px-4 py-2 font-medium">{t('admin.lastLogin')}</th>
-                    <th className="px-4 py-2 font-medium text-right">{t('admin.actions')}</th>
+                  <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+                    <th className="px-4 py-2.5 font-medium">{t('admin.user')}</th>
+                    <th className="px-4 py-2.5 font-medium">{t('admin.role')}</th>
+                    <th className="px-4 py-2.5 font-medium">{t('admin.status')}</th>
+                    <th className="px-4 py-2.5 font-medium text-right whitespace-nowrap" title={t('admin.resourcesHint')}>{t('admin.resources')}</th>
+                    <th className="px-4 py-2.5 font-medium whitespace-nowrap">{t('admin.lastLogin')}</th>
+                    <th className="px-4 py-2.5 font-medium text-right">{t('admin.actions')}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -361,12 +377,17 @@ export default function AdminPage() {
                     <tr key={u.id} className="border-b last:border-0 hover:bg-accent/30">
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-2">
-                          <div>
-                            <p className="font-medium">{u.name}</p>
-                            <p className="text-xs text-muted-foreground">{u.email}</p>
+                          <div className="min-w-0">
+                            <p className="font-medium flex items-center gap-1.5">
+                              <span className="truncate">{u.name}</span>
+                              {isSelf(u) && (
+                                <Badge variant="secondary" className="text-[10px] shrink-0">{t('admin.you')}</Badge>
+                              )}
+                            </p>
+                            <p className="text-xs text-muted-foreground truncate">{u.email}</p>
                           </div>
                           {u.twoFactorEnabled && (
-                            <Badge variant="outline" className="text-[10px] gap-1">
+                            <Badge variant="outline" className="text-[10px] gap-1 shrink-0">
                               <Lock size={9} /> 2FA
                             </Badge>
                           )}
@@ -376,30 +397,43 @@ export default function AdminPage() {
                       <td className="px-4 py-2.5">
                         <Badge variant={STATUS_BADGE[u.status]} className="text-[10px]">{u.status}</Badge>
                       </td>
-                      <td className="px-4 py-2.5 text-right text-xs text-muted-foreground">
+                      <td className="px-4 py-2.5 text-right text-xs text-muted-foreground whitespace-nowrap" title={t('admin.resourcesHint')}>
                         {u._count.projects}p · {u._count.memberships}m · {u._count.gitProviders}g
                       </td>
-                      <td className="px-4 py-2.5 text-xs text-muted-foreground">{timeAgo(u.lastLoginAt)}</td>
+                      <td className="px-4 py-2.5 text-xs text-muted-foreground whitespace-nowrap">{timeAgo(u.lastLoginAt)}</td>
                       <td className="px-4 py-2.5">
-                        <div className="flex justify-end gap-1">
-                          <Button size="icon" variant="ghost" title={t('admin.editRole')} onClick={() => setEditUser(u)}>
-                            <Shield size={14} />
-                          </Button>
-                          <Button size="icon" variant="ghost" title={t('admin.resetPw')} onClick={() => setResetPwUser(u)}>
-                            <KeyRound size={14} />
-                          </Button>
-                          {u.status === 'ACTIVE' ? (
-                            <Button size="icon" variant="ghost" title={t('admin.suspend')}
-                              onClick={() => statusMutation.mutate({ id: u.id, status: 'SUSPENDED' })}>
-                              <Ban size={14} />
+                        {canModify(u) ? (
+                          <div className="flex justify-end gap-1">
+                            <Button size="icon" variant="ghost" title={t('admin.editRole')} onClick={() => setEditUser(u)}>
+                              <Shield size={14} />
                             </Button>
-                          ) : (
-                            <Button size="icon" variant="ghost" title={t('admin.reactivate')}
-                              onClick={() => statusMutation.mutate({ id: u.id, status: 'ACTIVE' })}>
-                              <LockOpen size={14} />
+                            <Button size="icon" variant="ghost" title={t('admin.resetPw')} onClick={() => setResetPwUser(u)}>
+                              <KeyRound size={14} />
                             </Button>
-                          )}
-                        </div>
+                            {u.status === 'ACTIVE' ? (
+                              <Button size="icon" variant="ghost" title={t('admin.suspend')}
+                                onClick={() => statusMutation.mutate({ id: u.id, status: 'SUSPENDED' })}>
+                                <Ban size={14} />
+                              </Button>
+                            ) : (
+                              <Button size="icon" variant="ghost" title={t('admin.reactivate')}
+                                onClick={() => statusMutation.mutate({ id: u.id, status: 'ACTIVE' })}>
+                                <LockOpen size={14} />
+                              </Button>
+                            )}
+                          </div>
+                        ) : (
+                          // Self, or a target this admin can't touch — backend
+                          // rejects these, so don't offer them.
+                          <div className="flex justify-end">
+                            <span
+                              className="text-xs text-muted-foreground/60 italic"
+                              title={isSelf(u) ? t('admin.selfActionHint') : t('admin.higherRoleHint')}
+                            >
+                              {isSelf(u) ? t('admin.you') : '—'}
+                            </span>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))}
