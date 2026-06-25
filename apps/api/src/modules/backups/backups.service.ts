@@ -15,6 +15,7 @@ import {
   ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { PrismaService } from '../../prisma/prisma.service';
+import { assertProjectAccess } from '../../common/rbac/project-access';
 import { SystemConfigService } from '../system/system-config.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -51,6 +52,8 @@ interface BackupManifest {
   version: 1;
   backupId: string;
   serverId: string;
+  /** Set when the backup is scoped to a single project (null = whole server). */
+  projectId?: string | null;
   createdAt: string;
   includes: { applications: boolean; databases: boolean; volumes: boolean };
   databases: Array<{
@@ -310,6 +313,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
           data: {
             name: scheduledRunName(tpl.name, occurrence),
             serverId: tpl.serverId,
+            // Inherit the template's scope so a scheduled project backup stays
+            // scoped to that project (not the whole server).
+            projectId: tpl.projectId,
             target: tpl.target,
             includeApplications: tpl.includeApplications,
             includeDatabases: tpl.includeDatabases,
@@ -692,8 +698,13 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     stagingDir: string,
     serverId: string,
     manifest: BackupManifest,
+    projectId?: string | null,
   ): Promise<void> {
-    const dbs = await this.prisma.database.findMany({ where: { serverId } });
+    // Project-scoped backup → only this project's databases; otherwise every
+    // database on the server (legacy whole-server behaviour).
+    const dbs = await this.prisma.database.findMany({
+      where: projectId ? { projectId } : { serverId },
+    });
     if (dbs.length === 0) return;
     const dir = path.join(stagingDir, 'databases');
     await fs.promises.mkdir(dir, { recursive: true });
@@ -752,9 +763,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
    * Compose names volumes `<project>_<volume>` where the project name is the
    * compose dir basename (resolveAppDir handles per-instance vs legacy dirs).
    */
-  private async listAppVolumes(serverId: string): Promise<string[]> {
+  private async listAppVolumes(serverId: string, projectId?: string | null): Promise<string[]> {
     const apps = await this.prisma.application.findMany({
-      where: { project: { serverId } },
+      where: projectId ? { projectId } : { project: { serverId } },
       select: { id: true, name: true },
     });
     if (apps.length === 0) return [];
@@ -774,8 +785,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     stagingDir: string,
     serverId: string,
     manifest: BackupManifest,
+    projectId?: string | null,
   ): Promise<void> {
-    const volumes = await this.listAppVolumes(serverId);
+    const volumes = await this.listAppVolumes(serverId, projectId);
     if (volumes.length === 0) return;
     const dir = path.join(stagingDir, 'volumes');
     await fs.promises.mkdir(dir, { recursive: true });
@@ -790,9 +802,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async exportApplications(stagingDir: string, serverId: string): Promise<void> {
+  private async exportApplications(stagingDir: string, serverId: string, projectId?: string | null): Promise<void> {
     const apps = await this.prisma.application.findMany({
-      where: { project: { serverId } },
+      where: projectId ? { projectId } : { project: { serverId } },
       include: {
         domains: true,
         project: { select: { id: true, name: true } },
@@ -840,6 +852,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         version: 1,
         backupId,
         serverId: backup.serverId,
+        projectId: backup.projectId,
         createdAt: new Date().toISOString(),
         includes: {
           applications: backup.includeApplications,
@@ -852,13 +865,13 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       };
 
       if (backup.includeDatabases) {
-        await this.dumpDatabases(stagingDir, backup.serverId, manifest);
+        await this.dumpDatabases(stagingDir, backup.serverId, manifest, backup.projectId);
       }
       if (backup.includeVolumes) {
-        await this.dumpVolumes(stagingDir, backup.serverId, manifest);
+        await this.dumpVolumes(stagingDir, backup.serverId, manifest, backup.projectId);
       }
       if (backup.includeApplications) {
-        await this.exportApplications(stagingDir, backup.serverId);
+        await this.exportApplications(stagingDir, backup.serverId, backup.projectId);
         manifest.applicationsExported = true;
       }
       await fs.promises.writeFile(
@@ -991,8 +1004,10 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
    * agent. decrypt-then-encrypt guarantees a v1 ciphertext even for legacy
    * plaintext password columns.
    */
-  private async remoteBackupDatabases(serverId: string) {
-    const dbs = await this.prisma.database.findMany({ where: { serverId } });
+  private async remoteBackupDatabases(serverId: string, projectId?: string | null) {
+    const dbs = await this.prisma.database.findMany({
+      where: projectId ? { projectId } : { serverId },
+    });
     return dbs.map((db) => ({
       id: db.id,
       type: db.type,
@@ -1012,14 +1027,14 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
    * stacks, marketplace instance-suffixed keys, user compose files) are not
    * enumerated and therefore not covered by remote dumps.
    */
-  private async remoteBackupVolumes(serverId: string): Promise<string[]> {
+  private async remoteBackupVolumes(serverId: string, projectId?: string | null): Promise<string[]> {
     const [apps, dbs] = await Promise.all([
       this.prisma.application.findMany({
-        where: { project: { serverId } },
+        where: projectId ? { projectId } : { project: { serverId } },
         select: { id: true, name: true },
       }),
       this.prisma.database.findMany({
-        where: { serverId },
+        where: projectId ? { projectId } : { serverId },
         select: { name: true, autoImported: true },
       }),
     ]);
@@ -1036,17 +1051,22 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private async enqueueRemoteBackup(backup: {
     id: string;
     serverId: string;
+    projectId?: string | null;
     includeDatabases: boolean;
     includeVolumes: boolean;
   }): Promise<void> {
+    // Build the DB + volume lists server-side, scoped to the backup's project
+    // when set — so a remote (agent) backup is ALSO project-scoped, not just
+    // the local path. The agent only dumps what we hand it.
     const databases = backup.includeDatabases
-      ? await this.remoteBackupDatabases(backup.serverId)
+      ? await this.remoteBackupDatabases(backup.serverId, backup.projectId)
       : [];
     const volumes = backup.includeVolumes
-      ? await this.remoteBackupVolumes(backup.serverId)
+      ? await this.remoteBackupVolumes(backup.serverId, backup.projectId)
       : [];
     await this.agent.enqueueTask(backup.serverId, 'BACKUP', {
       backupId: backup.id,
+      projectId: backup.projectId ?? null,
       databases,
       volumes,
       uploadName: `${backup.id}.tar.gz`,
@@ -1275,6 +1295,24 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     if (!allowed.includes(dto.serverId)) {
       throw new ForbiddenException('You do not have access to this server.');
     }
+
+    // Project-scoped backup: the project must exist, live ON this server, and
+    // the caller must have at least DEVELOPER access to it. Omitting projectId
+    // keeps the legacy whole-server behaviour (gated by the server check above).
+    let projectId: string | null = null;
+    if (dto.projectId) {
+      const project = await this.prisma.project.findUnique({
+        where: { id: dto.projectId },
+        select: { id: true, serverId: true },
+      });
+      if (!project) throw new NotFoundException('Project not found.');
+      if (project.serverId !== dto.serverId) {
+        throw new BadRequestException('That project is not on the selected server.');
+      }
+      await assertProjectAccess(this.prisma, userId, dto.projectId, 'DEVELOPER');
+      projectId = project.id;
+    }
+
     const target = (dto.target || 'LOCAL') as 'LOCAL' | 'S3' | 'R2' | 'B2';
     if (isRemoteTarget(target)) {
       // Fail fast with a clear 400 (listing the missing keys) before any row
@@ -1286,6 +1324,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       data: {
         name: dto.name,
         serverId: dto.serverId,
+        projectId,
         target,
         includeApplications: dto.includeApplications ?? true,
         includeDatabases: dto.includeDatabases ?? true,

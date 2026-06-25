@@ -3,6 +3,9 @@ import { BackupStatus, BackupTarget } from './enums';
 export interface CreateBackupRequest {
   name: string;
   serverId: string;
+  /** Scope the backup to one project (its apps + DBs + volumes). Omit for a
+   *  whole-server backup. */
+  projectId?: string;
   target: BackupTarget;
   includeApplications?: boolean;
   includeDatabases?: boolean;
@@ -18,6 +21,8 @@ export interface BackupResponse {
   id: string;
   name: string;
   serverId: string;
+  /** Project this backup is scoped to (null = whole server). */
+  projectId?: string | null;
   target: `${BackupTarget}`;
   status: `${BackupStatus}`;
   /** Legacy size field (bytes, decimal string). */

@@ -15,6 +15,7 @@ import {
   Unlock,
   ShieldCheck,
   CalendarClock,
+  FolderKanban,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -142,6 +143,8 @@ export default function BackupsPage() {
 
   // Form state
   const [name, setName] = useState('');
+  // '' = whole-server backup; otherwise a project id to scope the backup to.
+  const [projectId, setProjectId] = useState('');
   const [target, setTarget] = useState('LOCAL');
   const [includeApplications, setIncludeApplications] = useState(true);
   const [includeDatabases, setIncludeDatabases] = useState(true);
@@ -154,6 +157,13 @@ export default function BackupsPage() {
     queryFn: () => api.get('/servers/local'),
   });
   const serverId = server?.id || '';
+
+  // Projects (for the scope selector + resolving a backup's project name).
+  const { data: projects = [] } = useQuery<{ id: string; name: string }[]>({
+    queryKey: ['projects'],
+    queryFn: () => api.get('/projects'),
+  });
+  const projectName = (id?: string | null) => projects.find((p) => p.id === id)?.name;
 
   const { data: backups = [], isLoading } = useQuery<Backup[]>({
     queryKey: ['backups'],
@@ -172,6 +182,7 @@ export default function BackupsPage() {
     mutationFn: (data: {
       name: string;
       serverId: string;
+      projectId?: string;
       target: string;
       includeApplications?: boolean;
       includeDatabases?: boolean;
@@ -227,6 +238,7 @@ export default function BackupsPage() {
   function closeCreateDialog() {
     setShowCreateDialog(false);
     setName('');
+    setProjectId('');
     setTarget('LOCAL');
     setIncludeApplications(true);
     setIncludeDatabases(true);
@@ -247,6 +259,7 @@ export default function BackupsPage() {
     createMutation.mutate({
       name: name.trim(),
       serverId,
+      ...(projectId ? { projectId } : {}),
       target,
       includeApplications,
       includeDatabases,
@@ -303,6 +316,7 @@ export default function BackupsPage() {
                   <tr className="border-b border-border text-left text-sm text-muted-foreground">
                     <th className="px-6 py-3 font-medium">{t('common.name')}</th>
                     <th className="px-6 py-3 font-medium">{t('backups.colServer')}</th>
+                    <th className="px-6 py-3 font-medium">{t('backups.scope')}</th>
                     <th className="px-6 py-3 font-medium">{t('backups.target')}</th>
                     <th className="px-6 py-3 font-medium">{t('common.status')}</th>
                     <th className="px-6 py-3 font-medium">{t('backups.size')}</th>
@@ -325,6 +339,16 @@ export default function BackupsPage() {
                           <Server size={14} />
                           {(backup.serverId === server?.id ? server?.name : null) || '—'}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 text-sm">
+                        {backup.projectId ? (
+                          <Badge variant="outline" className="gap-1">
+                            <FolderKanban size={12} />
+                            {projectName(backup.projectId) || t('backups.aProject')}
+                          </Badge>
+                        ) : (
+                          <span className="text-muted-foreground/70 text-xs">{t('backups.wholeServer')}</span>
+                        )}
                       </td>
                       <td className="px-6 py-4">
                         <Badge variant={targetVariant[backup.target] || 'secondary'}>
@@ -445,6 +469,23 @@ export default function BackupsPage() {
               onChange={(e) => setName(e.target.value)}
               required
             />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="backup-scope">{t('backups.scope')}</Label>
+            <Select
+              id="backup-scope"
+              value={projectId}
+              onChange={(e) => setProjectId(e.target.value)}
+            >
+              <option value="">{t('backups.wholeServer')}</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {projectId ? t('backups.scopeProjectHint') : t('backups.scopeServerHint')}
+            </p>
           </div>
 
           <div className="space-y-2">

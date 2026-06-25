@@ -254,6 +254,7 @@ model Project {
   mailboxes    Mailbox[]
   members      ProjectMember[]
   sftpAccounts SftpAccount[]
+  backups      Backup[]
 
   @@index([serverId])
   @@index([userId])
@@ -762,6 +763,11 @@ model Backup {
   id                  String       @id @default(cuid())
   name                String
   serverId            String
+  // Optional PROJECT scope. When set, the backup dumps ONLY this project's
+  // apps + databases + volumes (isolation between projects). NULL = legacy
+  // behaviour: the WHOLE server (every project on it) — kept for admin-wide
+  // snapshots and backward compatibility with rows created before this field.
+  projectId           String?
   target              BackupTarget @default(LOCAL)
   status              BackupStatus @default(PENDING)
   size                BigInt?
@@ -788,8 +794,13 @@ model Backup {
   createdAt           DateTime     @default(now())
 
   server Server @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  // Deleting a project drops its scoped backup rows (the dump files are pruned
+  // by the same retention path). Server-wide backups (projectId null) are
+  // unaffected.
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([serverId])
+  @@index([projectId])
   @@map("backups")
 }
 

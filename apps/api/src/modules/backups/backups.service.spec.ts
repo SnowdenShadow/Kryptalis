@@ -10,6 +10,12 @@ vi.mock('child_process', () => ({
   spawn: vi.fn(),
 }));
 
+// RBAC project check (used by create() for project-scoped backups) — mocked so
+// the scope tests don't need full membership fixtures.
+vi.mock('../../common/rbac/project-access', () => ({
+  assertProjectAccess: vi.fn().mockResolvedValue(undefined),
+}));
+
 vi.mock('fs', () => {
   const promises = {
     unlink: vi.fn().mockResolvedValue(undefined),
@@ -55,6 +61,7 @@ function makePrisma() {
     },
     user: { findUnique: vi.fn() },
     server: { findMany: vi.fn(), findUnique: vi.fn() },
+    project: { findUnique: vi.fn() },
     projectMember: { findMany: vi.fn() },
     database: { findMany: vi.fn(), findUnique: vi.fn() },
     application: { findMany: vi.fn() },
@@ -197,6 +204,85 @@ describe('create', () => {
       }),
     );
     expect(job).toHaveBeenCalledWith('b1');
+  });
+
+  // ── project scope ─────────────────────────────────────────────────
+  it('persists projectId when the project is on the server + accessible', async () => {
+    const { service, prisma } = makeService();
+    grantAccess(prisma, ['s1']);
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1', serverId: 's1' });
+    prisma.backup.create.mockResolvedValue({ id: 'b1', status: 'PENDING' });
+    vi.spyOn(service as any, 'runBackupJob').mockResolvedValue(undefined);
+
+    await service.create('u1', { name: 'b', serverId: 's1', projectId: 'p1', target: 'LOCAL' } as any);
+
+    expect(prisma.backup.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ projectId: 'p1' }) }),
+    );
+  });
+
+  it('rejects a project that is on a DIFFERENT server', async () => {
+    const { service, prisma } = makeService();
+    grantAccess(prisma, ['s1']);
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1', serverId: 's2' });
+
+    await expect(
+      service.create('u1', { name: 'b', serverId: 's1', projectId: 'p1', target: 'LOCAL' } as any),
+    ).rejects.toThrow(/not on the selected server/i);
+    expect(prisma.backup.create).not.toHaveBeenCalled();
+  });
+
+  it('404s on a missing project', async () => {
+    const { service, prisma } = makeService();
+    grantAccess(prisma, ['s1']);
+    prisma.project.findUnique.mockResolvedValue(null);
+
+    await expect(
+      service.create('u1', { name: 'b', serverId: 's1', projectId: 'pX', target: 'LOCAL' } as any),
+    ).rejects.toThrow(NotFoundException);
+  });
+
+  it('a whole-server backup (no projectId) persists projectId null', async () => {
+    const { service, prisma } = makeService();
+    grantAccess(prisma, ['s1']);
+    prisma.backup.create.mockResolvedValue({ id: 'b1', status: 'PENDING' });
+    vi.spyOn(service as any, 'runBackupJob').mockResolvedValue(undefined);
+
+    await service.create('u1', { name: 'b', serverId: 's1', target: 'LOCAL' } as any);
+
+    expect(prisma.backup.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ projectId: null }) }),
+    );
+  });
+});
+
+// ── project-scoped exporters ──────────────────────────────────────────
+describe('exporters honour project scope', () => {
+  it('dumpDatabases filters by projectId when set, else by serverId', async () => {
+    const { service, prisma } = makeService();
+    prisma.database.findMany.mockResolvedValue([]);
+    const manifest: any = { databases: [] };
+
+    await (service as any).dumpDatabases('/tmp/x', 's1', manifest, 'p1');
+    expect(prisma.database.findMany).toHaveBeenCalledWith({ where: { projectId: 'p1' } });
+
+    await (service as any).dumpDatabases('/tmp/x', 's1', manifest, null);
+    expect(prisma.database.findMany).toHaveBeenLastCalledWith({ where: { serverId: 's1' } });
+  });
+
+  it('exportApplications filters by projectId when set, else by serverId', async () => {
+    const { service, prisma } = makeService();
+    prisma.application.findMany.mockResolvedValue([]);
+
+    await (service as any).exportApplications('/tmp/x', 's1', 'p1');
+    expect(prisma.application.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { projectId: 'p1' } }),
+    );
+
+    await (service as any).exportApplications('/tmp/x', 's1', null);
+    expect(prisma.application.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: { project: { serverId: 's1' } } }),
+    );
   });
 });
 

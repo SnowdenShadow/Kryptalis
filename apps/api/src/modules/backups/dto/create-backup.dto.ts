@@ -14,6 +14,16 @@ export class CreateBackupDto {
   @IsString()
   serverId: string;
 
+  @ApiProperty({
+    required: false,
+    description:
+      'Scope the backup to a single project (its apps + databases + volumes). ' +
+      'Omit for a whole-server backup (every project on the server).',
+  })
+  @IsOptional()
+  @IsString()
+  projectId?: string;
+
   @ApiProperty({ enum: ['LOCAL', 'S3', 'R2', 'B2'] })
   @IsIn(['LOCAL', 'S3', 'R2', 'B2'])
   target: string;
