@@ -532,10 +532,12 @@ export default function ApplicationsPage() {
         </Button>
       </div>
 
-      {/* Search + Project Filter */}
+      {/* Search + Project Filter — search fills the row, filters sit on the
+          right. Wraps cleanly on narrow screens (no dead space). */}
       {applications.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
-          <div className="relative flex-1 min-w-[200px] max-w-md">
+          {/* Search grows to fill all leftover width. */}
+          <div className="relative flex-1 min-w-[200px]">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder={t('apps.searchPlaceholder')}
@@ -544,55 +546,61 @@ export default function ApplicationsPage() {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          {/* Status filter — fixed-width wrapper (the Select's internal div is
-              w-full and ignores className width). */}
-          <div className="w-44 shrink-0">
-            <Select
-              value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value as any)}
-            >
-              <option value="">{t('apps.filterAllStatuses')}</option>
-              <option value="RUNNING">{t('apps.statusRunning')}</option>
-              <option value="STOPPED">{t('apps.statusStopped')}</option>
-              <option value="DEPLOYING">{t('apps.statusDeployingBuilding')}</option>
-              <option value="ERROR">{t('apps.statusError')}</option>
-            </Select>
-          </div>
-          {/* Project filter — pills when few projects, a dropdown when many. */}
-          {projects.length > 0 && projects.length <= 4 ? (
-            <div className="flex items-center gap-2 flex-wrap">
-              <Button size="default" variant={filterProject === '' ? 'default' : 'outline'} onClick={() => setFilterProject('')}>
-                {t('apps.filterAllProjects')}
-              </Button>
-              {projects.map((p) => (
-                <Button
-                  key={p.id}
-                  size="default"
-                  variant={filterProject === p.id ? 'default' : 'outline'}
-                  onClick={() => setFilterProject(filterProject === p.id ? '' : p.id)}
-                >
-                  {p.name}
-                </Button>
-              ))}
-            </div>
-          ) : projects.length > 0 ? (
-            <div className="w-52 shrink-0">
+
+          {/* Right-hand filter group — keeps the controls together at the edge. */}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Status — fixed-width wrapper (the Select's inner div is w-full
+                and ignores className width). */}
+            <div className="w-44 shrink-0">
               <Select
-                value={filterProject}
-                onChange={(e) => setFilterProject(e.target.value)}
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value as any)}
               >
-                <option value="">{t('apps.filterAllProjects')}</option>
-                {projects.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
+                <option value="">{t('apps.filterAllStatuses')}</option>
+                <option value="RUNNING">{t('apps.statusRunning')}</option>
+                <option value="STOPPED">{t('apps.statusStopped')}</option>
+                <option value="DEPLOYING">{t('apps.statusDeployingBuilding')}</option>
+                <option value="ERROR">{t('apps.statusError')}</option>
               </Select>
             </div>
-          ) : null}
-          {(search || filterProject || filterStatus) && (
-            <Button variant="ghost" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); }}>
-              {t('apps.filterClear')}
-            </Button>
-          )}
+
+            {/* Project — pills when few projects, a dropdown when many. */}
+            {projects.length > 0 && projects.length <= 4 ? (
+              <div className="flex items-center gap-2 flex-wrap">
+                <Button size="default" variant={filterProject === '' ? 'default' : 'outline'} onClick={() => setFilterProject('')}>
+                  {t('apps.filterAllProjects')}
+                </Button>
+                {projects.map((p) => (
+                  <Button
+                    key={p.id}
+                    size="default"
+                    variant={filterProject === p.id ? 'default' : 'outline'}
+                    onClick={() => setFilterProject(filterProject === p.id ? '' : p.id)}
+                  >
+                    {p.name}
+                  </Button>
+                ))}
+              </div>
+            ) : projects.length > 0 ? (
+              <div className="w-52 shrink-0">
+                <Select
+                  value={filterProject}
+                  onChange={(e) => setFilterProject(e.target.value)}
+                >
+                  <option value="">{t('apps.filterAllProjects')}</option>
+                  {projects.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </Select>
+              </div>
+            ) : null}
+
+            {(search || filterProject || filterStatus) && (
+              <Button variant="ghost" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); }}>
+                {t('apps.filterClear')}
+              </Button>
+            )}
+          </div>
         </div>
       )}
 
