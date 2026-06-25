@@ -646,6 +646,19 @@ describe('install — webmail (roundcube) mail-server wiring', () => {
     expect(env).toContain('ROUNDCUBEMAIL_SMTP_PORT=5870');
   });
 
+  it('writes the roundcube SSL side-file (accept the mail container self-signed cert)', async () => {
+    const { service, prisma } = makeService();
+    prisma.mailServer.findUnique.mockResolvedValue({ imapsPort: 993, submissionPort: 587, domainId: 'dom-1' });
+    prisma.domain.findUnique.mockResolvedValue({ id: 'dom-1', domain: 'acme.io' });
+
+    await service.install({ appSlug: 'roundcube', projectId: 'p1', domainId: 'dom-1' }, 'u1');
+
+    const sslConf = writtenFile('roundcube-ssl.inc.php')!;
+    expect(sslConf).toContain("'verify_peer' => false");
+    expect(sslConf).toContain('imap_conn_options');
+    expect(sslConf).toContain('smtp_conn_options');
+  });
+
   it('caller supplies ROUNDCUBEMAIL_DEFAULT_HOST env → no "pick a Domain" 409, uses the provided env', async () => {
     const { service, prisma } = makeService();
     // Multiple mail servers exist — the legacy path would 409. But the caller

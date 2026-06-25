@@ -876,10 +876,12 @@ describe('deployWebmail (1-click Roundcube)', () => {
     // Dedicated subdomain — NOT the mail apex (no more silent takeover).
     expect(data.newDomain).toBe('webmail.example.com');
     expect(data.domainId).toBeUndefined();
-    // Env points at mail.<domain> with the server's IMAPS/Submission ports.
-    expect(data.envVars.ROUNDCUBEMAIL_DEFAULT_HOST).toBe('ssl://mail.example.com');
-    expect(data.envVars.ROUNDCUBEMAIL_DEFAULT_PORT).toBe('993');
-    expect(data.envVars.ROUNDCUBEMAIL_SMTP_SERVER).toBe('tls://mail.example.com');
+    // Env points at the INTERNAL mail container over the docker network
+    // (STARTTLS on 143/587) — NOT the public mail.<domain>:993 (which would
+    // need the Let's Encrypt cert). So the webmail works without DNS/cert.
+    expect(data.envVars.ROUNDCUBEMAIL_DEFAULT_HOST).toBe('tls://dockcontrol-mail-example-com');
+    expect(data.envVars.ROUNDCUBEMAIL_DEFAULT_PORT).toBe('143');
+    expect(data.envVars.ROUNDCUBEMAIL_SMTP_SERVER).toBe('tls://dockcontrol-mail-example-com');
     expect(data.envVars.ROUNDCUBEMAIL_SMTP_PORT).toBe('587');
   });
 

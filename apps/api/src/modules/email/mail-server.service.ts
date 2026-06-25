@@ -263,13 +263,20 @@ export class MailServerService implements OnApplicationBootstrap {
       return { applicationId: existing.id, alreadyInstalled: true };
     }
 
-    const mailHost = `mail.${(domain as any).domain}`;
-    // Roundcube reads these env keys (same ones reconcileWebmails keeps fresh).
+    // Wire Roundcube to the mail server over the INTERNAL docker network
+    // (container_name), NOT the public mail.<domain>:993. Why: the public
+    // address needs the Let's Encrypt cert (which needs mail.<domain> DNS) — so
+    // the webmail would only work AFTER DNS+cert. Internally, both containers
+    // share the `dockcontrol-apps` network and the mail server trusts it
+    // (PERMIT_DOCKER: network), so the webmail works IMMEDIATELY, no DNS/cert
+    // dependency. tls:// = STARTTLS on the standard internal ports 143/587; the
+    // self-signed internal cert is accepted via the config.inc.php side-file.
+    const mailContainer = `dockcontrol-mail-${(domain as any).domain.replace(/\./g, '-')}`;
     const envVars: Record<string, string> = {
-      ROUNDCUBEMAIL_DEFAULT_HOST: `ssl://${mailHost}`,
-      ROUNDCUBEMAIL_DEFAULT_PORT: String(mailServer.imapsPort),
-      ROUNDCUBEMAIL_SMTP_SERVER: `tls://${mailHost}`,
-      ROUNDCUBEMAIL_SMTP_PORT: String(mailServer.submissionPort),
+      ROUNDCUBEMAIL_DEFAULT_HOST: `tls://${mailContainer}`,
+      ROUNDCUBEMAIL_DEFAULT_PORT: '143',
+      ROUNDCUBEMAIL_SMTP_SERVER: `tls://${mailContainer}`,
+      ROUNDCUBEMAIL_SMTP_PORT: '587',
     };
 
     // Map the chosen access mode to a marketplace install. Default = a dedicated
@@ -1301,7 +1308,12 @@ ${sslExternalVolumes}`;
     });
     if (apps.length === 0) return;
 
-    const mailHost = `mail.${server.domain.domain}`;
+    // INTERNAL wiring (invariant — independent of DNS/cert): the webmail talks
+    // to the mail server by its container_name over the docker network with
+    // STARTTLS on the standard internal ports. This NEVER changes when the
+    // public cert is (re)issued, so a webmail installed before this change is
+    // migrated to the internal host on the next reconcile.
+    const mailContainer = `dockcontrol-mail-${server.domain.domain.replace(/\./g, '-')}`;
     for (const app of apps) {
       try {
         const slugify = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'app';
@@ -1311,14 +1323,14 @@ ${sslExternalVolumes}`;
         if (!fs.existsSync(composePath)) continue;
         let content = fs.readFileSync(composePath, 'utf-8');
 
-        // Replace any prior host (host.docker.internal or an old mail.<sub>)
-        // with the current mail host + ports.
+        // Re-point any prior host (public mail.<domain>, host.docker.internal…)
+        // to the internal container + standard STARTTLS ports.
         const before = content;
         content = content
-          .replace(/ROUNDCUBEMAIL_DEFAULT_HOST:\s*(?:ssl|tls|tcp):\/\/[^\s\n]+/g, `ROUNDCUBEMAIL_DEFAULT_HOST: ssl://${mailHost}`)
-          .replace(/ROUNDCUBEMAIL_DEFAULT_PORT:\s*"?\d+"?/g, `ROUNDCUBEMAIL_DEFAULT_PORT: "${server.imapsPort}"`)
-          .replace(/ROUNDCUBEMAIL_SMTP_SERVER:\s*(?:ssl|tls|tcp):\/\/[^\s\n]+/g, `ROUNDCUBEMAIL_SMTP_SERVER: tls://${mailHost}`)
-          .replace(/ROUNDCUBEMAIL_SMTP_PORT:\s*"?\d+"?/g, `ROUNDCUBEMAIL_SMTP_PORT: "${server.submissionPort}"`);
+          .replace(/ROUNDCUBEMAIL_DEFAULT_HOST:\s*"?(?:ssl|tls|tcp):\/\/[^\s\n"]+"?/g, `ROUNDCUBEMAIL_DEFAULT_HOST: tls://${mailContainer}`)
+          .replace(/ROUNDCUBEMAIL_DEFAULT_PORT:\s*"?\d+"?/g, `ROUNDCUBEMAIL_DEFAULT_PORT: "143"`)
+          .replace(/ROUNDCUBEMAIL_SMTP_SERVER:\s*"?(?:ssl|tls|tcp):\/\/[^\s\n"]+"?/g, `ROUNDCUBEMAIL_SMTP_SERVER: tls://${mailContainer}`)
+          .replace(/ROUNDCUBEMAIL_SMTP_PORT:\s*"?\d+"?/g, `ROUNDCUBEMAIL_SMTP_PORT: "587"`);
         if (content === before) continue; // nothing to reconcile
 
         fs.writeFileSync(composePath, content);
