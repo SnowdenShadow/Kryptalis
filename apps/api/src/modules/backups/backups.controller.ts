@@ -1,8 +1,9 @@
-import { Controller, Get, Post, Delete, Param, Body, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Param, Body, Query, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { BackupsService } from './backups.service';
 import { CreateBackupDto } from './dto/create-backup.dto';
+import { SetProjectStorageDto } from './dto/project-storage.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Backups')
@@ -26,9 +27,39 @@ export class BackupsController {
 
   // NB: declared before ':id' so 'targets' is not captured as an id.
   @Get('targets')
-  @ApiOperation({ summary: 'Available backup targets + whether S3 storage is configured' })
-  getTargets() {
-    return this.svc.getTargets();
+  @ApiOperation({ summary: 'Available backup targets + whether S3 storage is configured (optionally for a project)' })
+  getTargets(@Query('projectId') projectId?: string) {
+    return this.svc.getTargets(projectId);
+  }
+
+  // ── per-project remote storage config ──────────────────────────────
+  // Declared before ':id' so 'projects' isn't captured as a backup id.
+  @Get('projects/:projectId/storage')
+  @ApiOperation({ summary: "Read a project's remote backup storage config (no secret)" })
+  getProjectStorage(@CurrentUser('id') userId: string, @Param('projectId') projectId: string) {
+    return this.svc.getProjectStorage(userId, projectId);
+  }
+
+  @Put('projects/:projectId/storage')
+  @ApiOperation({ summary: "Set a project's remote backup storage (project ADMIN)" })
+  setProjectStorage(
+    @CurrentUser('id') userId: string,
+    @Param('projectId') projectId: string,
+    @Body() dto: SetProjectStorageDto,
+  ) {
+    return this.svc.setProjectStorage(userId, projectId, dto);
+  }
+
+  @Delete('projects/:projectId/storage')
+  @ApiOperation({ summary: "Remove a project's remote backup storage (project ADMIN)" })
+  deleteProjectStorage(@CurrentUser('id') userId: string, @Param('projectId') projectId: string) {
+    return this.svc.deleteProjectStorage(userId, projectId);
+  }
+
+  @Post('projects/:projectId/storage/test')
+  @ApiOperation({ summary: "Validate a project's stored S3 credentials by listing the bucket" })
+  testProjectStorage(@CurrentUser('id') userId: string, @Param('projectId') projectId: string) {
+    return this.svc.testProjectStorage(userId, projectId);
   }
 
   @Get(':id')

@@ -68,6 +68,11 @@ function makePrisma() {
     user: { findUnique: vi.fn() },
     server: { findMany: vi.fn(), findUnique: vi.fn() },
     project: { findUnique: vi.fn(), findMany: vi.fn().mockResolvedValue([]) },
+    projectBackupStorage: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      upsert: vi.fn(),
+      deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
     projectMember: { findMany: vi.fn() },
     database: { findMany: vi.fn(), findUnique: vi.fn() },
     application: { findMany: vi.fn() },
@@ -336,6 +341,108 @@ describe('exporters honour project scope', () => {
     expect(prisma.application.findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({ where: { project: { serverId: 's1' } } }),
     );
+  });
+});
+
+// ── per-project remote storage config ─────────────────────────────────
+describe('per-project S3 storage', () => {
+  it('s3Config uses the PROJECT bucket when it has a complete config', async () => {
+    const { service, prisma, encryption } = makeService();
+    prisma.projectBackupStorage.findUnique.mockResolvedValue({
+      projectId: 'p1', target: 'R2',
+      endpoint: 'https://r2.example.com', bucket: 'proj-bucket', region: 'auto',
+      accessKey: 'AK', secretKeyEnc: 'v1.enc(SK)',
+    });
+
+    const cfg = await (service as any).s3Config('p1');
+    expect(cfg.bucket).toBe('proj-bucket');
+    expect(cfg.endpoint).toBe('https://r2.example.com');
+    // The stored secretKeyEnc is run through encryption.decrypt (mock → 'pw').
+    expect(cfg.secretKey).toBe('pw');
+    expect(encryption.decrypt).toHaveBeenCalledWith('v1.enc(SK)');
+  });
+
+  it('s3Config falls back to GLOBAL when the project has no config', async () => {
+    const { service, prisma, systemConfig } = makeService();
+    prisma.projectBackupStorage.findUnique.mockResolvedValue(null);
+    systemConfig.get.mockImplementation((k: string) => ({
+      s3_endpoint: 'https://global', s3_bucket: 'global-bucket',
+      s3_access_key: 'GAK', s3_secret_key: 'GSK', s3_region: 'auto',
+    } as any)[k]);
+
+    const cfg = await (service as any).s3Config('p1');
+    expect(cfg.bucket).toBe('global-bucket');
+  });
+
+  it('setProjectStorage encrypts the secret (never stores plaintext) + upserts', async () => {
+    const { service, prisma, encryption } = makeService();
+    prisma.projectBackupStorage.findUnique.mockResolvedValue(null);
+    prisma.projectBackupStorage.upsert.mockResolvedValue({ target: 'R2', bucket: 'b' });
+
+    await service.setProjectStorage('u1', 'p1', {
+      target: 'R2', endpoint: 'https://r2', bucket: 'b', accessKey: 'AK', secretKey: 'plain-secret',
+    } as any);
+
+    expect(encryption.encrypt).toHaveBeenCalledWith('plain-secret');
+    const upsertArg = prisma.projectBackupStorage.upsert.mock.calls[0][0];
+    expect(upsertArg.create.secretKeyEnc).toBe('v1.enc(plain-secret)');
+    expect(JSON.stringify(upsertArg)).not.toContain('plain-secret"'); // no raw secret persisted
+  });
+
+  it('setProjectStorage keeps the existing secret when none is provided', async () => {
+    const { service, prisma, encryption } = makeService();
+    prisma.projectBackupStorage.findUnique.mockResolvedValue({ secretKeyEnc: 'v1.enc(old)' });
+    prisma.projectBackupStorage.upsert.mockResolvedValue({ target: 'R2', bucket: 'b' });
+
+    await service.setProjectStorage('u1', 'p1', {
+      target: 'R2', endpoint: 'https://r2', bucket: 'b', accessKey: 'AK',
+    } as any);
+
+    expect(encryption.encrypt).not.toHaveBeenCalled();
+    expect(prisma.projectBackupStorage.upsert.mock.calls[0][0].update.secretKeyEnc).toBe('v1.enc(old)');
+  });
+
+  it('getProjectStorage never returns the secret (only secretKeySet)', async () => {
+    const { service, prisma } = makeService();
+    prisma.projectBackupStorage.findUnique.mockResolvedValue({
+      target: 'R2', endpoint: 'https://r2', bucket: 'b', region: 'auto',
+      accessKey: 'AK', secretKeyEnc: 'v1.enc(SK)', updatedAt: new Date(),
+    });
+
+    const res: any = await service.getProjectStorage('u1', 'p1');
+    expect(res.configured).toBe(true);
+    expect(res.secretKeySet).toBe(true);
+    expect(JSON.stringify(res)).not.toContain('secretKeyEnc');
+    expect(JSON.stringify(res)).not.toContain('SK');
+  });
+
+  it('create() with a remote target + a project that has its OWN config succeeds', async () => {
+    const { service, prisma } = makeService();
+    grantAccess(prisma, ['s1']);
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1', serverId: 's1' });
+    prisma.projectBackupStorage.findUnique.mockResolvedValue({
+      target: 'R2', endpoint: 'https://r2', bucket: 'b', region: 'auto',
+      accessKey: 'AK', secretKeyEnc: 'v1.enc(SK)',
+    });
+    prisma.backup.create.mockResolvedValue({ id: 'b1', status: 'PENDING' });
+    vi.spyOn(service as any, 'runBackupJob').mockResolvedValue(undefined);
+
+    await expect(
+      service.create('u1', { name: 'b', serverId: 's1', projectId: 'p1', target: 'R2' } as any),
+    ).resolves.toBeTruthy();
+  });
+
+  it('create() remote target with NO project config and NO global config → 400', async () => {
+    const { service, prisma, systemConfig } = makeService();
+    grantAccess(prisma, ['s1']);
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1', serverId: 's1' });
+    prisma.projectBackupStorage.findUnique.mockResolvedValue(null);
+    systemConfig.get.mockReturnValue(undefined); // no global config either
+
+    await expect(
+      service.create('u1', { name: 'b', serverId: 's1', projectId: 'p1', target: 'S3' } as any),
+    ).rejects.toThrow(BadRequestException);
+    expect(prisma.backup.create).not.toHaveBeenCalled();
   });
 });
 

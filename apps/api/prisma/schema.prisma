@@ -255,10 +255,37 @@ model Project {
   members      ProjectMember[]
   sftpAccounts SftpAccount[]
   backups      Backup[]
+  backupStorage ProjectBackupStorage?
 
   @@index([serverId])
   @@index([userId])
   @@map("projects")
+}
+
+// ─── Per-project remote backup storage (S3-compatible) ───────────────
+//
+// Lets each project bring its OWN S3 / R2 / B2 bucket for remote backups
+// instead of sharing the platform-wide admin config. The secret key is
+// encrypted at rest (EncryptionService envelope). One row per project
+// (1-1). When absent, the backup engine falls back to the global
+// SystemSetting s3_* config (admin-managed) or LOCAL.
+model ProjectBackupStorage {
+  id           String   @id @default(cuid())
+  projectId    String   @unique
+  // S3 / R2 / B2 — which remote target these credentials are for.
+  target       BackupTarget
+  endpoint     String
+  bucket       String
+  region       String?
+  accessKey    String
+  // AES-256-GCM envelope (never stored or returned in plaintext).
+  secretKeyEnc String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@map("project_backup_storage")
 }
 
 model ProjectMember {

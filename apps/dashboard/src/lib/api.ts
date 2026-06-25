@@ -292,6 +292,10 @@ class ApiClient {
     return this.request<T>(endpoint, { method: 'PATCH', body });
   }
 
+  put<T>(endpoint: string, body?: unknown) {
+    return this.request<T>(endpoint, { method: 'PUT', body });
+  }
+
   delete<T>(endpoint: string, body?: unknown) {
     return this.request<T>(endpoint, { method: 'DELETE', body });
   }

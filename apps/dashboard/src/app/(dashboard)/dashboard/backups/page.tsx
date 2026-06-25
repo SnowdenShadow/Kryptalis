@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   CalendarClock,
   FolderKanban,
+  Settings2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -184,13 +185,18 @@ export default function BackupsPage() {
     queryFn: () => api.get('/backups'),
   });
 
-  // Remote targets (S3/R2/B2) are only selectable once the admin has filled
-  // in the S3-compatible storage settings — the API reports readiness here.
-  const { data: targetInfo } = useQuery<{ targets: string[]; s3Configured: boolean }>({
-    queryKey: ['backup-targets'],
-    queryFn: () => api.get('/backups/targets'),
+  // Remote targets (S3/R2/B2) are selectable once storage is configured — for
+  // the SELECTED project (its own bucket) OR globally (admin). Re-queried per
+  // project so picking a project reflects its own readiness.
+  const { data: targetInfo } = useQuery<{ targets: string[]; s3Configured: boolean; projectConfigured: boolean }>({
+    queryKey: ['backup-targets', projectId || 'server'],
+    queryFn: () => api.get(`/backups/targets${projectId ? `?projectId=${projectId}` : ''}`),
   });
   const s3Configured = targetInfo?.s3Configured ?? false;
+  const projectStorageConfigured = targetInfo?.projectConfigured ?? false;
+
+  // Per-project remote storage config dialog (open for the selected project).
+  const [showStorage, setShowStorage] = useState(false);
 
   const createMutation = useMutation({
     mutationFn: (data: {
@@ -522,10 +528,21 @@ export default function BackupsPage() {
                 );
               })}
             </Select>
-            {!s3Configured && (
-              <p className="text-xs text-muted-foreground">
-                {t('backups.s3Hint')}
+            {/* Per-project remote storage: a project member can wire their own
+                S3/R2/B2 bucket so remote targets become available for it. */}
+            {projectId ? (
+              <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                {projectStorageConfigured ? t('backups.projectStorageOn') : t('backups.projectStorageOff')}
+                <button
+                  type="button"
+                  onClick={() => setShowStorage(true)}
+                  className="text-primary hover:underline inline-flex items-center gap-1"
+                >
+                  <Settings2 size={12} /> {t('backups.configureStorage')}
+                </button>
               </p>
+            ) : (
+              !s3Configured && <p className="text-xs text-muted-foreground">{t('backups.s3Hint')}</p>
             )}
           </div>
 
@@ -638,6 +655,144 @@ export default function BackupsPage() {
           </Button>
         </DialogFooter>
       </Dialog>
+
+      {/* Per-project remote storage config */}
+      {showStorage && projectId && (
+        <ProjectStorageDialog
+          projectId={projectId}
+          projectName={projectName(projectId) || ''}
+          onClose={() => setShowStorage(false)}
+        />
+      )}
     </div>
+  );
+}
+
+// ─── Per-project remote storage (S3 / R2 / B2) config dialog ──────────
+//
+// Lets a project ADMIN wire the project's OWN bucket so its remote backups go
+// there instead of the shared admin config. The secret key is write-only — the
+// API never returns it; "leave empty to keep" applies on update.
+function ProjectStorageDialog({
+  projectId,
+  projectName,
+  onClose,
+}: {
+  projectId: string;
+  projectName: string;
+  onClose: () => void;
+}) {
+  const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const [target, setTarget] = useState('R2');
+  const [endpoint, setEndpoint] = useState('');
+  const [bucket, setBucket] = useState('');
+  const [region, setRegion] = useState('');
+  const [accessKey, setAccessKey] = useState('');
+  const [secretKey, setSecretKey] = useState('');
+  const [secretKeySet, setSecretKeySet] = useState(false);
+
+  const { data: cfg } = useQuery<any>({
+    queryKey: ['project-storage', projectId],
+    queryFn: () => api.get(`/backups/projects/${projectId}/storage`),
+  });
+  useEffect(() => {
+    if (cfg?.configured) {
+      setTarget(cfg.target || 'R2');
+      setEndpoint(cfg.endpoint || '');
+      setBucket(cfg.bucket || '');
+      setRegion(cfg.region || '');
+      setAccessKey(cfg.accessKey || '');
+      setSecretKeySet(!!cfg.secretKeySet);
+    }
+  }, [cfg]);
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['project-storage', projectId] });
+    queryClient.invalidateQueries({ queryKey: ['backup-targets'] });
+  };
+
+  const saveMutation = useMutation({
+    mutationFn: () =>
+      api.put(`/backups/projects/${projectId}/storage`, {
+        target, endpoint: endpoint.trim(), bucket: bucket.trim(),
+        region: region.trim() || undefined, accessKey: accessKey.trim(),
+        ...(secretKey.trim() ? { secretKey: secretKey.trim() } : {}),
+      }),
+    onSuccess: () => { invalidate(); toast.success(t('backups.storageSaved')); onClose(); },
+    onError: (err: Error) => toastError(err),
+  });
+  const deleteMutation = useMutation({
+    mutationFn: () => api.delete(`/backups/projects/${projectId}/storage`),
+    onSuccess: () => { invalidate(); toast.success(t('backups.storageRemoved')); onClose(); },
+    onError: (err: Error) => toastError(err),
+  });
+  const testMutation = useMutation({
+    mutationFn: () => api.post<{ ok: boolean; error?: string }>(`/backups/projects/${projectId}/storage/test`, {}),
+    onSuccess: (res) => {
+      if (res.ok) toast.success(t('backups.storageTestOk'));
+      else toast.error(t('backups.storageTestFail', { error: res.error || '' }));
+    },
+    onError: (err: Error) => toastError(err),
+  });
+
+  const canSave = !!endpoint.trim() && !!bucket.trim() && !!accessKey.trim() && (secretKeySet || !!secretKey.trim());
+
+  return (
+    <Dialog open onClose={onClose}>
+      <DialogHeader>
+        <DialogTitle>{t('backups.remoteStorage')} — {projectName}</DialogTitle>
+        <DialogDescription>{t('backups.remoteStorageHint')}</DialogDescription>
+      </DialogHeader>
+
+      <div className="space-y-3 py-2">
+        <div className="space-y-1.5">
+          <Label htmlFor="st-target">{t('backups.target')}</Label>
+          <Select id="st-target" value={target} onChange={(e) => setTarget(e.target.value)}>
+            <option value="S3">Amazon S3</option>
+            <option value="R2">Cloudflare R2</option>
+            <option value="B2">Backblaze B2</option>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="st-endpoint">{t('backups.s3Endpoint')}</Label>
+          <Input id="st-endpoint" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://<id>.r2.cloudflarestorage.com" />
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="st-bucket">{t('backups.s3Bucket')}</Label>
+            <Input id="st-bucket" value={bucket} onChange={(e) => setBucket(e.target.value)} placeholder="my-backups" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="st-region">{t('backups.s3Region')}</Label>
+            <Input id="st-region" value={region} onChange={(e) => setRegion(e.target.value)} placeholder="auto" />
+          </div>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="st-access">{t('backups.s3AccessKey')}</Label>
+          <Input id="st-access" value={accessKey} onChange={(e) => setAccessKey(e.target.value)} />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="st-secret">{t('backups.s3SecretKey')}</Label>
+          <Input id="st-secret" type="password" value={secretKey} onChange={(e) => setSecretKey(e.target.value)} placeholder={secretKeySet ? t('backups.s3SecretKept') : ''} />
+        </div>
+      </div>
+
+      <DialogFooter className="flex-wrap gap-2">
+        {cfg?.configured && (
+          <Button variant="ghost" className="text-destructive mr-auto" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}>
+            {t('common.delete')}
+          </Button>
+        )}
+        <Button variant="ghost" onClick={() => testMutation.mutate()} disabled={!cfg?.configured || testMutation.isPending}>
+          {testMutation.isPending ? <Loader2 size={14} className="mr-1.5 animate-spin" /> : null}
+          {t('backups.testConnection')}
+        </Button>
+        <Button onClick={() => saveMutation.mutate()} disabled={!canSave || saveMutation.isPending}>
+          {saveMutation.isPending && <Loader2 size={14} className="mr-1.5 animate-spin" />}
+          {t('common.save')}
+        </Button>
+      </DialogFooter>
+    </Dialog>
   );
 }
