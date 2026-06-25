@@ -44,6 +44,16 @@ import { cn } from '@/lib/utils';
 // name is resolved locally against the /servers/local query.
 type Backup = BackupResponse;
 
+// Minimal project shape from GET /projects. `userId` = owner; `members` is
+// filtered server-side to the current user, so members[0]?.role is the
+// caller's role on that project.
+type ProjectLite = {
+  id: string;
+  name: string;
+  userId?: string;
+  members?: { role: string }[];
+};
+
 const TARGETS = [
   { value: 'LOCAL', label: 'Local' },
   { value: 'S3', label: 'Amazon S3' },
@@ -167,11 +177,26 @@ export default function BackupsPage() {
   const isAdmin = !!user?.role && (user.role === 'ADMIN' || user.role === 'SUPERADMIN');
 
   // Projects (for the scope selector + resolving a backup's project name).
-  const { data: projects = [] } = useQuery<{ id: string; name: string }[]>({
+  // userId = owner; members[] is filtered server-side to the current user so
+  // members[0]?.role is THIS user's role on the project.
+  const { data: projects = [] } = useQuery<ProjectLite[]>({
     queryKey: ['projects'],
     queryFn: () => api.get('/projects'),
   });
   const projectName = (id?: string | null) => projects.find((p) => p.id === id)?.name;
+
+  // Effective project role: project owner OR explicit member role, with a
+  // platform-admin treated as owner everywhere (mirrors the API's RBAC).
+  const canManageStorage = (p?: ProjectLite | null): boolean => {
+    if (!p) return false;
+    if (isAdmin) return true;
+    if (user?.id && p.userId === user.id) return true;
+    const role = p.members?.[0]?.role;
+    return role === 'OWNER' || role === 'ADMIN';
+  };
+  // Projects whose remote storage THIS user is allowed to configure.
+  const manageableProjects = projects.filter(canManageStorage);
+  const selectedProject = projects.find((p) => p.id === projectId) || null;
 
   // Non-admins can't do whole-server backups → default the scope to a project.
   useEffect(() => {
@@ -195,8 +220,10 @@ export default function BackupsPage() {
   const s3Configured = targetInfo?.s3Configured ?? false;
   const projectStorageConfigured = targetInfo?.projectConfigured ?? false;
 
-  // Per-project remote storage config dialog (open for the selected project).
-  const [showStorage, setShowStorage] = useState(false);
+  // Per-project remote storage config dialog. Holds the project id being
+  // configured (null = closed). Opened either from the page header (with a
+  // built-in project picker) or from the create dialog (pre-scoped).
+  const [storageProjectId, setStorageProjectId] = useState<string | null>(null);
 
   const createMutation = useMutation({
     mutationFn: (data: {
@@ -299,10 +326,23 @@ export default function BackupsPage() {
             {t('backups.subtitle')}
           </p>
         </div>
-        <Button onClick={() => setShowCreateDialog(true)}>
-          <Plus size={16} />
-          {t('backups.create')}
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Discoverable entry point: any project OWNER/ADMIN can wire their
+              own S3/R2/B2 bucket without touching the create dialog. */}
+          {manageableProjects.length > 0 && (
+            <Button
+              variant="outline"
+              onClick={() => setStorageProjectId(manageableProjects[0].id)}
+            >
+              <Settings2 size={16} />
+              {t('backups.remoteStorage')}
+            </Button>
+          )}
+          <Button onClick={() => setShowCreateDialog(true)}>
+            <Plus size={16} />
+            {t('backups.create')}
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -528,18 +568,23 @@ export default function BackupsPage() {
                 );
               })}
             </Select>
-            {/* Per-project remote storage: a project member can wire their own
-                S3/R2/B2 bucket so remote targets become available for it. */}
+            {/* Per-project remote storage: an OWNER/ADMIN of the project can
+                wire its own S3/R2/B2 bucket so remote targets become available.
+                Only OWNER/ADMIN see the configure action (others would 403). */}
             {projectId ? (
               <p className="text-xs text-muted-foreground flex items-center gap-1.5">
                 {projectStorageConfigured ? t('backups.projectStorageOn') : t('backups.projectStorageOff')}
-                <button
-                  type="button"
-                  onClick={() => setShowStorage(true)}
-                  className="text-primary hover:underline inline-flex items-center gap-1"
-                >
-                  <Settings2 size={12} /> {t('backups.configureStorage')}
-                </button>
+                {canManageStorage(selectedProject) ? (
+                  <button
+                    type="button"
+                    onClick={() => setStorageProjectId(projectId)}
+                    className="text-primary hover:underline inline-flex items-center gap-1"
+                  >
+                    <Settings2 size={12} /> {t('backups.configureStorage')}
+                  </button>
+                ) : (
+                  !projectStorageConfigured && <span>{t('backups.storageAdminOnly')}</span>
+                )}
               </p>
             ) : (
               !s3Configured && <p className="text-xs text-muted-foreground">{t('backups.s3Hint')}</p>
@@ -656,12 +701,15 @@ export default function BackupsPage() {
         </DialogFooter>
       </Dialog>
 
-      {/* Per-project remote storage config */}
-      {showStorage && projectId && (
+      {/* Per-project remote storage config. The dialog carries its own project
+          picker (limited to projects the user can manage) so it's a complete,
+          self-contained flow whether opened from the header or the create form. */}
+      {storageProjectId && (
         <ProjectStorageDialog
-          projectId={projectId}
-          projectName={projectName(projectId) || ''}
-          onClose={() => setShowStorage(false)}
+          projectId={storageProjectId}
+          projects={manageableProjects}
+          onChangeProject={setStorageProjectId}
+          onClose={() => setStorageProjectId(null)}
         />
       )}
     </div>
@@ -670,20 +718,24 @@ export default function BackupsPage() {
 
 // ─── Per-project remote storage (S3 / R2 / B2) config dialog ──────────
 //
-// Lets a project ADMIN wire the project's OWN bucket so its remote backups go
-// there instead of the shared admin config. The secret key is write-only — the
-// API never returns it; "leave empty to keep" applies on update.
+// Lets a project OWNER/ADMIN wire the project's OWN bucket so its remote
+// backups go there instead of the shared admin config. The secret key is
+// write-only — the API never returns it; "leave empty to keep" applies on
+// update. Carries its own project picker so it's a self-contained flow.
 function ProjectStorageDialog({
   projectId,
-  projectName,
+  projects,
+  onChangeProject,
   onClose,
 }: {
   projectId: string;
-  projectName: string;
+  projects: ProjectLite[];
+  onChangeProject: (id: string) => void;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
+  const projectName = projects.find((p) => p.id === projectId)?.name || '';
   const [target, setTarget] = useState('R2');
   const [endpoint, setEndpoint] = useState('');
   const [bucket, setBucket] = useState('');
@@ -696,15 +748,17 @@ function ProjectStorageDialog({
     queryKey: ['project-storage', projectId],
     queryFn: () => api.get(`/backups/projects/${projectId}/storage`),
   });
+  // Sync the form to the loaded config — and RESET when switching to a project
+  // that has none (so one project's keys never bleed into another's form).
   useEffect(() => {
-    if (cfg?.configured) {
-      setTarget(cfg.target || 'R2');
-      setEndpoint(cfg.endpoint || '');
-      setBucket(cfg.bucket || '');
-      setRegion(cfg.region || '');
-      setAccessKey(cfg.accessKey || '');
-      setSecretKeySet(!!cfg.secretKeySet);
-    }
+    if (!cfg) return;
+    setTarget(cfg.configured ? cfg.target || 'R2' : 'R2');
+    setEndpoint(cfg.configured ? cfg.endpoint || '' : '');
+    setBucket(cfg.configured ? cfg.bucket || '' : '');
+    setRegion(cfg.configured ? cfg.region || '' : '');
+    setAccessKey(cfg.configured ? cfg.accessKey || '' : '');
+    setSecretKeySet(!!cfg.configured && !!cfg.secretKeySet);
+    setSecretKey('');
   }, [cfg]);
 
   const invalidate = () => {
@@ -741,11 +795,25 @@ function ProjectStorageDialog({
   return (
     <Dialog open onClose={onClose}>
       <DialogHeader>
-        <DialogTitle>{t('backups.remoteStorage')} — {projectName}</DialogTitle>
+        <DialogTitle>{t('backups.remoteStorage')}</DialogTitle>
         <DialogDescription>{t('backups.remoteStorageHint')}</DialogDescription>
       </DialogHeader>
 
       <div className="space-y-3 py-2">
+        {/* Project picker — switch which project's storage you're editing.
+            Single project = a static label (no need to choose). */}
+        <div className="space-y-1.5">
+          <Label htmlFor="st-project">{t('backups.aProject')}</Label>
+          {projects.length > 1 ? (
+            <Select id="st-project" value={projectId} onChange={(e) => onChangeProject(e.target.value)}>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </Select>
+          ) : (
+            <p className="text-sm font-medium">{projectName}</p>
+          )}
+        </div>
         <div className="space-y-1.5">
           <Label htmlFor="st-target">{t('backups.target')}</Label>
           <Select id="st-target" value={target} onChange={(e) => setTarget(e.target.value)}>
