@@ -235,7 +235,11 @@ export class MailServerService implements OnApplicationBootstrap {
    * into the domain's project, attached to the domain, with the mail host/ports
    * baked into its env.
    */
-  async deployWebmail(userId: string, domainId: string): Promise<{ applicationId: string; alreadyInstalled: boolean }> {
+  async deployWebmail(
+    userId: string,
+    domainId: string,
+    opts: { access?: string; newDomain?: string; targetDomainId?: string; hostPort?: number } = {},
+  ): Promise<{ applicationId: string; alreadyInstalled: boolean }> {
     const domain = await this.assertDomainAccess(userId, domainId, 'ADMIN');
     const projectId = (domain as any).projectId || (domain as any).application?.projectId;
     if (!projectId) {
@@ -246,7 +250,8 @@ export class MailServerService implements OnApplicationBootstrap {
       throw new BadRequestException('Deploy the mail server first, then install the webmail.');
     }
 
-    // Idempotent: reuse an existing webmail linked to this domain.
+    // Idempotent: reuse an existing webmail already linked to THIS domain
+    // (covers the legacy 1-click that attached it to the mail domain).
     const existing = await this.prisma.application.findFirst({
       where: {
         name: { in: ['Roundcube', 'SnappyMail', 'Rainloop'] },
@@ -266,10 +271,23 @@ export class MailServerService implements OnApplicationBootstrap {
       ROUNDCUBEMAIL_SMTP_SERVER: `tls://${mailHost}`,
       ROUNDCUBEMAIL_SMTP_PORT: String(mailServer.submissionPort),
     };
-    const result = await this.marketplace.install(
-      { appSlug: 'roundcube', projectId, domainId, envVars },
-      userId,
-    );
+
+    // Map the chosen access mode to a marketplace install. Default = a dedicated
+    // subdomain so we never silently take over the mail apex.
+    const access = opts.access || 'newDomain';
+    const installData: any = { appSlug: 'roundcube', projectId, envVars };
+    if (access === 'port') {
+      if (!opts.hostPort) throw new BadRequestException('A host port is required for direct IP:port access.');
+      installData.hostPort = opts.hostPort;
+    } else if (access === 'existingDomain') {
+      if (!opts.targetDomainId) throw new BadRequestException('Choose a domain to serve the webmail on.');
+      installData.domainId = opts.targetDomainId;
+    } else {
+      // newDomain (default) — dedicated subdomain, defaulting to webmail.<apex>.
+      installData.newDomain = (opts.newDomain || `webmail.${(domain as any).domain}`).trim().toLowerCase();
+    }
+
+    const result = await this.marketplace.install(installData, userId);
     const applicationId = (result as any).id || (result as any).applicationId || (result as any).application?.id;
     return { applicationId, alreadyInstalled: false };
   }

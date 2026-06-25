@@ -861,11 +861,11 @@ describe('deployWebmail (1-click Roundcube)', () => {
     return ctx;
   }
 
-  it('installs Roundcube preconfigured for THIS mail server', async () => {
+  it('default (newDomain): installs Roundcube on a dedicated subdomain webmail.<apex>, preconfigured', async () => {
     const { service, prisma, marketplace } = setup();
     prisma.application.findFirst.mockResolvedValue(null); // none yet
 
-    const res = await service.deployWebmail('u1', 'dom1');
+    const res = await service.deployWebmail('u1', 'dom1', { access: 'newDomain' });
     expect(res.alreadyInstalled).toBe(false);
     expect(res.applicationId).toBe('webmail-app-1');
 
@@ -873,7 +873,9 @@ describe('deployWebmail (1-click Roundcube)', () => {
     expect(userId).toBe('u1');
     expect(data.appSlug).toBe('roundcube');
     expect(data.projectId).toBe('p1');
-    expect(data.domainId).toBe('dom1');
+    // Dedicated subdomain — NOT the mail apex (no more silent takeover).
+    expect(data.newDomain).toBe('webmail.example.com');
+    expect(data.domainId).toBeUndefined();
     // Env points at mail.<domain> with the server's IMAPS/Submission ports.
     expect(data.envVars.ROUNDCUBEMAIL_DEFAULT_HOST).toBe('ssl://mail.example.com');
     expect(data.envVars.ROUNDCUBEMAIL_DEFAULT_PORT).toBe('993');
@@ -881,11 +883,47 @@ describe('deployWebmail (1-click Roundcube)', () => {
     expect(data.envVars.ROUNDCUBEMAIL_SMTP_PORT).toBe('587');
   });
 
+  it('newDomain honours a custom subdomain', async () => {
+    const { service, prisma, marketplace } = setup();
+    prisma.application.findFirst.mockResolvedValue(null);
+    await service.deployWebmail('u1', 'dom1', { access: 'newDomain', newDomain: 'Mail.Example.COM' });
+    expect(marketplace.install.mock.calls[0][0].newDomain).toBe('mail.example.com');
+  });
+
+  it('port access: passes hostPort, no domain', async () => {
+    const { service, prisma, marketplace } = setup();
+    prisma.application.findFirst.mockResolvedValue(null);
+    await service.deployWebmail('u1', 'dom1', { access: 'port', hostPort: 8085 });
+    const data = marketplace.install.mock.calls[0][0];
+    expect(data.hostPort).toBe(8085);
+    expect(data.domainId).toBeUndefined();
+    expect(data.newDomain).toBeUndefined();
+  });
+
+  it('port access without a port → 400', async () => {
+    const { service, prisma } = setup();
+    prisma.application.findFirst.mockResolvedValue(null);
+    await expect(service.deployWebmail('u1', 'dom1', { access: 'port' })).rejects.toThrow(/host port is required/);
+  });
+
+  it('existingDomain access: attaches to the chosen domain', async () => {
+    const { service, prisma, marketplace } = setup();
+    prisma.application.findFirst.mockResolvedValue(null);
+    await service.deployWebmail('u1', 'dom1', { access: 'existingDomain', targetDomainId: 'dom-other' });
+    expect(marketplace.install.mock.calls[0][0].domainId).toBe('dom-other');
+  });
+
+  it('existingDomain without a target → 400', async () => {
+    const { service, prisma } = setup();
+    prisma.application.findFirst.mockResolvedValue(null);
+    await expect(service.deployWebmail('u1', 'dom1', { access: 'existingDomain' })).rejects.toThrow(/Choose a domain/);
+  });
+
   it('is idempotent — reuses an existing linked webmail (no second install)', async () => {
     const { service, prisma, marketplace } = setup();
     prisma.application.findFirst.mockResolvedValue({ id: 'existing-wm' });
 
-    const res = await service.deployWebmail('u1', 'dom1');
+    const res = await service.deployWebmail('u1', 'dom1', { access: 'port', hostPort: 8085 });
     expect(res).toEqual({ applicationId: 'existing-wm', alreadyInstalled: true });
     expect(marketplace.install).not.toHaveBeenCalled();
   });
@@ -893,7 +931,7 @@ describe('deployWebmail (1-click Roundcube)', () => {
   it('refuses when the mail server is not deployed yet', async () => {
     const { service, prisma } = setup();
     prisma.mailServer.findUnique.mockResolvedValue(null);
-    await expect(service.deployWebmail('u1', 'dom1')).rejects.toThrow(/mail server first/);
+    await expect(service.deployWebmail('u1', 'dom1', { access: 'newDomain' })).rejects.toThrow(/mail server first/);
   });
 });
 

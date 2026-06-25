@@ -8,6 +8,7 @@ import { MailServerService } from './mail-server.service';
 import { CreateMailboxDto } from './dto/create-mailbox.dto';
 import { UpdateMailboxDto } from './dto/update-mailbox.dto';
 import { UpdateAntispamDto } from './dto/update-antispam.dto';
+import { DeployWebmailDto } from './dto/deploy-webmail.dto';
 import { CreateAliasDto } from './dto/create-alias.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
@@ -125,9 +126,13 @@ export class EmailController {
   }
 
   @Post('server/:domainId/webmail')
-  @ApiOperation({ summary: 'Install (1-click) a Roundcube webmail preconfigured for this domain' })
-  deployWebmail(@CurrentUser('id') userId: string, @Param('domainId') domainId: string) {
-    return this.mailServer.deployWebmail(userId, domainId);
+  @ApiOperation({ summary: 'Install a Roundcube webmail (choose subdomain / existing domain / IP:port)' })
+  deployWebmail(
+    @CurrentUser('id') userId: string,
+    @Param('domainId') domainId: string,
+    @Body() dto: DeployWebmailDto,
+  ) {
+    return this.mailServer.deployWebmail(userId, domainId, dto);
   }
 
   @Get('server/:domainId/antispam')

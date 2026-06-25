@@ -108,6 +108,12 @@ export default function EmailDomainPage() {
   // Antispam config form.
   const [spamAdvanced, setSpamAdvanced] = useState(false);
   const [spamForm, setSpamForm] = useState<any | null>(null);
+  // Webmail install dialog (access choice).
+  const [showWebmailDialog, setShowWebmailDialog] = useState(false);
+  const [wmAccess, setWmAccess] = useState<'newDomain' | 'existingDomain' | 'port'>('newDomain');
+  const [wmNewDomain, setWmNewDomain] = useState('');
+  const [wmTargetDomainId, setWmTargetDomainId] = useState('');
+  const [wmHostPort, setWmHostPort] = useState('8085');
 
   // ── queries ──────────────────────────────────────────────────────
   const { data: domain } = useQuery<DomainDetail>({
@@ -195,6 +201,17 @@ export default function EmailDomainPage() {
   });
   const webmail = overviewRows.find((r) => r.id === domainId)?.webmail || null;
 
+  // Domains of the same project (for the "existing domain" webmail option).
+  const { data: projectDomains = [] } = useQuery<{ id: string; domain: string }[]>({
+    queryKey: ['project-domains', domain?.project?.id],
+    queryFn: () => api.get(`/domains?projectId=${domain!.project!.id}`),
+    enabled: !!domain?.project?.id && showWebmailDialog,
+  });
+  // Default the dedicated subdomain to webmail.<apex> once the domain loads.
+  useEffect(() => {
+    if (domain && !wmNewDomain) setWmNewDomain(`webmail.${domain.domain}`);
+  }, [domain, wmNewDomain]);
+
   // ── mutations ────────────────────────────────────────────────────
   const deployMail = useMutation({
     mutationFn: () => api.post(`/email/server/${domainId}/deploy`),
@@ -262,10 +279,11 @@ export default function EmailDomainPage() {
     onError: (e: Error) => toast.error(e.message),
   });
   const deployWebmailMut = useMutation({
-    mutationFn: () => api.post<{ applicationId: string; alreadyInstalled: boolean }>(`/email/server/${domainId}/webmail`, {}),
+    mutationFn: (body: any) => api.post<{ applicationId: string; alreadyInstalled: boolean }>(`/email/server/${domainId}/webmail`, body),
     onSuccess: (r) => {
       toast.success(r.alreadyInstalled ? t('emails.webmailAlready') : t('emails.webmailInstalling'));
       qc.invalidateQueries({ queryKey: ['emails-overview'] });
+      setShowWebmailDialog(false);
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -948,8 +966,8 @@ export default function EmailDomainPage() {
                 <Loader2 size={13} className="animate-spin" /> {t('emails.webmailDeploying')}
               </p>
             ) : (
-              <Button onClick={() => deployWebmailMut.mutate()} disabled={deployWebmailMut.isPending}>
-                {deployWebmailMut.isPending ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+              <Button onClick={() => setShowWebmailDialog(true)}>
+                <Plus size={14} />
                 {t('emails.webmailInstall')}
               </Button>
             )}
@@ -1405,6 +1423,83 @@ export default function EmailDomainPage() {
           <Button onClick={saveEdit} disabled={updateMb.isPending}>
             {updateMb.isPending && <Loader2 size={14} className="mr-1.5 animate-spin" />}
             {t('common.save')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ─── Webmail install: choose access ─── */}
+      <Dialog open={showWebmailDialog} onClose={() => setShowWebmailDialog(false)}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Inbox size={18} /> {t('emails.webmailInstall')}</DialogTitle>
+          <DialogDescription>{t('emails.webmailAccessDesc')}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 py-2">
+          {/* Access mode radios */}
+          {([
+            ['newDomain', t('emails.webmailSubdomain'), t('emails.webmailSubdomainDesc')],
+            ['existingDomain', t('emails.webmailExisting'), t('emails.webmailExistingDesc')],
+            ['port', t('emails.webmailPort'), t('emails.webmailPortDesc')],
+          ] as const).map(([key, label, desc]) => (
+            <label key={key} className={cn(
+              'flex items-start gap-2 rounded-lg border p-3 cursor-pointer transition-colors',
+              wmAccess === key ? 'border-primary bg-primary/5' : 'border-border hover:bg-accent/40',
+            )}>
+              <input type="radio" name="wm-access" className="mt-1" checked={wmAccess === key}
+                onChange={() => setWmAccess(key)} />
+              <span>
+                <span className="font-medium text-sm">{label}</span>
+                <span className="block text-[11px] text-muted-foreground mt-0.5">{desc}</span>
+              </span>
+            </label>
+          ))}
+
+          {/* Mode-specific input */}
+          {wmAccess === 'newDomain' && (
+            <div className="space-y-1.5">
+              <Label htmlFor="wm-sub">{t('emails.webmailSubdomain')}</Label>
+              <Input id="wm-sub" value={wmNewDomain} onChange={(e) => setWmNewDomain(e.target.value)} className="font-mono" />
+              <p className="text-[11px] text-orange-400">{t('emails.webmailDnsHint')}</p>
+            </div>
+          )}
+          {wmAccess === 'existingDomain' && (
+            <div className="space-y-1.5">
+              <Label htmlFor="wm-dom">{t('emails.webmailExisting')}</Label>
+              <Select id="wm-dom" value={wmTargetDomainId} onChange={(e) => setWmTargetDomainId(e.target.value)}>
+                <option value="">{t('emails.webmailPickDomain')}</option>
+                {projectDomains.filter((d) => d.id !== domainId).map((d) => (
+                  <option key={d.id} value={d.id}>{d.domain}</option>
+                ))}
+              </Select>
+            </div>
+          )}
+          {wmAccess === 'port' && (
+            <div className="space-y-1.5">
+              <Label htmlFor="wm-port">{t('emails.webmailPort')}</Label>
+              <Input id="wm-port" type="number" min={1024} max={65535} value={wmHostPort}
+                onChange={(e) => setWmHostPort(e.target.value)} className="font-mono" />
+              <p className="text-[11px] text-muted-foreground">{t('emails.webmailPortHint')}</p>
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setShowWebmailDialog(false)}>{t('common.cancel')}</Button>
+          <Button
+            disabled={
+              deployWebmailMut.isPending ||
+              (wmAccess === 'newDomain' && !wmNewDomain.trim()) ||
+              (wmAccess === 'existingDomain' && !wmTargetDomainId) ||
+              (wmAccess === 'port' && !wmHostPort.trim())
+            }
+            onClick={() => {
+              const body: any = { access: wmAccess };
+              if (wmAccess === 'newDomain') body.newDomain = wmNewDomain.trim();
+              else if (wmAccess === 'existingDomain') body.targetDomainId = wmTargetDomainId;
+              else body.hostPort = parseInt(wmHostPort, 10);
+              deployWebmailMut.mutate(body);
+            }}
+          >
+            {deployWebmailMut.isPending && <Loader2 size={14} className="mr-1.5 animate-spin" />}
+            {t('emails.webmailInstall')}
           </Button>
         </DialogFooter>
       </Dialog>
