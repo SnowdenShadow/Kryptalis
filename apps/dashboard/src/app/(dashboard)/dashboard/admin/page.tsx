@@ -469,49 +469,53 @@ export default function AdminPage() {
                     <p className="font-medium">{s.label}</p>
                     <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{s.desc}</p>
                   </div>
-                  {s.type === 'bool' && (
-                    <Button
-                      variant={val ? 'default' : 'outline'}
-                      size="sm"
-                      className="shrink-0 w-32"
-                      onClick={() => updateSettingMutation.mutate({ key: s.key, value: !val })}
-                    >
-                      {val ? t('common.enabled') : t('common.disabled')}
-                    </Button>
-                  )}
-                  {s.type === 'text' && (
-                    <Input
-                      defaultValue={(val as string) ?? ''}
-                      className="w-48 sm:w-60 shrink-0"
-                      onBlur={(e) => {
-                        if (e.target.value !== val) {
-                          updateSettingMutation.mutate({ key: s.key, value: e.target.value });
-                        }
-                      }}
-                    />
-                  )}
-                  {s.type === 'role' && (
-                    <Select
-                      value={(val as string) ?? 'USER'}
-                      onChange={(e) => updateSettingMutation.mutate({ key: s.key, value: e.target.value })}
-                      className="w-32 shrink-0"
-                    >
-                      <option value="USER">USER</option>
-                      <option value="VIEWER">VIEWER</option>
-                    </Select>
-                  )}
-                  {s.type === 'deployMode' && (
-                    <Select
-                      value={(val as string) ?? 'LOCAL'}
-                      onChange={(e) => {
-                        if (e.target.value !== val) setPendingDeployMode(e.target.value);
-                      }}
-                      className="w-32 shrink-0"
-                    >
-                      <option value="LOCAL">LOCAL</option>
-                      <option value="MULTI">MULTI</option>
-                    </Select>
-                  )}
+                  {/* Fixed-width control column. The Select component wraps its
+                      <select> in a `w-full` div that ignores className, so its
+                      width MUST be constrained by this parent — not by a class
+                      on the Select itself. Keeps every row's control aligned. */}
+                  <div className="w-36 shrink-0 flex justify-end">
+                    {s.type === 'bool' && (
+                      <Button
+                        variant={val ? 'default' : 'outline'}
+                        size="sm"
+                        className="w-full"
+                        onClick={() => updateSettingMutation.mutate({ key: s.key, value: !val })}
+                      >
+                        {val ? t('common.enabled') : t('common.disabled')}
+                      </Button>
+                    )}
+                    {s.type === 'text' && (
+                      <Input
+                        defaultValue={(val as string) ?? ''}
+                        className="w-full"
+                        onBlur={(e) => {
+                          if (e.target.value !== val) {
+                            updateSettingMutation.mutate({ key: s.key, value: e.target.value });
+                          }
+                        }}
+                      />
+                    )}
+                    {s.type === 'role' && (
+                      <Select
+                        value={(val as string) ?? 'USER'}
+                        onChange={(e) => updateSettingMutation.mutate({ key: s.key, value: e.target.value })}
+                      >
+                        <option value="USER">USER</option>
+                        <option value="VIEWER">VIEWER</option>
+                      </Select>
+                    )}
+                    {s.type === 'deployMode' && (
+                      <Select
+                        value={(val as string) ?? 'LOCAL'}
+                        onChange={(e) => {
+                          if (e.target.value !== val) setPendingDeployMode(e.target.value);
+                        }}
+                      >
+                        <option value="LOCAL">LOCAL</option>
+                        <option value="MULTI">MULTI</option>
+                      </Select>
+                    )}
+                  </div>
                 </CardContent>
               </Card>
             );
