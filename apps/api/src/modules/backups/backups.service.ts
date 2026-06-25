@@ -498,17 +498,14 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     return this.globalS3Config();
   }
 
-  /** True when a usable S3 config exists for this scope (project own OR global). */
-  private async isS3Configured(projectId?: string | null): Promise<boolean> {
-    return missingS3ConfigKeys(await this.s3Config(projectId)).length === 0;
-  }
-
   /**
    * Build a short-lived S3 client for the given scope. Built per operation (not
    * cached) so config edits apply immediately; callers must destroy() it when
    * done. Throws a clear 400 when no config (project or global) is usable.
    */
-  private async s3ClientOrThrow(projectId?: string | null): Promise<{ client: S3Client; bucket: string }> {
+  private async s3ClientOrThrow(
+    projectId?: string | null,
+  ): Promise<{ client: S3Client; bucket: string; config: S3BackupConfig }> {
     const cfg = await this.s3Config(projectId);
     const missing = missingS3ConfigKeys(cfg);
     if (missing.length > 0) {
@@ -518,6 +515,11 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
           : `S3-compatible storage is not configured — missing setting(s): ${missing.join(', ')}. Set them in Admin → System Config (Backups / S3 storage).`,
       );
     }
+    return { ...this.s3ClientFromConfig(cfg), config: cfg };
+  }
+
+  /** Build an S3 client from an EXPLICIT config (e.g. a backup's pinned one). */
+  private s3ClientFromConfig(cfg: S3BackupConfig): { client: S3Client; bucket: string } {
     const client = new S3Client({
       endpoint: cfg.endpoint,
       region: cfg.region?.trim() || 'auto',
@@ -534,9 +536,51 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     return { client, bucket: cfg.bucket as string };
   }
 
-  /** Upload the finished dump. Returns the object key that was written. */
-  private async uploadBackupToS3(backupId: string, localPath: string, projectId?: string | null): Promise<string> {
-    const { client, bucket } = await this.s3ClientOrThrow(projectId);
+  /**
+   * Resolve the storage client for an EXISTING backup. Prefers the coordinate
+   * pinned on the row at finalize time (storageConfigEnc) — so later changes to
+   * the project's storage config never re-point this backup at the wrong
+   * bucket. Falls back to dynamic project/global resolution for legacy rows
+   * (created before pinning) and any row missing a pinned config.
+   */
+  private async s3ClientForBackup(backup: {
+    projectId?: string | null;
+    storageConfigEnc?: string | null;
+  }): Promise<{ client: S3Client; bucket: string }> {
+    if (backup.storageConfigEnc) {
+      const cfg = this.decodeStorageConfig(backup.storageConfigEnc);
+      if (cfg && missingS3ConfigKeys(cfg).length === 0) {
+        return this.s3ClientFromConfig(cfg);
+      }
+    }
+    return this.s3ClientOrThrow(backup.projectId);
+  }
+
+  /** Encrypt a resolved S3 config to pin onto a backup row. */
+  private encodeStorageConfig(cfg: S3BackupConfig): string {
+    return this.encryption.encrypt(JSON.stringify(cfg));
+  }
+
+  /** Decrypt a pinned storage config; null if absent/corrupt (→ caller falls back). */
+  private decodeStorageConfig(enc?: string | null): S3BackupConfig | null {
+    if (!enc) return null;
+    try {
+      return JSON.parse(this.encryption.decrypt(enc)) as S3BackupConfig;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Upload the finished dump. Returns the object key AND the exact config it was
+   * written to, so the caller can PIN that coordinate onto the backup row.
+   */
+  private async uploadBackupToS3(
+    backupId: string,
+    localPath: string,
+    projectId?: string | null,
+  ): Promise<{ key: string; config: S3BackupConfig }> {
+    const { client, bucket, config } = await this.s3ClientOrThrow(projectId);
     const key = buildS3Key(backupId, path.basename(localPath));
     try {
       const stat = await fs.promises.stat(localPath);
@@ -548,7 +592,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
           ContentLength: stat.size,
         }),
       );
-      return key;
+      return { key, config };
     } finally {
       client.destroy();
     }
@@ -576,8 +620,13 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Download a remote dump to a local temp file and return its path. */
-  private async downloadBackupFromS3(backupId: string, projectId?: string | null): Promise<string> {
-    const { client, bucket } = await this.s3ClientOrThrow(projectId);
+  private async downloadBackupFromS3(backup: {
+    id: string;
+    projectId?: string | null;
+    storageConfigEnc?: string | null;
+  }): Promise<string> {
+    const backupId = backup.id;
+    const { client, bucket } = await this.s3ClientForBackup(backup);
     const tmpPath = path.join(
       os.tmpdir(),
       `dockcontrol-restore-${backupId}-${crypto.randomBytes(6).toString('hex')}.dump`,
@@ -603,9 +652,14 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /** Best-effort removal of every remote object belonging to a backup row. */
-  private async deleteRemoteObjects(backupId: string, projectId?: string | null): Promise<void> {
+  private async deleteRemoteObjects(backup: {
+    id: string;
+    projectId?: string | null;
+    storageConfigEnc?: string | null;
+  }): Promise<void> {
+    const backupId = backup.id;
     try {
-      const { client, bucket } = await this.s3ClientOrThrow(projectId);
+      const { client, bucket } = await this.s3ClientForBackup(backup);
       try {
         const res = await client.send(
           new ListObjectsV2Command({ Bucket: bucket, Prefix: backupS3Prefix(backupId) }),
@@ -957,10 +1011,14 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     const stat = await fs.promises.stat(archivePath);
 
     const remote = isRemoteTarget(backup.target);
+    // The EXACT storage coordinate the dump was uploaded to, pinned onto the
+    // row so restore/delete never re-resolve to a later-changed project config.
+    let storageConfigEnc: string | null = null;
     if (remote) {
       // Upload to the bucket (the project's own bucket when configured, else
       // the global admin one). The local copy is NOT dropped yet — see below.
-      await this.uploadBackupToS3(backupId, archivePath, backup.projectId);
+      const { config } = await this.uploadBackupToS3(backupId, archivePath, backup.projectId);
+      storageConfigEnc = this.encodeStorageConfig(config);
     }
 
     // Persist the COMPLETED row (sha256 + filename + object key) BEFORE
@@ -978,14 +1036,16 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
           size: BigInt(stat.size),
           encryptedAt: encrypted,
           filename,
+          storageConfigEnc,
           status: 'COMPLETED',
           lastRunAt: new Date(),
         },
       });
     } catch (err) {
       if (remote) {
-        // No row will ever reference the uploaded object — remove it.
-        await this.deleteRemoteObjects(backupId, backup.projectId);
+        // No row will ever reference the uploaded object — remove it, using the
+        // freshly-resolved config we just uploaded with (not a re-resolution).
+        await this.deleteRemoteObjects({ id: backupId, projectId: backup.projectId, storageConfigEnc });
       }
       throw err;
     }
@@ -1322,18 +1382,34 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
    * Available targets + whether the S3-compatible config is complete.
    * The dashboard uses this to grey out S3/R2/B2 in the create dialog.
    */
-  async getTargets(projectId?: string) {
+  async getTargets(userId: string, projectId?: string) {
     // s3Configured reflects what's usable for THIS scope: the project's own
     // bucket if set, else the global admin config. Lets the UI enable remote
     // targets per selected project.
+    //
+    // Access: when a projectId is given the caller must be a member (DEVELOPER+)
+    // of it — otherwise any authenticated user could probe whether an arbitrary
+    // project has remote storage configured. The global (no-project) branch
+    // exposes only the platform-wide admin config flag, which is not sensitive.
+    let projectOwn: S3BackupConfig | null = null;
+    if (projectId) {
+      await assertProjectAccess(this.prisma, userId, projectId, 'DEVELOPER');
+      // Resolve the project's own config ONCE. Degrade gracefully if its secret
+      // can't be decrypted (rotated key / corruption) — report "not configured"
+      // rather than 500-ing the whole targets endpoint.
+      try {
+        projectOwn = await this.projectS3Config(projectId);
+      } catch {
+        projectOwn = null;
+      }
+    }
+    const projectConfigured = !!projectOwn && missingS3ConfigKeys(projectOwn).length === 0;
+    // Usable = the project's own complete config OR the global admin fallback.
+    const s3Configured = projectConfigured || missingS3ConfigKeys(this.globalS3Config()).length === 0;
     return {
       targets: ['LOCAL', ...REMOTE_TARGETS],
-      s3Configured: await this.isS3Configured(projectId),
-      // True when the project has its OWN config (vs inheriting the global one).
-      projectConfigured: projectId
-        ? !!(await this.projectS3Config(projectId)) &&
-          missingS3ConfigKeys((await this.projectS3Config(projectId))!).length === 0
-        : false,
+      s3Configured,
+      projectConfigured,
     };
   }
 
@@ -1527,7 +1603,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     let extractDir: string | undefined;
     try {
       if (isRemoteTarget(backup.target)) {
-        tmpDownload = await this.downloadBackupFromS3(backup.id, backup.projectId);
+        tmpDownload = await this.downloadBackupFromS3(backup);
         dumpPath = tmpDownload;
       } else {
         if (!backup.filename) {
@@ -1651,7 +1727,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     const backup = await this.assertBackupAccess(userId, id);
     if (isRemoteTarget(backup.target)) {
       // Best-effort — never blocks row deletion (see deleteRemoteObjects).
-      await this.deleteRemoteObjects(id, backup.projectId);
+      await this.deleteRemoteObjects(backup);
     } else if (backup.filename) {
       await fs.promises
         .unlink(path.join(BACKUPS_DIR, path.basename(backup.filename)))

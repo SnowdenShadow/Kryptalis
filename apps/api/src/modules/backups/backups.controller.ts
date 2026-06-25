@@ -28,8 +28,8 @@ export class BackupsController {
   // NB: declared before ':id' so 'targets' is not captured as an id.
   @Get('targets')
   @ApiOperation({ summary: 'Available backup targets + whether S3 storage is configured (optionally for a project)' })
-  getTargets(@Query('projectId') projectId?: string) {
-    return this.svc.getTargets(projectId);
+  getTargets(@CurrentUser('id') userId: string, @Query('projectId') projectId?: string) {
+    return this.svc.getTargets(userId, projectId);
   }
 
   // ── per-project remote storage config ──────────────────────────────

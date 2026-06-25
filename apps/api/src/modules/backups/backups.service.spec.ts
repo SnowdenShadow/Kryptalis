@@ -48,6 +48,7 @@ vi.mock('fs', () => {
 import * as fs from 'fs';
 import { execFile } from 'child_process';
 import { BackupsService } from './backups.service';
+import { assertProjectAccess } from '../../common/rbac/project-access';
 import { previousOccurrence, scheduledRunName, BACKUP_SCHEDULE_PATTERN } from './backup-schedule.util';
 
 const mockFs = fs as unknown as {
@@ -73,7 +74,7 @@ function makePrisma() {
       upsert: vi.fn(),
       deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
-    projectMember: { findMany: vi.fn() },
+    projectMember: { findMany: vi.fn(), findUnique: vi.fn().mockResolvedValue(null) },
     database: { findMany: vi.fn(), findUnique: vi.fn() },
     application: { findMany: vi.fn() },
     agentTask: { findFirst: vi.fn().mockResolvedValue(null) },
@@ -443,6 +444,94 @@ describe('per-project S3 storage', () => {
       service.create('u1', { name: 'b', serverId: 's1', projectId: 'p1', target: 'S3' } as any),
     ).rejects.toThrow(BadRequestException);
     expect(prisma.backup.create).not.toHaveBeenCalled();
+  });
+
+  it('getTargets(projectId) requires project access (no cross-tenant probing)', async () => {
+    const { service } = makeService();
+    // Drive the (mocked) RBAC gate to reject, as it would for a non-member.
+    vi.mocked(assertProjectAccess).mockRejectedValueOnce(
+      new ForbiddenException('not a member'),
+    );
+    await expect(service.getTargets('intruder', 'p1')).rejects.toThrow(ForbiddenException);
+  });
+
+  it('getTargets(projectId) reports projectConfigured from the project bucket', async () => {
+    const { service, prisma } = makeService();
+    prisma.user.findUnique.mockResolvedValue({ role: 'ADMIN' }); // passes access
+    prisma.projectMember.findUnique.mockResolvedValue(null);
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1', userId: 'admin' });
+    prisma.projectBackupStorage.findUnique.mockResolvedValue({
+      target: 'R2', endpoint: 'https://r2', bucket: 'b', region: 'auto',
+      accessKey: 'AK', secretKeyEnc: 'v1.enc(SK)',
+    });
+
+    const res = await service.getTargets('admin', 'p1');
+    expect(res.projectConfigured).toBe(true);
+    expect(res.s3Configured).toBe(true);
+  });
+
+  it('getTargets(projectId) degrades gracefully when the project secret is undecryptable', async () => {
+    const { service, prisma, encryption, systemConfig } = makeService();
+    prisma.user.findUnique.mockResolvedValue({ role: 'ADMIN' });
+    prisma.projectMember.findUnique.mockResolvedValue(null);
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1', userId: 'admin' });
+    prisma.projectBackupStorage.findUnique.mockResolvedValue({
+      target: 'R2', endpoint: 'https://r2', bucket: 'b', region: 'auto',
+      accessKey: 'AK', secretKeyEnc: 'v1.corrupt',
+    });
+    encryption.decrypt.mockImplementation(() => { throw new Error('bad key'); });
+    systemConfig.get.mockReturnValue(undefined); // no global fallback either
+
+    const res = await service.getTargets('admin', 'p1');
+    expect(res.projectConfigured).toBe(false); // did not 500
+    expect(res.s3Configured).toBe(false);
+  });
+});
+
+describe('storage config pinning (restore/delete use the bucket the dump was written to)', () => {
+  it('s3ClientForBackup PREFERS the pinned config over the live project config', async () => {
+    const { service, prisma, encryption } = makeService();
+    // The pinned config points at the ORIGINAL bucket.
+    encryption.decrypt.mockReturnValue(JSON.stringify({
+      endpoint: 'https://orig', bucket: 'orig-bucket', region: 'auto',
+      accessKey: 'OAK', secretKey: 'OSK',
+    }));
+    const { bucket } = await (service as any).s3ClientForBackup({
+      id: 'b1', projectId: 'p1', storageConfigEnc: 'v1.enc(pinned)',
+    });
+    expect(bucket).toBe('orig-bucket');
+    // Must NOT have consulted the live project storage row.
+    expect(prisma.projectBackupStorage.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('s3ClientForBackup falls back to dynamic resolution for legacy rows (no pinned config)', async () => {
+    const { service, prisma } = makeService();
+    prisma.projectBackupStorage.findUnique.mockResolvedValue({
+      target: 'R2', endpoint: 'https://r2', bucket: 'live-bucket', region: 'auto',
+      accessKey: 'AK', secretKeyEnc: 'v1.enc(SK)',
+    });
+    const { bucket } = await (service as any).s3ClientForBackup({
+      id: 'b1', projectId: 'p1', storageConfigEnc: null,
+    });
+    expect(bucket).toBe('live-bucket');
+    expect(prisma.projectBackupStorage.findUnique).toHaveBeenCalled();
+  });
+
+  it('finalize pins the resolved config; decode round-trips it', async () => {
+    const { service, encryption } = makeService();
+    encryption.encrypt.mockImplementation((s: string) => `v1.enc(${s})`);
+    const cfg = { endpoint: 'https://r2', bucket: 'b', region: 'auto', accessKey: 'AK', secretKey: 'SK' };
+    const enc = (service as any).encodeStorageConfig(cfg);
+    expect(enc).toContain('v1.enc(');
+    // decode uses encryption.decrypt — make it return the JSON we encoded.
+    encryption.decrypt.mockReturnValue(JSON.stringify(cfg));
+    expect((service as any).decodeStorageConfig(enc)).toEqual(cfg);
+  });
+
+  it('decodeStorageConfig returns null on corrupt envelope (→ caller falls back)', () => {
+    const { service, encryption } = makeService();
+    encryption.decrypt.mockImplementation(() => { throw new Error('bad'); });
+    expect((service as any).decodeStorageConfig('v1.broken')).toBeNull();
   });
 });
 

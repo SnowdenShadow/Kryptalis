@@ -185,25 +185,33 @@ export default function BackupsPage() {
   });
   const projectName = (id?: string | null) => projects.find((p) => p.id === id)?.name;
 
-  // Effective project role: project owner OR explicit member role, with a
-  // platform-admin treated as owner everywhere (mirrors the API's RBAC).
-  const canManageStorage = (p?: ProjectLite | null): boolean => {
-    if (!p) return false;
-    if (isAdmin) return true;
-    if (user?.id && p.userId === user.id) return true;
+  // Effective project role helpers (mirror the API's RBAC ranks). Platform
+  // admin = owner everywhere; project owner outranks any member role.
+  const projectRoleRank = (p?: ProjectLite | null): number => {
+    if (!p) return 0;
+    if (isAdmin) return 100; // platform admin → OWNER-equivalent
+    if (user?.id && p.userId === user.id) return 100; // project owner
     const role = p.members?.[0]?.role;
-    return role === 'OWNER' || role === 'ADMIN';
+    return { OWNER: 100, ADMIN: 80, DEVELOPER: 50, VIEWER: 10 }[role || ''] ?? 0;
   };
+  // Configuring remote storage = project ADMIN (rank >= 80).
+  const canManageStorage = (p?: ProjectLite | null): boolean => projectRoleRank(p) >= 80;
+  // Creating a backup = project DEVELOPER (rank >= 50) — matches create()'s gate.
+  const canBackupProject = (p?: ProjectLite | null): boolean => projectRoleRank(p) >= 50;
+
   // Projects whose remote storage THIS user is allowed to configure.
   const manageableProjects = projects.filter(canManageStorage);
+  // Projects this user may actually back up (avoids offering a doomed scope).
+  const backupableProjects = projects.filter(canBackupProject);
   const selectedProject = projects.find((p) => p.id === projectId) || null;
 
-  // Non-admins can't do whole-server backups → default the scope to a project.
+  // Non-admins can't do whole-server backups → default the scope to a project
+  // they can actually back up (DEVELOPER+), not just any accessible one.
   useEffect(() => {
-    if (!isAdmin && !projectId && projects.length > 0) {
-      setProjectId(projects[0].id);
+    if (!isAdmin && !projectId && backupableProjects.length > 0) {
+      setProjectId(backupableProjects[0].id);
     }
-  }, [isAdmin, projectId, projects]);
+  }, [isAdmin, projectId, backupableProjects]);
 
   const { data: backups = [], isLoading } = useQuery<Backup[]>({
     queryKey: ['backups'],
@@ -542,7 +550,9 @@ export default function BackupsPage() {
             >
               {/* Whole-server backups are admin-only. */}
               {isAdmin && <option value="">{t('backups.wholeServer')}</option>}
-              {projects.map((p) => (
+              {/* Only projects the caller can actually back up (DEVELOPER+) —
+                  offering a VIEWER project would guarantee a 403 on submit. */}
+              {backupableProjects.map((p) => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </Select>
@@ -748,8 +758,19 @@ function ProjectStorageDialog({
     queryKey: ['project-storage', projectId],
     queryFn: () => api.get(`/backups/projects/${projectId}/storage`),
   });
-  // Sync the form to the loaded config — and RESET when switching to a project
-  // that has none (so one project's keys never bleed into another's form).
+  // CLEAR every field the instant the project changes — independent of the
+  // fetch — so the previous project's credentials (endpoint/bucket/accessKey)
+  // can never linger in the form while the new project's config loads.
+  useEffect(() => {
+    setTarget('R2');
+    setEndpoint('');
+    setBucket('');
+    setRegion('');
+    setAccessKey('');
+    setSecretKey('');
+    setSecretKeySet(false);
+  }, [projectId]);
+  // Then populate from the loaded config once it arrives for THIS project.
   useEffect(() => {
     if (!cfg) return;
     setTarget(cfg.configured ? cfg.target || 'R2' : 'R2');
@@ -791,6 +812,17 @@ function ProjectStorageDialog({
   });
 
   const canSave = !!endpoint.trim() && !!bucket.trim() && !!accessKey.trim() && (secretKeySet || !!secretKey.trim());
+  // "Test" validates the SAVED credentials (the API reads them from the DB).
+  // Disable it while the form diverges from what's stored, so a user never
+  // tests stale values after editing — they must Save first.
+  const dirty =
+    !!cfg?.configured &&
+    (target !== (cfg.target || 'R2') ||
+      endpoint.trim() !== (cfg.endpoint || '') ||
+      bucket.trim() !== (cfg.bucket || '') ||
+      (region.trim() || '') !== (cfg.region || '') ||
+      accessKey.trim() !== (cfg.accessKey || '') ||
+      !!secretKey.trim());
 
   return (
     <Dialog open onClose={onClose}>
@@ -846,13 +878,24 @@ function ProjectStorageDialog({
         </div>
       </div>
 
+      {/* Test validates the SAVED config; tell the user when edits must be
+          saved first so the result is never misread. */}
+      {dirty && (
+        <p className="text-xs text-muted-foreground">{t('backups.testSaveFirst')}</p>
+      )}
+
       <DialogFooter className="flex-wrap gap-2">
         {cfg?.configured && (
           <Button variant="ghost" className="text-destructive mr-auto" onClick={() => deleteMutation.mutate()} disabled={deleteMutation.isPending}>
             {t('common.delete')}
           </Button>
         )}
-        <Button variant="ghost" onClick={() => testMutation.mutate()} disabled={!cfg?.configured || testMutation.isPending}>
+        <Button
+          variant="ghost"
+          onClick={() => testMutation.mutate()}
+          disabled={!cfg?.configured || dirty || testMutation.isPending}
+          title={t('backups.testConnectionHint')}
+        >
           {testMutation.isPending ? <Loader2 size={14} className="mr-1.5 animate-spin" /> : null}
           {t('backups.testConnection')}
         </Button>

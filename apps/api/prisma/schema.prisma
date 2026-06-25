@@ -813,6 +813,15 @@ model Backup {
   // the full path as <DATA_DIR>/backups/<filename>; remote targets use it as
   // the object key suffix under dockcontrol-backups/<id>/.
   filename            String?
+  // For remote (S3/R2/B2) backups: the EXACT storage coordinate the dump was
+  // written to, pinned at finalize time as an AES-256-GCM encrypted JSON
+  // (endpoint/bucket/region/accessKey/secretKey). Restore & delete resolve the
+  // bucket from THIS, not from the live project config — so editing or removing
+  // a project's storage later never re-points an existing backup at the wrong
+  // bucket (which would make it unrestorable and orphan the real object). NULL
+  // for LOCAL backups and for legacy rows created before this column (those
+  // fall back to dynamic project/global resolution).
+  storageConfigEnc    String?
   includeApplications Boolean      @default(true)
   includeDatabases    Boolean      @default(true)
   includeVolumes      Boolean      @default(true)
