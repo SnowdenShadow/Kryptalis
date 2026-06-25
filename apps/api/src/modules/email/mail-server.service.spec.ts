@@ -880,3 +880,82 @@ describe('deployWebmail (1-click Roundcube)', () => {
     await expect(service.deployWebmail('u1', 'dom1')).rejects.toThrow(/mail server first/);
   });
 });
+
+describe('antispam config', () => {
+  const PORTS = { smtp: 25, submission: 587, smtps: 465, imap: 143, imaps: 993 };
+  const DIR = `${MAIL_DIR}/srv1`;
+
+  it('applyPreset expands maximum to greylisting + antivirus + low threshold + reject', () => {
+    const { service } = makeService();
+    const base = (service as any).antispamFromRow(null);
+    expect((service as any).applyPreset('maximum', base)).toMatchObject({
+      greylisting: true, antivirus: true, spamAction: 'reject', spamThreshold: 4,
+    });
+    expect((service as any).applyPreset('standard', base)).toMatchObject({
+      greylisting: false, antivirus: false, spamAction: 'add_header', spamThreshold: 6,
+    });
+  });
+
+  it('runDeploy reflects the config in env toggles + writes rspamd actions', async () => {
+    const { service, prisma } = makeService();
+    prisma.mailServer.findUnique.mockResolvedValue({
+      id: 'srv1', greylisting: true, antivirus: true, spamAction: 'reject', spamThreshold: 4,
+      whitelist: 'friend@good.com', blacklist: 'spammer.biz',
+    });
+    await (service as any).runDeploy('srv1', 'example.com', PORTS, 'PRIVKEY');
+
+    const compose = vfs.__files.get(`${DIR}/docker-compose.yml`)!;
+    expect(compose).toContain('ENABLE_POSTGREY: 1');
+    expect(compose).toContain('ENABLE_CLAMAV: 1');
+
+    const actions = vfs.__files.get(`${DIR}/config/rspamd/override.d/actions.conf`)!;
+    expect(actions).toContain('reject = 4');
+
+    // Maps written + referenced only when the lists are non-empty.
+    expect(vfs.__files.get(`${DIR}/config/rspamd/whitelist.map`)).toContain('friend@good.com');
+    expect(vfs.__files.get(`${DIR}/config/rspamd/blacklist.map`)).toContain('spammer.biz');
+    const multimap = vfs.__files.get(`${DIR}/config/rspamd/override.d/multimap.conf`)!;
+    expect(multimap).toContain('DOCKCONTROL_WHITELIST');
+    expect(multimap).toContain('DOCKCONTROL_BLACKLIST');
+  });
+
+  it('runDeploy with add_header action pushes reject out of reach (mark only)', async () => {
+    const { service, prisma } = makeService();
+    prisma.mailServer.findUnique.mockResolvedValue({
+      id: 'srv1', greylisting: false, antivirus: false, spamAction: 'add_header', spamThreshold: 6,
+    });
+    await (service as any).runDeploy('srv1', 'example.com', PORTS, 'PRIVKEY');
+    const compose = vfs.__files.get(`${DIR}/docker-compose.yml`)!;
+    expect(compose).toContain('ENABLE_POSTGREY: 0');
+    expect(compose).toContain('ENABLE_CLAMAV: 0');
+    const actions = vfs.__files.get(`${DIR}/config/rspamd/override.d/actions.conf`)!;
+    expect(actions).toContain('reject = 999'); // never bounce, just flag
+  });
+
+  it('setAntispam (preset) persists the expanded settings + redeploys', async () => {
+    const { service, prisma } = makeService();
+    prisma.domain.findUnique.mockResolvedValue(DOMAIN); // assertDomainAccess (deploy too)
+    prisma.mailServer.findUnique.mockResolvedValue({ id: 'srv1', domainId: 'dom1', spamPreset: 'standard' });
+    // deploy() reads the domain + upserts; keep it from throwing by stubbing runDeploy.
+    vi.spyOn(service as any, 'deploy').mockResolvedValue({});
+
+    const res = await service.setAntispam('u1', 'dom1', { preset: 'strict' });
+    const saved = prisma.mailServer.update.mock.calls[0][0].data;
+    expect(saved).toMatchObject({ spamPreset: 'strict', greylisting: true, spamAction: 'reject', spamThreshold: 5 });
+    expect(res.redeploying).toBe(true);
+  });
+
+  it('setAntispam refuses when no mail server exists', async () => {
+    const { service, prisma } = makeService();
+    prisma.domain.findUnique.mockResolvedValue(DOMAIN);
+    prisma.mailServer.findUnique.mockResolvedValue(null);
+    await expect(service.setAntispam('u1', 'dom1', { preset: 'strict' })).rejects.toThrow(/Deploy the mail server first/);
+  });
+
+  it('setAntispam is gated to project ADMIN', async () => {
+    const { service, prisma } = makeService();
+    prisma.domain.findUnique.mockResolvedValue(DOMAIN);
+    mockAssert.mockRejectedValueOnce(new Error('forbidden'));
+    await expect(service.setAntispam('u1', 'dom1', { preset: 'maximum' })).rejects.toThrow();
+  });
+});

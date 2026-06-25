@@ -531,6 +531,16 @@ model MailServer {
   dkimPrivateKey String?         // PEM-encoded, encrypted at rest in V4
   hostname     String?
   lastError    String?
+  // ── antispam config (applied to the generated compose + rspamd files on
+  //    each (re)deploy). Defaults = current behaviour: rspamd + fail2ban on,
+  //    no greylisting/antivirus, mark (don't reject) above the threshold.
+  spamPreset    String  @default("standard") // standard | strict | maximum | custom
+  greylisting   Boolean @default(false)      // Postgrey
+  antivirus     Boolean @default(false)      // ClamAV (heavy ~1GB RAM)
+  spamAction    String  @default("add_header") // add_header | reject
+  spamThreshold Float   @default(6)          // rspamd reject score
+  whitelist     String?                      // newline-separated senders/domains
+  blacklist     String?                      // newline-separated senders/domains
   createdAt    DateTime         @default(now())
   updatedAt    DateTime         @updatedAt
 

@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Patch, Delete, Param, Body, Query, UseGuards,
+  Controller, Get, Post, Patch, Put, Delete, Param, Body, Query, UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
@@ -7,6 +7,7 @@ import { EmailService } from './email.service';
 import { MailServerService } from './mail-server.service';
 import { CreateMailboxDto } from './dto/create-mailbox.dto';
 import { UpdateMailboxDto } from './dto/update-mailbox.dto';
+import { UpdateAntispamDto } from './dto/update-antispam.dto';
 import { CreateAliasDto } from './dto/create-alias.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
@@ -127,6 +128,22 @@ export class EmailController {
   @ApiOperation({ summary: 'Install (1-click) a Roundcube webmail preconfigured for this domain' })
   deployWebmail(@CurrentUser('id') userId: string, @Param('domainId') domainId: string) {
     return this.mailServer.deployWebmail(userId, domainId);
+  }
+
+  @Get('server/:domainId/antispam')
+  @ApiOperation({ summary: 'Current antispam config (greylisting/antivirus/threshold/lists)' })
+  getAntispam(@CurrentUser('id') userId: string, @Param('domainId') domainId: string) {
+    return this.mailServer.getAntispam(userId, domainId);
+  }
+
+  @Put('server/:domainId/antispam')
+  @ApiOperation({ summary: 'Update antispam config + re-apply (redeploys the mail server)' })
+  setAntispam(
+    @CurrentUser('id') userId: string,
+    @Param('domainId') domainId: string,
+    @Body() dto: UpdateAntispamDto,
+  ) {
+    return this.mailServer.setAntispam(userId, domainId, dto);
   }
 
   @Delete('server/:domainId')

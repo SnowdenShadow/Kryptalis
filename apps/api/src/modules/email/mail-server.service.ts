@@ -274,6 +274,59 @@ export class MailServerService implements OnApplicationBootstrap {
     return { applicationId, alreadyInstalled: false };
   }
 
+  // ── antispam config API ───────────────────────────────────────────
+
+  /** Current antispam config (defaults when the server isn't deployed yet). */
+  async getAntispam(userId: string, domainId: string) {
+    await this.assertDomainAccess(userId, domainId, 'VIEWER');
+    const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    return { deployed: !!server, ...this.antispamFromRow(server as any) };
+  }
+
+  /**
+   * Update the antispam config and re-apply it. A preset expands to concrete
+   * settings (custom keeps the posted values). Persists, then redeploys so the
+   * rspamd files + env toggles are regenerated.
+   */
+  async setAntispam(userId: string, domainId: string, dto: {
+    preset?: string; greylisting?: boolean; antivirus?: boolean;
+    spamAction?: string; spamThreshold?: number; whitelist?: string; blacklist?: string;
+  }) {
+    await this.assertDomainAccess(userId, domainId, 'ADMIN');
+    const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    if (!server) throw new BadRequestException('Deploy the mail server first.');
+
+    // Start from the posted values (falling back to the stored ones), then let
+    // a named preset override. 'custom' (or no preset) keeps the posted values.
+    const base = this.antispamFromRow({
+      spamPreset: dto.preset ?? server.spamPreset,
+      greylisting: dto.greylisting ?? server.greylisting,
+      antivirus: dto.antivirus ?? server.antivirus,
+      spamAction: dto.spamAction ?? server.spamAction,
+      spamThreshold: dto.spamThreshold ?? server.spamThreshold,
+      whitelist: dto.whitelist ?? server.whitelist,
+      blacklist: dto.blacklist ?? server.blacklist,
+    } as any);
+    const eff = this.applyPreset(dto.preset || 'custom', base);
+
+    await this.prisma.mailServer.update({
+      where: { id: server.id },
+      data: {
+        spamPreset: eff.preset,
+        greylisting: eff.greylisting,
+        antivirus: eff.antivirus,
+        spamAction: eff.spamAction,
+        spamThreshold: eff.spamThreshold,
+        whitelist: eff.whitelist || null,
+        blacklist: eff.blacklist || null,
+      },
+    });
+
+    // Re-apply by redeploying (regenerates rspamd files + env toggles).
+    const redeploying = await this.deploy(userId, domainId).then(() => true).catch(() => false);
+    return { ...eff, deployed: true, redeploying };
+  }
+
   // ── deploy ────────────────────────────────────────────────────────
 
   async deploy(userId: string, domainId: string) {
@@ -794,6 +847,97 @@ export class MailServerService implements OnApplicationBootstrap {
     }
   }
 
+  // ── antispam config ───────────────────────────────────────────────
+
+  /** The effective antispam config for a deploy (defaults when the row lacks it). */
+  private antispamFromRow(row: {
+    spamPreset?: string | null; greylisting?: boolean | null; antivirus?: boolean | null;
+    spamAction?: string | null; spamThreshold?: number | null;
+    whitelist?: string | null; blacklist?: string | null;
+  } | null) {
+    return {
+      preset: row?.spamPreset || 'standard',
+      greylisting: !!row?.greylisting,
+      antivirus: !!row?.antivirus,
+      spamAction: (row?.spamAction as 'add_header' | 'reject') || 'add_header',
+      spamThreshold: typeof row?.spamThreshold === 'number' ? row.spamThreshold : 6,
+      whitelist: row?.whitelist || '',
+      blacklist: row?.blacklist || '',
+    };
+  }
+
+  /** Expand a preset into concrete settings. `custom` leaves the given values. */
+  applyPreset(preset: string, current: ReturnType<MailServerService['antispamFromRow']>) {
+    switch (preset) {
+      case 'standard':
+        return { ...current, preset, greylisting: false, antivirus: false, spamAction: 'add_header' as const, spamThreshold: 6 };
+      case 'strict':
+        return { ...current, preset, greylisting: true, antivirus: false, spamAction: 'reject' as const, spamThreshold: 5 };
+      case 'maximum':
+        return { ...current, preset, greylisting: true, antivirus: true, spamAction: 'reject' as const, spamThreshold: 4 };
+      default:
+        return { ...current, preset: 'custom' };
+    }
+  }
+
+  /** Parse a newline list into clean sender/domain entries (drops blanks/comments). */
+  private parseList(raw: string): string[] {
+    return (raw || '')
+      .split('\n')
+      .map((l) => l.trim().toLowerCase())
+      .filter((l) => l && !l.startsWith('#'))
+      // email or domain — guards against injecting rspamd map syntax.
+      .filter((l) => /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/.test(l) || /^[a-z0-9.-]+\.[a-z]{2,}$/.test(l));
+  }
+
+  /**
+   * Write the rspamd overrides docker-mailserver loads from
+   * /tmp/docker-mailserver/rspamd/. Sets the spam action thresholds and, when
+   * given, sender white/black maps (multimap). Only writes maps when non-empty
+   * so we never ship a half-configured rule.
+   */
+  private writeRspamdConfig(cfgDir: string, cfg: ReturnType<MailServerService['antispamFromRow']>) {
+    const rspamdDir = path.join(cfgDir, 'rspamd');
+    const overrideDir = path.join(rspamdDir, 'override.d');
+    fs.mkdirSync(overrideDir, { recursive: true });
+
+    // Action thresholds. When the user only wants to MARK (add_header), push
+    // reject far out of reach so nothing is ever bounced — just flagged.
+    const reject = cfg.spamAction === 'reject' ? cfg.spamThreshold : 999;
+    const addHeader = Math.max(1, cfg.spamThreshold - 2);
+    const greylist = Math.max(1, cfg.spamThreshold - 3);
+    fs.writeFileSync(
+      path.join(overrideDir, 'actions.conf'),
+      `# Managed by DockControl — do not edit by hand.\nactions {\n  reject = ${reject};\n  add_header = ${addHeader};\n  greylist = ${greylist};\n}\n`,
+    );
+
+    // Sender white/black lists via multimap.
+    const white = this.parseList(cfg.whitelist);
+    const black = this.parseList(cfg.blacklist);
+    const mapsConf: string[] = [];
+    // The config dir is mounted at /tmp/docker-mailserver inside the container,
+    // so the .map files are readable there at runtime.
+    if (white.length) {
+      fs.writeFileSync(path.join(rspamdDir, 'whitelist.map'), white.join('\n') + '\n');
+      mapsConf.push(
+        `DOCKCONTROL_WHITELIST {\n  type = "from";\n  map = "/tmp/docker-mailserver/rspamd/whitelist.map";\n  score = -100.0;\n}`,
+      );
+    }
+    if (black.length) {
+      fs.writeFileSync(path.join(rspamdDir, 'blacklist.map'), black.join('\n') + '\n');
+      mapsConf.push(
+        `DOCKCONTROL_BLACKLIST {\n  type = "from";\n  map = "/tmp/docker-mailserver/rspamd/blacklist.map";\n  score = 100.0;\n}`,
+      );
+    }
+    const multimapPath = path.join(overrideDir, 'multimap.conf');
+    if (mapsConf.length) {
+      fs.writeFileSync(multimapPath, `# Managed by DockControl.\n${mapsConf.join('\n')}\n`);
+    } else if (fs.existsSync(multimapPath)) {
+      // Lists cleared → remove the rule so old entries don't linger.
+      try { fs.unlinkSync(multimapPath); } catch {}
+    }
+  }
+
   // ── internal: write compose + start ──────────────────────────────
 
   private async runDeploy(
@@ -855,6 +999,14 @@ export class MailServerService implements OnApplicationBootstrap {
     fs.writeFileSync(path.join(cfgDir, 'postfix-accounts.cf'), '');
     fs.writeFileSync(path.join(cfgDir, 'postfix-virtual.cf'), '');
 
+    // Antispam: resolve the server's config, write the rspamd overrides, and
+    // compute the env toggles for the compose below.
+    const srvRow = await this.prisma.mailServer.findUnique({ where: { id: serverId } });
+    const spam = this.antispamFromRow(srvRow as any);
+    this.writeRspamdConfig(cfgDir, spam);
+    const enablePostgrey = spam.greylisting ? 1 : 0;
+    const enableClamav = spam.antivirus ? 1 : 0;
+
     const containerName = `dockcontrol-mail-${domain.replace(/\./g, '-')}`;
     const isLocal =
       domain.endsWith('.local') ||
@@ -913,9 +1065,9 @@ export class MailServerService implements OnApplicationBootstrap {
       ENABLE_RSPAMD_REDIS: 1
       ENABLE_AMAVIS: 0
       ENABLE_SPAMASSASSIN: 0
-      ENABLE_CLAMAV: 0
+      ENABLE_CLAMAV: ${enableClamav}
       ENABLE_FAIL2BAN: 1
-      ENABLE_POSTGREY: 0
+      ENABLE_POSTGREY: ${enablePostgrey}
       OVERRIDE_HOSTNAME: mail.${domain}
       PERMIT_DOCKER: network
       ONE_DIR: 1

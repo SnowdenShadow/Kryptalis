@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
@@ -105,6 +105,9 @@ export default function EmailDomainPage() {
   const [editShowPw, setEditShowPw] = useState(false);
   // Security tab: which log service to tail.
   const [logService, setLogService] = useState<'all' | 'postfix' | 'dovecot' | 'rspamd' | 'fail2ban'>('rspamd');
+  // Antispam config form.
+  const [spamAdvanced, setSpamAdvanced] = useState(false);
+  const [spamForm, setSpamForm] = useState<any | null>(null);
 
   // ── queries ──────────────────────────────────────────────────────
   const { data: domain } = useQuery<DomainDetail>({
@@ -158,6 +161,30 @@ export default function EmailDomainPage() {
     queryKey: ['email-logs', domainId, logService],
     queryFn: () => api.get(`/email/server/${domainId}/logs?service=${logService}&lines=200`),
     enabled: !!domainId && activeTab === 'security',
+  });
+  const { data: antispam } = useQuery<any>({
+    queryKey: ['email-antispam', domainId],
+    queryFn: () => api.get(`/email/server/${domainId}/antispam`),
+    enabled: !!domainId && activeTab === 'security',
+  });
+  // Seed the editable form once the config loads (never overwrite edits).
+  useEffect(() => {
+    if (antispam && spamForm === null) {
+      setSpamForm({
+        preset: antispam.preset, greylisting: antispam.greylisting, antivirus: antispam.antivirus,
+        spamAction: antispam.spamAction, spamThreshold: antispam.spamThreshold,
+        whitelist: antispam.whitelist || '', blacklist: antispam.blacklist || '',
+      });
+    }
+  }, [antispam, spamForm]);
+  const saveAntispam = useMutation({
+    mutationFn: (body: any) => api.put(`/email/server/${domainId}/antispam`, body),
+    onSuccess: () => {
+      toast.success(t('emails.antispamSaved'));
+      qc.invalidateQueries({ queryKey: ['email-antispam', domainId] });
+      refetchDns();
+    },
+    onError: (e: Error) => toast.error(e.message),
   });
 
   // Webmail status comes from the overview row (webmail: {id,port,status} | null).
@@ -716,7 +743,7 @@ export default function EmailDomainPage() {
             </CardContent></Card>
           ) : (
             <>
-              {/* Antispam summary */}
+              {/* Antispam — configurable: preset + advanced */}
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base flex items-center gap-2">
@@ -724,11 +751,104 @@ export default function EmailDomainPage() {
                   </CardTitle>
                   <CardDescription>{t('emails.antispamDesc')}</CardDescription>
                 </CardHeader>
-                <CardContent className="flex flex-wrap gap-2">
-                  <Badge variant="success" className="gap-1"><Check size={11} /> rspamd</Badge>
-                  <Badge variant="success" className="gap-1"><Check size={11} /> fail2ban</Badge>
-                  <Badge variant="success" className="gap-1"><Check size={11} /> OpenDKIM</Badge>
-                  <Badge variant="outline" className="gap-1">SPF · DMARC</Badge>
+                <CardContent className="space-y-4">
+                  {!spamForm ? (
+                    <div className="py-4 flex justify-center"><Loader2 size={18} className="animate-spin text-muted-foreground" /></div>
+                  ) : (
+                    <>
+                      {/* Preset selector */}
+                      <div className="grid sm:grid-cols-3 gap-2">
+                        {([
+                          ['standard', t('emails.presetStandard'), t('emails.presetStandardDesc')],
+                          ['strict', t('emails.presetStrict'), t('emails.presetStrictDesc')],
+                          ['maximum', t('emails.presetMaximum'), t('emails.presetMaximumDesc')],
+                        ] as const).map(([key, label, desc]) => (
+                          <button
+                            key={key}
+                            type="button"
+                            onClick={() => setSpamForm((s: any) => ({ ...s, preset: key }))}
+                            className={cn(
+                              'text-left rounded-lg border p-3 transition-colors',
+                              spamForm.preset === key ? 'border-primary bg-primary/5' : 'border-border hover:bg-accent/40',
+                            )}
+                          >
+                            <p className="font-medium text-sm flex items-center gap-1.5">
+                              {spamForm.preset === key && <Check size={13} className="text-primary" />}
+                              {label}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground mt-0.5">{desc}</p>
+                          </button>
+                        ))}
+                      </div>
+
+                      <button type="button" className="text-xs text-primary hover:underline"
+                        onClick={() => setSpamAdvanced((v) => !v)}>
+                        {spamAdvanced ? '▾ ' : '▸ '}{t('emails.advanced')}
+                      </button>
+
+                      {spamAdvanced && (
+                        <div className="space-y-3 rounded-lg border border-border p-3">
+                          {/* Toggles */}
+                          <label className="flex items-start gap-2 text-sm">
+                            <input type="checkbox" className="mt-0.5" checked={spamForm.greylisting}
+                              onChange={(e) => setSpamForm((s: any) => ({ ...s, greylisting: e.target.checked, preset: 'custom' }))} />
+                            <span>{t('emails.greylisting')}<br /><span className="text-[11px] text-muted-foreground">{t('emails.greylistingHint')}</span></span>
+                          </label>
+                          <label className="flex items-start gap-2 text-sm">
+                            <input type="checkbox" className="mt-0.5" checked={spamForm.antivirus}
+                              onChange={(e) => setSpamForm((s: any) => ({ ...s, antivirus: e.target.checked, preset: 'custom' }))} />
+                            <span>{t('emails.antivirus')}<br /><span className="text-[11px] text-orange-400">{t('emails.antivirusHint')}</span></span>
+                          </label>
+                          {/* Threshold + action */}
+                          <div className="grid sm:grid-cols-2 gap-3">
+                            <div className="space-y-1.5">
+                              <Label htmlFor="spam-th">{t('emails.spamThreshold')}</Label>
+                              <Input id="spam-th" type="number" min={1} max={15} step={0.5}
+                                value={spamForm.spamThreshold}
+                                onChange={(e) => setSpamForm((s: any) => ({ ...s, spamThreshold: parseFloat(e.target.value) || 6, preset: 'custom' }))} />
+                              <p className="text-[11px] text-muted-foreground">{t('emails.spamThresholdHint')}</p>
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label htmlFor="spam-act">{t('emails.spamAction')}</Label>
+                              <Select id="spam-act" value={spamForm.spamAction}
+                                onChange={(e) => setSpamForm((s: any) => ({ ...s, spamAction: e.target.value, preset: 'custom' }))}>
+                                <option value="add_header">{t('emails.spamActionMark')}</option>
+                                <option value="reject">{t('emails.spamActionReject')}</option>
+                              </Select>
+                            </div>
+                          </div>
+                          {/* White / black lists */}
+                          <div className="grid sm:grid-cols-2 gap-3">
+                            <div className="space-y-1.5">
+                              <Label htmlFor="spam-wl">{t('emails.whitelist')}</Label>
+                              <textarea id="spam-wl" rows={4}
+                                className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono"
+                                placeholder={'friend@example.com\ntrusted-domain.com'}
+                                value={spamForm.whitelist}
+                                onChange={(e) => setSpamForm((s: any) => ({ ...s, whitelist: e.target.value, preset: 'custom' }))} />
+                            </div>
+                            <div className="space-y-1.5">
+                              <Label htmlFor="spam-bl">{t('emails.blacklist')}</Label>
+                              <textarea id="spam-bl" rows={4}
+                                className="w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono"
+                                placeholder={'spammer@bad.com\nspam-domain.biz'}
+                                value={spamForm.blacklist}
+                                onChange={(e) => setSpamForm((s: any) => ({ ...s, blacklist: e.target.value, preset: 'custom' }))} />
+                            </div>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">{t('emails.listHint')}</p>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <p className="text-[11px] text-muted-foreground">{t('emails.antispamApplyNote')}</p>
+                        <Button onClick={() => saveAntispam.mutate(spamForm)} disabled={saveAntispam.isPending}>
+                          {saveAntispam.isPending && <Loader2 size={14} className="mr-1.5 animate-spin" />}
+                          {t('emails.antispamSave')}
+                        </Button>
+                      </div>
+                    </>
+                  )}
                 </CardContent>
               </Card>
 
