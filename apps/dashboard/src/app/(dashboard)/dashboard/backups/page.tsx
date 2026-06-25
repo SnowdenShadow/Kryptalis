@@ -597,7 +597,8 @@ export default function BackupsPage() {
                 )}
               </p>
             ) : (
-              <p className="text-xs text-muted-foreground">{t('backups.s3Hint')}</p>
+              // Whole-server scope (admin): remote uses the global admin bucket.
+              !s3Configured && <p className="text-xs text-muted-foreground">{t('backups.s3Hint')}</p>
             )}
           </div>
 

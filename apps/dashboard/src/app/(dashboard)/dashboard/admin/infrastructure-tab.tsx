@@ -16,6 +16,7 @@ import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } fr
 import { useAuthStore } from '@/lib/store';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { useTranslation } from '@/lib/i18n';
 
 /**
  * Deployment mode toggle (LOCAL ↔ MULTI) + a summary of registered
@@ -23,6 +24,7 @@ import { cn } from '@/lib/utils';
  * live. SUPERADMIN-only writes (USERs see the read-only state).
  */
 export function InfrastructureTab() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const router = useRouter();
   const me = useAuthStore((s) => s.user);
@@ -60,7 +62,7 @@ export function InfrastructureTab() {
     mutationFn: (next: 'LOCAL' | 'MULTI') =>
       api.patch('/admin/settings/deployment_mode', { value: next }),
     onSuccess: (_, next) => {
-      toast.success(`Mode set to ${next}`);
+      toast.success(t('admin.infra.modeSet', { mode: next }));
       qc.invalidateQueries({ queryKey: ['public-settings'] });
       qc.invalidateQueries({ queryKey: ['servers'] });
       setShowConfirm(null);
@@ -82,12 +84,9 @@ export function InfrastructureTab() {
       <Card>
         <CardHeader>
           <CardTitle className="text-lg flex items-center gap-2">
-            <Share2 size={18} /> Deployment mode
+            <Share2 size={18} /> {t('admin.infra.deployTitle')}
           </CardTitle>
-          <CardDescription>
-            Local = everything on this VPS. Multi = add other VPS as deployment
-            targets via the DockControl agent.
-          </CardDescription>
+          <CardDescription>{t('admin.infra.deployDesc')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <button
@@ -102,10 +101,8 @@ export function InfrastructureTab() {
             <div className="flex items-start gap-3">
               <HardDrive size={20} className="text-primary mt-0.5 shrink-0" />
               <div className="flex-1">
-                <p className="font-medium text-sm">Local server</p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Single-host setup. All apps run on this VPS. Simplest, no other VPS to manage.
-                </p>
+                <p className="font-medium text-sm">{t('admin.infra.localTitle')}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{t('admin.infra.localDesc')}</p>
               </div>
               {serverMode === 'local' && <Check size={16} className="text-primary shrink-0" />}
             </div>
@@ -123,13 +120,12 @@ export function InfrastructureTab() {
             <div className="flex items-start gap-3">
               <Share2 size={20} className="text-primary mt-0.5 shrink-0" />
               <div className="flex-1">
-                <p className="font-medium text-sm">Multi-server</p>
+                <p className="font-medium text-sm">{t('admin.infra.multiTitle')}</p>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  This VPS + extra VPS connected via the DockControl agent. Apps
-                  can be deployed on any registered server. Add servers from{' '}
+                  {t('admin.infra.multiDesc')}{' '}
                   <Link href="/dashboard/servers" className="text-primary hover:underline">
                     /dashboard/servers
-                  </Link>.
+                  </Link>
                 </p>
               </div>
               {serverMode === 'multi' && <Check size={16} className="text-primary shrink-0" />}
@@ -138,7 +134,7 @@ export function InfrastructureTab() {
 
           {!isAdmin && (
             <p className="text-xs text-muted-foreground italic">
-              Only platform admins can change the deployment mode.
+              {t('admin.infra.adminOnly')}
             </p>
           )}
         </CardContent>
@@ -148,13 +144,13 @@ export function InfrastructureTab() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base flex items-center gap-2">
-              <Server size={16} /> Registered servers ({servers.length})
+              <Server size={16} /> {t('admin.infra.registeredServers', { n: servers.length })}
             </CardTitle>
             <CardDescription>
               <Link href="/dashboard/servers" className="text-primary hover:underline">
-                Manage servers
+                {t('admin.infra.manageServers')}
               </Link>{' '}
-              to add or remove.
+              {t('admin.infra.manageServersSuffix')}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -178,7 +174,7 @@ export function InfrastructureTab() {
                     <span className="font-mono">{s.name}</span>
                     <span className="text-muted-foreground">{s.host}</span>
                     {s.host === '127.0.0.1' && (
-                      <Badge variant="outline" className="text-[10px]">local</Badge>
+                      <Badge variant="outline" className="text-[10px]">{t('admin.infra.localBadge')}</Badge>
                     )}
                   </div>
                   <Badge variant="outline" className="text-[10px]">{s.status}</Badge>
@@ -192,50 +188,44 @@ export function InfrastructureTab() {
       <Dialog open={!!showConfirm} onClose={() => setShowConfirm(null)}>
         <DialogHeader>
           <DialogTitle>
-            Switch to {showConfirm === 'to-multi' ? 'Multi-server' : 'Local'} mode?
+            {t('admin.infra.switchTitle', {
+              mode: showConfirm === 'to-multi' ? t('admin.infra.multiTitle') : t('admin.infra.localTitle'),
+            })}
           </DialogTitle>
           <DialogDescription>
             {showConfirm === 'to-multi'
-              ? 'Multi-server lets you add extra VPS as deployment targets. Apps already on this VPS keep running here.'
-              : 'Switching back to Local mode hides the multi-server UI. Apps currently deployed on remote VPS will keep running — they just disappear from the dashboard until you switch back.'}
+              ? t('admin.infra.switchToMulti')
+              : t('admin.infra.switchToLocal')}
           </DialogDescription>
         </DialogHeader>
 
         {showConfirm === 'to-local' && appsOnRemote.length > 0 && (
           <div className="rounded-lg border border-orange-500/30 bg-orange-500/5 p-3 space-y-2">
             <p className="text-xs font-semibold text-orange-500 flex items-center gap-1">
-              <AlertCircle size={12} /> {appsOnRemote.length} app
-              {appsOnRemote.length !== 1 ? 's are' : ' is'} running on remote servers
+              <AlertCircle size={12} /> {t('admin.infra.appsOnRemote', { n: appsOnRemote.length })}
             </p>
             <ul className="text-xs text-muted-foreground list-disc list-inside">
               {appsOnRemote.slice(0, 5).map((a: any) => (
                 <li key={a.id}>
-                  <span className="font-mono">{a.name}</span> on {a.project?.server?.name}
+                  <span className="font-mono">{a.name}</span> — {a.project?.server?.name}
                 </li>
               ))}
-              {appsOnRemote.length > 5 && <li>+ {appsOnRemote.length - 5} more</li>}
+              {appsOnRemote.length > 5 && <li>{t('admin.infra.andMore', { n: appsOnRemote.length - 5 })}</li>}
             </ul>
             <p className="text-[10px] text-muted-foreground">
-              These won't be deleted, but you won't see them in the dashboard
-              until Multi mode is re-enabled or the apps are moved to the local
-              server.
+              {t('admin.infra.appsOnRemoteNote')}
             </p>
           </div>
         )}
 
         {showConfirm === 'to-multi' && remoteServers.length === 0 && (
           <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
-            After switching, head to{' '}
-            <Link href="/dashboard/servers" className="text-primary hover:underline">
-              /dashboard/servers
-            </Link>{' '}
-            to add your first remote VPS. The dashboard will generate an install
-            command you run on the new server.
+            {t('admin.infra.firstServerNote')}
           </div>
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => setShowConfirm(null)}>Cancel</Button>
+          <Button variant="outline" onClick={() => setShowConfirm(null)}>{t('common.cancel')}</Button>
           <Button
             disabled={switchModeMutation.isPending}
             onClick={() =>
@@ -243,7 +233,7 @@ export function InfrastructureTab() {
             }
           >
             {switchModeMutation.isPending && <Loader2 size={12} className="animate-spin" />}
-            Confirm switch
+            {t('admin.infra.confirmSwitch')}
           </Button>
         </DialogFooter>
       </Dialog>
@@ -262,30 +252,28 @@ export function InfrastructureTab() {
  * is irreversible — explicit confirm + per-section counts shown first.
  */
 function DockerReaperCard() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const [scan, setScan] = useState<any | null>(null);
-  const [reaping, setReaping] = useState(false);
   const [confirmReap, setConfirmReap] = useState(false);
 
   const scanMutation = useMutation({
     mutationFn: () => api.get<any>('/admin/reaper/scan'),
     onSuccess: (r) => setScan(r),
-    onError: (e: any) => toast.error(e?.message || 'Scan failed'),
+    onError: (e: any) => toast.error(e?.message || t('admin.infra.scanFailed')),
   });
 
   const reapMutation = useMutation({
     mutationFn: () => api.post<any>('/admin/reaper/reap'),
     onSuccess: (r) => {
       setScan(r);
-      setReaping(false);
       setConfirmReap(false);
       const total = r.containers.length + r.images.length + r.volumes.length + r.networks.length;
-      toast.success(`Reaped ${total} artefact${total === 1 ? '' : 's'}`);
+      toast.success(t('admin.infra.reaped', { n: total }));
       qc.invalidateQueries({ queryKey: ['servers'] });
     },
     onError: (e: any) => {
-      setReaping(false);
-      toast.error(e?.message || 'Reap failed');
+      toast.error(e?.message || t('admin.infra.reapFailed'));
     },
   });
 
@@ -299,12 +287,9 @@ function DockerReaperCard() {
         <div className="flex items-center justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2">
-              <Trash2 size={18} /> Docker Reaper
+              <Trash2 size={18} /> {t('admin.infra.reaperTitle')}
             </CardTitle>
-            <CardDescription>
-              Garbage-collect docker artefacts left behind by deleted apps / databases / projects.
-              Identifies orphans by matching the platform's naming conventions against live DB rows.
-            </CardDescription>
+            <CardDescription>{t('admin.infra.reaperDesc')}</CardDescription>
           </div>
           <div className="flex gap-2 shrink-0">
             <Button
@@ -313,52 +298,50 @@ function DockerReaperCard() {
               disabled={scanMutation.isPending}
             >
               {scanMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-              Scan
+              {t('admin.infra.scan')}
             </Button>
             <Button
               variant="destructive"
               disabled={!scan || total === 0 || reapMutation.isPending}
               onClick={() => setConfirmReap(true)}
             >
-              Reap{total > 0 ? ` (${total})` : ''}
+              {t('admin.infra.reap')}{total > 0 ? ` (${total})` : ''}
             </Button>
           </div>
         </div>
       </CardHeader>
       <CardContent>
         {!scan && (
-          <p className="text-sm text-muted-foreground">
-            Click <span className="font-medium">Scan</span> to inventory orphan artefacts. No changes are made until you click Reap.
-          </p>
+          <p className="text-sm text-muted-foreground">{t('admin.infra.reaperIdle')}</p>
         )}
         {scan && total === 0 && (
           <div className="flex items-center gap-2 text-sm text-emerald-500">
-            <Check size={16} /> Nothing to clean — every docker artefact maps back to a live DB row.
+            <Check size={16} /> {t('admin.infra.reaperClean')}
           </div>
         )}
         {scan && total > 0 && (
           <div className="space-y-3">
             <ReaperSection
               icon={Container}
-              title="Containers"
+              title={t('admin.infra.containers')}
               items={scan.containers}
               render={(c: any) => `${c.name} (${c.status})`}
             />
             <ReaperSection
               icon={Package}
-              title="Images"
+              title={t('admin.infra.images')}
               items={scan.images}
               render={(i: any) => `${i.repo}:${i.tag}${i.size ? ` — ${i.size}` : ''}`}
             />
             <ReaperSection
               icon={HardDriveDownload}
-              title="Volumes"
+              title={t('admin.infra.volumes')}
               items={scan.volumes}
               render={(v: any) => v.name}
             />
             <ReaperSection
               icon={Network}
-              title="Networks"
+              title={t('admin.infra.networks')}
               items={scan.networks}
               render={(n: any) => n.name}
             />
@@ -369,23 +352,21 @@ function DockerReaperCard() {
       <Dialog open={confirmReap} onClose={() => setConfirmReap(false)}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-destructive">
-            <AlertCircle size={18} /> Confirm Reap
+            <AlertCircle size={18} /> {t('admin.infra.confirmReapTitle')}
           </DialogTitle>
           <DialogDescription>
-            About to permanently delete {total} orphan artefact{total === 1 ? '' : 's'}.
-            Volume data is unrecoverable. Container/network/image removals are also irreversible
-            but don't carry user data.
+            {t('admin.infra.confirmReapDesc', { n: total })}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={() => setConfirmReap(false)}>Cancel</Button>
+          <Button variant="outline" onClick={() => setConfirmReap(false)}>{t('common.cancel')}</Button>
           <Button
             variant="destructive"
             disabled={reapMutation.isPending}
-            onClick={() => { setReaping(true); reapMutation.mutate(); }}
+            onClick={() => reapMutation.mutate()}
           >
             {reapMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-            Reap {total} artefacts
+            {t('admin.infra.reapN', { n: total })}
           </Button>
         </DialogFooter>
       </Dialog>

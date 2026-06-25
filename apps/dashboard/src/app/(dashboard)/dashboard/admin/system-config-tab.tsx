@@ -3,13 +3,14 @@
 import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Save, Send, KeyRound, Mail, Globe2, Clock } from 'lucide-react';
+import { Save, Send, KeyRound, Mail, Globe2, Clock, CloudUpload } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from '@/lib/api';
 import { toastError } from '@/lib/toast-error';
+import { useTranslation } from '@/lib/i18n';
 
 /**
  * Runtime config tab inside Admin. Reads /admin/config (secrets are
@@ -21,6 +22,7 @@ import { toastError } from '@/lib/toast-error';
 type Snapshot = Record<string, any>;
 
 export function SystemConfigTab() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const { data: snapshot, isLoading } = useQuery<Snapshot>({
     queryKey: ['admin-config'],
@@ -41,6 +43,12 @@ export function SystemConfigTab() {
       // Secrets: blank input = keep existing.
       smtp_pass: '',
       backup_encryption_key: '',
+      s3_secret_key: '',
+      // Whole-server backup storage (non-secret parts).
+      s3_endpoint: snapshot.s3_endpoint || '',
+      s3_bucket: snapshot.s3_bucket || '',
+      s3_region: snapshot.s3_region || '',
+      s3_access_key: snapshot.s3_access_key || '',
       // Public URLs.
       public_dashboard_url: snapshot.public_dashboard_url || '',
       public_api_url: snapshot.public_api_url || '',
@@ -58,21 +66,21 @@ export function SystemConfigTab() {
     mutationFn: (payload: Record<string, any>) =>
       api.patch<{ updated: number; removed: number }>('/admin/config', payload),
     onSuccess: (res) => {
-      toast.success(`Saved — ${res.updated} setting(s) updated.`);
+      toast.success(t('admin.sys.saved', { n: res.updated }));
       qc.invalidateQueries({ queryKey: ['admin-config'] });
     },
-    onError: (err) => toastError(err, 'Save'),
+    onError: (err) => toastError(err, t('admin.sys.saveError')),
   });
 
   const testSmtpMutation = useMutation({
     mutationFn: (to?: string) =>
       api.post<{ ok: true; sentTo: string }>('/admin/config/test-smtp', { to }),
-    onSuccess: (res) => toast.success(`Test email sent to ${res.sentTo}.`),
-    onError: (err) => toastError(err, 'SMTP test'),
+    onSuccess: (res) => toast.success(t('admin.sys.smtpTestSent', { to: res.sentTo })),
+    onError: (err) => toastError(err, t('admin.sys.smtpTestError')),
   });
 
   if (isLoading || !snapshot) {
-    return <Card><CardContent className="py-8 text-center text-muted-foreground text-sm">Loading…</CardContent></Card>;
+    return <Card><CardContent className="py-8 text-center text-muted-foreground text-sm">{t('admin.sys.loading')}</CardContent></Card>;
   }
 
   // Build the diff: only fields whose value changed get sent.
@@ -81,7 +89,7 @@ export function SystemConfigTab() {
     for (const [k, v] of Object.entries(form)) {
       const stored = snapshot[k];
       // For secrets, blank means "no change", anything else is a new value.
-      if (k === 'smtp_pass' || k === 'backup_encryption_key') {
+      if (k === 'smtp_pass' || k === 'backup_encryption_key' || k === 's3_secret_key') {
         if (v !== '' && v !== undefined) payload[k] = v;
         continue;
       }
@@ -101,7 +109,7 @@ export function SystemConfigTab() {
       if (String(v ?? '') !== String(stored ?? '')) payload[k] = v;
     }
     if (Object.keys(payload).length === 0) {
-      toast.message('No changes to save.');
+      toast.message(t('admin.sys.noChanges'));
       return;
     }
     saveMutation.mutate(payload);
@@ -112,7 +120,7 @@ export function SystemConfigTab() {
 
   const SmtpHint = ({ active }: { active: boolean }) =>
     active ? (
-      <span className="text-[11px] text-muted-foreground">A value is stored. Leave blank to keep it.</span>
+      <span className="text-[11px] text-muted-foreground">{t('admin.sys.secretStored')}</span>
     ) : null;
 
   return (
@@ -121,17 +129,14 @@ export function SystemConfigTab() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-lg">
-            <Mail size={18} /> SMTP / Email
+            <Mail size={18} /> {t('admin.sys.smtpTitle')}
           </CardTitle>
-          <CardDescription>
-            Outbound mail config. Used for password reset, email verification,
-            project invites, deployment outcomes, and monitoring alerts.
-          </CardDescription>
+          <CardDescription>{t('admin.sys.smtpDesc')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
-              <Label htmlFor="smtp_host">Host</Label>
+              <Label htmlFor="smtp_host">{t('admin.sys.smtpHost')}</Label>
               <Input
                 id="smtp_host"
                 placeholder="smtp.gmail.com"
@@ -140,7 +145,7 @@ export function SystemConfigTab() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="smtp_port">Port</Label>
+              <Label htmlFor="smtp_port">{t('admin.sys.smtpPort')}</Label>
               <Input
                 id="smtp_port"
                 type="number"
@@ -150,7 +155,7 @@ export function SystemConfigTab() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="smtp_user">User</Label>
+              <Label htmlFor="smtp_user">{t('admin.sys.smtpUser')}</Label>
               <Input
                 id="smtp_user"
                 placeholder="noreply@your-domain.com"
@@ -159,7 +164,7 @@ export function SystemConfigTab() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="smtp_pass">Password</Label>
+              <Label htmlFor="smtp_pass">{t('admin.sys.smtpPass')}</Label>
               <Input
                 id="smtp_pass"
                 type="password"
@@ -170,7 +175,7 @@ export function SystemConfigTab() {
               <SmtpHint active={!!snapshot.smtp_pass} />
             </div>
             <div className="space-y-1.5 sm:col-span-2">
-              <Label htmlFor="smtp_from">From address</Label>
+              <Label htmlFor="smtp_from">{t('admin.sys.smtpFrom')}</Label>
               <Input
                 id="smtp_from"
                 placeholder='"DockControl" <noreply@your-domain.com>'
@@ -185,7 +190,7 @@ export function SystemConfigTab() {
             onClick={() => testSmtpMutation.mutate(undefined)}
             className="gap-2"
           >
-            <Send size={14} /> Send test email
+            <Send size={14} /> {t('admin.sys.smtpTest')}
           </Button>
         </CardContent>
       </Card>
@@ -194,16 +199,13 @@ export function SystemConfigTab() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-lg">
-            <Globe2 size={18} /> Public URLs
+            <Globe2 size={18} /> {t('admin.sys.urlsTitle')}
           </CardTitle>
-          <CardDescription>
-            Where the dashboard and API are reachable from the public internet.
-            Used to build links in outgoing emails.
-          </CardDescription>
+          <CardDescription>{t('admin.sys.urlsDesc')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="public_dashboard_url">Dashboard URL</Label>
+            <Label htmlFor="public_dashboard_url">{t('admin.sys.dashboardUrl')}</Label>
             <Input
               id="public_dashboard_url"
               placeholder="https://your-domain.com"
@@ -212,7 +214,7 @@ export function SystemConfigTab() {
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="public_api_url">API URL</Label>
+            <Label htmlFor="public_api_url">{t('admin.sys.apiUrl')}</Label>
             <Input
               id="public_api_url"
               placeholder="https://api.your-domain.com"
@@ -227,16 +229,14 @@ export function SystemConfigTab() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-lg">
-            <Clock size={18} /> Data retention
+            <Clock size={18} /> {t('admin.sys.retentionTitle')}
           </CardTitle>
-          <CardDescription>
-            How long historical data is kept. Empty = use the built-in default.
-          </CardDescription>
+          <CardDescription>{t('admin.sys.retentionDesc')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid sm:grid-cols-3 gap-4">
             <div className="space-y-1.5">
-              <Label htmlFor="metric_retention_days">Server metrics (days)</Label>
+              <Label htmlFor="metric_retention_days">{t('admin.sys.metricDays')}</Label>
               <Input
                 id="metric_retention_days"
                 type="number"
@@ -246,7 +246,7 @@ export function SystemConfigTab() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="deployment_retention_days">Deployment history (days)</Label>
+              <Label htmlFor="deployment_retention_days">{t('admin.sys.deployDays')}</Label>
               <Input
                 id="deployment_retention_days"
                 type="number"
@@ -256,7 +256,7 @@ export function SystemConfigTab() {
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="audit_log_retention_days">Audit logs (days)</Label>
+              <Label htmlFor="audit_log_retention_days">{t('admin.sys.auditDays')}</Label>
               <Input
                 id="audit_log_retention_days"
                 type="number"
@@ -273,17 +273,13 @@ export function SystemConfigTab() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-lg">
-            <KeyRound size={18} /> Backup encryption
+            <KeyRound size={18} /> {t('admin.sys.encTitle')}
           </CardTitle>
-          <CardDescription>
-            Setting this enables AES-256-GCM at-rest encryption for new backups.
-            Existing plaintext backups stay readable. Treat the key as a master
-            secret — if you lose it, encrypted backups are unrecoverable.
-          </CardDescription>
+          <CardDescription>{t('admin.sys.encDesc')}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="space-y-1.5">
-            <Label htmlFor="backup_encryption_key">Backup encryption key (32+ chars)</Label>
+            <Label htmlFor="backup_encryption_key">{t('admin.sys.encKey')}</Label>
             <Input
               id="backup_encryption_key"
               type="password"
@@ -296,13 +292,74 @@ export function SystemConfigTab() {
         </CardContent>
       </Card>
 
-      {/* Remote backup storage is configured PER PROJECT (Backups page →
-          "Remote storage"), not globally — each project brings its own bucket. */}
+      {/* ─── Whole-server backup storage (admin) ──────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <CloudUpload size={18} /> {t('admin.sys.s3Title')}
+          </CardTitle>
+          <CardDescription>
+            {t('admin.sys.s3Desc')}{' '}
+            <code className="text-xs">dockcontrol-backups/&lt;backupId&gt;/</code>.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label htmlFor="s3_endpoint">{t('admin.sys.s3Endpoint')}</Label>
+              <Input
+                id="s3_endpoint"
+                placeholder="https://<accountid>.r2.cloudflarestorage.com"
+                value={form.s3_endpoint || ''}
+                onChange={(e) => set('s3_endpoint', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="s3_bucket">{t('admin.sys.s3Bucket')}</Label>
+              <Input
+                id="s3_bucket"
+                placeholder="dockcontrol-backups"
+                value={form.s3_bucket || ''}
+                onChange={(e) => set('s3_bucket', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="s3_region">{t('admin.sys.s3Region')}</Label>
+              <Input
+                id="s3_region"
+                placeholder="auto"
+                value={form.s3_region || ''}
+                onChange={(e) => set('s3_region', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="s3_access_key">{t('admin.sys.s3AccessKey')}</Label>
+              <Input
+                id="s3_access_key"
+                placeholder="AKIA…"
+                value={form.s3_access_key || ''}
+                onChange={(e) => set('s3_access_key', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="s3_secret_key">{t('admin.sys.s3SecretKey')}</Label>
+              <Input
+                id="s3_secret_key"
+                type="password"
+                placeholder="••••••••"
+                value={form.s3_secret_key || ''}
+                onChange={(e) => set('s3_secret_key', e.target.value)}
+              />
+              <SmtpHint active={!!snapshot.s3_secret_key} />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* ─── Save bar ─────────────────────────────────────────── */}
       <div className="flex justify-end">
         <Button onClick={handleSave} disabled={saveMutation.isPending} className="gap-2">
-          <Save size={14} /> {saveMutation.isPending ? 'Saving…' : 'Save changes'}
+          <Save size={14} /> {saveMutation.isPending ? t('admin.sys.saving') : t('admin.sys.save')}
         </Button>
       </div>
     </div>

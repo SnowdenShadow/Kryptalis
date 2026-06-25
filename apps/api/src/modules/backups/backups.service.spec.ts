@@ -363,16 +363,30 @@ describe('per-project S3 storage', () => {
     expect(encryption.decrypt).toHaveBeenCalledWith('v1.enc(SK)');
   });
 
-  it('s3Config returns an EMPTY (unusable) config when the project has none — no global fallback', async () => {
-    const { service, prisma } = makeService();
+  it('s3Config: a project with NO own config is EMPTY (never falls back to the admin global)', async () => {
+    const { service, prisma, systemConfig } = makeService();
     prisma.projectBackupStorage.findUnique.mockResolvedValue(null);
+    // Even with a global admin config present, a project must NOT inherit it.
+    systemConfig.get.mockImplementation((k: string) => ({
+      s3_endpoint: 'https://global', s3_bucket: 'global-bucket',
+      s3_access_key: 'GAK', s3_secret_key: 'GSK', s3_region: 'auto',
+    } as any)[k]);
 
     const cfg = await (service as any).s3Config('p1');
     expect(cfg.bucket).toBe('');
     expect(cfg.endpoint).toBe('');
-    // Whole-server scope (no projectId) is likewise empty → remote unavailable.
-    const serverCfg = await (service as any).s3Config(null);
-    expect(serverCfg.bucket).toBe('');
+  });
+
+  it('s3Config: WHOLE-SERVER scope (no projectId) uses the admin global config', async () => {
+    const { service, systemConfig } = makeService();
+    systemConfig.get.mockImplementation((k: string) => ({
+      s3_endpoint: 'https://global', s3_bucket: 'global-bucket',
+      s3_access_key: 'GAK', s3_secret_key: 'GSK', s3_region: 'auto',
+    } as any)[k]);
+
+    const cfg = await (service as any).s3Config(null);
+    expect(cfg.bucket).toBe('global-bucket');
+    expect(cfg.endpoint).toBe('https://global');
   });
 
   it('setProjectStorage encrypts the secret (never stores plaintext) + upserts', async () => {
@@ -468,6 +482,24 @@ describe('per-project S3 storage', () => {
     const res = await service.getTargets('admin', 'p1');
     expect(res.projectConfigured).toBe(true);
     expect(res.s3Configured).toBe(true);
+  });
+
+  it('getTargets WHOLE-SERVER (no projectId) reports the admin global config', async () => {
+    const { service, systemConfig } = makeService();
+    // Global admin bucket configured → whole-server remote available.
+    systemConfig.get.mockImplementation((k: string) => ({
+      s3_endpoint: 'https://global', s3_bucket: 'global-bucket',
+      s3_access_key: 'GAK', s3_secret_key: 'GSK', s3_region: 'auto',
+    } as any)[k]);
+
+    const res = await service.getTargets('admin');
+    expect(res.s3Configured).toBe(true);
+    expect(res.projectConfigured).toBe(false);
+
+    // Without a global config → whole-server remote unavailable.
+    systemConfig.get.mockReturnValue(undefined);
+    const res2 = await service.getTargets('admin');
+    expect(res2.s3Configured).toBe(false);
   });
 
   it('getTargets(projectId) degrades gracefully when the project secret is undecryptable', async () => {

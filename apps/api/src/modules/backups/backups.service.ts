@@ -139,10 +139,12 @@ interface BackupManifest {
  *     reusing the same env key across many dumps never reuses an (key, iv)
  *     pair (GCM's fatal failure mode).
  *
- * Remote (S3-compatible) storage:
- *   - Configured PER PROJECT (ProjectBackupStorage; secret key encrypted at
- *     rest). Each project brings its own S3/R2/B2 bucket — there is no global
- *     platform-wide bucket. Whole-server backups can only be stored locally.
+ * Remote (S3-compatible) storage — resolved by SCOPE, no fallback between them:
+ *   - PROJECT backups → that project's OWN bucket (ProjectBackupStorage; secret
+ *     encrypted at rest). A project never lands in the admin bucket.
+ *   - WHOLE-SERVER (admin) backups → the global SystemSettings s3_* config
+ *     (Admin → System Config; secret encrypted; env S3_* fallback for headless).
+ *   The two destinations are deliberately separate.
  *   - After the local dump → (optional) encryption → sha256 flow, dumps for
  *     S3/R2/B2 targets are uploaded under `dockcontrol-backups/<backupId>/
  *     <filename>` and the local file is deleted. The object key is also
@@ -475,17 +477,36 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Resolve the S3 config for an operation. Remote storage is PER PROJECT only —
-   * there is no platform-wide/global bucket. A project with no own config (or a
-   * whole-server backup with no projectId) resolves to an empty config, which
-   * s3ClientOrThrow rejects with a clear message.
+   * The WHOLE-SERVER (admin) S3 config from SystemSettings. This is used ONLY
+   * for server-wide backups (no projectId) — it is NOT a fallback for projects.
+   * Env fallbacks S3_* for headless installs.
+   */
+  private globalS3Config(): S3BackupConfig {
+    return {
+      endpoint: this.systemConfig.get<string>('s3_endpoint', 'S3_ENDPOINT'),
+      bucket: this.systemConfig.get<string>('s3_bucket', 'S3_BUCKET'),
+      region: this.systemConfig.get<string>('s3_region', 'S3_REGION', 'auto'),
+      accessKey: this.systemConfig.get<string>('s3_access_key', 'S3_ACCESS_KEY'),
+      secretKey: this.systemConfig.get<string>('s3_secret_key', 'S3_SECRET_KEY'),
+    };
+  }
+
+  /**
+   * Resolve the S3 config for an operation by SCOPE — no silent fallback:
+   *   - PROJECT backup  → that project's OWN config only (empty if unconfigured).
+   *   - WHOLE-SERVER    → the admin global config only.
+   * The two destinations are deliberately separate: a project never lands in the
+   * admin bucket, and the admin's server-wide dumps never land in a project's.
    */
   private async s3Config(projectId?: string | null): Promise<S3BackupConfig> {
     if (projectId) {
-      const own = await this.projectS3Config(projectId);
-      if (own) return own;
+      return (
+        (await this.projectS3Config(projectId)) ?? {
+          endpoint: '', bucket: '', region: 'auto', accessKey: '', secretKey: '',
+        }
+      );
     }
-    return { endpoint: '', bucket: '', region: 'auto', accessKey: '', secretKey: '' };
+    return this.globalS3Config();
   }
 
   /**
@@ -502,7 +523,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException(
         projectId
           ? `Remote backup storage isn't configured for this project — set its S3/R2/B2 bucket in the project's backup storage settings (missing: ${missing.join(', ')}).`
-          : 'Remote backups require a project with its own S3/R2/B2 storage configured. Whole-server backups can only be stored locally.',
+          : `Whole-server remote storage isn't configured — set the S3/R2/B2 bucket in Admin → System Config (missing: ${missing.join(', ')}).`,
       );
     }
     return { ...this.s3ClientFromConfig(cfg), config: cfg };
@@ -1373,32 +1394,30 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
    * The dashboard uses this to grey out S3/R2/B2 in the create dialog.
    */
   async getTargets(userId: string, projectId?: string) {
-    // Remote storage is PER PROJECT only — there is no global bucket. Remote
-    // targets are usable only when the SELECTED project has its own complete
-    // config. Whole-server backups (no projectId) are always LOCAL-only.
+    // Remote storage is resolved by SCOPE, with no fallback between scopes:
+    //   - PROJECT scope → remote usable only if the project has its own config.
+    //   - WHOLE-SERVER  → remote usable only if the admin global config is set.
     //
     // Access: when a projectId is given the caller must be a member (DEVELOPER+)
     // of it — otherwise any authenticated user could probe whether an arbitrary
     // project has remote storage configured.
-    let projectOwn: S3BackupConfig | null = null;
     if (projectId) {
       await assertProjectAccess(this.prisma, userId, projectId, 'DEVELOPER');
       // Resolve the project's own config ONCE. Degrade gracefully if its secret
       // can't be decrypted (rotated key / corruption) — report "not configured"
       // rather than 500-ing the whole targets endpoint.
+      let projectOwn: S3BackupConfig | null = null;
       try {
         projectOwn = await this.projectS3Config(projectId);
       } catch {
         projectOwn = null;
       }
+      const projectConfigured = !!projectOwn && missingS3ConfigKeys(projectOwn).length === 0;
+      return { targets: ['LOCAL', ...REMOTE_TARGETS], s3Configured: projectConfigured, projectConfigured };
     }
-    const projectConfigured = !!projectOwn && missingS3ConfigKeys(projectOwn).length === 0;
-    return {
-      targets: ['LOCAL', ...REMOTE_TARGETS],
-      // Remote usable only via the project's own bucket (no global fallback).
-      s3Configured: projectConfigured,
-      projectConfigured,
-    };
+    // Whole-server scope: remote available iff the admin global bucket is set.
+    const globalConfigured = missingS3ConfigKeys(this.globalS3Config()).length === 0;
+    return { targets: ['LOCAL', ...REMOTE_TARGETS], s3Configured: globalConfigured, projectConfigured: false };
   }
 
   // ── per-project remote storage config ──────────────────────────────

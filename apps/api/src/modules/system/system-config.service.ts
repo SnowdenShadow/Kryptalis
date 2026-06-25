@@ -48,6 +48,9 @@ export class SystemConfigService implements OnModuleInit {
     'smtp_pass',
     'backup_encryption_key',
     'github_webhook_secret',
+    // Whole-server (admin) remote backup storage credentials.
+    's3_access_key',
+    's3_secret_key',
   ]);
 
   // URL-shaped keys must parse as an http(s) URL when set. Empty/unset is
