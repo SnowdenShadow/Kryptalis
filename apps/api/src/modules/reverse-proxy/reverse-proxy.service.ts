@@ -966,12 +966,12 @@ ${portLines.length > 0 ? portLines.join('\n') : '      []'}
       if (mt == null) continue;
       const prev = this.mailCertMtime[host] || 0;
       if (mt !== prev) {
-        if (prev !== 0) {
-          // First sighting (prev === 0) shouldn't trigger a reload — that's
-          // just bootstrapping the tracker. Real change → reload.
-          this.logger.log(`Mail cert for ${host} changed (mtime ${prev} → ${mt}) — reloading mail server`);
-          try { await this.mailReloadHook(s.domain.id); } catch {}
-        }
+        // Fire on EVERY change, INCLUDING the first sighting (prev === 0): a
+        // mail server may have been deployed WITHOUT TLS while waiting for the
+        // cert, and the reload hook redeploys it with TLS once the cert lands.
+        // (reloadMailServer is a no-op reload when TLS is already configured.)
+        this.logger.log(`Mail cert for ${host} present/changed (mtime ${prev} → ${mt}) — reconciling mail server`);
+        try { await this.mailReloadHook(s.domain.id); } catch {}
         this.mailCertMtime[host] = mt;
         changed = true;
       }

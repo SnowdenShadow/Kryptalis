@@ -839,6 +839,30 @@ export class MailServerService implements OnApplicationBootstrap {
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) return;
     const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
+
+    // If the compose was generated WITHOUT TLS (cert wasn't issued yet) but the
+    // cert now exists, an in-place reload can't enable TLS — we must re-render
+    // the compose (SSL_TYPE: manual) and recreate. Detect by checking the stored
+    // compose for SSL_TYPE.
+    try {
+      const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
+      const composePath = path.join(MAIL_DIR, server?.id || '', 'docker-compose.yml');
+      const hasTls = fs.existsSync(composePath) && fs.readFileSync(composePath, 'utf-8').includes('SSL_TYPE: manual');
+      const certNow = await this.proxy.certExists(`mail.${domain.domain}`).catch(() => false);
+      if (server && certNow && !hasTls) {
+        this.logger.log(`Cert for mail.${domain.domain} now present — redeploying mail server to enable TLS.`);
+        const ports = {
+          smtp: server.smtpPort, submission: server.submissionPort, smtps: server.smtpsPort,
+          imap: server.imapPort, imaps: server.imapsPort,
+        };
+        const dkimKey = server.dkimPrivateKey ? this.encryption.decrypt(server.dkimPrivateKey) : '';
+        await this.runDeploy(server.id, domain.domain, ports, dkimKey);
+        return;
+      }
+    } catch (e: any) {
+      this.logger.warn(`Mail TLS recheck failed for ${domain.domain}: ${e?.message || e}`);
+    }
+
     try {
       await execFileAsync('docker', ['exec', containerName, 'postfix', 'reload'], { timeout: 5_000 });
       await execFileAsync('docker', ['exec', containerName, 'doveadm', 'reload'], { timeout: 5_000 });
@@ -1015,17 +1039,27 @@ export class MailServerService implements OnApplicationBootstrap {
       domain === 'localhost';
 
     // SSL config:
-    //   production domain → reuse Caddy's Let's Encrypt cert (manual mode).
-    //   local domain      → no TLS configured, postfix uses opportunistic plain-text.
-    //                       (DMS's "self-signed" mode requires you ship the key, which
-    //                       we don't — leaving SSL_TYPE empty avoids the boot crash.)
-    const sslEnv = isLocal
-      ? `# SSL disabled in local dev — no Let's Encrypt cert available.`
+    //   production domain WITH a cert → reuse Caddy's Let's Encrypt cert (manual).
+    //   production domain WITHOUT a cert yet → start WITHOUT TLS (opportunistic
+    //       plaintext) so the container doesn't crash-loop. Caddy issues the cert
+    //       once mail.<domain> resolves to this host; the cert-mtime watcher then
+    //       reloads the mail server (reconcile also re-deploys with manual TLS).
+    //   local domain → no TLS (DMS manual mode needs a real key on disk).
+    //
+    // The old behaviour hard-set SSL_TYPE=manual unconditionally → if the cert
+    // wasn't issued (e.g. mail.<domain> DNS not pointed yet), DMS aborted boot
+    // and the container restarted forever, which also broke `docker exec` (logs).
+    const mailHost = `mail.${domain}`;
+    const certReady = !isLocal && (await this.proxy.certExists(mailHost).catch(() => false));
+    const sslEnv = !certReady
+      ? `# TLS not configured yet — ${isLocal ? 'local dev' : `waiting for Let's Encrypt cert for ${mailHost}`}.`
       : [
           `SSL_TYPE: manual`,
-          `SSL_CERT_PATH: /caddy-certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/mail.${domain}/mail.${domain}.crt`,
-          `SSL_KEY_PATH: /caddy-certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/mail.${domain}/mail.${domain}.key`,
+          `SSL_CERT_PATH: /caddy-certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${mailHost}/${mailHost}.crt`,
+          `SSL_KEY_PATH: /caddy-certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${mailHost}/${mailHost}.key`,
         ].join('\n      ');
+    // Mount the Caddy cert volume whenever it's a real domain (even before the
+    // cert exists) so a later reload finds it without re-rendering the compose.
     const sslVolume = isLocal
       ? ''
       : `      - dockcontrol_caddy_data:/caddy-certs:ro\n`;

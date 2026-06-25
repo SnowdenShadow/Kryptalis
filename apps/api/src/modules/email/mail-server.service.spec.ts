@@ -138,6 +138,9 @@ function makeService() {
   const proxy = {
     regenerate: vi.fn().mockResolvedValue(undefined),
     setMailReloadHook: vi.fn(),
+    // Default: cert NOT yet issued (degraded-start path). Tests that exercise
+    // the TLS path override this per-case.
+    certExists: vi.fn().mockResolvedValue(false),
   };
   const encryption = {
     encrypt: vi.fn((s: string) => `enc:${s}`),
@@ -440,9 +443,10 @@ describe('runDeploy', () => {
     expect(compose).toContain('ENABLE_OPENDKIM: 1');
   });
 
-  it('production domain: manual SSL against the Caddy cert volume (env override wins)', async () => {
+  it('production domain WITH issued cert: manual SSL against the Caddy cert volume', async () => {
     process.env.CADDY_DATA_VOLUME = 'mycustom_caddy_data';
-    const { service } = makeService();
+    const { service, proxy } = makeService();
+    proxy.certExists.mockResolvedValue(true); // cert already issued
 
     await (service as any).runDeploy('srv1', 'example.com', PORTS, 'PRIVKEY');
 
@@ -453,13 +457,25 @@ describe('runDeploy', () => {
     expect(compose).toContain('- dockcontrol_caddy_data:/caddy-certs:ro');
   });
 
+  it('production domain WITHOUT a cert yet: starts WITHOUT TLS (no crash-loop), still mounts the cert volume', async () => {
+    const { service, proxy } = makeService();
+    proxy.certExists.mockResolvedValue(false); // cert not issued yet
+
+    await (service as any).runDeploy('srv1', 'example.com', PORTS, 'PRIVKEY');
+
+    const compose = vfs.__files.get(`${DIR}/docker-compose.yml`)!;
+    expect(compose).not.toContain('SSL_TYPE: manual'); // degraded start, no crash
+    expect(compose).toContain("waiting for Let's Encrypt cert for mail.example.com");
+    // Volume is still mounted so a later reload/redeploy finds the cert.
+    expect(compose).toContain('- dockcontrol_caddy_data:/caddy-certs:ro');
+  });
+
   it('local dev domain (.test): TLS left unconfigured, no caddy volume', async () => {
     const { service } = makeService();
 
     await (service as any).runDeploy('srv1', 'demo.test', PORTS, 'PRIVKEY');
 
     const compose = vfs.__files.get(`${DIR}/docker-compose.yml`)!;
-    expect(compose).toContain('SSL disabled in local dev');
     expect(compose).not.toContain('SSL_TYPE');
     expect(compose).not.toContain('caddy-certs');
   });
@@ -957,5 +973,39 @@ describe('antispam config', () => {
     prisma.domain.findUnique.mockResolvedValue(DOMAIN);
     mockAssert.mockRejectedValueOnce(new Error('forbidden'));
     await expect(service.setAntispam('u1', 'dom1', { preset: 'maximum' })).rejects.toThrow();
+  });
+});
+
+describe('reloadMailServer — TLS bootstrap', () => {
+  const DIR = `${MAIL_DIR}/srv1`;
+
+  it('redeploys with TLS when the cert appears and the compose had no SSL_TYPE', async () => {
+    const { service, prisma, proxy } = makeService();
+    prisma.domain.findUnique.mockResolvedValue(DOMAIN);
+    prisma.mailServer.findUnique.mockResolvedValue({
+      id: 'srv1', domainId: 'dom1', smtpPort: 25, submissionPort: 587, smtpsPort: 465,
+      imapPort: 143, imapsPort: 993, dkimPrivateKey: null,
+    });
+    // Existing compose was generated WITHOUT TLS (degraded start).
+    vfs.__files.set(`${DIR}/docker-compose.yml`, 'services:\n  mailserver:\n    # no TLS yet');
+    proxy.certExists.mockResolvedValue(true); // cert now present
+    const runSpy = vi.spyOn(service as any, 'runDeploy').mockResolvedValue(undefined);
+
+    await service.reloadMailServer('dom1');
+    expect(runSpy).toHaveBeenCalledWith('srv1', 'example.com', expect.objectContaining({ imaps: 993 }), '');
+  });
+
+  it('just reloads (no redeploy) when TLS is already configured', async () => {
+    const { service, prisma, proxy } = makeService();
+    prisma.domain.findUnique.mockResolvedValue(DOMAIN);
+    prisma.mailServer.findUnique.mockResolvedValue({ id: 'srv1', domainId: 'dom1' });
+    vfs.__files.set(`${DIR}/docker-compose.yml`, 'services:\n  mailserver:\n    environment:\n      SSL_TYPE: manual');
+    proxy.certExists.mockResolvedValue(true);
+    const runSpy = vi.spyOn(service as any, 'runDeploy').mockResolvedValue(undefined);
+
+    await service.reloadMailServer('dom1');
+    expect(runSpy).not.toHaveBeenCalled();
+    // falls through to postfix/doveadm reload
+    expect(findExec((c) => c.args.includes('postfix'))).toBeTruthy();
   });
 });
