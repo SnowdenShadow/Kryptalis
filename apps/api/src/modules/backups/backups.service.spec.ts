@@ -363,16 +363,16 @@ describe('per-project S3 storage', () => {
     expect(encryption.decrypt).toHaveBeenCalledWith('v1.enc(SK)');
   });
 
-  it('s3Config falls back to GLOBAL when the project has no config', async () => {
-    const { service, prisma, systemConfig } = makeService();
+  it('s3Config returns an EMPTY (unusable) config when the project has none — no global fallback', async () => {
+    const { service, prisma } = makeService();
     prisma.projectBackupStorage.findUnique.mockResolvedValue(null);
-    systemConfig.get.mockImplementation((k: string) => ({
-      s3_endpoint: 'https://global', s3_bucket: 'global-bucket',
-      s3_access_key: 'GAK', s3_secret_key: 'GSK', s3_region: 'auto',
-    } as any)[k]);
 
     const cfg = await (service as any).s3Config('p1');
-    expect(cfg.bucket).toBe('global-bucket');
+    expect(cfg.bucket).toBe('');
+    expect(cfg.endpoint).toBe('');
+    // Whole-server scope (no projectId) is likewise empty → remote unavailable.
+    const serverCfg = await (service as any).s3Config(null);
+    expect(serverCfg.bucket).toBe('');
   });
 
   it('setProjectStorage encrypts the secret (never stores plaintext) + upserts', async () => {

@@ -597,7 +597,7 @@ export default function BackupsPage() {
                 )}
               </p>
             ) : (
-              !s3Configured && <p className="text-xs text-muted-foreground">{t('backups.s3Hint')}</p>
+              <p className="text-xs text-muted-foreground">{t('backups.s3Hint')}</p>
             )}
           </div>
 

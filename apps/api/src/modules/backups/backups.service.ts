@@ -140,9 +140,9 @@ interface BackupManifest {
  *     pair (GCM's fatal failure mode).
  *
  * Remote (S3-compatible) storage:
- *   - Configured via SystemSettings s3_endpoint / s3_bucket / s3_region /
- *     s3_access_key / s3_secret_key (Admin → System Config; secret key is
- *     encrypted at rest). Env fallbacks S3_* for headless installs.
+ *   - Configured PER PROJECT (ProjectBackupStorage; secret key encrypted at
+ *     rest). Each project brings its own S3/R2/B2 bucket — there is no global
+ *     platform-wide bucket. Whole-server backups can only be stored locally.
  *   - After the local dump → (optional) encryption → sha256 flow, dumps for
  *     S3/R2/B2 targets are uploaded under `dockcontrol-backups/<backupId>/
  *     <filename>` and the local file is deleted. The object key is also
@@ -461,17 +461,6 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
   // ── remote (S3-compatible) storage ─────────────────────────────────
 
-  /** Global (admin) S3 config from SystemSettings — the platform-wide fallback. */
-  private globalS3Config(): S3BackupConfig {
-    return {
-      endpoint: this.systemConfig.get<string>('s3_endpoint', 'S3_ENDPOINT'),
-      bucket: this.systemConfig.get<string>('s3_bucket', 'S3_BUCKET'),
-      region: this.systemConfig.get<string>('s3_region', 'S3_REGION', 'auto'),
-      accessKey: this.systemConfig.get<string>('s3_access_key', 'S3_ACCESS_KEY'),
-      secretKey: this.systemConfig.get<string>('s3_secret_key', 'S3_SECRET_KEY'),
-    };
-  }
-
   /** A project's OWN S3 config (secret decrypted), or null when unconfigured. */
   private async projectS3Config(projectId: string): Promise<S3BackupConfig | null> {
     const row = await this.prisma.projectBackupStorage.findUnique({ where: { projectId } });
@@ -486,22 +475,23 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Resolve the S3 config for an operation: the PROJECT's own config when it has
-   * a complete one, else the global admin config. Server-wide backups (no
-   * projectId) always use the global config.
+   * Resolve the S3 config for an operation. Remote storage is PER PROJECT only —
+   * there is no platform-wide/global bucket. A project with no own config (or a
+   * whole-server backup with no projectId) resolves to an empty config, which
+   * s3ClientOrThrow rejects with a clear message.
    */
   private async s3Config(projectId?: string | null): Promise<S3BackupConfig> {
     if (projectId) {
       const own = await this.projectS3Config(projectId);
-      if (own && missingS3ConfigKeys(own).length === 0) return own;
+      if (own) return own;
     }
-    return this.globalS3Config();
+    return { endpoint: '', bucket: '', region: 'auto', accessKey: '', secretKey: '' };
   }
 
   /**
    * Build a short-lived S3 client for the given scope. Built per operation (not
    * cached) so config edits apply immediately; callers must destroy() it when
-   * done. Throws a clear 400 when no config (project or global) is usable.
+   * done. Throws a clear 400 when the project's storage isn't configured.
    */
   private async s3ClientOrThrow(
     projectId?: string | null,
@@ -512,7 +502,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException(
         projectId
           ? `Remote backup storage isn't configured for this project — set its S3/R2/B2 bucket in the project's backup storage settings (missing: ${missing.join(', ')}).`
-          : `S3-compatible storage is not configured — missing setting(s): ${missing.join(', ')}. Set them in Admin → System Config (Backups / S3 storage).`,
+          : 'Remote backups require a project with its own S3/R2/B2 storage configured. Whole-server backups can only be stored locally.',
       );
     }
     return { ...this.s3ClientFromConfig(cfg), config: cfg };
@@ -1383,14 +1373,13 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
    * The dashboard uses this to grey out S3/R2/B2 in the create dialog.
    */
   async getTargets(userId: string, projectId?: string) {
-    // s3Configured reflects what's usable for THIS scope: the project's own
-    // bucket if set, else the global admin config. Lets the UI enable remote
-    // targets per selected project.
+    // Remote storage is PER PROJECT only — there is no global bucket. Remote
+    // targets are usable only when the SELECTED project has its own complete
+    // config. Whole-server backups (no projectId) are always LOCAL-only.
     //
     // Access: when a projectId is given the caller must be a member (DEVELOPER+)
     // of it — otherwise any authenticated user could probe whether an arbitrary
-    // project has remote storage configured. The global (no-project) branch
-    // exposes only the platform-wide admin config flag, which is not sensitive.
+    // project has remote storage configured.
     let projectOwn: S3BackupConfig | null = null;
     if (projectId) {
       await assertProjectAccess(this.prisma, userId, projectId, 'DEVELOPER');
@@ -1404,11 +1393,10 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       }
     }
     const projectConfigured = !!projectOwn && missingS3ConfigKeys(projectOwn).length === 0;
-    // Usable = the project's own complete config OR the global admin fallback.
-    const s3Configured = projectConfigured || missingS3ConfigKeys(this.globalS3Config()).length === 0;
     return {
       targets: ['LOCAL', ...REMOTE_TARGETS],
-      s3Configured,
+      // Remote usable only via the project's own bucket (no global fallback).
+      s3Configured: projectConfigured,
       projectConfigured,
     };
   }
