@@ -1031,6 +1031,19 @@ describe('credential management', () => {
     expect(upd.data.password).toBe(`enc(${res.password})`);
   });
 
+  it('resetPassword (MySQL): authenticates as root + keeps root password in lockstep, pw OFF argv', async () => {
+    const { service, prisma } = makeService();
+    wireLocal(prisma, pgRow({ type: 'MYSQL', username: 'shop' }));
+    const res = await service.resetPassword('u1', 'db1', { password: 'New_pw_123' });
+    const mysql = spawnCalls.find((c) => c._args.includes('mysql'));
+    expect(mysql._args).toContain('root');                 // -u root
+    expect(mysql._args).toContain('--env-file');           // MYSQL_PWD via file
+    expect(mysql._args.join(' ')).not.toContain(res.password); // never on argv
+    const sql = mysql._stdin.join('');
+    expect(sql).toContain("ALTER USER 'shop'@'%' IDENTIFIED BY 'New_pw_123'");
+    expect(sql).toContain("'root'@'localhost' IDENTIFIED BY 'New_pw_123'"); // root kept in sync
+  });
+
   it('resetPassword: honours a user-supplied password', async () => {
     const { service, prisma } = makeService();
     wireLocal(prisma, pgRow());
@@ -1082,14 +1095,32 @@ describe('credential management', () => {
     expect(res.redeployedApp).toBe(true);
   });
 
-  it('changeUsername: validates + renames + persists', async () => {
+  it('changeUsername (PG): renames via a TEMP superuser (a role cannot rename itself) + persists', async () => {
     const { service, prisma } = makeService();
     wireLocal(prisma, pgRow());
     const res = await service.changeUsername('u1', 'db1', { username: 'app_user' });
     expect(res.username).toBe('app_user');
-    const psql = spawnCalls.find((c) => c._args.includes('psql'));
-    expect(psql._stdin.join('')).toContain('ALTER USER "mydb" RENAME TO "app_user"');
+
+    const allSql = spawnCalls.map((c) => c._stdin.join('')).join('\n');
+    // Temp superuser created, the rename runs from a DIFFERENT (temp) session,
+    // then the temp role is dropped.
+    expect(allSql).toMatch(/CREATE ROLE "dockctl_rename_[0-9a-f]+" WITH SUPERUSER LOGIN;/);
+    expect(allSql).toContain('ALTER USER "mydb" RENAME TO "app_user";');
+    expect(allSql).toMatch(/DROP ROLE IF EXISTS "dockctl_rename_[0-9a-f]+";/);
+    // The rename was NOT executed from the session of the user being renamed.
+    const renameCall = spawnCalls.find((c) => c._stdin.join('').includes('RENAME TO'));
+    expect(renameCall._args.join(' ')).not.toContain('-U mydb');
     expect(prisma.database.update).toHaveBeenCalledWith({ where: { id: 'db1' }, data: { username: 'app_user' } });
+  });
+
+  it('changeUsername (MySQL): renames as root', async () => {
+    const { service, prisma } = makeService();
+    wireLocal(prisma, pgRow({ type: 'MYSQL', username: 'shop' }));
+    const res = await service.changeUsername('u1', 'db1', { username: 'shop2' });
+    expect(res.username).toBe('shop2');
+    const mysql = spawnCalls.find((c) => c._args.includes('mysql'));
+    expect(mysql._args).toContain('root'); // -u root
+    expect(mysql._stdin.join('')).toContain("RENAME USER 'shop'@'%' TO 'shop2'@'%'");
   });
 
   it('restart: refuses auto-imported', async () => {

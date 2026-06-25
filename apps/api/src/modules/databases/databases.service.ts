@@ -541,34 +541,32 @@ export class DatabasesService {
   }
 
   /**
-   * Run an admin SQL statement inside the DB container WITHOUT putting the
-   * password on the host argv (a `ps` leak). The SQL goes in on STDIN; for
-   * MySQL/MariaDB the connection password is passed via a 0600 --env-file
-   * (MYSQL_PWD), never `-p<pass>`.
+   * Run SQL in a Postgres container as a SPECIFIC role over the unix socket.
+   * The official postgres image uses `trust` auth for local socket connections,
+   * so no password is needed — and the password never touches the argv. SQL on
+   * stdin; ON_ERROR_STOP=1 → non-zero exit on any SQL error.
    */
-  private async execSqlAdmin(
-    container: string,
-    db: { type: string; username: string; name: string; password: string },
-    sql: string,
-  ): Promise<void> {
-    const type = db.type.toUpperCase();
-    if (type === 'POSTGRESQL') {
-      // psql reads the script from stdin; -v ON_ERROR_STOP=1 → non-zero exit on
-      // any SQL error so the caller knows it failed.
-      await this.execWithStdin(
-        'docker',
-        ['exec', '-i', container, 'psql', '-v', 'ON_ERROR_STOP=1', '-U', db.username, '-d', db.name],
-        sql,
-      );
-      return;
-    }
-    // MySQL / MariaDB — MYSQL_PWD via env-file (off the argv), SQL on stdin.
+  private async pgExec(container: string, asRole: string, dbName: string, sql: string): Promise<void> {
+    await this.execWithStdin(
+      'docker',
+      ['exec', '-i', container, 'psql', '-v', 'ON_ERROR_STOP=1', '-U', asRole, '-d', dbName],
+      sql,
+    );
+  }
+
+  /**
+   * Run admin SQL in a MySQL/MariaDB container AS ROOT. We keep root's password
+   * in sync with the stored app password (see resetPassword), so the current
+   * stored password authenticates root. Password via a 0600 --env-file
+   * (MYSQL_PWD), never `-p<pass>` on the argv (a `ps` leak).
+   */
+  private async mysqlRootExec(container: string, rootPw: string, sql: string): Promise<void> {
     const envFile = path.join(os.tmpdir(), `dockcontrol-dbadmin-${randomBytes(8).toString('hex')}.env`);
-    fs.writeFileSync(envFile, `MYSQL_PWD=${this.dbPassword(db)}\n`, { mode: 0o600 });
+    fs.writeFileSync(envFile, `MYSQL_PWD=${rootPw}\n`, { mode: 0o600 });
     try {
       await this.execWithStdin(
         'docker',
-        ['exec', '-i', '--env-file', envFile, container, 'mysql', '-u', db.username],
+        ['exec', '-i', '--env-file', envFile, container, 'mysql', '-u', 'root'],
         sql,
       );
     } finally {
@@ -605,15 +603,24 @@ export class DatabasesService {
   async resetPassword(userId: string, id: string, dto: { password?: string }): Promise<{ password: string; redeployedApp: boolean | null }> {
     const { db, container } = await this.assertManageableSqlDb(userId, id);
     const newPw = dto.password?.trim() || this.generatePassword();
-
-    const type = db.type.toUpperCase();
     // newPw is charset-restricted by the DTO (no quotes) → safe to interpolate
     // into the single-quoted SQL literal.
-    const sql =
-      type === 'POSTGRESQL'
-        ? `ALTER USER "${db.username}" WITH PASSWORD '${newPw}';`
-        : `ALTER USER '${db.username}'@'%' IDENTIFIED BY '${newPw}'; FLUSH PRIVILEGES;`;
-    await this.execSqlAdmin(container, db, sql);
+    const type = db.type.toUpperCase();
+    if (type === 'POSTGRESQL') {
+      // Changing your OWN password is allowed — connect as the user itself over
+      // the trust-auth unix socket (no password on the argv).
+      await this.pgExec(container, db.username, db.name, `ALTER USER "${db.username}" WITH PASSWORD '${newPw}';`);
+    } else {
+      // MySQL/MariaDB: authenticate as root with the CURRENT stored password
+      // (root's password is kept == the app password, seeded equal at create),
+      // and change the app user AND root in lockstep so the next admin op still
+      // authenticates. IF EXISTS guards a root@'%' that may not exist.
+      await this.mysqlRootExec(container, this.dbPassword(db),
+        `ALTER USER '${db.username}'@'%' IDENTIFIED BY '${newPw}'; ` +
+        `ALTER USER IF EXISTS 'root'@'%' IDENTIFIED BY '${newPw}'; ` +
+        `ALTER USER 'root'@'localhost' IDENTIFIED BY '${newPw}'; FLUSH PRIVILEGES;`,
+      );
+    }
 
     await this.prisma.database.update({
       where: { id },
@@ -633,16 +640,42 @@ export class DatabasesService {
     }
     const type = db.type.toUpperCase();
     // newUser is identifier-validated by the DTO regex.
-    const sql =
-      type === 'POSTGRESQL'
-        ? `ALTER USER "${db.username}" RENAME TO "${newUser}";`
-        : `RENAME USER '${db.username}'@'%' TO '${newUser}'@'%'; FLUSH PRIVILEGES;`;
-    await this.execSqlAdmin(container, db, sql);
+    if (type === 'POSTGRESQL') {
+      await this.pgRenameUser(container, db.name, db.username, newUser);
+    } else {
+      // MySQL/MariaDB rename requires admin privileges → run as root.
+      await this.mysqlRootExec(container, this.dbPassword(db),
+        `RENAME USER '${db.username}'@'%' TO '${newUser}'@'%'; FLUSH PRIVILEGES;`,
+      );
+    }
 
     await this.prisma.database.update({ where: { id }, data: { username: newUser } });
 
     const redeployedApp = await this.refreshLinkedApp(userId, id);
     return { username: newUser, redeployedApp };
+  }
+
+  /**
+   * Rename a Postgres role. A role CANNOT rename itself ("session user cannot
+   * be renamed"), and the image creates no separate `postgres` superuser (the
+   * app user IS the bootstrap superuser). So: create a TEMP superuser, run the
+   * rename from its session, then drop it — connecting as whichever of the
+   * (new / old) role exists afterwards. All over the trust-auth socket.
+   */
+  private async pgRenameUser(container: string, dbName: string, oldUser: string, newUser: string): Promise<void> {
+    const tmp = `dockctl_rename_${randomBytes(4).toString('hex')}`;
+    // Create the temp admin as the current (superuser) app role.
+    await this.pgExec(container, oldUser, dbName, `CREATE ROLE "${tmp}" WITH SUPERUSER LOGIN;`);
+    try {
+      await this.pgExec(container, tmp, dbName, `ALTER USER "${oldUser}" RENAME TO "${newUser}";`);
+    } finally {
+      // Cleanup: after success the role is newUser; after failure it's oldUser.
+      // A session can't drop its own role, so connect as the renamed/original
+      // user (not the temp role) to drop the temp. Best-effort.
+      await this.pgExec(container, newUser, dbName, `DROP ROLE IF EXISTS "${tmp}";`).catch(() =>
+        this.pgExec(container, oldUser, dbName, `DROP ROLE IF EXISTS "${tmp}";`).catch(() => {}),
+      );
+    }
   }
 
   /** Restart the database container (standalone, local). */
