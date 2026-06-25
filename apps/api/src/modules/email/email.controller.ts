@@ -123,6 +123,12 @@ export class EmailController {
     return this.mailServer.stop(userId, domainId);
   }
 
+  @Post('server/:domainId/webmail')
+  @ApiOperation({ summary: 'Install (1-click) a Roundcube webmail preconfigured for this domain' })
+  deployWebmail(@CurrentUser('id') userId: string, @Param('domainId') domainId: string) {
+    return this.mailServer.deployWebmail(userId, domainId);
+  }
+
   @Delete('server/:domainId')
   @ApiOperation({ summary: 'Remove the mail server (containers + data)' })
   removeMailServer(@CurrentUser('id') userId: string, @Param('domainId') domainId: string) {

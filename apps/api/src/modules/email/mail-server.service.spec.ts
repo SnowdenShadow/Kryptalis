@@ -143,8 +143,11 @@ function makeService() {
     encrypt: vi.fn((s: string) => `enc:${s}`),
     decrypt: vi.fn((s: string) => (s.startsWith('enc:') ? s.slice(4) : s)),
   };
-  const service = new MailServerService(prisma as any, proxy as any, encryption as any);
-  return { service, prisma, proxy, encryption };
+  const marketplace = {
+    install: vi.fn().mockResolvedValue({ id: 'webmail-app-1' }),
+  };
+  const service = new MailServerService(prisma as any, proxy as any, encryption as any, marketplace as any);
+  return { service, prisma, proxy, encryption, marketplace };
 }
 
 const DOMAIN = { id: 'dom1', domain: 'example.com', projectId: 'p1', application: null };
@@ -829,5 +832,51 @@ describe('kickMailboxSessions', () => {
     prisma.domain.findUnique.mockResolvedValue(DOMAIN);
     handlers.push(() => new Error('container down'));
     await expect(service.kickMailboxSessions('dom1', 'a@b.co')).resolves.toBeUndefined();
+  });
+});
+
+describe('deployWebmail (1-click Roundcube)', () => {
+  function setup() {
+    const ctx = makeService();
+    ctx.prisma.domain.findUnique.mockResolvedValue(DOMAIN); // assertDomainAccess
+    ctx.prisma.mailServer.findUnique.mockResolvedValue({
+      id: 'ms1', domainId: 'dom1', imapsPort: 993, submissionPort: 587,
+    });
+    return ctx;
+  }
+
+  it('installs Roundcube preconfigured for THIS mail server', async () => {
+    const { service, prisma, marketplace } = setup();
+    prisma.application.findFirst.mockResolvedValue(null); // none yet
+
+    const res = await service.deployWebmail('u1', 'dom1');
+    expect(res.alreadyInstalled).toBe(false);
+    expect(res.applicationId).toBe('webmail-app-1');
+
+    const [data, userId] = marketplace.install.mock.calls[0];
+    expect(userId).toBe('u1');
+    expect(data.appSlug).toBe('roundcube');
+    expect(data.projectId).toBe('p1');
+    expect(data.domainId).toBe('dom1');
+    // Env points at mail.<domain> with the server's IMAPS/Submission ports.
+    expect(data.envVars.ROUNDCUBEMAIL_DEFAULT_HOST).toBe('ssl://mail.example.com');
+    expect(data.envVars.ROUNDCUBEMAIL_DEFAULT_PORT).toBe('993');
+    expect(data.envVars.ROUNDCUBEMAIL_SMTP_SERVER).toBe('tls://mail.example.com');
+    expect(data.envVars.ROUNDCUBEMAIL_SMTP_PORT).toBe('587');
+  });
+
+  it('is idempotent — reuses an existing linked webmail (no second install)', async () => {
+    const { service, prisma, marketplace } = setup();
+    prisma.application.findFirst.mockResolvedValue({ id: 'existing-wm' });
+
+    const res = await service.deployWebmail('u1', 'dom1');
+    expect(res).toEqual({ applicationId: 'existing-wm', alreadyInstalled: true });
+    expect(marketplace.install).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the mail server is not deployed yet', async () => {
+    const { service, prisma } = setup();
+    prisma.mailServer.findUnique.mockResolvedValue(null);
+    await expect(service.deployWebmail('u1', 'dom1')).rejects.toThrow(/mail server first/);
   });
 });

@@ -16,6 +16,7 @@ import { EncryptionService } from '../../common/crypto/encryption.service';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
+import { MarketplaceService } from '../marketplace/marketplace.service';
 import { DATA_DIR, MAIL_DIR } from '../../common/paths';
 
 const execFileAsync = promisify(execFile);
@@ -39,6 +40,7 @@ export class MailServerService implements OnApplicationBootstrap {
     private prisma: PrismaService,
     private proxy: ReverseProxyService,
     private encryption: EncryptionService,
+    private marketplace: MarketplaceService,
   ) {
     if (!fs.existsSync(MAIL_DIR)) fs.mkdirSync(MAIL_DIR, { recursive: true });
   }
@@ -221,6 +223,55 @@ export class MailServerService implements OnApplicationBootstrap {
     }
 
     return { ...server, status: liveStatus };
+  }
+
+  // ── webmail (Roundcube) 1-click ───────────────────────────────────
+
+  /**
+   * Deploy (or re-point) a Roundcube webmail for this domain, preconfigured to
+   * talk to THIS mail server over IMAPS/Submission. Idempotent: if a webmail app
+   * is already linked to the domain we just return it (reconcileWebmails keeps
+   * its host/ports in sync). Otherwise we install Roundcube from the marketplace
+   * into the domain's project, attached to the domain, with the mail host/ports
+   * baked into its env.
+   */
+  async deployWebmail(userId: string, domainId: string): Promise<{ applicationId: string; alreadyInstalled: boolean }> {
+    const domain = await this.assertDomainAccess(userId, domainId, 'ADMIN');
+    const projectId = (domain as any).projectId || (domain as any).application?.projectId;
+    if (!projectId) {
+      throw new BadRequestException('This domain has no project — attach it to a project first.');
+    }
+    const mailServer = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    if (!mailServer) {
+      throw new BadRequestException('Deploy the mail server first, then install the webmail.');
+    }
+
+    // Idempotent: reuse an existing webmail linked to this domain.
+    const existing = await this.prisma.application.findFirst({
+      where: {
+        name: { in: ['Roundcube', 'SnappyMail', 'Rainloop'] },
+        domains: { some: { id: domainId } },
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      return { applicationId: existing.id, alreadyInstalled: true };
+    }
+
+    const mailHost = `mail.${(domain as any).domain}`;
+    // Roundcube reads these env keys (same ones reconcileWebmails keeps fresh).
+    const envVars: Record<string, string> = {
+      ROUNDCUBEMAIL_DEFAULT_HOST: `ssl://${mailHost}`,
+      ROUNDCUBEMAIL_DEFAULT_PORT: String(mailServer.imapsPort),
+      ROUNDCUBEMAIL_SMTP_SERVER: `tls://${mailHost}`,
+      ROUNDCUBEMAIL_SMTP_PORT: String(mailServer.submissionPort),
+    };
+    const result = await this.marketplace.install(
+      { appSlug: 'roundcube', projectId, domainId, envVars },
+      userId,
+    );
+    const applicationId = (result as any).id || (result as any).applicationId || (result as any).application?.id;
+    return { applicationId, alreadyInstalled: false };
   }
 
   // ── deploy ────────────────────────────────────────────────────────

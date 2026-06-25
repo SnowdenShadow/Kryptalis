@@ -22,7 +22,7 @@ import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
-type Tab = 'overview' | 'mailboxes' | 'aliases' | 'dns';
+type Tab = 'overview' | 'mailboxes' | 'aliases' | 'security' | 'dns' | 'webmail';
 type MailboxStatus = 'ACTIVE' | 'SUSPENDED' | 'DELETED';
 type ServerStatus = 'STOPPED' | 'DEPLOYING' | 'RUNNING' | 'ERROR';
 
@@ -99,6 +99,12 @@ export default function EmailDomainPage() {
   const [deleteAliasId, setDeleteAliasId] = useState<string | null>(null);
   const [showRemoveServer, setShowRemoveServer] = useState(false);
   const [copied, setCopied] = useState('');
+  // Edit-mailbox dialog (password / quota / forward / catch-all).
+  const [editMb, setEditMb] = useState<Mailbox | null>(null);
+  const [editForm, setEditForm] = useState({ password: '', quotaMb: 2048, forwardTo: '', catchAll: false });
+  const [editShowPw, setEditShowPw] = useState(false);
+  // Security tab: which log service to tail.
+  const [logService, setLogService] = useState<'all' | 'postfix' | 'dovecot' | 'rspamd' | 'fail2ban'>('rspamd');
 
   // ── queries ──────────────────────────────────────────────────────
   const { data: domain } = useQuery<DomainDetail>({
@@ -141,6 +147,26 @@ export default function EmailDomainPage() {
     enabled: !!domainId && activeTab === 'dns',
     staleTime: 30_000,
   });
+
+  // Security tab — fail2ban bans + log tail (only when the tab is active).
+  const { data: bansData, refetch: refetchBans, isFetching: bansLoading } = useQuery<{ jails: { name: string; banned: string[] }[] }>({
+    queryKey: ['email-bans', domainId],
+    queryFn: () => api.get(`/email/server/${domainId}/bans`),
+    enabled: !!domainId && activeTab === 'security',
+  });
+  const { data: logsData, refetch: refetchLogs, isFetching: logsLoading } = useQuery<{ logs: string }>({
+    queryKey: ['email-logs', domainId, logService],
+    queryFn: () => api.get(`/email/server/${domainId}/logs?service=${logService}&lines=200`),
+    enabled: !!domainId && activeTab === 'security',
+  });
+
+  // Webmail status comes from the overview row (webmail: {id,port,status} | null).
+  const { data: overviewRows = [] } = useQuery<any[]>({
+    queryKey: ['emails-overview'],
+    queryFn: () => api.get('/email/overview'),
+    enabled: !!domainId,
+  });
+  const webmail = overviewRows.find((r) => r.id === domainId)?.webmail || null;
 
   // ── mutations ────────────────────────────────────────────────────
   const deployMail = useMutation({
@@ -191,6 +217,28 @@ export default function EmailDomainPage() {
     onSuccess: () => {
       toast.success(t('common.update'));
       qc.invalidateQueries({ queryKey: ['mailboxes-domain', domainId] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const updateMb = useMutation({
+    mutationFn: (body: any) => api.patch(`/email/mailboxes/${editMb!.id}`, body),
+    onSuccess: () => {
+      toast.success(t('emails.mailboxUpdated'));
+      qc.invalidateQueries({ queryKey: ['mailboxes-domain', domainId] });
+      setEditMb(null);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const unbanMut = useMutation({
+    mutationFn: (ip: string) => api.post(`/email/server/${domainId}/unban`, { ip }),
+    onSuccess: () => { toast.success(t('emails.unbanned')); refetchBans(); },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const deployWebmailMut = useMutation({
+    mutationFn: () => api.post<{ applicationId: string; alreadyInstalled: boolean }>(`/email/server/${domainId}/webmail`, {}),
+    onSuccess: (r) => {
+      toast.success(r.alreadyInstalled ? t('emails.webmailAlready') : t('emails.webmailInstalling'));
+      qc.invalidateQueries({ queryKey: ['emails-overview'] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -251,6 +299,26 @@ export default function EmailDomainPage() {
     setNewMb((s) => ({ ...s, password: out }));
     setShowPw(true);
   }
+  function randomPw() {
+    const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%';
+    let out = '';
+    for (let i = 0; i < 16; i++) out += chars[Math.floor(Math.random() * chars.length)];
+    return out;
+  }
+  function openEdit(mb: Mailbox) {
+    setEditMb(mb);
+    setEditForm({ password: '', quotaMb: mb.quotaMb, forwardTo: mb.forwardTo || '', catchAll: mb.catchAll });
+    setEditShowPw(false);
+  }
+  function saveEdit() {
+    const body: any = { quotaMb: editForm.quotaMb, catchAll: editForm.catchAll };
+    if (editForm.password.trim()) body.password = editForm.password.trim();
+    body.forwardTo = editForm.forwardTo.trim() || null;
+    updateMb.mutate(body);
+  }
+  const webmailUrl = webmail && webmail.port && webmail.status === 'RUNNING'
+    ? `http://${typeof window !== 'undefined' ? window.location.hostname : ''}:${webmail.port}`
+    : null;
 
   const status = dnsHints?.mailServer?.status;
   const statusColor =
@@ -269,7 +337,9 @@ export default function EmailDomainPage() {
     { key: 'overview', label: t('emails.tab.overview'), icon: ServerIcon },
     { key: 'mailboxes', label: t('emails.tab.mailboxes'), icon: Mail, badge: mailboxes.length },
     { key: 'aliases', label: t('emails.tab.aliases'), icon: AtSign, badge: aliases.length },
+    { key: 'security', label: t('emails.tab.security'), icon: Shield },
     { key: 'dns', label: t('emails.tab.dns'), icon: Globe },
+    { key: 'webmail', label: t('emails.tab.webmail'), icon: Inbox },
   ];
 
   if (!domain) {
@@ -527,6 +597,10 @@ export default function EmailDomainPage() {
                           </div>
                         </div>
                         <div className="flex gap-1 shrink-0">
+                          <Button size="icon" variant="ghost" title={t('emails.mailboxEdit')}
+                            onClick={() => openEdit(mb)}>
+                            <KeyRound size={13} />
+                          </Button>
                           {mb.status === 'ACTIVE' ? (
                             <Button size="icon" variant="ghost" title={t('emails.mailboxSuspend')}
                               onClick={() => statusMb.mutate({ id: mb.id, status: 'SUSPENDED' })}>
@@ -633,6 +707,136 @@ export default function EmailDomainPage() {
         </>
       )}
 
+      {/* ─── Security / Antispam ─────────────────────────────── */}
+      {activeTab === 'security' && (
+        <div className="space-y-3">
+          {status !== 'RUNNING' ? (
+            <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">
+              {t('emails.securityNeedsServer')}
+            </CardContent></Card>
+          ) : (
+            <>
+              {/* Antispam summary */}
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <ShieldCheck size={16} className="text-emerald-500" /> {t('emails.antispamTitle')}
+                  </CardTitle>
+                  <CardDescription>{t('emails.antispamDesc')}</CardDescription>
+                </CardHeader>
+                <CardContent className="flex flex-wrap gap-2">
+                  <Badge variant="success" className="gap-1"><Check size={11} /> rspamd</Badge>
+                  <Badge variant="success" className="gap-1"><Check size={11} /> fail2ban</Badge>
+                  <Badge variant="success" className="gap-1"><Check size={11} /> OpenDKIM</Badge>
+                  <Badge variant="outline" className="gap-1">SPF · DMARC</Badge>
+                </CardContent>
+              </Card>
+
+              {/* fail2ban bans */}
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <CardTitle className="text-base flex items-center gap-2">
+                        <Shield size={16} /> {t('emails.bansTitle')}
+                      </CardTitle>
+                      <CardDescription>{t('emails.bansDesc')}</CardDescription>
+                    </div>
+                    <Button size="sm" variant="outline" onClick={() => refetchBans()} disabled={bansLoading}>
+                      {bansLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                      {t('common.refresh')}
+                    </Button>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {(() => {
+                    const ips = (bansData?.jails || []).flatMap((j) => j.banned.map((ip) => ({ jail: j.name, ip })));
+                    if (ips.length === 0) {
+                      return <p className="text-sm text-emerald-500 flex items-center gap-1.5"><Check size={14} /> {t('emails.bansNone')}</p>;
+                    }
+                    return (
+                      <div className="space-y-1.5">
+                        {ips.map(({ jail, ip }) => (
+                          <div key={`${jail}-${ip}`} className="flex items-center justify-between rounded-md border border-border p-2 text-xs">
+                            <span className="font-mono">{ip} <span className="text-muted-foreground">· {jail}</span></span>
+                            <Button size="sm" variant="ghost" onClick={() => unbanMut.mutate(ip)} disabled={unbanMut.isPending}>
+                              {t('emails.unban')}
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </CardContent>
+              </Card>
+
+              {/* Logs */}
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <CardTitle className="text-base flex items-center gap-2">
+                      <Inbox size={16} /> {t('emails.logsTitle')}
+                    </CardTitle>
+                    <div className="flex items-center gap-2">
+                      <div className="w-36">
+                        <Select value={logService} onChange={(e) => setLogService(e.target.value as any)}>
+                          <option value="rspamd">rspamd</option>
+                          <option value="postfix">postfix</option>
+                          <option value="dovecot">dovecot</option>
+                          <option value="fail2ban">fail2ban</option>
+                          <option value="all">all</option>
+                        </Select>
+                      </div>
+                      <Button size="sm" variant="outline" onClick={() => refetchLogs()} disabled={logsLoading}>
+                        {logsLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                      </Button>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <pre className="font-mono text-[11px] bg-muted/30 rounded p-3 overflow-x-auto max-h-96 whitespace-pre-wrap break-all">
+                    {logsData?.logs?.trim() || t('emails.logsEmpty')}
+                  </pre>
+                </CardContent>
+              </Card>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ─── Webmail ─────────────────────────────────────────── */}
+      {activeTab === 'webmail' && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Inbox size={16} /> {t('emails.webmailTitle')}
+            </CardTitle>
+            <CardDescription>{t('emails.webmailDesc')}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {status !== 'RUNNING' ? (
+              <p className="text-sm text-muted-foreground">{t('emails.webmailNeedsServer')}</p>
+            ) : webmailUrl ? (
+              <div className="flex items-center gap-2 flex-wrap">
+                <Badge variant="success" className="gap-1"><Check size={11} /> Roundcube</Badge>
+                <a href={webmailUrl} target="_blank" rel="noreferrer">
+                  <Button size="sm"><ExternalLink size={13} /> {t('emails.cardOpenWebmail')}</Button>
+                </a>
+              </div>
+            ) : webmail ? (
+              <p className="text-sm text-muted-foreground flex items-center gap-1.5">
+                <Loader2 size={13} className="animate-spin" /> {t('emails.webmailDeploying')}
+              </p>
+            ) : (
+              <Button onClick={() => deployWebmailMut.mutate()} disabled={deployWebmailMut.isPending}>
+                {deployWebmailMut.isPending ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+                {t('emails.webmailInstall')}
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {/* ─── DNS ─────────────────────────────────────────────── */}
       {activeTab === 'dns' && dnsHints && (
         <div className="space-y-3">
@@ -670,6 +874,30 @@ export default function EmailDomainPage() {
             <CardContent className="space-y-2">
               {!dnsHealth && healthLoading && (
                 <div className="py-6 flex justify-center"><Loader2 size={20} className="animate-spin text-muted-foreground" /></div>
+              )}
+              {/* PTR / rDNS — highlighted: it's the #1 deliverability blocker and
+                  can ONLY be set at the VPS provider (not by DockControl). */}
+              {dnsHealth && dnsHealth.checks.ptr.status !== 'OK' && (
+                <div className="rounded-lg border border-orange-500/40 bg-orange-500/10 p-3 space-y-2">
+                  <p className="text-sm font-semibold text-orange-300 flex items-center gap-1.5">
+                    <AlertTriangle size={14} /> {t('emails.ptrTitle')}
+                  </p>
+                  <p className="text-xs text-muted-foreground">{t('emails.ptrExplain')}</p>
+                  {dnsHealth.serverIp && (
+                    <div className="grid grid-cols-[64px_1fr] gap-x-3 gap-y-1 text-xs items-center">
+                      <span className="text-muted-foreground">IP</span>
+                      <button className="font-mono text-left hover:text-primary inline-flex items-center gap-1.5"
+                        onClick={() => copyText(dnsHealth.serverIp!, 'ptr-ip')}>
+                        {dnsHealth.serverIp} {copied === 'ptr-ip' ? <Check size={11} className="text-emerald-500" /> : <Copy size={11} />}
+                      </button>
+                      <span className="text-muted-foreground">{t('emails.ptrValue')}</span>
+                      <button className="font-mono text-left hover:text-primary inline-flex items-center gap-1.5"
+                        onClick={() => copyText(`mail.${dnsHealth.domain}`, 'ptr-val')}>
+                        mail.{dnsHealth.domain} {copied === 'ptr-val' ? <Check size={11} className="text-emerald-500" /> : <Copy size={11} />}
+                      </button>
+                    </div>
+                  )}
+                </div>
               )}
               {dnsHealth && (
                 <>
@@ -998,6 +1226,65 @@ export default function EmailDomainPage() {
           >
             {sendTestEmail.isPending && <Loader2 size={12} className="animate-spin" />}
             <Send size={12} /> Send
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ─── Edit mailbox (password / quota / forward / catch-all) ─── */}
+      <Dialog open={!!editMb} onClose={() => setEditMb(null)}>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <KeyRound size={18} /> {t('emails.mailboxEdit')}
+          </DialogTitle>
+          <DialogDescription className="font-mono">{editMb?.address}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 py-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="edit-pw">{t('emails.mailboxNewPassword')}</Label>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <Input
+                  id="edit-pw"
+                  type={editShowPw ? 'text' : 'password'}
+                  value={editForm.password}
+                  onChange={(e) => setEditForm((s) => ({ ...s, password: e.target.value }))}
+                  placeholder={t('emails.mailboxPwUnchanged')}
+                  className="font-mono pr-9"
+                />
+                <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground"
+                  onClick={() => setEditShowPw((v) => !v)}>
+                  {editShowPw ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
+              <Button type="button" variant="outline" className="shrink-0"
+                onClick={() => { setEditForm((s) => ({ ...s, password: randomPw() })); setEditShowPw(true); }}>
+                {t('emails.generate')}
+              </Button>
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="edit-quota">{t('emails.mailboxQuota')} (MB)</Label>
+            <Input id="edit-quota" type="number" min={64} max={102400}
+              value={editForm.quotaMb}
+              onChange={(e) => setEditForm((s) => ({ ...s, quotaMb: parseInt(e.target.value, 10) || 0 }))} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="edit-fwd">{t('emails.mailboxForward')}</Label>
+            <Input id="edit-fwd" type="email" value={editForm.forwardTo}
+              onChange={(e) => setEditForm((s) => ({ ...s, forwardTo: e.target.value }))}
+              placeholder="alias@autre-domaine.com" />
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={editForm.catchAll}
+              onChange={(e) => setEditForm((s) => ({ ...s, catchAll: e.target.checked }))} />
+            {t('emails.mailboxCatchAll')}
+          </label>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setEditMb(null)}>{t('common.cancel')}</Button>
+          <Button onClick={saveEdit} disabled={updateMb.isPending}>
+            {updateMb.isPending && <Loader2 size={14} className="mr-1.5 animate-spin" />}
+            {t('common.save')}
           </Button>
         </DialogFooter>
       </Dialog>
