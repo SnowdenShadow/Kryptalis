@@ -1107,12 +1107,10 @@ export class ApplicationsService implements OnModuleInit {
    * Mirrors attachDatabase's env-merge, but the link already exists.
    */
   async refreshDatabaseEnv(userId: string, appId: string, databaseId: string): Promise<boolean> {
-    // Rebuild the in-network DB_* block from the live (post-change) row.
-    const db = await this.databases.findOne(userId, databaseId);
-    const dbEnv = this.databases.buildDbEnvVars({
-      name: db.name, type: db.type, username: db.username,
-      password: (db as any).password, autoImported: (db as any).autoImported, host: (db as any).host,
-    });
+    // Rebuild the in-network DB_* block from the live (post-change) row. Use the
+    // by-id builder which reads the RAW encrypted row (findOne returns a
+    // decrypted password → buildDbEnvVars would double-decrypt and corrupt it).
+    const dbEnv = await this.databases.buildDbEnvVarsById(databaseId);
     const current = this.env.decryptEnvVars(
       (await this.prisma.application.findUnique({ where: { id: appId }, select: { envVars: true } }))?.envVars,
     );

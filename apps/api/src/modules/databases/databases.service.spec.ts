@@ -283,6 +283,9 @@ describe('create', () => {
     expect(res.connectionString).toBe(
       `postgresql://app_db:${rawPass}@localhost:${data.port}/app-db`,
     );
+    // The RETURNED password must be the PLAINTEXT, never the AES-GCM envelope.
+    expect(res.password).toBe(rawPass);
+    expect(res.password).not.toMatch(/^enc\(/);
     await flushAsync();
   });
 
@@ -1108,5 +1111,29 @@ describe('credential management', () => {
     expect(info.username).toBe('mydb');
     expect(info.url).toContain('postgres');
     expect(info.inNetwork.host).toContain('dockcontrol-db-');
+  });
+
+  it('findOne returns the DECRYPTED password, never the v1. envelope', async () => {
+    const { service, prisma } = makeService();
+    // findOne uses an include (no select) → return the full row with the
+    // encrypted password as stored; assertDbAccess also reads it.
+    prisma.database.findUnique.mockResolvedValue(
+      pgRow({ password: 'enc(s3cret)', server: { host: 'localhost' } }),
+    );
+    const res: any = await service.findOne('u1', 'db1');
+    expect(res.password).toBe('s3cret');
+    expect(res.password).not.toMatch(/^enc\(/);
+  });
+
+  it('findAll returns the DECRYPTED password for every row', async () => {
+    const { service, prisma } = makeService();
+    mockListIds.mockResolvedValue(['p1']);
+    prisma.user.findUnique.mockResolvedValue({ role: 'USER' });
+    prisma.database.findMany.mockResolvedValue([
+      pgRow({ id: 'db1', password: 'enc(pw1)', server: { host: 'localhost' } }),
+    ]);
+    const res: any[] = await service.findAll('u1', {});
+    expect(res[0].password).toBe('pw1');
+    expect(res[0].password).not.toMatch(/^enc\(/);
   });
 });

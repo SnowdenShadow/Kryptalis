@@ -389,7 +389,9 @@ export class DatabasesService {
       });
     }
 
-    return { ...db, status: 'deploying', connectionString: this.getConnectionString(dto.type, username, password, hostPort, dto.name, this.connHost(server)) };
+    // Return the PLAINTEXT password (the local var) — `db.password` from the
+    // create is the AES-GCM envelope and must never reach the client.
+    return { ...db, password, status: 'deploying', connectionString: this.getConnectionString(dto.type, username, password, hostPort, dto.name, this.connHost(server)) };
   }
 
   // ── read ───────────────────────────────────────────────────────────
@@ -430,7 +432,10 @@ export class DatabasesService {
     return Promise.all(dbs.map(async (db) => {
       const status = await this.getContainerStatus(resolveDbContainer(db as any));
       const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name, this.connHost((db as any).server));
-      return { ...db, status, connectionString };
+      // Expose the DECRYPTED password to API consumers (the dashboard shows it,
+      // same as the connection string). The raw row stores it AES-GCM encrypted
+      // (`v1.…`) — never leak that envelope to the client.
+      return { ...db, password: this.dbPassword(db), status, connectionString };
     }));
   }
 
@@ -447,7 +452,9 @@ export class DatabasesService {
     if (!db) throw new NotFoundException('Database not found');
     const status = await this.getContainerStatus(resolveDbContainer(db as any));
     const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name, this.connHost((db as any).server));
-    return { ...db, status, connectionString };
+    // Decrypted password for the client (matches connectionString); the stored
+    // row keeps the AES-GCM envelope.
+    return { ...db, password: this.dbPassword(db), status, connectionString };
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────
@@ -1463,6 +1470,21 @@ export class DatabasesService {
       DB_PASSWORD: c.password,
       DATABASE_URL: c.url,
     };
+  }
+
+  /**
+   * Build the DB_* env block from a database id, reading the RAW (encrypted)
+   * row so the password is decrypted exactly once. Use this instead of passing
+   * a findOne() result (whose password is already decrypted) into
+   * buildDbEnvVars — that would double-decrypt and corrupt the value.
+   */
+  async buildDbEnvVarsById(dbId: string): Promise<Record<string, string>> {
+    const db = await this.prisma.database.findUnique({ where: { id: dbId } });
+    if (!db) throw new NotFoundException('Database not found');
+    return this.buildDbEnvVars({
+      name: db.name, type: db.type, username: db.username,
+      password: db.password, autoImported: (db as any).autoImported, host: db.host,
+    });
   }
 
   /** Laravel-style DB_CONNECTION value for the engine. */
