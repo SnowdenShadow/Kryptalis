@@ -111,6 +111,7 @@ export const translations: Record<string, Record<string, string>> = {
     // ── application detail (v2 — extra keys) ────────────────────────
     'apps.created2': 'Created {ago}',
     'apps.publicUrls': 'Public URLs',
+    'apps.domains': 'Domains', 'apps.newDomain': 'New domain', 'apps.detach': 'Detach', 'apps.detachDomain': 'Detach this domain', 'apps.noDomainYet': 'No domain attached yet.', 'apps.selectDomain': 'Select a domain…', 'apps.attach': 'Attach', 'apps.noFreeDomain': 'No unattached domain available.', 'apps.addOne': 'Add one',
     'apps.noUrlYet': 'No URL yet — start the app, then link a domain or open the port directly.',
     'apps.sslOk': 'SSL OK',
     'apps.sslPending': 'SSL pending',
@@ -1351,6 +1352,7 @@ export const translations: Record<string, Record<string, string>> = {
     // ── application detail (v2 — extra keys) ────────────────────────
     'apps.created2': 'Créé {ago}',
     'apps.publicUrls': 'URLs publiques',
+    'apps.domains': 'Domaines', 'apps.newDomain': 'Nouveau domaine', 'apps.detach': 'Détacher', 'apps.detachDomain': 'Détacher ce domaine', 'apps.noDomainYet': 'Aucun domaine attaché pour le moment.', 'apps.selectDomain': 'Choisir un domaine…', 'apps.attach': 'Attacher', 'apps.noFreeDomain': 'Aucun domaine disponible.', 'apps.addOne': 'En ajouter un',
     'apps.noUrlYet': "Aucune URL pour l'instant — démarre l'appli, puis lie un domaine ou ouvre le port directement.",
     'apps.sslOk': 'SSL OK',
     'apps.sslPending': 'SSL en cours',

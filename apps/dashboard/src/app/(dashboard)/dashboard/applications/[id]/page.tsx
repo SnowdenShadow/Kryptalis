@@ -280,8 +280,7 @@ export default function ApplicationDetailPage() {
   // Delete dialog
   const [showDelete, setShowDelete] = useState(false);
 
-  // Domain link
-  const [showLinkDomain, setShowLinkDomain] = useState(false);
+  // Domain attach picker (selected unlinked domain to attach to this app).
   const [selectedDomainId, setSelectedDomainId] = useState('');
 
   // Port edit
@@ -387,7 +386,6 @@ export default function ApplicationDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['application', id] });
       queryClient.invalidateQueries({ queryKey: ['domains'] });
       toast.success(t('toast.domainLinked'));
-      setShowLinkDomain(false);
       setSelectedDomainId('');
     },
     onError: (err: Error) => toast.error(err.message),
@@ -906,6 +904,71 @@ export default function ApplicationDetailPage() {
                       </div>
                     );
                   })()}
+                </div>
+
+                {/* Domains — attach / detach / change the domain(s) of this app. */}
+                <div className="rounded-lg border border-border p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                      <Globe size={12} className="inline mr-1" />
+                      {t('apps.domains')}
+                    </p>
+                    <Link href="/dashboard/domains" className="text-xs text-primary hover:underline inline-flex items-center gap-1">
+                      <Plus size={11} /> {t('apps.newDomain')}
+                    </Link>
+                  </div>
+
+                  {/* Attached domains, each detachable. */}
+                  {(app.domains && app.domains.length > 0) ? (
+                    <div className="space-y-1.5 mb-2">
+                      {app.domains.map((d) => (
+                        <div key={d.id} className="flex items-center justify-between gap-2 text-sm">
+                          <span className="font-mono truncate flex items-center gap-1.5">
+                            <Globe size={12} className="text-muted-foreground shrink-0" />
+                            {d.domain}
+                          </span>
+                          <button
+                            onClick={() => unlinkDomainMutation.mutate(d.id)}
+                            disabled={unlinkDomainMutation.isPending}
+                            className="text-xs text-muted-foreground hover:text-red-400 inline-flex items-center gap-1 shrink-0"
+                            title={t('apps.detachDomain')}
+                          >
+                            <Trash2 size={12} /> {t('apps.detach')}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground mb-2">{t('apps.noDomainYet')}</p>
+                  )}
+
+                  {/* Attach an existing (unlinked) domain. */}
+                  {unlinkedDomains.length > 0 ? (
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={selectedDomainId}
+                        onChange={(e) => setSelectedDomainId(e.target.value)}
+                        className="h-9 text-sm"
+                      >
+                        <option value="">{t('apps.selectDomain')}</option>
+                        {unlinkedDomains.map((d) => (
+                          <option key={d.id} value={d.id}>{d.domain}</option>
+                        ))}
+                      </Select>
+                      <Button
+                        size="sm"
+                        onClick={() => selectedDomainId && linkDomainMutation.mutate(selectedDomainId)}
+                        disabled={!selectedDomainId || linkDomainMutation.isPending}
+                      >
+                        {linkDomainMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : t('apps.attach')}
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">
+                      {t('apps.noFreeDomain')}{' '}
+                      <Link href="/dashboard/domains" className="text-primary hover:underline">{t('apps.addOne')}</Link>
+                    </p>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
