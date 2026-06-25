@@ -901,22 +901,25 @@ export default function DomainsPage() {
         </div>
       )}
 
-      {/* Search + project filter */}
+      {/* Search + project filter — search fills the row, filters sit on the
+          right. Wraps cleanly on narrow screens (no dead space). */}
       {domains.length > 0 && (
-        <div className="flex items-center gap-3 flex-wrap">
-          <div className="relative flex-1 max-w-md">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Search grows to fill all leftover width. */}
+          <div className="relative flex-1 min-w-[200px]">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-            <Input placeholder={t('domains.searchPlaceholder')} className="pl-9" value={search} onChange={e => setSearch(e.target.value)} />
+            <Input placeholder={t('domains.searchPlaceholder')} className="pl-9 h-10" value={search} onChange={e => setSearch(e.target.value)} />
           </div>
-          {projects.length > 0 && (
+          {/* Project filter — pills when few projects, a dropdown when many. */}
+          {projects.length > 0 && projects.length <= 4 ? (
             <div className="flex items-center gap-2 flex-wrap">
-              <Button size="sm" variant={filterProjectId === '' ? 'default' : 'outline'} onClick={() => setFilterProjectId('')}>
+              <Button size="default" variant={filterProjectId === '' ? 'default' : 'outline'} onClick={() => setFilterProjectId('')}>
                 {t('domains.filterAll')}
               </Button>
               {projects.map((p) => (
                 <Button
                   key={p.id}
-                  size="sm"
+                  size="default"
                   variant={filterProjectId === p.id ? 'default' : 'outline'}
                   onClick={() => setFilterProjectId(filterProjectId === p.id ? '' : p.id)}
                 >
@@ -924,6 +927,20 @@ export default function DomainsPage() {
                 </Button>
               ))}
             </div>
+          ) : projects.length > 0 ? (
+            <div className="w-52 shrink-0">
+              <Select value={filterProjectId} onChange={(e) => setFilterProjectId(e.target.value)}>
+                <option value="">{t('domains.filterAll')}</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </Select>
+            </div>
+          ) : null}
+          {(search || filterProjectId) && (
+            <Button variant="ghost" onClick={() => { setSearch(''); setFilterProjectId(''); }}>
+              {t('domains.filterClear')}
+            </Button>
           )}
         </div>
       )}
