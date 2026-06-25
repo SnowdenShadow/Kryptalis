@@ -464,8 +464,8 @@ export default function AdminPage() {
             const val = settings?.[s.key];
             return (
               <Card key={s.key}>
-                <CardContent className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 p-4">
-                  <div className="flex-1 min-w-[200px]">
+                <CardContent className="flex items-center justify-between gap-4 p-4">
+                  <div className="flex-1 min-w-0">
                     <p className="font-medium">{s.label}</p>
                     <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{s.desc}</p>
                   </div>
@@ -473,7 +473,7 @@ export default function AdminPage() {
                     <Button
                       variant={val ? 'default' : 'outline'}
                       size="sm"
-                      className="shrink-0 min-w-[7rem]"
+                      className="shrink-0 w-32"
                       onClick={() => updateSettingMutation.mutate({ key: s.key, value: !val })}
                     >
                       {val ? t('common.enabled') : t('common.disabled')}
@@ -482,7 +482,7 @@ export default function AdminPage() {
                   {s.type === 'text' && (
                     <Input
                       defaultValue={(val as string) ?? ''}
-                      className="w-full sm:w-60 shrink-0"
+                      className="w-48 sm:w-60 shrink-0"
                       onBlur={(e) => {
                         if (e.target.value !== val) {
                           updateSettingMutation.mutate({ key: s.key, value: e.target.value });
@@ -494,7 +494,7 @@ export default function AdminPage() {
                     <Select
                       value={(val as string) ?? 'USER'}
                       onChange={(e) => updateSettingMutation.mutate({ key: s.key, value: e.target.value })}
-                      className="w-40 shrink-0"
+                      className="w-32 shrink-0"
                     >
                       <option value="USER">USER</option>
                       <option value="VIEWER">VIEWER</option>
@@ -506,7 +506,7 @@ export default function AdminPage() {
                       onChange={(e) => {
                         if (e.target.value !== val) setPendingDeployMode(e.target.value);
                       }}
-                      className="w-40 shrink-0"
+                      className="w-32 shrink-0"
                     >
                       <option value="LOCAL">LOCAL</option>
                       <option value="MULTI">MULTI</option>
