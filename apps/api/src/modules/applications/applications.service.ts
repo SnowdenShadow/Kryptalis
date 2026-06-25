@@ -4,6 +4,7 @@ import {
   BadRequestException,
   ForbiddenException,
   ConflictException,
+  type OnModuleInit,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
@@ -60,7 +61,7 @@ export type { PortDef } from './applications.helpers';
  * the controllers can keep injecting a single service.
  */
 @Injectable()
-export class ApplicationsService {
+export class ApplicationsService implements OnModuleInit {
   constructor(
     private prisma: PrismaService,
     private proxy: ReverseProxyService,
@@ -74,6 +75,15 @@ export class ApplicationsService {
     private env: ApplicationEnvService,
     private sftp: SftpService,
   ) {}
+
+  // Register the linked-app refresher so DatabasesService can refresh + redeploy
+  // an app after a DB credential change, WITHOUT a hard module cycle (the
+  // Databases→Applications direction would otherwise be circular).
+  onModuleInit() {
+    this.databases.setAppRefresher((userId, appId, databaseId) =>
+      this.refreshDatabaseEnv(userId, appId, databaseId),
+    );
+  }
 
   // ── access control (RBAC via ProjectMember) ───────────────────────
 
@@ -1088,6 +1098,30 @@ export class ApplicationsService {
       redeployed,
       envKeys: Object.keys(dbEnv),
     };
+  }
+
+  /**
+   * Refresh a linked app's DB_* env from a database's CURRENT credentials and
+   * redeploy. Called by DatabasesService after a password / username change so
+   * the app never loses its connection. Returns whether the redeploy started.
+   * Mirrors attachDatabase's env-merge, but the link already exists.
+   */
+  async refreshDatabaseEnv(userId: string, appId: string, databaseId: string): Promise<boolean> {
+    // Rebuild the in-network DB_* block from the live (post-change) row.
+    const db = await this.databases.findOne(userId, databaseId);
+    const dbEnv = this.databases.buildDbEnvVars({
+      name: db.name, type: db.type, username: db.username,
+      password: (db as any).password, autoImported: (db as any).autoImported, host: (db as any).host,
+    });
+    const current = this.env.decryptEnvVars(
+      (await this.prisma.application.findUnique({ where: { id: appId }, select: { envVars: true } }))?.envVars,
+    );
+    const merged = { ...current, ...dbEnv };
+    await this.prisma.application.update({
+      where: { id: appId },
+      data: { envVars: this.env.encryptEnvVars(merged) as any },
+    });
+    return this.ops.redeploy(userId, appId).then(() => true).catch(() => false);
   }
 
   /** Detach a database: unlink it and strip the injected DB_* env vars, then redeploy. */

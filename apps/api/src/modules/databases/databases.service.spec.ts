@@ -35,12 +35,39 @@ vi.mock('../../common/rbac/project-access', () => ({
 }));
 
 import * as fs from 'fs';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import {
   assertProjectAccess,
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
 import { DatabasesService } from './databases.service';
+
+const mockSpawn = vi.mocked(spawn) as any;
+
+/**
+ * Fake child process for execWithStdin: captures the SQL written to stdin and
+ * fires `close` with the given exit code on next tick.
+ */
+function installSpawnDefaults(exitCode = 0) {
+  mockSpawn.mockImplementation((cmd: string, args: string[]) => {
+    const stdinChunks: string[] = [];
+    const listeners: Record<string, ((...a: any[]) => void)[]> = {};
+    const child: any = {
+      _cmd: cmd, _args: args, _stdin: stdinChunks,
+      stdin: { write: (c: string) => stdinChunks.push(c), end: () => {} },
+      stderr: { on: () => {} },
+      once: (ev: string, cb: (...a: any[]) => void) => {
+        (listeners[ev] ||= []).push(cb);
+        if (ev === 'close') process.nextTick(() => cb(exitCode));
+        return child;
+      },
+      on: (ev: string, cb: (...a: any[]) => void) => { (listeners[ev] ||= []).push(cb); return child; },
+    };
+    spawnCalls.push(child);
+    return child;
+  });
+}
+let spawnCalls: any[] = [];
 
 const mockFs = fs as unknown as {
   existsSync: ReturnType<typeof vi.fn>;
@@ -136,6 +163,8 @@ beforeEach(() => {
   mockListIds.mockReset();
   mockListIds.mockResolvedValue([]);
   installExecDefaults();
+  spawnCalls = [];
+  installSpawnDefaults(0);
   mockFs.existsSync.mockReturnValue(true);
 });
 
@@ -952,5 +981,132 @@ describe('inNetworkConnectionInfo / buildDbEnvVars', () => {
       name: 'wp', type: 'MARIADB', username: 'wp', password: 'enc(x)', autoImported: true, host: 'dockcontrol-wp-db-abc123',
     });
     expect(info.host).toBe('dockcontrol-wp-db-abc123');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// credential management — reset password / change username / restart
+// ═══════════════════════════════════════════════════════════════════
+
+describe('credential management', () => {
+  /** A local, standalone PG database row. */
+  function pgRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 'db1', name: 'mydb', type: 'POSTGRESQL', username: 'mydb',
+      password: 'enc(oldpw)', autoImported: false, host: 'localhost',
+      projectId: 'p1', applicationId: null, port: 5440,
+      ...overrides,
+    };
+  }
+  /** Wire assertDbAccess + resolveDbServer to a local server. */
+  function wireLocal(prisma: ReturnType<typeof makePrisma>, row: any) {
+    prisma.database.findUnique.mockImplementation(async ({ select }: any) =>
+      select?.server
+        ? { server: { id: 'srv1', host: 'localhost' }, project: null, application: null }
+        : select?.applicationId !== undefined
+          ? { applicationId: row.applicationId }
+          : row,
+    );
+  }
+
+  it('resetPassword: generates a pw, applies ALTER USER in-container, encrypts at rest, pw OFF the argv', async () => {
+    const { service, prisma, encryption } = makeService();
+    wireLocal(prisma, pgRow());
+
+    const res = await service.resetPassword('u1', 'db1', {});
+    expect(res.password).toMatch(/^dockcontrol_/);
+
+    // ALTER USER ran via spawn (stdin), with the password NOT on the argv.
+    const psql = spawnCalls.find((c) => c._args.includes('psql'));
+    expect(psql).toBeTruthy();
+    expect(psql._args.join(' ')).not.toContain(res.password);
+    expect(psql._stdin.join('')).toContain(`ALTER USER "mydb" WITH PASSWORD '${res.password}'`);
+
+    // Persisted ENCRYPTED, never plaintext.
+    expect(encryption.encrypt).toHaveBeenCalledWith(res.password);
+    const upd = prisma.database.update.mock.calls[0][0];
+    expect(upd.data.password).toBe(`enc(${res.password})`);
+  });
+
+  it('resetPassword: honours a user-supplied password', async () => {
+    const { service, prisma } = makeService();
+    wireLocal(prisma, pgRow());
+    const res = await service.resetPassword('u1', 'db1', { password: 'MyStr0ng_pw' });
+    expect(res.password).toBe('MyStr0ng_pw');
+    const psql = spawnCalls.find((c) => c._args.includes('psql'));
+    expect(psql._stdin.join('')).toContain("PASSWORD 'MyStr0ng_pw'");
+  });
+
+  it('resetPassword: refuses auto-imported databases', async () => {
+    const { service, prisma } = makeService();
+    wireLocal(prisma, pgRow({ autoImported: true }));
+    await expect(service.resetPassword('u1', 'db1', {})).rejects.toThrow(BadRequestException);
+  });
+
+  it('resetPassword: refuses non-SQL engines (Redis)', async () => {
+    const { service, prisma } = makeService();
+    wireLocal(prisma, pgRow({ type: 'REDIS' }));
+    await expect(service.resetPassword('u1', 'db1', {})).rejects.toThrow(/PostgreSQL, MySQL and MariaDB/);
+  });
+
+  it('resetPassword: refuses a remote database', async () => {
+    const { service, prisma } = makeService();
+    const row = pgRow();
+    prisma.database.findUnique.mockImplementation(async ({ select }: any) =>
+      select?.server
+        ? { server: { id: 'srv2', host: '10.0.0.9' }, project: null, application: null }
+        : row,
+    );
+    await expect(service.resetPassword('u1', 'db1', {})).rejects.toThrow(/remote server/);
+  });
+
+  it('resetPassword: surfaces a failed ALTER USER (non-zero exit)', async () => {
+    const { service, prisma } = makeService();
+    wireLocal(prisma, pgRow());
+    installSpawnDefaults(1); // engine rejects
+    await expect(service.resetPassword('u1', 'db1', {})).rejects.toThrow(/Database command failed/);
+    expect(prisma.database.update).not.toHaveBeenCalled();
+  });
+
+  it('resetPassword: refreshes the linked app via the registered refresher', async () => {
+    const { service, prisma } = makeService();
+    wireLocal(prisma, pgRow({ applicationId: 'app1' }));
+    const refresher = vi.fn().mockResolvedValue(true);
+    service.setAppRefresher(refresher);
+
+    const res = await service.resetPassword('u1', 'db1', {});
+    expect(refresher).toHaveBeenCalledWith('u1', 'app1', 'db1');
+    expect(res.redeployedApp).toBe(true);
+  });
+
+  it('changeUsername: validates + renames + persists', async () => {
+    const { service, prisma } = makeService();
+    wireLocal(prisma, pgRow());
+    const res = await service.changeUsername('u1', 'db1', { username: 'app_user' });
+    expect(res.username).toBe('app_user');
+    const psql = spawnCalls.find((c) => c._args.includes('psql'));
+    expect(psql._stdin.join('')).toContain('ALTER USER "mydb" RENAME TO "app_user"');
+    expect(prisma.database.update).toHaveBeenCalledWith({ where: { id: 'db1' }, data: { username: 'app_user' } });
+  });
+
+  it('restart: refuses auto-imported', async () => {
+    const { service, prisma } = makeService();
+    prisma.database.findUnique.mockResolvedValue(pgRow({ autoImported: true }));
+    await expect(service.restart('u1', 'db1')).rejects.toThrow(/parent application/);
+  });
+
+  it('connectionInfo: returns host/port/url without throwing', async () => {
+    const { service, prisma } = makeService();
+    const row = pgRow();
+    prisma.database.findUnique.mockImplementation(async ({ select }: any) =>
+      select?.server
+        ? { server: { id: 'srv1', host: 'localhost' }, project: null, application: null }
+        : row,
+    );
+    const info = await service.connectionInfo('u1', 'db1');
+    expect(info.port).toBe(5440);
+    expect(info.username).toBe('mydb');
+    expect(info.url).toContain('postgres');
+    expect(info.inNetwork.host).toContain('dockcontrol-db-');
   });
 });

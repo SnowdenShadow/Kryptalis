@@ -495,6 +495,224 @@ export class DatabasesService {
     return { message: 'Database stopped' };
   }
 
+  // ── credential management (reset password / rename user / restart) ──
+  //
+  // SQL engines only (Postgres / MySQL / MariaDB). The password / username are
+  // applied INSIDE the live container (the volume is the source of truth at
+  // runtime — env POSTGRES_*/MYSQL_* only seed an empty volume on first boot),
+  // re-encrypted at rest, and the linked application's DB_* env is refreshed +
+  // redeployed so it never loses the connection.
+
+  /** Engines whose user credentials we can manage via SQL. */
+  private static readonly SQL_ENGINES = new Set(['POSTGRESQL', 'MYSQL', 'MARIADB']);
+
+  /**
+   * Common guard for credential ops: DEVELOPER access, not auto-imported (owned
+   * by the parent app), runs locally (we exec into the container), SQL engine.
+   * Returns the db row + resolved container name.
+   */
+  private async assertManageableSqlDb(userId: string, id: string) {
+    const db = await this.assertDbAccess(userId, id, 'DEVELOPER');
+    if ((db as any).autoImported) {
+      throw new BadRequestException(
+        'This database is managed by its parent application. Change its credentials from the application instead.',
+      );
+    }
+    if (!DatabasesService.SQL_ENGINES.has(db.type)) {
+      throw new BadRequestException(
+        `Credential management isn't supported for ${db.type}. Only PostgreSQL, MySQL and MariaDB are supported.`,
+      );
+    }
+    const server = await this.resolveDbServer(id);
+    if (!this.isDbLocal(server)) {
+      throw new BadRequestException(
+        'This database runs on a remote server — manage its credentials from that server.',
+      );
+    }
+    const container = resolveDbContainer({ name: db.name, autoImported: false, host: db.host || '' });
+    return { db, container };
+  }
+
+  /**
+   * Run an admin SQL statement inside the DB container WITHOUT putting the
+   * password on the host argv (a `ps` leak). The SQL goes in on STDIN; for
+   * MySQL/MariaDB the connection password is passed via a 0600 --env-file
+   * (MYSQL_PWD), never `-p<pass>`.
+   */
+  private async execSqlAdmin(
+    container: string,
+    db: { type: string; username: string; name: string; password: string },
+    sql: string,
+  ): Promise<void> {
+    const type = db.type.toUpperCase();
+    if (type === 'POSTGRESQL') {
+      // psql reads the script from stdin; -v ON_ERROR_STOP=1 → non-zero exit on
+      // any SQL error so the caller knows it failed.
+      await this.execWithStdin(
+        'docker',
+        ['exec', '-i', container, 'psql', '-v', 'ON_ERROR_STOP=1', '-U', db.username, '-d', db.name],
+        sql,
+      );
+      return;
+    }
+    // MySQL / MariaDB — MYSQL_PWD via env-file (off the argv), SQL on stdin.
+    const envFile = path.join(os.tmpdir(), `dockcontrol-dbadmin-${randomBytes(8).toString('hex')}.env`);
+    fs.writeFileSync(envFile, `MYSQL_PWD=${this.dbPassword(db)}\n`, { mode: 0o600 });
+    try {
+      await this.execWithStdin(
+        'docker',
+        ['exec', '-i', '--env-file', envFile, container, 'mysql', '-u', db.username],
+        sql,
+      );
+    } finally {
+      try { fs.unlinkSync(envFile); } catch {}
+    }
+  }
+
+  /** Spawn a command, write `input` to its stdin, resolve on exit 0 else throw. */
+  private execWithStdin(cmd: string, args: string[], input: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (d: Buffer) => { if (stderr.length < 8192) stderr += d.toString(); });
+      child.once('error', reject);
+      child.once('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new BadRequestException(`Database command failed: ${stderr.trim().slice(0, 300) || `exit ${code}`}`));
+      });
+      child.stdin.write(input);
+      child.stdin.end();
+    });
+  }
+
+  /** A strong random password (same CSPRNG/shape as create). */
+  private generatePassword(): string {
+    return `dockcontrol_${randomBytes(12).toString('base64url')}`;
+  }
+
+  /**
+   * Reset a DB user's password: apply it in the container, re-encrypt at rest,
+   * then refresh + redeploy the linked application so its DB_* env stays valid.
+   * Returns the new password ONCE (the caller shows it to the user).
+   */
+  async resetPassword(userId: string, id: string, dto: { password?: string }): Promise<{ password: string; redeployedApp: boolean | null }> {
+    const { db, container } = await this.assertManageableSqlDb(userId, id);
+    const newPw = dto.password?.trim() || this.generatePassword();
+
+    const type = db.type.toUpperCase();
+    // newPw is charset-restricted by the DTO (no quotes) → safe to interpolate
+    // into the single-quoted SQL literal.
+    const sql =
+      type === 'POSTGRESQL'
+        ? `ALTER USER "${db.username}" WITH PASSWORD '${newPw}';`
+        : `ALTER USER '${db.username}'@'%' IDENTIFIED BY '${newPw}'; FLUSH PRIVILEGES;`;
+    await this.execSqlAdmin(container, db, sql);
+
+    await this.prisma.database.update({
+      where: { id },
+      data: { password: this.encryption.encrypt(newPw) },
+    });
+
+    const redeployedApp = await this.refreshLinkedApp(userId, id);
+    return { password: newPw, redeployedApp };
+  }
+
+  /** Rename a DB user, persist it, and refresh the linked application. */
+  async changeUsername(userId: string, id: string, dto: { username: string }): Promise<{ username: string; redeployedApp: boolean | null }> {
+    const { db, container } = await this.assertManageableSqlDb(userId, id);
+    const newUser = dto.username.trim();
+    if (newUser === db.username) {
+      return { username: newUser, redeployedApp: null };
+    }
+    const type = db.type.toUpperCase();
+    // newUser is identifier-validated by the DTO regex.
+    const sql =
+      type === 'POSTGRESQL'
+        ? `ALTER USER "${db.username}" RENAME TO "${newUser}";`
+        : `RENAME USER '${db.username}'@'%' TO '${newUser}'@'%'; FLUSH PRIVILEGES;`;
+    await this.execSqlAdmin(container, db, sql);
+
+    await this.prisma.database.update({ where: { id }, data: { username: newUser } });
+
+    const redeployedApp = await this.refreshLinkedApp(userId, id);
+    return { username: newUser, redeployedApp };
+  }
+
+  /** Restart the database container (standalone, local). */
+  async restart(userId: string, id: string) {
+    const db = await this.assertDbAccess(userId, id, 'DEVELOPER');
+    if ((db as any).autoImported) {
+      throw new BadRequestException(
+        'This database is managed by its parent application. Restart it from the application page.',
+      );
+    }
+    const server = await this.resolveDbServer(id);
+    const slug = `db-${db.name}`;
+    if (this.isDbLocal(server)) {
+      const dbDir = path.join(DBS_DIR, db.name);
+      if (fs.existsSync(dbDir)) {
+        await compose(['restart'], { cwd: dbDir, timeout: 60000 });
+      }
+    } else if (server) {
+      // No dedicated RESTART agent task — stop then start.
+      await this.agent.enqueueTask(server.id, 'STOP', { slug });
+      await this.agent.enqueueTask(server.id, 'START', { slug });
+    }
+    return { message: 'Database restarting' };
+  }
+
+  /** Full connection info for the "connect" panel (VIEWER access). */
+  async connectionInfo(userId: string, id: string) {
+    const db = await this.assertDbAccess(userId, id, 'VIEWER');
+    const server = await this.resolveDbServer(id);
+    const password = this.dbPassword(db);
+    const inNetwork = this.inNetworkConnectionInfo({
+      name: db.name, type: db.type, username: db.username,
+      password: db.password, autoImported: (db as any).autoImported, host: db.host,
+    });
+    return {
+      type: db.type,
+      host: this.connHost(server),
+      port: db.port,
+      database: db.name,
+      username: db.username,
+      password,
+      url: this.getConnectionString(db.type, db.username, password, db.port, db.name, this.connHost(server)),
+      inNetwork: { host: inNetwork.host, port: inNetwork.port, url: inNetwork.url },
+    };
+  }
+
+  /**
+   * After a credential change, refresh the linked application's DB_* env and
+   * redeploy it. Decoupled via the lazily-resolved ApplicationsService (set by
+   * ApplicationsModule to avoid a hard circular dependency). Returns:
+   *   true  → an app was linked and redeployed,
+   *   false → an app was linked but the redeploy failed (caller surfaces it),
+   *   null  → no app is linked (nothing to do).
+   */
+  private async refreshLinkedApp(userId: string, dbId: string): Promise<boolean | null> {
+    const db = await this.prisma.database.findUnique({
+      where: { id: dbId },
+      select: { applicationId: true },
+    });
+    if (!db?.applicationId) return null;
+    if (!this.appRefresher) return null;
+    return this.appRefresher(userId, db.applicationId, dbId);
+  }
+
+  /**
+   * Injected by ApplicationsModule at init (setAppRefresher) to break the
+   * Databases→Applications cycle. Rebuilds the app's DB_* env from the DB's
+   * CURRENT (post-change) credentials and redeploys; resolves true/false on
+   * redeploy success.
+   */
+  private appRefresher:
+    | ((userId: string, applicationId: string, databaseId: string) => Promise<boolean>)
+    | null = null;
+  setAppRefresher(fn: (userId: string, applicationId: string, databaseId: string) => Promise<boolean>) {
+    this.appRefresher = fn;
+  }
+
   async remove(userId: string, id: string) {
     const db = await this.assertDbAccess(userId, id, 'ADMIN');
     const server = await this.resolveDbServer(id);

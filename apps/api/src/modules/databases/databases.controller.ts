@@ -4,6 +4,7 @@ import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { DatabasesService } from './databases.service';
 import { CreateDatabaseDto } from './dto/create-database.dto';
+import { ResetPasswordDto, ChangeUsernameDto } from './dto/update-credentials.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Databases')
@@ -46,6 +47,30 @@ export class DatabasesController {
   @ApiOperation({ summary: 'Stop database' })
   stop(@CurrentUser('id') userId: string, @Param('id') id: string) {
     return this.svc.stop(userId, id);
+  }
+
+  @Post(':id/restart')
+  @ApiOperation({ summary: 'Restart database' })
+  restart(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.restart(userId, id);
+  }
+
+  @Post(':id/reset-password')
+  @ApiOperation({ summary: "Reset the database user's password (applies in-container + refreshes linked app)" })
+  resetPassword(@CurrentUser('id') userId: string, @Param('id') id: string, @Body() dto: ResetPasswordDto) {
+    return this.svc.resetPassword(userId, id, dto);
+  }
+
+  @Patch(':id/username')
+  @ApiOperation({ summary: 'Rename the database user (applies in-container + refreshes linked app)' })
+  changeUsername(@CurrentUser('id') userId: string, @Param('id') id: string, @Body() dto: ChangeUsernameDto) {
+    return this.svc.changeUsername(userId, id, dto);
+  }
+
+  @Get(':id/connection')
+  @ApiOperation({ summary: 'Full connection info (host/port/user/password/url, public + in-network)' })
+  connection(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.connectionInfo(userId, id);
   }
 
   @Get(':id/export')

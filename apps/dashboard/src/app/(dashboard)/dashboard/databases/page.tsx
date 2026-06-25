@@ -18,6 +18,9 @@ import {
   Rocket,
   Link as LinkIcon,
   Download,
+  KeyRound,
+  UserCog,
+  RefreshCw,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { toastError } from '@/lib/toast-error';
@@ -117,6 +120,11 @@ export default function DatabasesPage() {
 
   // Filter state
   const [filterProjectId, setFilterProjectId] = useState('');
+  const [search, setSearch] = useState('');
+
+  // Credential-management dialogs (target a single DB by id).
+  const [manageDb, setManageDb] = useState<DatabaseItem | null>(null);
+  const [manageMode, setManageMode] = useState<'password' | 'username' | null>(null);
 
   // Projects + applications (for selectors and badges)
   const { data: projects = [] } = useQuery<ProjectOpt[]>({
@@ -252,14 +260,21 @@ export default function DatabasesPage() {
   }
 
   const dbActionMutation = useMutation({
-    mutationFn: ({ id, action }: { id: string; action: 'start' | 'stop' }) =>
+    mutationFn: ({ id, action }: { id: string; action: 'start' | 'stop' | 'restart' }) =>
       api.post(`/databases/${id}/${action}`),
     onSuccess: (_, { action }) => {
       queryClient.invalidateQueries({ queryKey: ['databases'] });
-      toast.success(t(action === 'start' ? 'toast.dbStarted' : 'toast.dbStopped'));
+      toast.success(
+        t(action === 'start' ? 'toast.dbStarted' : action === 'stop' ? 'toast.dbStopped' : 'databases.restarted'),
+      );
     },
     onError: (err: Error) => toastError(err),
   });
+
+  // Engines whose credentials can be managed (mirror the API guard).
+  const SQL_ENGINES = ['POSTGRESQL', 'MYSQL', 'MARIADB'];
+  const canManageCreds = (db: DatabaseItem) =>
+    !db.autoImported && SQL_ENGINES.includes(db.type);
 
   // One-click dump download. Streams the dump through the auth-aware
   // rawFetch (shares the access-token refresh pipeline), then materializes
@@ -307,20 +322,33 @@ export default function DatabasesPage() {
           <h1 className="text-3xl font-bold">{t('databases.title')}</h1>
           <p className="text-muted-foreground">{t('databases.subtitle')}</p>
         </div>
-        <div className="flex items-center gap-3">
-          {projects.length > 0 && (
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                variant={filterProjectId === '' ? 'default' : 'outline'}
-                onClick={() => setFilterProjectId('')}
-              >
+        <Button onClick={() => setShowCreateDialog(true)}>
+          <Plus size={16} />
+          {t('databases.create')}
+        </Button>
+      </div>
+
+      {/* Search + project filter — search fills the row, filters on the right. */}
+      {databases.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[200px]">
+            <Database size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              placeholder={t('databases.searchPlaceholder')}
+              className="pl-9 h-10"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+          {projects.length > 0 && projects.length <= 4 ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              <Button size="default" variant={filterProjectId === '' ? 'default' : 'outline'} onClick={() => setFilterProjectId('')}>
                 {t('databases.filterAll')}
               </Button>
               {projects.map((p) => (
                 <Button
                   key={p.id}
-                  size="sm"
+                  size="default"
                   variant={filterProjectId === p.id ? 'default' : 'outline'}
                   onClick={() => setFilterProjectId(filterProjectId === p.id ? '' : p.id)}
                 >
@@ -328,13 +356,23 @@ export default function DatabasesPage() {
                 </Button>
               ))}
             </div>
+          ) : projects.length > 0 ? (
+            <div className="w-52 shrink-0">
+              <Select value={filterProjectId} onChange={(e) => setFilterProjectId(e.target.value)}>
+                <option value="">{t('databases.filterAll')}</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </Select>
+            </div>
+          ) : null}
+          {(search || filterProjectId) && (
+            <Button variant="ghost" onClick={() => { setSearch(''); setFilterProjectId(''); }}>
+              {t('databases.filterClear')}
+            </Button>
           )}
-          <Button onClick={() => setShowCreateDialog(true)}>
-            <Plus size={16} />
-            {t('databases.create')}
-          </Button>
         </div>
-      </div>
+      )}
 
       {/* Content */}
       {isLoading ? (
@@ -374,7 +412,17 @@ export default function DatabasesPage() {
       ) : (
         /* Database cards */
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {databases.map((db) => {
+          {databases
+            .filter((db) => {
+              const q = search.trim().toLowerCase();
+              if (!q) return true;
+              return (
+                db.name.toLowerCase().includes(q) ||
+                (db.username || '').toLowerCase().includes(q) ||
+                db.type.toLowerCase().includes(q)
+              );
+            })
+            .map((db) => {
             const status = getStatus(db.status);
             const running = status === 'running';
             const deploying = status === 'deploying';
@@ -504,6 +552,41 @@ export default function DatabasesPage() {
                         </>
                       ) : (
                         <>
+                          {/* Credential management (SQL engines only). */}
+                          {canManageCreds(db) && (
+                            <>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-primary"
+                                onClick={() => { setManageDb(db); setManageMode('password'); }}
+                                title={t('databases.resetPassword')}
+                              >
+                                <KeyRound size={14} />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-8 w-8 text-muted-foreground hover:text-primary"
+                                onClick={() => { setManageDb(db); setManageMode('username'); }}
+                                title={t('databases.changeUsername')}
+                              >
+                                <UserCog size={14} />
+                              </Button>
+                            </>
+                          )}
+                          {!deploying && running && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-muted-foreground hover:text-blue-500"
+                              disabled={dbActionMutation.isPending}
+                              onClick={() => dbActionMutation.mutate({ id: db.id, action: 'restart' })}
+                              title={t('databases.restart')}
+                            >
+                              <RefreshCw size={14} />
+                            </Button>
+                          )}
                           {!deploying && running && (
                             <Button
                               variant="ghost"
@@ -792,6 +875,159 @@ export default function DatabasesPage() {
           </Button>
         </DialogFooter>
       </Dialog>
+
+      {/* Credential management dialog (reset password / change username) */}
+      {manageDb && manageMode && (
+        <ManageCredentialsDialog
+          db={manageDb}
+          mode={manageMode}
+          onClose={() => { setManageDb(null); setManageMode(null); }}
+          onDone={() => queryClient.invalidateQueries({ queryKey: ['databases'] })}
+        />
+      )}
     </div>
+  );
+}
+
+// ─── Credential management dialog ─────────────────────────────────────
+//
+// Reset password (type or generate) OR change username. Both apply the change
+// inside the live DB container AND refresh the linked app, so we warn about the
+// redeploy. The new password is shown ONCE on success (the API returns it).
+function ManageCredentialsDialog({
+  db,
+  mode,
+  onClose,
+  onDone,
+}: {
+  db: DatabaseItem;
+  mode: 'password' | 'username';
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const { t } = useTranslation();
+  const [password, setPassword] = useState('');
+  const [newUsername, setNewUsername] = useState(db.username || '');
+  const [resultPw, setResultPw] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const genPassword = () => {
+    // Browser CSPRNG → base64url, mirrors the server's strong default.
+    const bytes = new Uint8Array(15);
+    crypto.getRandomValues(bytes);
+    const b64 = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    setPassword(`dockcontrol_${b64}`);
+  };
+
+  const resetPw = useMutation({
+    mutationFn: () =>
+      api.post<{ password: string; redeployedApp: boolean | null }>(
+        `/databases/${db.id}/reset-password`,
+        password.trim() ? { password: password.trim() } : {},
+      ),
+    onSuccess: (res) => {
+      setResultPw(res.password);
+      if (res.redeployedApp === false) toast.warning(t('databases.linkedAppRedeployFailed'));
+      onDone();
+    },
+    onError: (err: Error) => toastError(err),
+  });
+
+  const changeUser = useMutation({
+    mutationFn: () => api.patch(`/databases/${db.id}/username`, { username: newUsername.trim() }),
+    onSuccess: (res: any) => {
+      toast.success(t('databases.usernameChanged'));
+      if (res?.redeployedApp === false) toast.warning(t('databases.linkedAppRedeployFailed'));
+      onDone();
+      onClose();
+    },
+    onError: (err: Error) => toastError(err),
+  });
+
+  const copyPw = async () => {
+    if (!resultPw) return;
+    try { await navigator.clipboard.writeText(resultPw); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {}
+  };
+
+  return (
+    <Dialog open onClose={onClose}>
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-2">
+          {mode === 'password' ? <KeyRound size={18} /> : <UserCog size={18} />}
+          {mode === 'password' ? t('databases.resetPassword') : t('databases.changeUsername')}
+          {' — '}<span className="font-mono text-base">{db.name}</span>
+        </DialogTitle>
+        <DialogDescription>
+          {mode === 'password' ? t('databases.resetPasswordDesc') : t('databases.changeUsernameDesc')}
+        </DialogDescription>
+      </DialogHeader>
+
+      {/* Success state for password reset — show the new pw once. */}
+      {mode === 'password' && resultPw ? (
+        <div className="space-y-3 py-2">
+          <p className="text-sm text-muted-foreground">{t('databases.newPasswordOnce')}</p>
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 p-2.5">
+            <code className="flex-1 font-mono text-sm break-all">{resultPw}</code>
+            <Button size="icon" variant="ghost" className="h-8 w-8 shrink-0" onClick={copyPw}>
+              {copied ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">{t('databases.linkedAppsRedeploy')}</p>
+        </div>
+      ) : mode === 'password' ? (
+        <div className="space-y-3 py-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="mc-pw">{t('databases.newPassword')}</Label>
+            <div className="flex gap-2">
+              <Input
+                id="mc-pw"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={t('databases.newPasswordPlaceholder')}
+                className="font-mono"
+              />
+              <Button type="button" variant="outline" className="shrink-0" onClick={genPassword}>
+                {t('databases.generate')}
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">{t('databases.linkedAppsRedeploy')}</p>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3 py-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="mc-user">{t('databases.newUsername')}</Label>
+            <Input
+              id="mc-user"
+              value={newUsername}
+              onChange={(e) => setNewUsername(e.target.value)}
+              className="font-mono"
+            />
+            <p className="text-xs text-muted-foreground">{t('databases.linkedAppsRedeploy')}</p>
+          </div>
+        </div>
+      )}
+
+      <DialogFooter>
+        <Button variant="outline" onClick={onClose}>
+          {mode === 'password' && resultPw ? t('common.close') : t('common.cancel')}
+        </Button>
+        {mode === 'password' && !resultPw && (
+          <Button onClick={() => resetPw.mutate()} disabled={resetPw.isPending}>
+            {resetPw.isPending && <Loader2 size={14} className="mr-1.5 animate-spin" />}
+            {t('databases.resetPassword')}
+          </Button>
+        )}
+        {mode === 'username' && (
+          <Button
+            onClick={() => changeUser.mutate()}
+            disabled={changeUser.isPending || !newUsername.trim() || newUsername.trim() === db.username}
+          >
+            {changeUser.isPending && <Loader2 size={14} className="mr-1.5 animate-spin" />}
+            {t('common.save')}
+          </Button>
+        )}
+      </DialogFooter>
+    </Dialog>
   );
 }
