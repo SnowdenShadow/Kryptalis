@@ -534,21 +534,22 @@ export default function ApplicationsPage() {
 
       {/* Search + Project Filter */}
       {applications.length > 0 && (
-        <div className="flex items-center gap-3">
-          <div className="relative flex-1 max-w-md">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[200px] max-w-md">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
             <Input
               placeholder={t('apps.searchPlaceholder')}
-              className="pl-9"
+              className="pl-9 h-10"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
+          {/* Status filter — fixed-width wrapper (the Select's internal div is
+              w-full and ignores className width). */}
+          <div className="w-44 shrink-0">
             <Select
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value as any)}
-              className="h-9 w-auto min-w-[140px]"
             >
               <option value="">{t('apps.filterAllStatuses')}</option>
               <option value="RUNNING">{t('apps.statusRunning')}</option>
@@ -556,40 +557,42 @@ export default function ApplicationsPage() {
               <option value="DEPLOYING">{t('apps.statusDeployingBuilding')}</option>
               <option value="ERROR">{t('apps.statusError')}</option>
             </Select>
-            {projects.length <= 6 ? (
-              <>
-                <Button size="sm" variant={filterProject === '' ? 'default' : 'outline'} onClick={() => setFilterProject('')}>
-                  {t('apps.filterAllProjects')}
+          </div>
+          {/* Project filter — pills when few projects, a dropdown when many. */}
+          {projects.length > 0 && projects.length <= 4 ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              <Button size="default" variant={filterProject === '' ? 'default' : 'outline'} onClick={() => setFilterProject('')}>
+                {t('apps.filterAllProjects')}
+              </Button>
+              {projects.map((p) => (
+                <Button
+                  key={p.id}
+                  size="default"
+                  variant={filterProject === p.id ? 'default' : 'outline'}
+                  onClick={() => setFilterProject(filterProject === p.id ? '' : p.id)}
+                >
+                  {p.name}
                 </Button>
-                {projects.map((p) => (
-                  <Button
-                    key={p.id}
-                    size="sm"
-                    variant={filterProject === p.id ? 'default' : 'outline'}
-                    onClick={() => setFilterProject(filterProject === p.id ? '' : p.id)}
-                  >
-                    {p.name}
-                  </Button>
-                ))}
-              </>
-            ) : (
+              ))}
+            </div>
+          ) : projects.length > 0 ? (
+            <div className="w-52 shrink-0">
               <Select
                 value={filterProject}
                 onChange={(e) => setFilterProject(e.target.value)}
-                className="h-9 w-auto min-w-[160px]"
               >
                 <option value="">{t('apps.filterAllProjects')}</option>
                 {projects.map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
               </Select>
-            )}
-            {(search || filterProject || filterStatus) && (
-              <Button size="sm" variant="ghost" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); }}>
-                {t('apps.filterClear')}
-              </Button>
-            )}
-          </div>
+            </div>
+          ) : null}
+          {(search || filterProject || filterStatus) && (
+            <Button variant="ghost" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); }}>
+              {t('apps.filterClear')}
+            </Button>
+          )}
         </div>
       )}
 
