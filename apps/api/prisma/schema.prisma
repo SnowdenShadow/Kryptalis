@@ -367,6 +367,13 @@ model Application {
   // time, baked into the php:<version>-apache image as a build ARG. NULL for
   // every other framework. Changing it triggers an image rebuild on redeploy.
   phpVersion        String?
+  // ── PHP_SITE config (NULL for non-PHP). Re-applied on every (re)deploy.
+  //    Defaults preserve current behaviour: Apache + base extension pack,
+  //    default php.ini. ──
+  phpWebServer      String?         @default("apache") // apache | nginx (php-fpm)
+  phpExtensions     String?         // CSV of OPTIONAL extensions on top of the base pack
+  phpIni            Json?           // { memory_limit, upload_max_filesize, post_max_size, max_execution_time, timezone }
+  phpPreset         String?         // wordpress | laravel | symfony | custom (indicative)
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
 

@@ -199,7 +199,13 @@ export class ApplicationOpsService {
         app.id,
         app.name,
         app.phpVersion || DEFAULT_PHP_VERSION,
-        { hostPort: app.hostPort ?? undefined, envVars: this.env.decryptEnvVars(app.envVars) },
+        {
+          hostPort: app.hostPort ?? undefined,
+          envVars: this.env.decryptEnvVars(app.envVars),
+          webServer: (app as any).phpWebServer === 'nginx' ? 'nginx' : 'apache',
+          extensions: ((app as any).phpExtensions || '').split(',').filter(Boolean),
+          phpIni: (app as any).phpIni || null,
+        },
       );
       return { message: 'PHP site rebuilt and recreated', deploymentId: deployment.id };
     }

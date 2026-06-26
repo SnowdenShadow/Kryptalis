@@ -37,10 +37,52 @@ import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
 import { publicAppUrl } from '@/lib/app-format';
 import { StatusDot } from '@/components/ui/status-dot';
+import { cn } from '@/lib/utils';
 
 // PHP versions offered — mirrors SUPPORTED_PHP_VERSIONS on the API
 // (apps/api/.../applications/php-site.constants.ts). Newest first.
 const PHP_VERSIONS = ['8.3', '8.2', '8.1', '8.0', '7.4'] as const;
+
+// Optional extensions (mirror PHP_OPTIONAL_EXTENSIONS on the API). The base
+// pack (DB drivers, gd, intl, zip, opcache, bcmath) is always included.
+const PHP_EXTENSIONS = [
+  'mbstring', 'exif', 'soap', 'xsl', 'gmp', 'pcntl', 'sockets', 'redis', 'imagick',
+] as const;
+const PHP_PRESETS = ['none', 'wordpress', 'laravel', 'symfony'] as const;
+const PHP_INI_FIELDS: { key: string; placeholder: string }[] = [
+  { key: 'memory_limit', placeholder: '256M' },
+  { key: 'upload_max_filesize', placeholder: '64M' },
+  { key: 'post_max_size', placeholder: '64M' },
+  { key: 'max_execution_time', placeholder: '120' },
+  { key: 'timezone', placeholder: 'Europe/Paris' },
+];
+
+interface PhpConfig {
+  webServer: 'apache' | 'nginx';
+  preset: string;
+  extensions: string[];
+  ini: Record<string, string>;
+}
+function emptyPhpConfig(): PhpConfig {
+  return { webServer: 'apache', preset: 'none', extensions: [], ini: {} };
+}
+function phpConfigFromApp(a: any): PhpConfig {
+  return {
+    webServer: a?.phpWebServer === 'nginx' ? 'nginx' : 'apache',
+    preset: a?.phpPreset || 'none',
+    extensions: (a?.phpExtensions || '').split(',').filter(Boolean),
+    ini: (a?.phpIni && typeof a.phpIni === 'object') ? a.phpIni : {},
+  };
+}
+/** Body fields for create/PATCH from a PhpConfig. */
+function phpConfigBody(c: PhpConfig): Record<string, unknown> {
+  return {
+    phpWebServer: c.webServer,
+    phpExtensions: c.extensions,
+    phpIni: Object.fromEntries(Object.entries(c.ini).filter(([, v]) => v && v.trim())),
+    phpPreset: c.preset === 'none' ? null : c.preset,
+  };
+}
 
 interface ProjectOpt { id: string; name: string }
 interface DomainOpt { id: string; domain: string; projectId: string; applicationId: string | null }
@@ -58,6 +100,11 @@ export default function PhpSitesPage() {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   // The PHP site whose database panel is open (null = closed).
   const [manageDbSite, setManageDbSite] = useState<ApplicationResponse | null>(null);
+  // Advanced PHP config in the create dialog.
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [cfg, setCfg] = useState<PhpConfig>(emptyPhpConfig());
+  // The PHP site whose "Configure" dialog is open (null = closed).
+  const [configureSite, setConfigureSite] = useState<ApplicationResponse | null>(null);
 
   // The app list is shared; we just filter to PHP_SITE apps client-side.
   const { data: apps = [], isLoading } = useQuery<ApplicationResponse[]>({
@@ -111,6 +158,19 @@ export default function PhpSitesPage() {
     onError: (err: Error) => toastError(err),
   });
 
+  // Configure an existing site (web server / extensions / php.ini) → PATCH +
+  // redeploy.
+  const configureMutation = useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) =>
+      api.patch(`/applications/${id}`, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['applications'] });
+      toast.success(t('php.configSaved'));
+      setConfigureSite(null);
+    },
+    onError: (err: Error) => toastError(err),
+  });
+
   function closeCreate() {
     setShowCreate(false);
     setName('');
@@ -118,6 +178,8 @@ export default function PhpSitesPage() {
     setProjectId('');
     setDomainChoice('');
     setNewDomain('');
+    setShowAdvanced(false);
+    setCfg(emptyPhpConfig());
   }
 
   function handleCreate(e: React.FormEvent) {
@@ -128,6 +190,7 @@ export default function PhpSitesPage() {
       projectId,
       framework: 'PHP_SITE',
       phpVersion: version,
+      ...phpConfigBody(cfg),
     };
     if (domainChoice === 'new' && newDomain.trim()) body.domain = newDomain.trim();
     else if (domainChoice && domainChoice !== 'new') body.domainId = domainChoice;
@@ -246,6 +309,14 @@ export default function PhpSitesPage() {
                       <FolderOpen size={12} />
                       {t('php.manageFiles')}
                     </Link>
+                    <button
+                      type="button"
+                      onClick={() => { setCfg(phpConfigFromApp(site)); setConfigureSite(site); }}
+                      className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+                    >
+                      <Settings2 size={12} />
+                      {t('php.configure')}
+                    </button>
                     {/* The generic app-detail page gives PHP sites logs,
                         deployments history, terminal and start/stop/restart. */}
                     <Link
@@ -342,6 +413,13 @@ export default function PhpSitesPage() {
                   {t('php.domainHint')}
                 </p>
               </div>
+
+              {/* Advanced: web server / extensions / php.ini */}
+              <button type="button" className="text-xs text-primary hover:underline"
+                onClick={() => setShowAdvanced((v) => !v)}>
+                {showAdvanced ? '▾ ' : '▸ '}{t('php.advanced')}
+              </button>
+              {showAdvanced && <PhpConfigFields t={t} cfg={cfg} onChange={setCfg} />}
             </div>
 
             <DialogFooter>
@@ -354,6 +432,27 @@ export default function PhpSitesPage() {
               </Button>
             </DialogFooter>
           </form>
+        </Dialog>
+      )}
+
+      {/* Configure an existing site (server / extensions / php.ini) */}
+      {configureSite && (
+        <Dialog open onClose={() => setConfigureSite(null)}>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><Settings2 size={18} /> {t('php.configure')} — {configureSite.name}</DialogTitle>
+            <DialogDescription>{t('php.configureDesc')}</DialogDescription>
+          </DialogHeader>
+          <div className="py-1"><PhpConfigFields t={t} cfg={cfg} onChange={setCfg} /></div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setConfigureSite(null)}>{t('common.cancel')}</Button>
+            <Button
+              onClick={() => configureMutation.mutate({ id: configureSite.id, body: phpConfigBody(cfg) })}
+              disabled={configureMutation.isPending}
+            >
+              {configureMutation.isPending && <Loader2 size={14} className="mr-1.5 animate-spin" />}
+              {t('php.saveRedeploy')}
+            </Button>
+          </DialogFooter>
         </Dialog>
       )}
 
@@ -542,5 +641,83 @@ function PhpDatabaseDialog({ site, onClose }: { site: ApplicationResponse; onClo
         <Button variant="ghost" onClick={onClose}>{t('common.close')}</Button>
       </DialogFooter>
     </Dialog>
+  );
+}
+
+// ─── Shared PHP advanced config (preset / web server / extensions / php.ini) ──
+function PhpConfigFields({
+  t,
+  cfg,
+  onChange,
+}: {
+  t: (k: string, v?: Record<string, string | number>) => string;
+  cfg: PhpConfig;
+  onChange: (c: PhpConfig) => void;
+}) {
+  const set = (patch: Partial<PhpConfig>) => onChange({ ...cfg, ...patch });
+  const toggleExt = (ext: string) =>
+    set({ extensions: cfg.extensions.includes(ext) ? cfg.extensions.filter((e) => e !== ext) : [...cfg.extensions, ext] });
+
+  return (
+    <div className="space-y-4 rounded-lg border border-border p-3 mt-2">
+      {/* Preset + web server */}
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label>{t('php.preset')}</Label>
+          <Select value={cfg.preset} onChange={(e) => set({ preset: e.target.value })}>
+            {PHP_PRESETS.map((p) => (
+              <option key={p} value={p}>{t(`php.preset.${p}`)}</option>
+            ))}
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label>{t('php.webServer')}</Label>
+          <Select value={cfg.webServer} onChange={(e) => set({ webServer: e.target.value as 'apache' | 'nginx' })}>
+            <option value="apache">{t('php.apache')}</option>
+            <option value="nginx">{t('php.nginx')}</option>
+          </Select>
+          {cfg.webServer === 'nginx' && <p className="text-[11px] text-orange-400">{t('php.nginxHint')}</p>}
+        </div>
+      </div>
+
+      {/* Extensions */}
+      <div className="space-y-1.5">
+        <Label>{t('php.extensions')}</Label>
+        <p className="text-[11px] text-muted-foreground">{t('php.extensionsBase')}</p>
+        <div className="flex flex-wrap gap-2">
+          {PHP_EXTENSIONS.map((ext) => (
+            <button
+              key={ext}
+              type="button"
+              onClick={() => toggleExt(ext)}
+              className={cn(
+                'rounded-md border px-2 py-1 text-xs font-mono transition-colors',
+                cfg.extensions.includes(ext) ? 'border-primary bg-primary/10 text-foreground' : 'border-border text-muted-foreground hover:bg-accent/40',
+              )}
+            >
+              {cfg.extensions.includes(ext) ? '✓ ' : ''}{ext}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* php.ini */}
+      <div className="space-y-1.5">
+        <Label>{t('php.iniTitle')}</Label>
+        <div className="grid sm:grid-cols-2 gap-2">
+          {PHP_INI_FIELDS.map((f) => (
+            <div key={f.key} className="space-y-1">
+              <span className="text-[11px] text-muted-foreground font-mono">{f.key}</span>
+              <Input
+                value={cfg.ini[f.key] || ''}
+                placeholder={f.placeholder}
+                onChange={(e) => set({ ini: { ...cfg.ini, [f.key]: e.target.value } })}
+                className="font-mono h-9"
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }

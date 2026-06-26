@@ -19,7 +19,7 @@ import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { AgentService } from '../agent/agent.service';
 import { DatabasesService } from '../databases/databases.service';
 import { ApplicationDeployService } from './application-deploy.service';
-import { DEFAULT_PHP_VERSION } from './php-site.constants';
+import { DEFAULT_PHP_VERSION, resolvePhpConfig } from './php-site.constants';
 import { SftpService } from '../sftp/sftp.service';
 import { ApplicationOpsService } from './application-ops.service';
 import { ApplicationNetworkService } from './application-network.service';
@@ -129,8 +129,23 @@ export class ApplicationsService implements OnModuleInit {
       serverId: dtoServerId,
       restoreVolumes: dtoRestoreVolumes,
       loadImages: dtoLoadImages,
+      // PHP_SITE config — normalized below (extensions stored as CSV, preset
+      // expands into extensions+ini). Pulled out so they don't land in dbData raw.
+      phpWebServer: dtoPhpWebServer,
+      phpExtensions: dtoPhpExtensions,
+      phpIni: dtoPhpIni,
+      phpPreset: dtoPhpPreset,
       ...dbData
     } = dto;
+
+    // Resolve the PHP_SITE config: a preset expands into extensions + ini,
+    // merged with any explicit picks. Stored as CSV / JSON on the row.
+    const php = resolvePhpConfig({
+      webServer: dtoPhpWebServer,
+      extensions: dtoPhpExtensions,
+      ini: dtoPhpIni,
+      preset: dtoPhpPreset,
+    });
 
     // Per-app server placement (MULTI mode). Stored only when it differs
     // from the project default — NULL serverId means "inherit", so moving
@@ -358,6 +373,13 @@ export class ApplicationsService implements OnModuleInit {
           status: 'DEPLOYING',
           envVars: this.env.encryptEnvVars(dtoEnvVars) as any,
           webhookSecret: this.encryption.encrypt(crypto.randomBytes(24).toString('hex')),
+          // PHP_SITE config (NULL/ignored for other frameworks).
+          ...(isPhpSite ? {
+            phpWebServer: php.webServer,
+            phpExtensions: php.extensions.length ? php.extensions.join(',') : null,
+            phpIni: Object.keys(php.ini).length ? (php.ini as any) : undefined,
+            phpPreset: php.preset || null,
+          } : {}),
         } as any,
       });
 
@@ -474,6 +496,9 @@ export class ApplicationsService implements OnModuleInit {
       this.deployService.runPhpSiteDeploy(deployment.id, app.id, dto.name, dto.phpVersion || DEFAULT_PHP_VERSION, {
         envVars: dto.envVars,
         hostPort: dtoHostPort,
+        webServer: php.webServer,
+        extensions: php.extensions,
+        phpIni: php.ini,
       }).catch(() => {});
     } else {
       await this.prisma.application.update({ where: { id: app.id }, data: { status: 'STOPPED' } });
@@ -570,20 +595,45 @@ export class ApplicationsService implements OnModuleInit {
     if (dto.envVars !== undefined) {
       data.envVars = this.env.encryptEnvVars(dto.envVars);
     }
-    // Changing a PHP site's version only matters for PHP_SITE apps — it rebuilds
-    // the php:<ver>-apache image. Drop it for everything else so it can't write
-    // a stray column on a non-PHP app.
-    const phpVersionChanged =
-      dto.phpVersion !== undefined &&
-      existing.framework === 'PHP_SITE' &&
-      dto.phpVersion !== existing.phpVersion;
-    if (dto.phpVersion !== undefined && existing.framework !== 'PHP_SITE') {
-      delete data.phpVersion;
+    // PHP_SITE config (version, web server, extensions, php.ini, preset). These
+    // are normalized (extensions → CSV, preset expands, ini sanitized) and only
+    // apply to PHP_SITE apps. A change to ANY of them triggers a redeploy (the
+    // stack is regenerated). The raw dto array/object shapes must NOT reach the
+    // prisma update unchanged (extensions column is CSV string, not string[]).
+    const isPhp = existing.framework === 'PHP_SITE';
+    delete data.phpWebServer; delete data.phpExtensions; delete data.phpIni; delete data.phpPreset;
+    let phpChanged = false;
+    if (dto.phpVersion !== undefined && !isPhp) delete data.phpVersion;
+    if (isPhp) {
+      const touchesPhp =
+        dto.phpWebServer !== undefined || dto.phpExtensions !== undefined ||
+        dto.phpIni !== undefined || dto.phpPreset !== undefined;
+      const phpVersionChanged = dto.phpVersion !== undefined && dto.phpVersion !== existing.phpVersion;
+      if (touchesPhp) {
+        // Merge: start from the stored config, apply the dto fields that are set.
+        const cur = resolvePhpConfig({
+          webServer: existing.phpWebServer,
+          extensions: (existing.phpExtensions || '').split(',').filter(Boolean),
+          ini: (existing.phpIni as any) || null,
+          preset: existing.phpPreset,
+        });
+        const next = resolvePhpConfig({
+          webServer: dto.phpWebServer ?? cur.webServer,
+          extensions: dto.phpExtensions ?? cur.extensions,
+          ini: (dto.phpIni as any) ?? cur.ini,
+          preset: dto.phpPreset ?? null, // a preset re-application is explicit
+        });
+        data.phpWebServer = next.webServer;
+        data.phpExtensions = next.extensions.length ? next.extensions.join(',') : null;
+        data.phpIni = Object.keys(next.ini).length ? (next.ini as any) : null;
+        data.phpPreset = next.preset || null;
+      }
+      phpChanged = touchesPhp || phpVersionChanged;
     }
     const result = await this.prisma.application.update({ where: { id }, data });
-    // Redeploy to apply: a port change, OR a PHP version change (rebuilds the
-    // image with the new ARG PHP_VERSION).
-    if (dto.port !== undefined || phpVersionChanged) {
+    // Redeploy to apply: a port change, OR any PHP config change (regenerates
+    // the Dockerfile/compose with the new version/server/extensions/ini).
+    if (dto.port !== undefined || phpChanged) {
       this.redeploy(userId, id).catch(() => {});
     }
     return this.withDisplayName(result);

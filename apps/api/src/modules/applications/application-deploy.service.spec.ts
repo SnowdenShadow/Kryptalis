@@ -1264,9 +1264,10 @@ describe('runPhpSiteDeploy', () => {
     expect(doc.services.app.build).toEqual({ context: '.', args: { PHP_VERSION: '8.2' } });
     expect(doc.services.app.container_name).toBe('dockcontrol-my-app');
     expect(doc.services.app.networks).toEqual(['dockcontrol_project', 'dockcontrol_apps']);
-    // LIVE docroot bind mount → public/ subdir, served with no rebuild.
-    expect(doc.services.app.volumes).toHaveLength(1);
+    // LIVE docroot bind mount → public/ subdir, served with no rebuild, + the
+    // php.ini drop-in mount.
     expect(norm(doc.services.app.volumes[0])).toMatch(/\/apps\/my-app-[^/]+\/public:\/var\/www\/html$/);
+    expect(doc.services.app.volumes.some((v: string) => v.includes('zz-dockcontrol.ini'))).toBe(true);
 
     // build BEFORE up (build failure must roll back before any container changes).
     expect(findExec((c) => c.cmd === 'docker' && c.args.join(' ') === 'compose build')).toBeTruthy();
@@ -1290,6 +1291,37 @@ describe('runPhpSiteDeploy', () => {
     const indexPath = norm(path.join(appDir(), 'public', 'index.php'));
     expect(vfs.__files.has(indexPath)).toBe(true);
     expect(vfs.__files.get(indexPath)).toContain('<?php');
+  });
+
+  it('optional extensions: docker-php-ext for soap, pecl install+enable for redis, + php.ini override', async () => {
+    const { service } = makeService();
+    await service.runPhpSiteDeploy('dep1', APP_ID, APP_NAME, '8.3', {
+      extensions: ['soap', 'redis'],
+      phpIni: { memory_limit: '256M', upload_max_filesize: '64M' },
+    });
+    const dockerfile = dockerfileOf(appDir())!;
+    expect(dockerfile).toContain('soap');          // docker-php-ext-install
+    expect(dockerfile).toContain('pecl install redis');
+    expect(dockerfile).toContain('docker-php-ext-enable redis');
+    expect(dockerfile).toContain('libxml2-dev');   // soap's apt lib
+    // php.ini drop-in written + mounted.
+    const ini = vfs.__files.get(norm(path.join(appDir(), 'zz-dockcontrol.ini')))!;
+    expect(ini).toContain('memory_limit = 256M');
+    expect(ini).toContain('upload_max_filesize = 64M');
+  });
+
+  it('nginx mode: php-fpm image + a second nginx service + default.conf, public port on nginx', async () => {
+    const { service } = makeService();
+    await service.runPhpSiteDeploy('dep1', APP_ID, APP_NAME, '8.3', { webServer: 'nginx', hostPort: 8090 });
+    const dockerfile = dockerfileOf(appDir())!;
+    expect(dockerfile).toContain('FROM php:${PHP_VERSION}-fpm');
+    expect(dockerfile).not.toContain('a2enmod');
+    const doc = readComposeDoc();
+    expect(doc.services.app.container_name).toBe('dockcontrol-my-app-fpm');
+    expect(doc.services.web.image).toBe('nginx:alpine');
+    expect(doc.services.web.container_name).toBe('dockcontrol-my-app');
+    expect(doc.services.web.ports).toEqual(['8090:80']);
+    expect(vfs.__files.get(norm(path.join(appDir(), 'default.conf')))).toContain('fastcgi_pass app:9000');
   });
 
   it('falls back to the default PHP version for an out-of-range value', async () => {

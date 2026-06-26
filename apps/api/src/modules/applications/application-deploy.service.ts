@@ -9,8 +9,14 @@ import { detectStack, FRAMEWORK_DOCKERFILES, FRAMEWORK_INTERNAL_PORT } from './d
 import {
   DEFAULT_PHP_VERSION,
   PHP_SITE_CONTAINER_PORT,
-  PHP_SITE_DOCKERFILE,
+  DEFAULT_PHP_WEB_SERVER,
   isSupportedPhpVersion,
+  buildPhpDockerfile,
+  buildPhpIni,
+  buildNginxConf,
+  sanitizePhpExtensions,
+  type PhpWebServer,
+  type PhpIniSettings,
 } from './php-site.constants';
 import { DatabasesService } from '../databases/databases.service';
 import { ApplicationEnvService } from './application-env.service';
@@ -238,7 +244,13 @@ export class ApplicationDeployService implements OnModuleInit {
     appId: string,
     name: string,
     phpVersion: string,
-    opts: { envVars?: Record<string, string>; hostPort?: number },
+    opts: {
+      envVars?: Record<string, string>;
+      hostPort?: number;
+      webServer?: PhpWebServer;
+      extensions?: string[];
+      phpIni?: PhpIniSettings | null;
+    },
   ) {
     const slug = slugify(name);
     const containerNm = containerName(slug);
@@ -250,6 +262,9 @@ export class ApplicationDeployService implements OnModuleInit {
     const hostDataDir = process.env.DOCKCONTROL_HOST_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
     const hostAppDir = path.join(hostDataDir, 'apps', path.basename(appDir));
     const hostDocroot = path.join(hostAppDir, 'public');
+    // Posix form for bind-mount sources of the config side-files (the docker
+    // daemon is on the host; mount sources must be host paths).
+    const hostAppDirPosix = hostAppDir.replace(/\\/g, '/');
     const started = Date.now();
     const buildLogs: string[] = [];
     const log = (line: string) => { buildLogs.push(line); };
@@ -258,6 +273,9 @@ export class ApplicationDeployService implements OnModuleInit {
     // forward an undefined value, so resolve to a known-good default defensively
     // (the DTO already constrains it to SUPPORTED_PHP_VERSIONS).
     const version = isSupportedPhpVersion(phpVersion) ? phpVersion : DEFAULT_PHP_VERSION;
+    const webServer: PhpWebServer = opts.webServer === 'nginx' ? 'nginx' : DEFAULT_PHP_WEB_SERVER;
+    const extensions = sanitizePhpExtensions(opts.extensions);
+    const phpIni = opts.phpIni || null;
 
     // PHP site stacks need a host bind mount, so they can't be shipped to a
     // remote agent the way image/compose deploys are (the agent owns its own
@@ -282,7 +300,7 @@ export class ApplicationDeployService implements OnModuleInit {
         where: { id: deploymentId },
         data: { status: DeploymentStatus.DEPLOYING, startedAt: new Date() },
       });
-      log(`> deploying PHP ${version} site (Apache)`);
+      log(`> deploying PHP ${version} site (${webServer === 'nginx' ? 'Nginx + PHP-FPM' : 'Apache'})${extensions.length ? ` + ${extensions.join(', ')}` : ''}`);
 
       // Resolve / create the per-project network (same multi-app discovery as
       // every other deploy path) so sibling apps resolve each other by name.
@@ -324,45 +342,78 @@ export class ApplicationDeployService implements OnModuleInit {
         log('> seeded public/index.php (first deploy)');
       }
 
-      // Parametrized Dockerfile: one template, version chosen at build time.
-      // Bundles the database drivers (pdo_mysql/mysqli for MySQL & MariaDB,
-      // pdo_pgsql/pgsql for Postgres) + the common web extension pack
-      // (gd/zip/intl/opcache/bcmath) so real PHP apps — WordPress, Laravel,
-      // Symfony, PrestaShop — run out of the box. Without the drivers,
-      // `new PDO('mysql:...')` fails with "could not find driver". The
-      // docker-php-ext-* helpers need system -dev libs present first, so we
-      // apt-get them, then clean the apt lists to keep the image lean.
+      // Generated Dockerfile: version + web server (apache mod_php / nginx
+      // php-fpm) + base extension pack + chosen optional extensions. Plus a
+      // php.ini drop-in for the user's overrides (memory_limit, uploads, …).
       fs.writeFileSync(
         path.join(appDir, 'Dockerfile'),
-        PHP_SITE_DOCKERFILE,
+        buildPhpDockerfile({ version, webServer, extensions }),
       );
+      // php.ini overrides — mounted into conf.d so they win over image defaults.
+      const iniContent = buildPhpIni(phpIni);
+      fs.writeFileSync(path.join(appDir, 'zz-dockcontrol.ini'), iniContent);
+      const hostIni = path.posix.join(hostAppDirPosix, 'zz-dockcontrol.ini');
 
       const env = opts.envVars || {};
       const publishHost = opts.hostPort;
       const networks = ['dockcontrol_apps'];
       if (projectNet) networks.unshift('dockcontrol_project');
-      const composeDoc: any = {
-        services: {
-          app: {
-            build: { context: '.', args: { PHP_VERSION: version } },
-            image: imageName(slug),
-            container_name: containerNm,
-            restart: 'unless-stopped',
-            ...(Object.keys(env).length ? { environment: { ...env } } : {}),
-            ...(publishHost ? { ports: [`${publishHost}:80`] } : {}),
-            // LIVE docroot bind mount — SFTP-uploaded files served with no rebuild.
-            volumes: [`${hostDocroot}:/var/www/html`],
-            networks,
-          },
-        },
-        networks: {
-          ...(projectNet ? { dockcontrol_project: { external: true, name: projectNet } } : {}),
-          dockcontrol_apps: { external: true, name: 'dockcontrol-apps' },
-        },
+      const networksBlock = {
+        ...(projectNet ? { dockcontrol_project: { external: true, name: projectNet } } : {}),
+        dockcontrol_apps: { external: true, name: 'dockcontrol-apps' },
       };
+
+      let composeDoc: any;
+      if (webServer === 'nginx') {
+        // 2 services: php-fpm (app) + nginx (web). Both mount the SAME live
+        // docroot; nginx publishes :80 and FastCGI's to app:9000. SFTP/docroot
+        // bind is unchanged (same hostDocroot).
+        fs.writeFileSync(path.join(appDir, 'default.conf'), buildNginxConf());
+        const hostNginxConf = path.posix.join(hostAppDirPosix, 'default.conf');
+        composeDoc = {
+          services: {
+            app: {
+              build: { context: '.', args: { PHP_VERSION: version } },
+              image: imageName(slug),
+              container_name: `${containerNm}-fpm`,
+              restart: 'unless-stopped',
+              ...(Object.keys(env).length ? { environment: { ...env } } : {}),
+              volumes: [`${hostDocroot}:/var/www/html`, `${hostIni}:/usr/local/etc/php/conf.d/zz-dockcontrol.ini:ro`],
+              networks: ['dockcontrol_apps', ...(projectNet ? ['dockcontrol_project'] : [])],
+            },
+            web: {
+              image: 'nginx:alpine',
+              container_name: containerNm,
+              restart: 'unless-stopped',
+              depends_on: ['app'],
+              ...(publishHost ? { ports: [`${publishHost}:80`] } : {}),
+              volumes: [`${hostDocroot}:/var/www/html:ro`, `${hostNginxConf}:/etc/nginx/conf.d/default.conf:ro`],
+              networks,
+            },
+          },
+          networks: networksBlock,
+        };
+      } else {
+        composeDoc = {
+          services: {
+            app: {
+              build: { context: '.', args: { PHP_VERSION: version } },
+              image: imageName(slug),
+              container_name: containerNm,
+              restart: 'unless-stopped',
+              ...(Object.keys(env).length ? { environment: { ...env } } : {}),
+              ...(publishHost ? { ports: [`${publishHost}:80`] } : {}),
+              // LIVE docroot bind mount — SFTP-uploaded files served with no rebuild.
+              volumes: [`${hostDocroot}:/var/www/html`, `${hostIni}:/usr/local/etc/php/conf.d/zz-dockcontrol.ini:ro`],
+              networks,
+            },
+          },
+          networks: networksBlock,
+        };
+      }
       const compose = yaml.dump(composeDoc, { lineWidth: 200 });
       fs.writeFileSync(path.join(appDir, 'docker-compose.yml'), compose);
-      log('> wrote Dockerfile + docker-compose.yml');
+      log(`> wrote Dockerfile + docker-compose.yml${webServer === 'nginx' ? ' (nginx + php-fpm)' : ''}`);
 
       log('> docker compose build');
       await dockerCompose(appDir, ['build'], undefined, 600_000);

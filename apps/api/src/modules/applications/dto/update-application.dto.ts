@@ -5,12 +5,13 @@ import {
   IsIn,
   IsInt,
   IsObject,
+  IsArray,
   Min,
   Max,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AppFramework, GitProviderType } from '@prisma/client';
-import { SUPPORTED_PHP_VERSIONS } from '../php-site.constants';
+import { SUPPORTED_PHP_VERSIONS, PHP_WEB_SERVERS } from '../php-site.constants';
 
 export class UpdateApplicationDto {
   // Note: `name` is intentionally NOT exposed here. It's the slug source and
@@ -79,4 +80,25 @@ export class UpdateApplicationDto {
     message: `phpVersion must be one of: ${SUPPORTED_PHP_VERSIONS.join(', ')}`,
   })
   phpVersion?: string;
+
+  @ApiProperty({ required: false, enum: PHP_WEB_SERVERS as unknown as string[], description: 'PHP_SITE web server — triggers a redeploy.' })
+  @IsOptional()
+  @IsIn(PHP_WEB_SERVERS as unknown as string[])
+  phpWebServer?: string;
+
+  @ApiProperty({ required: false, type: [String], description: 'Optional PHP extensions — triggers a redeploy.' })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  phpExtensions?: string[];
+
+  @ApiProperty({ required: false, description: 'php.ini overrides — triggers a redeploy.' })
+  @IsOptional()
+  @IsObject()
+  phpIni?: Record<string, string>;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  phpPreset?: string;
 }

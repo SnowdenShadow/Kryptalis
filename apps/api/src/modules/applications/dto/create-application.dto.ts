@@ -5,6 +5,7 @@ import {
   IsIn,
   IsInt,
   IsObject,
+  IsArray,
   Min,
   Max,
   Matches,
@@ -12,7 +13,7 @@ import {
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AppFramework, GitProviderType } from '@prisma/client';
-import { SUPPORTED_PHP_VERSIONS } from '../php-site.constants';
+import { SUPPORTED_PHP_VERSIONS, PHP_WEB_SERVERS } from '../php-site.constants';
 
 export class CreateApplicationDto {
   @ApiProperty({ example: 'my-app' })
@@ -45,6 +46,27 @@ export class CreateApplicationDto {
     message: `phpVersion must be one of: ${SUPPORTED_PHP_VERSIONS.join(', ')}`,
   })
   phpVersion?: string;
+
+  @ApiProperty({ required: false, enum: PHP_WEB_SERVERS as unknown as string[], description: 'PHP_SITE web server' })
+  @IsOptional()
+  @IsIn(PHP_WEB_SERVERS as unknown as string[])
+  phpWebServer?: string;
+
+  @ApiProperty({ required: false, type: [String], description: 'Optional PHP extensions to enable' })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  phpExtensions?: string[];
+
+  @ApiProperty({ required: false, description: 'php.ini overrides (memory_limit, upload_max_filesize, …)' })
+  @IsOptional()
+  @IsObject()
+  phpIni?: Record<string, string>;
+
+  @ApiProperty({ required: false, description: 'PHP preset (wordpress|laravel|symfony|custom)' })
+  @IsOptional()
+  @IsString()
+  phpPreset?: string;
 
   @ApiProperty({ required: false, example: 'https://github.com/user/repo.git' })
   @IsOptional()
