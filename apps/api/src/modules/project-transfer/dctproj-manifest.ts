@@ -95,6 +95,21 @@ export interface DctprojApp {
    * clear warning rather than recreating an unrunnable / dangerous stack.
    */
   requiresHostAccess?: boolean;
+  /**
+   * PHP_SITE config — a PHP site is its OWN deploy source (no git/image/compose),
+   * so these fields are what let it round-trip across installs. All optional for
+   * backward-compat with v1 archives that predate the configurable-PHP feature.
+   *   - phpVersion:    e.g. "8.3"
+   *   - phpWebServer:  "apache" | "nginx"
+   *   - phpExtensions: CSV of optional extensions (as stored on the row)
+   *   - phpIni:        php.ini overrides object
+   *   - phpPreset:     preset label
+   */
+  phpVersion?: string;
+  phpWebServer?: string;
+  phpExtensions?: string;
+  phpIni?: Record<string, string>;
+  phpPreset?: string;
 }
 
 export interface DctprojDb {

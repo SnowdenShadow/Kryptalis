@@ -617,16 +617,23 @@ export class ApplicationsService implements OnModuleInit {
           ini: (existing.phpIni as any) || null,
           preset: existing.phpPreset,
         });
+        // When the caller sends an explicit extension list it is AUTHORITATIVE:
+        // we must NOT re-expand a preset over it, otherwise un-toggling a
+        // preset-provided extension (e.g. removing imagick from a WordPress
+        // site) would silently come back. The preset only expands into
+        // extensions when no explicit list is given (a pure "apply preset").
+        const extsExplicit = dto.phpExtensions !== undefined;
         const next = resolvePhpConfig({
           webServer: dto.phpWebServer ?? cur.webServer,
-          extensions: dto.phpExtensions ?? cur.extensions,
+          extensions: extsExplicit ? dto.phpExtensions : cur.extensions,
           ini: (dto.phpIni as any) ?? cur.ini,
-          preset: dto.phpPreset ?? null, // a preset re-application is explicit
+          preset: extsExplicit ? null : (dto.phpPreset ?? null),
         });
         data.phpWebServer = next.webServer;
         data.phpExtensions = next.extensions.length ? next.extensions.join(',') : null;
         data.phpIni = Object.keys(next.ini).length ? (next.ini as any) : null;
-        data.phpPreset = next.preset || null;
+        // Keep the preset as a label when extensions were sent explicitly.
+        data.phpPreset = (extsExplicit ? (dto.phpPreset ?? null) : (next.preset || null)) || null;
       }
       phpChanged = touchesPhp || phpVersionChanged;
     }
@@ -661,6 +668,11 @@ export class ApplicationsService implements OnModuleInit {
       // (compose `down` may have missed them on a crashed install).
       try { await execFileAsync('docker', ['rm', '-f', containerName(slug)]); } catch {}
       try { await execFileAsync('docker', ['rm', '-f', `${containerName(slug)}-${id.slice(0, 12)}`]); } catch {}
+      // nginx-mode PHP sites also run a php-fpm sidecar `<name>-fpm` that the
+      // hardcoded names above don't cover — without this, a failed `compose down`
+      // (missing/corrupt appDir) leaks the fpm container after the row is gone.
+      try { await execFileAsync('docker', ['rm', '-f', `${containerName(slug)}-fpm`]); } catch {}
+      try { await execFileAsync('docker', ['rm', '-f', `${containerName(slug)}-${id.slice(0, 12)}-fpm`]); } catch {}
       // Drop the per-project network if this app was the last in its
       // project — leaves shared networks alone.
       try {
@@ -927,6 +939,8 @@ export class ApplicationsService implements OnModuleInit {
         try { await dockerCompose(appDir, ['down', '--remove-orphans'], undefined, 90_000); } catch {}
       }
       try { await execFileAsync('docker', ['rm', '-f', app.containerName || containerName(slug)]); } catch {}
+      // nginx-mode PHP sites carry a php-fpm sidecar the single-name rm misses.
+      try { await execFileAsync('docker', ['rm', '-f', `${app.containerName || containerName(slug)}-fpm`]); } catch {}
     } else if (current) {
       try {
         await this.agent.enqueueAndWait(

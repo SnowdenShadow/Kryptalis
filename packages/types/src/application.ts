@@ -65,6 +65,14 @@ export interface ApplicationResponse {
   framework: `${AppFramework}`;
   /** PHP runtime version when framework is PHP_SITE (e.g. "8.3"). */
   phpVersion?: string | null;
+  /** PHP_SITE web server: "apache" (mod_php) or "nginx" (php-fpm + nginx). */
+  phpWebServer?: string | null;
+  /** PHP_SITE optional extensions enabled on top of the base pack (CSV). */
+  phpExtensions?: string | null;
+  /** PHP_SITE php.ini overrides (memory_limit, upload_max_filesize, …). */
+  phpIni?: Record<string, string> | null;
+  /** PHP_SITE preset label (wordpress | laravel | symfony | custom). */
+  phpPreset?: string | null;
   status: `${ApplicationStatus}`;
   gitUrl: string | null;
   gitBranch: string | null;

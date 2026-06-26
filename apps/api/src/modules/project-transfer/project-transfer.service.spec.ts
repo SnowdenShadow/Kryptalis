@@ -337,6 +337,61 @@ describe('ProjectTransferService — parse / import safety', () => {
     expect(result.manifest.applications[0].requiresHostAccess).toBeFalsy();
     expect(result.manifest.applications[0].dockerComposeFile).toContain('ghost:5');
   });
+
+  it('round-trips a PHP_SITE: carries php config on export, recreates it on import (NOT skipped)', async () => {
+    // A PHP site is its own deploy source (no git/image/compose) — it must NOT
+    // be skipped, and its version/web-server/extensions/php.ini must survive.
+    const phpProject = {
+      ...sampleProject,
+      applications: [{
+        ...sampleProject.applications[0],
+        name: 'shop',
+        framework: 'PHP_SITE',
+        gitUrl: null, gitBranch: null, dockerImage: null, dockerComposeFile: null,
+        phpVersion: '8.2',
+        phpWebServer: 'nginx',
+        phpExtensions: 'redis,imagick',
+        phpIni: { memory_limit: '256M', upload_max_filesize: '128M' },
+        phpPreset: 'wordpress',
+      }],
+      databases: [],
+      domains: [],
+    };
+    prisma.project.findUnique.mockResolvedValue(phpProject);
+    const { archivePath } = await svc.exportProject('u1', 'p1', { includeData: false, passphrase: PASS });
+    created.push(archivePath);
+
+    // Export carries the php config in the manifest.
+    const parsed = await svc.parseImport('u2', archivePath, PASS);
+    created.push((svc as any).stagingDir(parsed.stagedId));
+    const m = parsed.manifest.applications[0];
+    expect(m.framework).toBe('PHP_SITE');
+    expect(m.phpVersion).toBe('8.2');
+    expect(m.phpWebServer).toBe('nginx');
+    expect(m.phpExtensions).toBe('redis,imagick');
+    expect(m.phpIni).toEqual({ memory_limit: '256M', upload_max_filesize: '128M' });
+    expect(m.phpPreset).toBe('wordpress');
+
+    // Import recreates it (NOT skipped) with the config threaded into create().
+    prisma.domain.findUnique.mockResolvedValue(null);
+    prisma.project.findFirst.mockResolvedValue(null);
+    const appsCreate = vi.fn().mockResolvedValue({ id: 'php1' });
+    (svc as any).applications = { create: appsCreate };
+    (svc as any).projects = { create: vi.fn().mockResolvedValue({ id: 'proj1' }) };
+    (svc as any).databases = { create: vi.fn() };
+    (svc as any).domains = { create: vi.fn() };
+
+    const r = await svc.applyImport('u2', parsed.stagedId, { passphrase: PASS });
+    const phpCall = appsCreate.mock.calls.find((c) => c[1].framework === 'PHP_SITE');
+    expect(phpCall).toBeDefined();
+    expect(phpCall![1].phpVersion).toBe('8.2');
+    expect(phpCall![1].phpWebServer).toBe('nginx');
+    expect(phpCall![1].phpExtensions).toEqual(['redis', 'imagick']); // CSV → string[]
+    expect(phpCall![1].phpIni).toEqual({ memory_limit: '256M', upload_max_filesize: '128M' });
+    expect(phpCall![1].phpPreset).toBe('wordpress');
+    // Warns that the uploaded docroot doesn't travel (host bind mount).
+    expect(r.warnings.some((w: string) => /public\/ docroot|re-upload/i.test(w))).toBe(true);
+  });
 });
 
 /**

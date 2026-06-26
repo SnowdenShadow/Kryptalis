@@ -1321,7 +1321,11 @@ describe('runPhpSiteDeploy', () => {
     expect(doc.services.web.image).toBe('nginx:alpine');
     expect(doc.services.web.container_name).toBe('dockcontrol-my-app');
     expect(doc.services.web.ports).toEqual(['8090:80']);
-    expect(vfs.__files.get(norm(path.join(appDir(), 'default.conf')))).toContain('fastcgi_pass app:9000');
+    // FastCGI to the UNIQUE fpm container name — NOT the shared `app` service
+    // alias (which collides across tenants on the dockcontrol-apps bridge).
+    const nginxConf = vfs.__files.get(norm(path.join(appDir(), 'default.conf')))!;
+    expect(nginxConf).toContain('fastcgi_pass dockcontrol-my-app-fpm:9000');
+    expect(nginxConf).not.toContain('fastcgi_pass app:9000');
   });
 
   it('falls back to the default PHP version for an out-of-range value', async () => {

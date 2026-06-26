@@ -145,7 +145,9 @@ export function buildPhpDockerfile(args: {
   webServer: PhpWebServer;
   extensions: string[];
 }): string {
-  const version = isSupportedPhpVersion(args.version) ? args.version : DEFAULT_PHP_VERSION;
+  // NB: the concrete version is injected at build time via the compose
+  // `args: { PHP_VERSION }` (validated in runPhpSiteDeploy), which overrides the
+  // ARG default below — so `args.version` isn't interpolated into the template.
   const tag = args.webServer === 'nginx' ? 'fpm' : 'apache';
   const opt = sanitizePhpExtensions(args.extensions).map((n) => OPTIONAL_BY_NAME.get(n)!);
 
@@ -193,8 +195,34 @@ export function buildPhpIni(ini: PhpIniSettings | null | undefined): string {
   return out.join('\n') + '\n';
 }
 
-/** Nginx site config used in nginx mode — serves the docroot, FastCGI to php-fpm. */
-export function buildNginxConf(): string {
+/** Parse a PHP byte-size string ("64M", "256M", "1G", "1024K", "512") to bytes. */
+function phpSizeToBytes(v: string | undefined): number {
+  if (!v) return 0;
+  const m = /^(\d+)\s*([KMG])?$/i.exec(v.trim());
+  if (!m) return 0;
+  const n = parseInt(m[1], 10);
+  const unit = (m[2] || '').toUpperCase();
+  return unit === 'G' ? n * 1024 ** 3 : unit === 'M' ? n * 1024 ** 2 : unit === 'K' ? n * 1024 : n;
+}
+
+/**
+ * Nginx site config used in nginx mode — serves the docroot, FastCGI to php-fpm.
+ *  - `fpmHost`: the UNIQUE php-fpm container name (e.g. dockcontrol-<slug>-fpm).
+ *    We deliberately do NOT use the compose service alias `app:9000`: that alias
+ *    is shared by every app-named service on the platform-wide `dockcontrol-apps`
+ *    bridge, so Docker DNS would round-robin across tenants and could FastCGI a
+ *    request to a FOREIGN container. The container_name is unique → no collision.
+ *  - `ini`: the user's php.ini overrides — client_max_body_size is derived from
+ *    upload_max_filesize / post_max_size so a raised PHP limit isn't silently
+ *    capped by nginx's default (a >limit upload would 413 before reaching PHP).
+ */
+export function buildNginxConf(fpmHost: string, ini?: PhpIniSettings | null): string {
+  const bodyBytes = Math.max(
+    phpSizeToBytes(ini?.upload_max_filesize),
+    phpSizeToBytes(ini?.post_max_size),
+    64 * 1024 ** 2, // 64m floor — generous default, never shrink below it.
+  );
+  const bodyMb = Math.ceil(bodyBytes / 1024 ** 2);
   return `server {
     listen 80;
     server_name _;
@@ -205,12 +233,13 @@ export function buildNginxConf(): string {
         try_files $uri $uri/ /index.php?$query_string;
     }
     location ~ \\.php$ {
-        fastcgi_pass app:9000;
+        try_files $fastcgi_script_name =404;
+        fastcgi_pass ${fpmHost}:9000;
         fastcgi_index index.php;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         include fastcgi_params;
     }
-    client_max_body_size 64m;
+    client_max_body_size ${bodyMb}m;
 }
 `;
 }

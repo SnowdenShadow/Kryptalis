@@ -235,6 +235,17 @@ export class ProjectTransferService {
           envEncrypted,
           volumeFiles: [],
           requiresHostAccess: requiresHostAccess || undefined,
+          // PHP_SITE config so the site round-trips (it has no git/image/compose
+          // source — these five columns ARE its deploy spec).
+          ...(app.framework === 'PHP_SITE'
+            ? {
+                phpVersion: app.phpVersion || undefined,
+                phpWebServer: app.phpWebServer || undefined,
+                phpExtensions: app.phpExtensions || undefined,
+                phpIni: (app.phpIni as Record<string, string> | null) || undefined,
+                phpPreset: app.phpPreset || undefined,
+              }
+            : {}),
         };
         // Data (volumes) are only carried for LOCAL-source apps in this v1 —
         // remote-source volume export would need the agent VOLUME_EXPORT chain,
@@ -880,8 +891,11 @@ export class ProjectTransferService {
           warnings.push(`app ${app.name}: imported WITH host access (docker socket / host paths) per your explicit consent — it controls the host, treat it accordingly.`);
         }
         // An app with no deployable source can't be recreated — say so rather
-        // than silently leaving a STOPPED row.
-        if (!app.gitUrl && !app.dockerImage && !app.dockerComposeFile) {
+        // than silently leaving a STOPPED row. PHP_SITE is the exception: it is
+        // its OWN source (the platform generates the stack from the php* config),
+        // so it has no git/image/compose by design — don't skip it.
+        const isPhpSite = app.framework === 'PHP_SITE';
+        if (!isPhpSite && !app.gitUrl && !app.dockerImage && !app.dockerComposeFile) {
           warnings.push(`app ${app.name}: has no recreatable source (no git URL, image, or compose) and was skipped.`);
           continue;
         }
@@ -910,6 +924,17 @@ export class ProjectTransferService {
           }
           else if (app.dockerImage) dto.dockerImage = app.dockerImage;
           else if (app.dockerComposeFile) dto.composeContent = app.dockerComposeFile;
+          // PHP_SITE: rebuild the same stack from the carried php* config so the
+          // imported site matches the source (version, web server, extensions,
+          // php.ini, preset) instead of reverting to apache + base pack + 8.3.
+          // phpExtensions is stored as CSV but the create DTO wants a string[].
+          if (isPhpSite) {
+            if (app.phpVersion) dto.phpVersion = app.phpVersion;
+            if (app.phpWebServer) dto.phpWebServer = app.phpWebServer;
+            if (app.phpExtensions) dto.phpExtensions = app.phpExtensions.split(',').filter(Boolean);
+            if (app.phpIni) dto.phpIni = app.phpIni;
+            if (app.phpPreset) dto.phpPreset = app.phpPreset;
+          }
           if (app.buildCommand) dto.buildCommand = app.buildCommand;
           if (app.startCommand) dto.startCommand = app.startCommand;
           if (app.port) dto.port = app.port;
@@ -962,6 +987,12 @@ export class ProjectTransferService {
           try {
             const created = await this.applications.create(userId, dto);
             appNameToId[app.name] = (created as any).id;
+            // A PHP site's docroot (public/) is a host bind mount, not a docker
+            // volume, so the SFTP-uploaded files don't travel in the archive —
+            // the recreated stack boots with its config but an empty docroot.
+            if (isPhpSite) {
+              warnings.push(`app ${app.name}: PHP site recreated with its configuration, but the uploaded files (public/ docroot) are not part of the transfer — re-upload them over SFTP.`);
+            }
           } catch (createErr) {
             // create() runs all its validation synchronously and can throw
             // BEFORE dispatching the deploy that would consume + unlink the

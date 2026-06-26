@@ -83,4 +83,39 @@ describe('ApplicationOpsService.execCommand — container name resolution', () =
     );
     expect(dockerExec![1]).toContain('dockcontrol-teste-cmqsnsex0000');
   });
+
+  it('PHP_SITE in nginx mode: targets the php-fpm container, not the nginx web container', async () => {
+    // The nginx web container (persisted containerName) has no php binary —
+    // terminal/cron commands must run in the php-fpm sidecar `<name>-fpm`.
+    assertAppOwnership.mockResolvedValue({
+      id: 'cmqsnsex0000xxxx', name: 'Teste', projectId: 'p1',
+      containerName: 'dockcontrol-teste',
+      framework: 'PHP_SITE', phpWebServer: 'nginx',
+    });
+    const svc = makeService();
+
+    await svc.execCommand('u1', 'cmqsnsex0000xxxx', 'php -v');
+
+    const dockerExec = execFileAsync.mock.calls.find(
+      (c: any[]) => c[0] === 'docker' && Array.isArray(c[1]) && c[1][0] === 'exec',
+    );
+    expect(dockerExec![1]).toContain('dockcontrol-teste-fpm');
+  });
+
+  it('PHP_SITE in apache mode: targets the single mod_php container (no -fpm)', async () => {
+    assertAppOwnership.mockResolvedValue({
+      id: 'cmqsnsex0000xxxx', name: 'Teste', projectId: 'p1',
+      containerName: 'dockcontrol-teste',
+      framework: 'PHP_SITE', phpWebServer: 'apache',
+    });
+    const svc = makeService();
+
+    await svc.execCommand('u1', 'cmqsnsex0000xxxx', 'php -v');
+
+    const dockerExec = execFileAsync.mock.calls.find(
+      (c: any[]) => c[0] === 'docker' && Array.isArray(c[1]) && c[1][0] === 'exec',
+    );
+    expect(dockerExec![1]).toContain('dockcontrol-teste');
+    expect(dockerExec![1]).not.toContain('dockcontrol-teste-fpm');
+  });
 });

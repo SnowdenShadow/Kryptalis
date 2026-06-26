@@ -49,6 +49,14 @@ const PHP_EXTENSIONS = [
   'mbstring', 'exif', 'soap', 'xsl', 'gmp', 'pcntl', 'sockets', 'redis', 'imagick',
 ] as const;
 const PHP_PRESETS = ['none', 'wordpress', 'laravel', 'symfony'] as const;
+// Preset → extensions + php.ini (mirrors PHP_PRESETS on the API). Selecting a
+// preset pre-fills the toggles/inputs once; after that the toggles are
+// authoritative (manually changing one switches the preset back to "custom").
+const PRESET_DEFS: Record<string, { extensions: string[]; ini: Record<string, string> }> = {
+  wordpress: { extensions: ['mbstring', 'exif', 'imagick'], ini: { upload_max_filesize: '64M', post_max_size: '64M', memory_limit: '256M' } },
+  laravel: { extensions: ['mbstring', 'pcntl', 'redis'], ini: { memory_limit: '256M', max_execution_time: '120' } },
+  symfony: { extensions: ['mbstring', 'xsl'], ini: { memory_limit: '256M' } },
+};
 const PHP_INI_FIELDS: { key: string; placeholder: string }[] = [
   { key: 'memory_limit', placeholder: '256M' },
   { key: 'upload_max_filesize', placeholder: '64M' },
@@ -66,7 +74,7 @@ interface PhpConfig {
 function emptyPhpConfig(): PhpConfig {
   return { webServer: 'apache', preset: 'none', extensions: [], ini: {} };
 }
-function phpConfigFromApp(a: any): PhpConfig {
+function phpConfigFromApp(a: ApplicationResponse): PhpConfig {
   return {
     webServer: a?.phpWebServer === 'nginx' ? 'nginx' : 'apache',
     preset: a?.phpPreset || 'none',
@@ -74,12 +82,20 @@ function phpConfigFromApp(a: any): PhpConfig {
     ini: (a?.phpIni && typeof a.phpIni === 'object') ? a.phpIni : {},
   };
 }
-/** Body fields for create/PATCH from a PhpConfig. */
+/**
+ * Body fields for create/PATCH from a PhpConfig. The extension list + ini shown
+ * in the dialog are ALWAYS authoritative (the preset was already expanded into
+ * them in the UI). We send phpPreset only as an indicative label and never rely
+ * on the backend re-expanding it — otherwise un-toggling a preset-provided
+ * extension would silently come back. So extensions/ini reflect exactly the
+ * toggles the user sees.
+ */
 function phpConfigBody(c: PhpConfig): Record<string, unknown> {
   return {
     phpWebServer: c.webServer,
     phpExtensions: c.extensions,
     phpIni: Object.fromEntries(Object.entries(c.ini).filter(([, v]) => v && v.trim())),
+    // null unless the toggles still EXACTLY match the preset (purely a label).
     phpPreset: c.preset === 'none' ? null : c.preset,
   };
 }
@@ -171,6 +187,21 @@ export default function PhpSitesPage() {
     onError: (err: Error) => toastError(err),
   });
 
+  // Open the create dialog from a CLEAN slate. The `cfg` state is shared with
+  // the per-site Configure dialog, so without an explicit reset a brand-new site
+  // could inherit the last-Configured site's web server / extensions / php.ini
+  // (those values are sent even if the Advanced panel stays collapsed).
+  function openCreate() {
+    setName('');
+    setVersion('8.3');
+    setProjectId('');
+    setDomainChoice('');
+    setNewDomain('');
+    setShowAdvanced(false);
+    setCfg(emptyPhpConfig());
+    setShowCreate(true);
+  }
+
   function closeCreate() {
     setShowCreate(false);
     setName('');
@@ -208,7 +239,7 @@ export default function PhpSitesPage() {
           </h1>
           <p className="text-sm text-muted-foreground mt-1">{t('php.subtitle')}</p>
         </div>
-        <Button onClick={() => setShowCreate(true)}>
+        <Button onClick={openCreate}>
           <Plus size={16} className="mr-1.5" />
           {t('php.create')}
         </Button>
@@ -225,7 +256,7 @@ export default function PhpSitesPage() {
             <FileCode2 className="text-muted-foreground/50 mb-3" size={40} />
             <p className="font-medium">{t('php.empty')}</p>
             <p className="text-sm text-muted-foreground mt-1 max-w-sm">{t('php.emptyHint')}</p>
-            <Button className="mt-4" onClick={() => setShowCreate(true)}>
+            <Button className="mt-4" onClick={openCreate}>
               <Plus size={16} className="mr-1.5" />
               {t('php.create')}
             </Button>
@@ -655,8 +686,24 @@ function PhpConfigFields({
   onChange: (c: PhpConfig) => void;
 }) {
   const set = (patch: Partial<PhpConfig>) => onChange({ ...cfg, ...patch });
+  // Picking a preset expands it into the visible toggles + ini ONCE. From then
+  // on the toggles are authoritative; touching any of them flips preset→'none'
+  // ('custom') so the user can freely remove a preset-provided extension.
+  const pickPreset = (preset: string) => {
+    const def = PRESET_DEFS[preset];
+    if (!def) { set({ preset: 'none' }); return; }
+    set({
+      preset,
+      extensions: [...new Set([...cfg.extensions, ...def.extensions])],
+      ini: { ...def.ini, ...cfg.ini },
+    });
+  };
   const toggleExt = (ext: string) =>
-    set({ extensions: cfg.extensions.includes(ext) ? cfg.extensions.filter((e) => e !== ext) : [...cfg.extensions, ext] });
+    set({
+      preset: 'none',
+      extensions: cfg.extensions.includes(ext) ? cfg.extensions.filter((e) => e !== ext) : [...cfg.extensions, ext],
+    });
+  const setIni = (key: string, value: string) => set({ preset: 'none', ini: { ...cfg.ini, [key]: value } });
 
   return (
     <div className="space-y-4 rounded-lg border border-border p-3 mt-2">
@@ -664,7 +711,7 @@ function PhpConfigFields({
       <div className="grid sm:grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label>{t('php.preset')}</Label>
-          <Select value={cfg.preset} onChange={(e) => set({ preset: e.target.value })}>
+          <Select value={cfg.preset} onChange={(e) => pickPreset(e.target.value)}>
             {PHP_PRESETS.map((p) => (
               <option key={p} value={p}>{t(`php.preset.${p}`)}</option>
             ))}
@@ -711,7 +758,7 @@ function PhpConfigFields({
               <Input
                 value={cfg.ini[f.key] || ''}
                 placeholder={f.placeholder}
-                onChange={(e) => set({ ini: { ...cfg.ini, [f.key]: e.target.value } })}
+                onChange={(e) => setIni(f.key, e.target.value)}
                 className="font-mono h-9"
               />
             </div>

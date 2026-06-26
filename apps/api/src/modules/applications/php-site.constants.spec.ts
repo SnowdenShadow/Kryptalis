@@ -57,9 +57,22 @@ describe('buildPhpIni', () => {
 });
 
 describe('buildNginxConf', () => {
-  it('proxies php to app:9000 via fastcgi', () => {
-    expect(buildNginxConf()).toContain('fastcgi_pass app:9000');
-    expect(buildNginxConf()).toContain('root /var/www/html');
+  it('FastCGI to the UNIQUE fpm container name (not the shared `app` alias)', () => {
+    const conf = buildNginxConf('dockcontrol-my-site-fpm');
+    expect(conf).toContain('fastcgi_pass dockcontrol-my-site-fpm:9000');
+    expect(conf).not.toContain('fastcgi_pass app:9000'); // cross-tenant collision
+    expect(conf).toContain('root /var/www/html');
+  });
+  it('guards php execution with try_files =404', () => {
+    expect(buildNginxConf('x-fpm')).toContain('try_files $fastcgi_script_name =404');
+  });
+  it('derives client_max_body_size from the php.ini upload limit (never below 64m)', () => {
+    expect(buildNginxConf('x-fpm', {})).toContain('client_max_body_size 64m');
+    expect(buildNginxConf('x-fpm', { upload_max_filesize: '256M' })).toContain('client_max_body_size 256m');
+    expect(buildNginxConf('x-fpm', { post_max_size: '512M' })).toContain('client_max_body_size 512m');
+    expect(buildNginxConf('x-fpm', { upload_max_filesize: '1G' })).toContain('client_max_body_size 1024m');
+    // a smaller-than-default limit must NOT shrink nginx below the 64m floor.
+    expect(buildNginxConf('x-fpm', { upload_max_filesize: '8M' })).toContain('client_max_body_size 64m');
   });
 });
 

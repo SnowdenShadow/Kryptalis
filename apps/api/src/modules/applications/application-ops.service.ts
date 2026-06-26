@@ -508,7 +508,16 @@ export class ApplicationOpsService {
     // ("No such container: dockcontrol-<slug>-<id12>"). The stored value is the
     // source of truth; fall back to the heuristic only for legacy rows that
     // never persisted one.
-    const cname = app.containerName || resolveContainerName(slug, id);
+    let cname = app.containerName || resolveContainerName(slug, id);
+    // NGINX-mode PHP sites run TWO containers: the public nginx:alpine web
+    // container (persisted as app.containerName, NO php binary) and the actual
+    // PHP runtime in the php-fpm sidecar named `<containerName>-fpm`. A terminal
+    // command, `php artisan …`, `composer …`, or a cron EXEC must hit the PHP
+    // runtime — exec'ing the nginx container would fail with "php: not found".
+    // Apache mode keeps mod_php in the single container, so it's unaffected.
+    if (app.framework === 'PHP_SITE' && (app as any).phpWebServer === 'nginx') {
+      cname = `${cname}-fpm`;
+    }
     const server = await resolveAppServer(this.prisma, id);
 
     if (!isAppLocal(server) && server) {
@@ -623,16 +632,28 @@ export class ApplicationOpsService {
         }
         return app;
       }
-      const running = stdout
+      const states = stdout
         .split('\n')
         .filter(Boolean)
-        .some((line) => {
+        .map((line) => {
           try {
-            return JSON.parse(line).State === 'running';
+            return String(JSON.parse(line).State || '');
           } catch {
-            return line.includes('running');
+            return line.includes('running') ? 'running' : 'other';
           }
         });
+      // A multi-container stack is only truly UP when EVERY service is running.
+      // This matters for nginx-mode PHP sites: nginx (the persisted container)
+      // runs `restart: unless-stopped` and stays up even if its php-fpm sidecar
+      // crashed — so a `.some()` union would report RUNNING while every request
+      // 502s. Requiring the conjunction makes a dead fpm flip the app to STOPPED
+      // (the truthful state). Single-service stacks (apache mode, every other
+      // app) are unaffected — one service, any vs all are equivalent.
+      const isMultiService =
+        app.framework === 'PHP_SITE' && app.phpWebServer === 'nginx';
+      const running = isMultiService
+        ? states.length > 0 && states.every((s) => s === 'running')
+        : states.some((s) => s === 'running');
       const realStatus = running ? 'RUNNING' : 'STOPPED';
       if (app.status !== realStatus) {
         await this.prisma.application.update({
