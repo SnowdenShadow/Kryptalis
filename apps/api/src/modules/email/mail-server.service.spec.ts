@@ -802,24 +802,34 @@ describe('getLogs', () => {
     return ctx;
   }
 
-  it('clamps the line count to [10, 5000]', async () => {
+  it('reads via `docker logs` (always available) and clamps the line count to [10, 5000]', async () => {
     const { service } = setup();
     await service.getLogs('u1', 'dom1', { lines: 999_999 });
     expect(findExec((c) => c.args[0] === 'logs')!.args).toEqual([
       'logs', '--tail', '5000', '--timestamps', CONTAINER,
     ]);
-
-    await service.getLogs('u1', 'dom1', { lines: 1 });
-    expect(findExec((c) => c.args[2] === '10')).toBeDefined();
   });
 
-  it('service-scoped logs tail the right in-container file', async () => {
+  it('service-scoped logs FILTER docker logs (no fragile tail on a maybe-missing file)', async () => {
     const { service } = setup();
-    await service.getLogs('u1', 'dom1', { service: 'dovecot' });
-    const call = findExec((c) => c.args[0] === 'exec');
-    expect(call!.args).toEqual([
-      'exec', CONTAINER, 'tail', '-n', '200', '/var/log/mail/dovecot.log',
-    ]);
+    // docker logs returns mixed lines; the rspamd filter keeps only its lines.
+    handlers.push((cmd, args) =>
+      args[0] === 'logs'
+        ? { stdout: 'x postfix/smtpd: hi\ny rspamd: spam check ok\nz dovecot: login\n' }
+        : undefined,
+    );
+    const res = await service.getLogs('u1', 'dom1', { service: 'rspamd' });
+    expect(res.logs).toContain('rspamd: spam check ok');
+    expect(res.logs).not.toContain('dovecot: login');
+    // It reads `docker logs`, NOT `tail` on a file.
+    expect(findExec((c) => c.args[0] === 'exec' && c.args.includes('tail'))).toBeUndefined();
+  });
+
+  it('reports cleanly when a service has no lines in the window', async () => {
+    const { service } = setup();
+    handlers.push((cmd, args) => (args[0] === 'logs' ? { stdout: 'only postfix here\n' } : undefined));
+    const res = await service.getLogs('u1', 'dom1', { service: 'fail2ban' });
+    expect(res.logs).toContain('no fail2ban log lines');
   });
 
   it('never throws on docker failure — returns the error inline', async () => {

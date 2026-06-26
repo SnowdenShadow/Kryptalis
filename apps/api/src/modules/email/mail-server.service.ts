@@ -765,29 +765,33 @@ export class MailServerService implements OnApplicationBootstrap {
     const lines = Math.min(Math.max(opts.lines || 200, 10), 5000);
     const service = opts.service || 'all';
     try {
-      if (service === 'all') {
-        const { stdout } = await execFileAsync(
-          'docker',
-          ['logs', '--tail', String(lines), '--timestamps', containerName],
-          { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 },
-        );
-        return { logs: stdout };
-      }
-      // Service-scoped logs live under /var/log/mail in the container,
-      // mounted at ${hostDir}/logs. Use tail on the right file.
-      const fileMap: Record<string, string> = {
-        postfix: '/var/log/mail/mail.log',
-        dovecot: '/var/log/mail/dovecot.log',
-        rspamd: '/var/log/mail/rspamd.log',
-        fail2ban: '/var/log/mail/fail2ban.log',
-      };
-      const file = fileMap[service];
-      const { stdout } = await execFileAsync(
+      // `docker logs` (combined stdout/stderr) is ALWAYS available and is where
+      // docker-mailserver actually surfaces rspamd/fail2ban — the per-service
+      // /var/log/mail/<svc>.log files are not guaranteed to exist (DMS version /
+      // config dependent), which is why a fixed `tail` 404'd. So we read the
+      // container log once and filter by service in JS. Pull a larger window
+      // then trim to the requested count after filtering.
+      const window = service === 'all' ? lines : Math.min(lines * 8, 5000);
+      const { stdout, stderr } = await execFileAsync(
         'docker',
-        ['exec', containerName, 'tail', '-n', String(lines), file],
-        { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 },
+        ['logs', '--tail', String(window), '--timestamps', containerName],
+        { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 },
       );
-      return { logs: stdout };
+      const raw = `${stdout || ''}${stderr || ''}`;
+      if (service === 'all') return { logs: raw };
+
+      // Match the daemon name in the syslog-style line (e.g. "… rspamd[123]: …",
+      // "… postfix/smtpd[…]", "… dovecot: …", "… fail2ban.actions[…]").
+      const needle: Record<string, RegExp> = {
+        postfix: /postfix/i,
+        dovecot: /dovecot/i,
+        rspamd: /rspamd/i,
+        fail2ban: /fail2ban/i,
+      };
+      const re = needle[service];
+      const filtered = raw.split('\n').filter((l) => re.test(l));
+      const tail = filtered.slice(-lines).join('\n');
+      return { logs: tail || `(no ${service} log lines in the last ${window} container log lines)` };
     } catch (e: any) {
       return { logs: `(failed to read logs: ${e?.message || e})` };
     }
