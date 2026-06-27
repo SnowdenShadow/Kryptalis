@@ -317,6 +317,26 @@ export async function downloadFile(target: DockerFsTarget, relPath: string): Pro
   };
 }
 
+/**
+ * Copy a file OUT of the container to a host path via `docker cp` (no shell —
+ * argv array). Used by the zip-extract flow to pull an archive out for
+ * decoding on the API side (the image may have no `unzip`). The relPath is
+ * validated/joined the same way as every other op; `docker cp` writes the file
+ * to `hostPath` directly.
+ */
+export async function copyOut(
+  target: DockerFsTarget,
+  relPath: string,
+  hostPath: string,
+): Promise<void> {
+  const abs = joinAndValidate(target.rootDir, relPath);
+  await execFileAsync(
+    'docker',
+    ['cp', `${target.containerName}:${abs}`, hostPath],
+    { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 },
+  );
+}
+
 export async function mkdir(target: DockerFsTarget, relPath: string): Promise<void> {
   const abs = joinAndValidate(target.rootDir, relPath);
   await dockerSh(target.containerName, `mkdir -p '${abs}'`);

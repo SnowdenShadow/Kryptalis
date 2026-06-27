@@ -15,6 +15,7 @@ import { assertProjectAccess } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
 import * as dockerFs from './docker-fs';
 import { pickRootForImage, type DockerFsTarget } from './docker-fs';
+import { decodeZipSafely } from './zip-extract';
 import { AgentService } from '../agent/agent.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { remoteAppSlug, slugify as appSlugify } from '../applications/applications.helpers';
@@ -1447,6 +1448,148 @@ export class FilesService {
     return { path: resolved.relPath, deleted: true };
   }
 
+  // ── extract (.zip) ─────────────────────────────────────────────────
+
+  /**
+   * Extract a .zip archive IN PLACE (into its parent directory), like a
+   * classic `unzip`. Works in all three file-manager modes:
+   *  - REMOTE app  → a single FILE_EXTRACT agent task (Go `archive/zip` with
+   *    the same zip-slip guard the backups restore uses) — the archive is never
+   *    shipped back over the wire.
+   *  - DOCKER-FS   → copy the .zip out of the container, decode + validate it on
+   *    the API, then push each entry back in via `docker cp` (no `unzip` needed
+   *    inside the image).
+   *  - LOCAL       → decode on the API and write each entry through the existing
+   *    O_NOFOLLOW, symlink-checked writer.
+   *
+   * Security: every entry name is validated to a safe relative path BEFORE any
+   * write (zip-slip), the total uncompressed size is capped against the
+   * project's remaining quota (zip-bomb), and writes reuse the same symlink
+   * defenses as upload. Min role DEVELOPER (same as upload/mkdir/write).
+   */
+  async extract(
+    userId: string,
+    scope: 'app' | 'db',
+    scopeId: string,
+    zipRelPath: string,
+    opts: { deleteAfter?: boolean } = {},
+  ): Promise<{ path: string; files: number; deletedArchive: boolean }> {
+    if (!zipRelPath || zipRelPath === '.') {
+      throw new BadRequestException('No archive path given');
+    }
+    if (!/\.zip$/i.test(zipRelPath)) {
+      throw new BadRequestException('Only .zip archives can be extracted.');
+    }
+    const resolved = await this.resolvePath(userId, scope, scopeId, zipRelPath, 'DEVELOPER');
+    this.assertNotManaged(resolved.relPath);
+    // Destination = the archive's parent directory ("." when at the root).
+    const destRel = resolved.relPath.includes('/')
+      ? resolved.relPath.slice(0, resolved.relPath.lastIndexOf('/'))
+      : '';
+
+    // ── REMOTE: delegate to the agent (Go-side extraction). ──
+    const remote = await this.resolveRemoteFsTarget(scope, scopeId);
+    if (remote) {
+      const task = await this.agent.enqueueAndWait(
+        remote.serverId,
+        'FILE_EXTRACT',
+        {
+          slug: remote.slug,
+          legacySlug: remote.legacySlug,
+          file: resolved.relPath,
+          dest: destRel,
+          deleteAfter: !!opts.deleteAfter,
+        },
+        5 * 60_000,
+      );
+      if (task.status === 'FAILED') {
+        if ((task.error || '').includes('not found')) throw new NotFoundException('Archive not found');
+        throw new BadRequestException(task.error || 'Remote extraction failed');
+      }
+      const r: any = task.result || {};
+      await this.audit(userId, scope, scopeId, 'extract', resolved.relPath);
+      return {
+        path: destRel || '.',
+        files: typeof r.files === 'number' ? r.files : 0,
+        deletedArchive: !!opts.deleteAfter,
+      };
+    }
+
+    // Cap uncompressed output at the project's remaining quota (or an absolute
+    // ceiling), so an archive can't blow past the storage budget.
+    const projectId = await this.projectIdForScope(scope, scopeId);
+    const remaining = await this.remainingQuotaBytes(projectId);
+
+    // ── DOCKER-FS: pull the zip out, decode on the API, push entries back. ──
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        const st = await dockerFs.stat(target, resolved.relPath);
+        if (!st.exists || !st.isFile) throw new NotFoundException('Archive not found');
+        const tmpZip = path.join(TMP_DIR, `dc-extract-${crypto.randomBytes(8).toString('hex')}.zip`);
+        try {
+          await dockerFs.copyOut(target, resolved.relPath, tmpZip);
+          const zipBuf = await fs.promises.readFile(tmpZip);
+          const files = decodeZipSafely(zipBuf, remaining);
+          for (const f of files) {
+            // Per-entry managed-file guard (parity with LOCAL mode) — an archive
+            // entry must not overwrite a DockControl-managed file.
+            this.assertNotManaged([destRel, f.path].filter(Boolean).join('/'));
+            const entryTmp = path.join(TMP_DIR, `dc-entry-${crypto.randomBytes(8).toString('hex')}`);
+            await fs.promises.writeFile(entryTmp, f.data);
+            try {
+              const sub = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '';
+              const name = f.path.includes('/') ? f.path.slice(f.path.lastIndexOf('/') + 1) : f.path;
+              const fullSub = [destRel, sub].filter(Boolean).join('/');
+              await dockerFs.uploadFile(target, fullSub, name, entryTmp);
+            } finally {
+              await fs.promises.unlink(entryTmp).catch(() => {});
+            }
+          }
+          if (opts.deleteAfter) await dockerFs.remove(target, resolved.relPath);
+          await this.audit(userId, scope, scopeId, 'extract', resolved.relPath);
+          return { path: destRel || '.', files: files.length, deletedArchive: !!opts.deleteAfter };
+        } finally {
+          await fs.promises.unlink(tmpZip).catch(() => {});
+        }
+      }
+    }
+
+    // ── LOCAL: decode on the API, write through the symlink-safe writer. ──
+    if (!fs.existsSync(resolved.absPath) || !fs.lstatSync(resolved.absPath).isFile()) {
+      throw new NotFoundException('Archive not found');
+    }
+    const zipBuf = await fs.promises.readFile(resolved.absPath);
+    const files = decodeZipSafely(zipBuf, remaining);
+    // Charge the whole decompressed total against quota up front (one check).
+    const totalBytes = files.reduce((n, f) => n + f.data.length, 0);
+    await this.checkQuota(projectId, totalBytes);
+
+    let written = 0;
+    for (const f of files) {
+      // Re-resolve EACH destination path through the sandbox (defence in depth
+      // on top of decodeZipSafely's own validation).
+      const entryRel = [destRel, f.path].filter(Boolean).join('/');
+      const entryResolved = await this.resolvePath(userId, scope, scopeId, entryRel, 'DEVELOPER');
+      this.assertNotManaged(entryResolved.relPath);
+      fs.mkdirSync(path.dirname(entryResolved.absPath), { recursive: true });
+      this.assertNoSymlinkInPath(entryResolved.rootDir, entryResolved.absPath);
+      this.writeFileNoFollow(entryResolved.absPath, f.data);
+      written++;
+    }
+    // The cached usage no longer reflects what we just wrote — drop it.
+    this.invalidateQuota(projectId);
+
+    let deletedArchive = false;
+    if (opts.deleteAfter) {
+      this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
+      fs.rmSync(resolved.absPath, { force: true });
+      deletedArchive = true;
+    }
+    await this.audit(userId, scope, scopeId, 'extract', resolved.relPath);
+    return { path: destRel || '.', files: written, deletedArchive };
+  }
+
   // ── quota ─────────────────────────────────────────────────────────
 
   /**
@@ -1638,6 +1781,21 @@ export class FilesService {
   /** Invalidate the cached usage for a project — call after deletes. */
   private invalidateQuota(projectId: string | null) {
     if (projectId) this.quotaCache.delete(projectId);
+  }
+
+  /**
+   * Bytes still available to write in a project, used as the zip-bomb cap for
+   * extraction. Falls back to an absolute ceiling for unlinked/admin scopes (no
+   * project budget) so a hostile archive still can't decompress without bound.
+   */
+  private async remainingQuotaBytes(projectId: string | null): Promise<number> {
+    const ABSOLUTE_EXTRACT_CEILING = 2 * 1024 * 1024 * 1024; // 2 GiB hard cap
+    if (!projectId) return ABSOLUTE_EXTRACT_CEILING;
+    const quota = await this.getProjectQuotaBytes(projectId);
+    const used = await this.getProjectUsageCached(projectId);
+    const left = quota > used ? quota - used : 0n;
+    // Clamp to a Number (sizes are well under 2^53) and to the ceiling.
+    return Math.min(Number(left), ABSOLUTE_EXTRACT_CEILING);
   }
 
   /** Public — drives the GET /files/project/:projectId/usage endpoint. */

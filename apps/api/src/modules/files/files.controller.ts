@@ -18,6 +18,7 @@ import type { Request, Response } from 'express';
 import * as fs from 'fs';
 import { FilesService } from './files.service';
 import { MkdirDto } from './dto/mkdir.dto';
+import { ExtractZipDto } from './dto/extract-zip.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 type Scope = 'app' | 'db';
@@ -104,6 +105,19 @@ export class FilesController {
     @Body() body: { from: string; to: string },
   ) {
     return this.svc.rename(userId, parseScope(scope), scopeId, body.from, body.to);
+  }
+
+  @Post(':scope/:scopeId/extract')
+  @ApiOperation({ summary: 'Extract a .zip archive in place' })
+  extract(
+    @CurrentUser('id') userId: string,
+    @Param('scope') scope: string,
+    @Param('scopeId') scopeId: string,
+    @Body() dto: ExtractZipDto,
+  ) {
+    return this.svc.extract(userId, parseScope(scope), scopeId, dto.path, {
+      deleteAfter: dto.deleteAfter,
+    });
   }
 
   @Delete(':scope/:scopeId/entry')

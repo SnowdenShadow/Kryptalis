@@ -1,6 +1,7 @@
 package poller
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -64,18 +65,19 @@ const maxConcurrentTasks = 4
 // (network stall) permanently occupied a semaphore slot; four such tasks
 // silently bricked the agent.
 var taskTimeouts = map[string]time.Duration{
-	"DEPLOY":     30 * time.Minute, // image builds can be slow
-	"BUILD":      30 * time.Minute,
-	"START":      5 * time.Minute,
-	"RESTART":    5 * time.Minute,
-	"STOP":       5 * time.Minute,
-	"REMOVE":     5 * time.Minute,
-	"LOGS":       1 * time.Minute,
-	"SFTP_SYNC":  1 * time.Minute,
-	"EXEC":       2 * time.Minute,
-	"STATUS":     1 * time.Minute,
-	"FILE_READ":  30 * time.Second,
-	"FILE_WRITE": 30 * time.Second,
+	"DEPLOY":       30 * time.Minute, // image builds can be slow
+	"BUILD":        30 * time.Minute,
+	"START":        5 * time.Minute,
+	"RESTART":      5 * time.Minute,
+	"STOP":         5 * time.Minute,
+	"REMOVE":       5 * time.Minute,
+	"LOGS":         1 * time.Minute,
+	"SFTP_SYNC":    1 * time.Minute,
+	"EXEC":         2 * time.Minute,
+	"STATUS":       1 * time.Minute,
+	"FILE_READ":    30 * time.Second,
+	"FILE_WRITE":   30 * time.Second,
+	"FILE_EXTRACT": 5 * time.Minute, // unzip can touch many files
 	// Data-transfer tasks move whole volumes / database dumps over the
 	// network — generous deadlines by design.
 	"VOLUME_LIST":   1 * time.Minute,
@@ -235,6 +237,8 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.runFileList(task)
 	case "FILE_DELETE":
 		result, taskErr = p.runFileDelete(task)
+	case "FILE_EXTRACT":
+		result, taskErr = p.runFileExtract(task)
 	case "DISK_USAGE":
 		result, taskErr = p.runDiskUsage(task)
 	case "SFTP_SYNC":
@@ -974,6 +978,153 @@ func (p *Poller) runFileWrite(task Task) (map[string]interface{}, string) {
 		return nil, err.Error()
 	}
 	return map[string]interface{}{"written": len(data)}, ""
+}
+
+// maxExtractBytes caps the total UNCOMPRESSED output of a single FILE_EXTRACT
+// (zip-bomb defence). 2 GiB matches the API-side ceiling.
+const maxExtractBytes int64 = 2 * 1024 * 1024 * 1024
+
+// managedFiles must stay in sync with the API's MANAGED_FILES (files.service.ts)
+// — a zip entry must never overwrite a DockControl-managed file. Compared
+// case-insensitively against every path component.
+var managedFiles = map[string]bool{
+	".dockcontrol.env":            true,
+	"docker-compose.override.yml": true,
+}
+
+// touchesManaged reports whether any component of a cleaned relative path is a
+// managed filename (case-insensitive).
+func touchesManaged(rel string) bool {
+	for _, c := range strings.Split(filepath.ToSlash(rel), "/") {
+		if managedFiles[strings.ToLower(c)] {
+			return true
+		}
+	}
+	return false
+}
+
+// runFileExtract unzips an archive IN PLACE inside the app dir. Payload:
+//
+//	{ slug|legacySlug, file: "<relpath>.zip", dest: "<reldir>", deleteAfter: bool }
+//
+// Security mirrors untarGz (backup restore): every entry is filepath.Clean'd
+// and rejected if it escapes the destination (zip-slip); non-regular entries
+// (symlinks/devices) are skipped; the total uncompressed size is capped.
+func (p *Poller) runFileExtract(task Task) (map[string]interface{}, string) {
+	name, _ := task.Payload["file"].(string)
+	dest, _ := task.Payload["dest"].(string)
+	deleteAfter, _ := task.Payload["deleteAfter"].(bool)
+	dir, errStr := resolveTaskDir(task.Payload)
+	if errStr != "" || name == "" {
+		return nil, "missing slug or file"
+	}
+	if !strings.HasSuffix(strings.ToLower(name), ".zip") {
+		return nil, "only .zip archives can be extracted"
+	}
+
+	safeZip := filepath.Clean(name)
+	if strings.HasPrefix(safeZip, "..") || strings.Contains(safeZip, "..") || filepath.IsAbs(safeZip) {
+		return nil, "path traversal rejected"
+	}
+	zipPath := filepath.Join(dir, safeZip)
+
+	// Destination dir (parent of the archive by default; or an explicit reldir).
+	destClean := filepath.Clean(dest)
+	if dest == "" || destClean == "." {
+		destClean = filepath.Dir(safeZip)
+	}
+	if strings.HasPrefix(destClean, "..") || strings.Contains(destClean, "..") || filepath.IsAbs(destClean) {
+		return nil, "destination traversal rejected"
+	}
+	destAbs := filepath.Join(dir, destClean)
+
+	written, errStr := extractZipInto(zipPath, destAbs)
+	if errStr != "" {
+		return nil, errStr
+	}
+	if deleteAfter {
+		_ = os.Remove(zipPath)
+	}
+	return map[string]interface{}{"files": written, "deletedArchive": deleteAfter}, ""
+}
+
+// extractZipInto unzips zipPath into destAbs (both absolute), enforcing
+// zip-slip (no entry may escape destAbs), skipping non-regular entries
+// (symlinks/devices), and capping total uncompressed output at maxExtractBytes.
+// Returns the number of files written, or a non-empty error string.
+func extractZipInto(zipPath, destAbs string) (int, string) {
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, "archive not found"
+		}
+		return 0, "not a valid .zip: " + err.Error()
+	}
+	defer zr.Close()
+
+	var total int64
+	written := 0
+	for _, f := range zr.File {
+		entryName := filepath.Clean(filepath.FromSlash(f.Name))
+		if entryName == "." {
+			continue
+		}
+		// zip-slip: the resolved target must stay under destAbs.
+		target := filepath.Join(destAbs, entryName)
+		if target != destAbs && !strings.HasPrefix(target, destAbs+string(os.PathSeparator)) {
+			return 0, fmt.Sprintf("entry %q escapes the destination", f.Name)
+		}
+		// Never let an archive overwrite a DockControl-managed file.
+		if touchesManaged(entryName) {
+			return 0, fmt.Sprintf("entry %q targets a managed file", f.Name)
+		}
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return 0, err.Error()
+			}
+			continue
+		}
+		// Skip symlinks / devices / anything not a regular file.
+		if !f.FileInfo().Mode().IsRegular() {
+			continue
+		}
+		// Budget remaining BEFORE this file (header sizes can lie, so we cap the
+		// actual copy below — never trust UncompressedSize64 alone).
+		remaining := maxExtractBytes - total
+		if remaining <= 0 {
+			return 0, fmt.Sprintf("archive decompresses beyond %d bytes (possible zip bomb)", maxExtractBytes)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return 0, err.Error()
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return 0, err.Error()
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		if err != nil {
+			rc.Close()
+			return 0, err.Error()
+		}
+		// Copy at most `remaining`+1 bytes: if we actually read more than the
+		// budget, the archive lied about its size — reject as a zip bomb.
+		n, copyErr := io.Copy(out, io.LimitReader(rc, remaining+1))
+		rc.Close()
+		closeErr := out.Close()
+		if copyErr != nil {
+			return 0, copyErr.Error()
+		}
+		if closeErr != nil {
+			return 0, closeErr.Error()
+		}
+		if n > remaining {
+			_ = os.Remove(target)
+			return 0, fmt.Sprintf("archive decompresses beyond %d bytes (possible zip bomb)", maxExtractBytes)
+		}
+		total += n
+		written++
+	}
+	return written, ""
 }
 
 // sanitize must stay byte-for-byte equivalent to apps/api/.../applications.service.ts:slugify.

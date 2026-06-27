@@ -188,6 +188,8 @@ export default function FilesPage() {
   const [renameTarget, setRenameTarget] = useState<FileEntry | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
+  const [extractTarget, setExtractTarget] = useState<FileEntry | null>(null);
+  const [extractDeleteAfter, setExtractDeleteAfter] = useState(false);
   const [search, setSearch] = useState('');
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
@@ -358,6 +360,19 @@ export default function FilesPage() {
     onSuccess: () => {
       toast.success(t('files.toastDeleted'));
       setDeleteTarget(null);
+      refetchListing();
+      refetchUsage();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const extractMutation = useMutation({
+    mutationFn: ({ path, deleteAfter }: { path: string; deleteAfter: boolean }) =>
+      api.post<{ files: number }>(`/files/${selected!.scope}/${selected!.id}/extract`, { path, deleteAfter }),
+    onSuccess: (res) => {
+      toast.success(t('files.toastExtracted', { n: res?.files ?? 0 }));
+      setExtractTarget(null);
+      setExtractDeleteAfter(false);
       refetchListing();
       refetchUsage();
     },
@@ -858,6 +873,12 @@ export default function FilesPage() {
                                       <Download size={13} />
                                     </Button>
                                   )}
+                                  {!isDir && canEdit && /\.zip$/i.test(e.name) && (
+                                    <Button size="icon" variant="ghost" className="h-7 w-7" title={t('files.actionExtract')}
+                                      onClick={() => { setExtractTarget(e); setExtractDeleteAfter(false); }}>
+                                      <FileArchive size={13} />
+                                    </Button>
+                                  )}
                                   {canEdit && (
                                     <Button size="icon" variant="ghost" className="h-7 w-7" title={t('files.actionRename')}
                                       onClick={() => { setRenameTarget(e); setRenameValue(e.name); }}>
@@ -949,6 +970,32 @@ export default function FilesPage() {
             onClick={() => deleteTarget && removeMutation.mutate(deleteTarget.path)}
           >
             {removeMutation.isPending ? t('files.dlgDeleting') : t('files.dlgDelete')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ── extract (.zip) dialog ── */}
+      <Dialog open={!!extractTarget} onClose={() => setExtractTarget(null)}>
+        <DialogHeader>
+          <DialogTitle>{t('files.dlgExtractTitle', { name: extractTarget?.name || '' })}</DialogTitle>
+          <DialogDescription>{t('files.dlgExtractDesc')}</DialogDescription>
+        </DialogHeader>
+        <label className="flex items-center gap-2 px-1 py-2 text-sm cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={extractDeleteAfter}
+            onChange={(ev) => setExtractDeleteAfter(ev.target.checked)}
+            className="h-4 w-4 rounded border-input"
+          />
+          {t('files.dlgExtractDeleteAfter')}
+        </label>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setExtractTarget(null)}>{t('common.cancel')}</Button>
+          <Button
+            disabled={extractMutation.isPending}
+            onClick={() => extractTarget && extractMutation.mutate({ path: extractTarget.path, deleteAfter: extractDeleteAfter })}
+          >
+            {extractMutation.isPending ? t('files.dlgExtracting') : t('files.dlgExtract')}
           </Button>
         </DialogFooter>
       </Dialog>
