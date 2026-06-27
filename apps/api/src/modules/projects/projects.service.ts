@@ -22,6 +22,7 @@ import { slugify, remoteAppSlug, RESERVED_HOST_PORTS } from '../applications/app
 import { ApplicationOpsService } from '../applications/application-ops.service';
 import { ApplicationsService } from '../applications/applications.service';
 import { DatabasesService } from '../databases/databases.service';
+import { renderDbCompose as renderDbComposeShared } from '../databases/db-configs';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -781,44 +782,23 @@ export class ProjectsService implements OnModuleInit {
   }
 
   /**
-   * Re-render the compose YAML for a managed database, matching databases.
-   * service's DB_CONFIGS templates. The raw db.name is used for the container
+   * Re-render the compose YAML for a managed database during project
+   * migration. Thin wrapper over the shared DB_CONFIGS renderer
+   * (databases/db-configs.ts) — the single source of truth both modules use,
+   * so the two can no longer drift. The raw db.name is used for the container
    * name + db name (NEVER slugified). Returns null for unknown types.
-   * (Duplicated from databases.service because DB_CONFIGS is module-private;
-   * see the deferred note in the batch report.)
    */
   private renderDbCompose(db: {
     name: string; type: string; username: string; password: string; port: number;
   }): string | null {
-    const name = db.name;
-    const user = db.username;
-    const pass = this.encryption.decrypt(db.password);
-    const port = db.port;
-    switch (db.type) {
-      case 'POSTGRESQL':
-        return `services:\n  ${name}:\n    image: postgres:16-alpine\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:5432"\n    environment:\n      POSTGRES_DB: ${name}\n      POSTGRES_USER: ${user}\n      POSTGRES_PASSWORD: ${pass}\n    volumes:\n      - data:/var/lib/postgresql/data\n    healthcheck:\n      test: ["CMD-SHELL", "pg_isready -U ${user}"]\n      interval: 5s\n      timeout: 5s\n      retries: 5\nvolumes:\n  data:`;
-      case 'MYSQL':
-        return `services:\n  ${name}:\n    image: mysql:8\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:3306"\n    environment:\n      MYSQL_DATABASE: ${name}\n      MYSQL_USER: ${user}\n      MYSQL_PASSWORD: ${pass}\n      MYSQL_ROOT_PASSWORD: ${pass}\n    volumes:\n      - data:/var/lib/mysql\nvolumes:\n  data:`;
-      case 'MARIADB':
-        // MUST match databases.service DB_CONFIGS.MARIADB, which uses the
-        // MYSQL_* env keys (mariadb:11 honors both, but the two renderers had
-        // drifted — this copy used MARIADB_*, so a managed MariaDB rebuilt via
-        // this projects path initialized a fresh volume with DIFFERENT env
-        // than the databases path. Keep them identical.)
-        return `services:\n  ${name}:\n    image: mariadb:11\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:3306"\n    environment:\n      MYSQL_DATABASE: ${name}\n      MYSQL_USER: ${user}\n      MYSQL_PASSWORD: ${pass}\n      MYSQL_ROOT_PASSWORD: ${pass}\n    volumes:\n      - data:/var/lib/mysql\nvolumes:\n  data:`;
-      case 'REDIS':
-        return `services:\n  ${name}:\n    image: redis:7-alpine\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:6379"\n    command: redis-server${pass ? ` --requirepass ${pass}` : ''}\n    volumes:\n      - data:/data\nvolumes:\n  data:`;
-      case 'MONGODB':
-        return `services:\n  ${name}:\n    image: mongo:7\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:27017"\n    environment:\n      MONGO_INITDB_DATABASE: ${name}\n      MONGO_INITDB_ROOT_USERNAME: ${user}\n      MONGO_INITDB_ROOT_PASSWORD: ${pass}\n    volumes:\n      - data:/data/db\nvolumes:\n  data:`;
-      case 'KEYDB':
-        return `services:\n  ${name}:\n    image: eqalpha/keydb:latest\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:6379"\n    command: keydb-server${pass ? ` --requirepass ${pass}` : ''} --server-threads 2\n    volumes:\n      - data:/data\nvolumes:\n  data:`;
-      case 'DRAGONFLY':
-        return `services:\n  ${name}:\n    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:6379"\n    ulimits:\n      memlock: -1\n    command: ["--logtostderr"${pass ? `, "--requirepass=${pass}"` : ''}]\n    volumes:\n      - data:/data\nvolumes:\n  data:`;
-      case 'CLICKHOUSE':
-        return `services:\n  ${name}:\n    image: clickhouse/clickhouse-server:latest\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:8123"\n      - "${port + 1000}:9000"\n    ulimits:\n      nofile:\n        soft: 262144\n        hard: 262144\n    environment:\n      CLICKHOUSE_DB: ${name}\n      CLICKHOUSE_USER: ${user}\n      CLICKHOUSE_PASSWORD: ${pass}\n      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1\n    volumes:\n      - data:/var/lib/clickhouse\nvolumes:\n  data:`;
-      default:
-        return null;
-    }
+    // Delegate to the shared DB_CONFIGS templates (databases/db-configs.ts) so
+    // this migration path can never drift from the databases-module renderer
+    // again. We decrypt the stored password here — the template module is
+    // dependency-free and works on the plaintext.
+    return renderDbComposeShared(
+      { name: db.name, type: db.type, username: db.username, port: db.port },
+      this.encryption.decrypt(db.password),
+    );
   }
 
   /**

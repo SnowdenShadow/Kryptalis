@@ -20,6 +20,7 @@ import {
 } from './php-site.constants';
 import { DatabasesService } from '../databases/databases.service';
 import { ApplicationEnvService } from './application-env.service';
+import { ApplicationRepository } from './application.repository';
 import {
   execFileAsync,
   slugify,
@@ -64,6 +65,7 @@ export class ApplicationDeployService implements OnModuleInit {
     private notifications: NotificationsService,
     private databases: DatabasesService,
     private env: ApplicationEnvService,
+    private apps: ApplicationRepository,
   ) {}
 
   onModuleInit(): void {
@@ -115,6 +117,53 @@ export class ApplicationDeployService implements OnModuleInit {
         await this.notifications.sendDeploymentResult(dep.triggeredById, appName, status, error);
       }
     } catch {}
+  }
+
+  /**
+   * Fire-and-forget Caddy regeneration. Every deploy path refreshes the proxy
+   * after flipping app status (so a stale block from a prior deploy stops
+   * pointing at a dead container, and a fresh app's port becomes routable).
+   * Failures here must never fail the deploy — hence the swallowed catch. This
+   * wraps the `this.proxy.regenerate().catch(() => {})` that was copied 14×.
+   */
+  private regenerateProxy(): void {
+    void this.proxy.regenerate().catch(() => {});
+  }
+
+  /**
+   * Shared failure finalizer for the non-git deploy paths (image / raw compose
+   * / raw Dockerfile / PHP site). Flips the app to ERROR, records the failed
+   * Deployment row (build logs + truncated error + duration), refreshes Caddy,
+   * and notifies. Previously duplicated byte-for-byte at the tail of each of
+   * those four methods. NOTE: runDeploy() (git) has its OWN catch with rollback
+   * and does not use this.
+   */
+  private async finalizeDeployFailure(args: {
+    appId: string;
+    deploymentId: string;
+    appName: string;
+    message: string;
+    buildLogs: string[];
+    started: number;
+    log: (line: string) => void;
+  }): Promise<void> {
+    const { appId, deploymentId, appName, message, buildLogs, started, log } = args;
+    log(`✖ ${message}`);
+    await this.apps.setStatus(appId, AppStatus.ERROR);
+    await this.prisma.deployment.update({
+      where: { id: deploymentId },
+      data: {
+        status: DeploymentStatus.FAILED,
+        buildLogs: buildLogs.join('\n').slice(0, 50_000),
+        deployLogs: message.slice(0, 10_000),
+        duration: Date.now() - started,
+        finishedAt: new Date(),
+      },
+    });
+    // Refresh Caddy so any stale block from a prior successful deploy (we just
+    // failed a new one) no longer points at a dead container.
+    this.regenerateProxy();
+    this.notifyDeploymentOutcome(deploymentId, appName, 'failed', message);
   }
 
   /**
@@ -177,15 +226,11 @@ export class ApplicationDeployService implements OnModuleInit {
       const r: any = task.result || {};
       if (r.logs) buildLogs.push(r.logs);
       if (task.status === 'FAILED') throw new Error(task.error || 'agent deploy failed');
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: {
-          status: AppStatus.RUNNING,
-          ...(meta?.containerName ? { containerName: meta.containerName } : {}),
-          ...(meta?.containerPort ? { containerPort: meta.containerPort } : {}),
-        },
+      await this.apps.setStatus(appId, AppStatus.RUNNING, {
+        ...(meta?.containerName ? { containerName: meta.containerName } : {}),
+        ...(meta?.containerPort ? { containerPort: meta.containerPort } : {}),
       });
-      this.proxy.regenerate().catch(() => {});
+      this.regenerateProxy();
       await this.prisma.deployment.update({
         where: { id: deploymentId },
         data: {
@@ -199,10 +244,7 @@ export class ApplicationDeployService implements OnModuleInit {
     } catch (err: any) {
       const msg = err?.message || 'remote deploy failed';
       buildLogs.push(`✖ ${msg}`);
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: { status: AppStatus.ERROR },
-      });
+      await this.apps.setStatus(appId, AppStatus.ERROR);
       await this.prisma.deployment.update({
         where: { id: deploymentId },
         data: {
@@ -213,7 +255,7 @@ export class ApplicationDeployService implements OnModuleInit {
           finishedAt: new Date(),
         },
       });
-      this.proxy.regenerate().catch(() => {});
+      this.regenerateProxy();
       this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
   }
@@ -285,7 +327,7 @@ export class ApplicationDeployService implements OnModuleInit {
       const msg =
         'PHP sites are only supported on the local host for now (they bind-mount a docroot the host daemon must see). Deploy on the platform server, or use a Git/Docker app for a remote target.';
       log(`✖ ${msg}`);
-      await this.prisma.application.update({ where: { id: appId }, data: { status: AppStatus.ERROR } });
+      await this.apps.setStatus(appId, AppStatus.ERROR);
       await this.prisma.deployment.update({
         where: { id: deploymentId },
         data: { status: DeploymentStatus.FAILED, buildLogs: buildLogs.join('\n'), deployLogs: msg, duration: Date.now() - started, finishedAt: new Date() },
@@ -424,18 +466,14 @@ export class ApplicationDeployService implements OnModuleInit {
       log('> docker compose up -d');
       await dockerCompose(appDir, ['up', '-d', '--remove-orphans'], undefined, 180_000);
 
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: {
-          status: AppStatus.RUNNING,
-          framework: 'PHP_SITE',
-          phpVersion: version,
-          containerName: containerNm,
-          containerPort: PHP_SITE_CONTAINER_PORT,
-          port: PHP_SITE_CONTAINER_PORT,
-        },
+      await this.apps.setStatus(appId, AppStatus.RUNNING, {
+        framework: 'PHP_SITE',
+        phpVersion: version,
+        containerName: containerNm,
+        containerPort: PHP_SITE_CONTAINER_PORT,
+        port: PHP_SITE_CONTAINER_PORT,
       });
-      this.proxy.regenerate().catch(() => {});
+      this.regenerateProxy();
       await this.prisma.deployment.update({
         where: { id: deploymentId },
         data: {
@@ -447,24 +485,15 @@ export class ApplicationDeployService implements OnModuleInit {
       });
       this.notifyDeploymentOutcome(deploymentId, name, 'success');
     } catch (err: any) {
-      const msg = err?.message || 'PHP site deploy failed';
-      log(`✖ ${msg}`);
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: { status: AppStatus.ERROR },
+      await this.finalizeDeployFailure({
+        appId,
+        deploymentId,
+        appName: name,
+        message: err?.message || 'PHP site deploy failed',
+        buildLogs,
+        started,
+        log,
       });
-      await this.prisma.deployment.update({
-        where: { id: deploymentId },
-        data: {
-          status: DeploymentStatus.FAILED,
-          buildLogs: buildLogs.join('\n').slice(0, 50_000),
-          deployLogs: msg.slice(0, 10_000),
-          duration: Date.now() - started,
-          finishedAt: new Date(),
-        },
-      });
-      this.proxy.regenerate().catch(() => {});
-      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
   }
 
@@ -637,16 +666,12 @@ export class ApplicationDeployService implements OnModuleInit {
         } catch {}
       }
 
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: {
-          status: AppStatus.RUNNING,
-          containerName: containerNm,
-          containerPort: detectedPort,
-          port: detectedPort,
-        },
+      await this.apps.setStatus(appId, AppStatus.RUNNING, {
+        containerName: containerNm,
+        containerPort: detectedPort,
+        port: detectedPort,
       });
-      this.proxy.regenerate().catch(() => {});
+      this.regenerateProxy();
       await this.prisma.deployment.update({
         where: { id: deploymentId },
         data: {
@@ -658,26 +683,15 @@ export class ApplicationDeployService implements OnModuleInit {
       });
       this.notifyDeploymentOutcome(deploymentId, name, 'success');
     } catch (err: any) {
-      const msg = err?.message || 'docker image deploy failed';
-      log(`✖ ${msg}`);
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: { status: AppStatus.ERROR },
+      await this.finalizeDeployFailure({
+        appId,
+        deploymentId,
+        appName: name,
+        message: err?.message || 'docker image deploy failed',
+        buildLogs,
+        started,
+        log,
       });
-      await this.prisma.deployment.update({
-        where: { id: deploymentId },
-        data: {
-          status: DeploymentStatus.FAILED,
-          buildLogs: buildLogs.join('\n').slice(0, 50_000),
-          deployLogs: msg.slice(0, 10_000),
-          duration: Date.now() - started,
-          finishedAt: new Date(),
-        },
-      });
-      // Refresh Caddy so any stale block from a prior successful deploy
-      // (we just failed a new one) no longer points at a dead container.
-      this.proxy.regenerate().catch(() => {});
-      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
   }
 
@@ -860,19 +874,15 @@ export class ApplicationDeployService implements OnModuleInit {
       // the compose's published port, and only fall back to the container port.
       const info = readComposeContainerInfo(finalCompose, containerName(slug));
       const publishedPort = opts.hostPort ?? info.publishedHostPort ?? null;
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: {
-          status: AppStatus.RUNNING,
-          containerName: info.containerName,
-          containerPort: info.containerPort,
-          // `port` drives the public URL — use the published host port when we
-          // have one, else the container port (single-value compose case).
-          port: publishedPort ?? info.containerPort,
-          ...(publishedPort != null ? { hostPort: publishedPort } : {}),
-        },
+      await this.apps.setStatus(appId, AppStatus.RUNNING, {
+        containerName: info.containerName,
+        containerPort: info.containerPort,
+        // `port` drives the public URL — use the published host port when we
+        // have one, else the container port (single-value compose case).
+        port: publishedPort ?? info.containerPort,
+        ...(publishedPort != null ? { hostPort: publishedPort } : {}),
       });
-      this.proxy.regenerate().catch(() => {});
+      this.regenerateProxy();
       await this.prisma.deployment.update({
         where: { id: deploymentId },
         data: {
@@ -908,24 +918,15 @@ export class ApplicationDeployService implements OnModuleInit {
         }
       } catch {}
     } catch (err: any) {
-      const msg = err?.message || 'compose deploy failed';
-      log(`✖ ${msg}`);
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: { status: AppStatus.ERROR },
+      await this.finalizeDeployFailure({
+        appId,
+        deploymentId,
+        appName: name,
+        message: err?.message || 'compose deploy failed',
+        buildLogs,
+        started,
+        log,
       });
-      await this.prisma.deployment.update({
-        where: { id: deploymentId },
-        data: {
-          status: DeploymentStatus.FAILED,
-          buildLogs: buildLogs.join('\n').slice(0, 50_000),
-          deployLogs: msg.slice(0, 10_000),
-          duration: Date.now() - started,
-          finishedAt: new Date(),
-        },
-      });
-      this.proxy.regenerate().catch(() => {});
-      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
   }
 
@@ -1187,16 +1188,12 @@ export class ApplicationDeployService implements OnModuleInit {
         } catch {}
       }
 
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: {
-          status: AppStatus.RUNNING,
-          containerName: containerNm,
-          containerPort: detectedPort,
-          port: detectedPort,
-        },
+      await this.apps.setStatus(appId, AppStatus.RUNNING, {
+        containerName: containerNm,
+        containerPort: detectedPort,
+        port: detectedPort,
       });
-      this.proxy.regenerate().catch(() => {});
+      this.regenerateProxy();
       await this.prisma.deployment.update({
         where: { id: deploymentId },
         data: {
@@ -1208,24 +1205,15 @@ export class ApplicationDeployService implements OnModuleInit {
       });
       this.notifyDeploymentOutcome(deploymentId, name, 'success');
     } catch (err: any) {
-      const msg = err?.message || 'Dockerfile build failed';
-      log(`✖ ${msg}`);
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: { status: AppStatus.ERROR },
+      await this.finalizeDeployFailure({
+        appId,
+        deploymentId,
+        appName: name,
+        message: err?.message || 'Dockerfile build failed',
+        buildLogs,
+        started,
+        log,
       });
-      await this.prisma.deployment.update({
-        where: { id: deploymentId },
-        data: {
-          status: DeploymentStatus.FAILED,
-          buildLogs: buildLogs.join('\n').slice(0, 50_000),
-          deployLogs: msg.slice(0, 10_000),
-          duration: Date.now() - started,
-          finishedAt: new Date(),
-        },
-      });
-      this.proxy.regenerate().catch(() => {});
-      this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
   }
 
@@ -1348,11 +1336,8 @@ export class ApplicationDeployService implements OnModuleInit {
         const r: any = task.result || {};
         if (r.logs) log(r.logs);
         if (task.status === 'FAILED') throw new Error(task.error || 'agent deploy failed');
-        await this.prisma.application.update({
-          where: { id: appId },
-          data: { status: AppStatus.RUNNING },
-        });
-        this.proxy.regenerate().catch(() => {});
+        await this.apps.setStatus(appId, AppStatus.RUNNING);
+        this.regenerateProxy();
         await this.prisma.deployment.update({
           where: { id: deploymentId },
           data: {
@@ -1368,10 +1353,7 @@ export class ApplicationDeployService implements OnModuleInit {
       } catch (err: any) {
         const msg = err?.message || 'deploy failed';
         log(`✖ ${msg}`);
-        await this.prisma.application.update({
-          where: { id: appId },
-          data: { status: AppStatus.ERROR },
-        });
+        await this.apps.setStatus(appId, AppStatus.ERROR);
         await this.prisma.deployment.update({
           where: { id: deploymentId },
           data: {
@@ -1520,10 +1502,7 @@ export class ApplicationDeployService implements OnModuleInit {
         }
         log(`> merged env (${Object.keys(repoEnv).length} from repo, ${Object.keys(opts.envVars).length} total)`);
         // persist (encrypted) so redeploy keeps the merge
-        await this.prisma.application.update({
-          where: { id: appId },
-          data: { envVars: this.env.encryptEnvVars(opts.envVars) as any },
-        });
+        await this.apps.update(appId, { envVars: this.env.encryptEnvVars(opts.envVars) as any });
       }
 
       // 5. capture commit info
@@ -1563,17 +1542,14 @@ export class ApplicationDeployService implements OnModuleInit {
           // Lock the app to the framework's canonical internal port so
           // every later reload picks the same one.
           const internalPort = FRAMEWORK_INTERNAL_PORT[stack];
-          await this.prisma.application.update({
-            where: { id: appId },
-            data: {
-              port: internalPort,
-              framework: (stack as any),
-              // Caddy reaches the app on the shared dockcontrol-apps bridge
-              // by container_name:internalPort — no host port publish, no
-              // port collision possible.
-              containerName: containerName(slug),
-              containerPort: internalPort,
-            },
+          await this.apps.update(appId, {
+            port: internalPort,
+            framework: (stack as any),
+            // Caddy reaches the app on the shared dockcontrol-apps bridge
+            // by container_name:internalPort — no host port publish, no
+            // port collision possible.
+            containerName: containerName(slug),
+            containerPort: internalPort,
           });
           opts.port = internalPort;
         }
@@ -1617,13 +1593,10 @@ export class ApplicationDeployService implements OnModuleInit {
             // check (which gates on app.port being non-null) passes —
             // otherwise the domain stays in "reserved" mode forever and
             // the user sees the 503 placeholder.
-            await this.prisma.application.update({
-              where: { id: appId },
-              data: {
-                containerName: info.containerName,
-                containerPort: info.containerPort,
-                port: info.containerPort,
-              },
+            await this.apps.update(appId, {
+              containerName: info.containerName,
+              containerPort: info.containerPort,
+              port: info.containerPort,
             });
             log(
               `🛰  Domain attached — Caddy will route to ${info.containerName}:${info.containerPort}.`,
@@ -1640,14 +1613,11 @@ export class ApplicationDeployService implements OnModuleInit {
           const info = readComposeContainerInfo(content, containerName(slug));
           const containerPort = info.containerPort || opts.hostPort;
           content = remapComposePorts(content, { [String(containerPort)]: opts.hostPort });
-          await this.prisma.application.update({
-            where: { id: appId },
-            data: {
-              containerName: info.containerName,
-              containerPort,
-              port: containerPort,
-              hostPort: opts.hostPort,
-            },
+          await this.apps.update(appId, {
+            containerName: info.containerName,
+            containerPort,
+            port: containerPort,
+            hostPort: opts.hostPort,
           });
         } else {
           // No domain AND no user-picked hostPort: keep the repo's host-port
@@ -1781,10 +1751,7 @@ export class ApplicationDeployService implements OnModuleInit {
         // the in-network path (containerName:internalPort) on every
         // future regenerate.
         if (internalPort) {
-          await this.prisma.application.update({
-            where: { id: appId },
-            data: { containerName: cname, containerPort: internalPort },
-          });
+          await this.apps.update(appId, { containerName: cname, containerPort: internalPort });
         }
 
         // Generate the compose mirror so start/stop/logs uses the same
@@ -1848,12 +1815,9 @@ export class ApplicationDeployService implements OnModuleInit {
         try { fs.rmSync(prevDir, { recursive: true, force: true }); } catch {}
       }
 
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: { status: AppStatus.RUNNING },
-      });
+      await this.apps.setStatus(appId, AppStatus.RUNNING);
       // refresh Caddy now that the app is up and its port is canonical
-      this.proxy.regenerate().catch(() => {});
+      this.regenerateProxy();
       await this.prisma.deployment.update({
         where: { id: deploymentId },
         data: {
@@ -1905,10 +1869,7 @@ export class ApplicationDeployService implements OnModuleInit {
         }
       }
 
-      await this.prisma.application.update({
-        where: { id: appId },
-        data: { status: rolledBack ? AppStatus.RUNNING : AppStatus.ERROR },
-      });
+      await this.apps.setStatus(appId, rolledBack ? AppStatus.RUNNING : AppStatus.ERROR);
       await this.prisma.deployment.update({
         where: { id: deploymentId },
         data: {
@@ -1921,7 +1882,7 @@ export class ApplicationDeployService implements OnModuleInit {
       });
       // Refresh Caddy so the previous block (if any) reflects the
       // current state — either the rollback is up, or the app is down.
-      this.proxy.regenerate().catch(() => {});
+      this.regenerateProxy();
       this.notifyDeploymentOutcome(deploymentId, name, 'failed', msg);
     }
   }

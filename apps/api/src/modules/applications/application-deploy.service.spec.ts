@@ -49,6 +49,7 @@ import * as fs from 'fs';
 import { execFile } from 'child_process';
 import { detectStack } from './dockerfile-templates';
 import { ApplicationDeployService } from './application-deploy.service';
+import { ApplicationRepository } from './application.repository';
 import { resolveAppDir } from './applications.helpers';
 
 const vfs = fs as unknown as {
@@ -190,6 +191,10 @@ function makeService() {
     loadRepoEnvFiles: vi.fn().mockReturnValue({}),
     encryptEnvVars: vi.fn((e: any) => ({ __k: 1, v: JSON.stringify(e) })),
   };
+  // Real repository wired to the mocked prisma so the existing
+  // `prisma.application.update` assertions keep working transparently —
+  // setStatus()/update() funnel through prisma.application.update under the hood.
+  const apps = new ApplicationRepository(prisma as any);
   const service = new ApplicationDeployService(
     prisma as any,
     proxy as any,
@@ -197,8 +202,9 @@ function makeService() {
     notifications as any,
     databases as any,
     env as any,
+    apps,
   );
-  return { service, prisma, proxy, agent, notifications, databases, env };
+  return { service, prisma, proxy, agent, notifications, databases, env, apps };
 }
 
 const APP_ID = 'app1234567890abcdef';

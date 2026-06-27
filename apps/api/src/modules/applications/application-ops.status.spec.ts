@@ -31,13 +31,17 @@ vi.mock('fs', async () => {
 
 import * as helpers from './applications.helpers';
 import { ApplicationOpsService } from './application-ops.service';
+import { ApplicationRepository } from './application.repository';
 
 const dockerCompose = helpers.dockerCompose as unknown as ReturnType<typeof vi.fn>;
 
 function makeService(prismaUpdate = vi.fn()) {
   const prisma = { application: { update: prismaUpdate } } as any;
+  // Real repository wired to the same mock prisma so setStatus() still drives
+  // prisma.application.update (the assertion target).
+  const apps = new ApplicationRepository(prisma);
   return new ApplicationOpsService(
-    prisma, {} as any, {} as any, {} as any, {} as any, {} as any,
+    prisma, {} as any, {} as any, {} as any, {} as any, {} as any, apps,
   );
 }
 

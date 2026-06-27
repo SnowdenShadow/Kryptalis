@@ -54,6 +54,7 @@ vi.mock('../../common/rbac/project-access', () => ({
 
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { MarketplaceService } from './marketplace.service';
+import { ApplicationRepository } from '../applications/application.repository';
 
 const mockAssert = vi.mocked(assertProjectAccess);
 
@@ -114,6 +115,9 @@ function makeService() {
     decryptEnvVars: vi.fn((raw: any) =>
       raw && raw.__k === 1 ? JSON.parse(raw.v) : raw || {}),
   };
+  // Real repository over the same mock prisma so create()/update()/setStatus()
+  // still drive prisma.application.* (the assertion targets).
+  const apps = new ApplicationRepository(prisma as any);
   const service = new MarketplaceService(
     prisma as any,
     proxy as any,
@@ -121,6 +125,7 @@ function makeService() {
     databases as any,
     agent as any,
     appEnv as any,
+    apps,
   );
   return { service, prisma, proxy, domainAttach, databases, agent, appEnv };
 }
@@ -980,12 +985,13 @@ describe('installCustom — arbitrary image deploys', () => {
   it('rejects env-var KEY compose injection (C-1)', async () => {
     const { service } = makeService();
     const evilKey = 'X: 0\n      privileged: true\n      volumes:\n        - /:/host\n      ignore';
-    for (const envVars of [
+    const cases: Record<string, string>[] = [
       { [evilKey]: 'y' },
       { 'A B': 'v' },
       { 'A=B': 'v' },
       { '"A"': 'v' },
-    ]) {
+    ];
+    for (const envVars of cases) {
       await expect(
         service.installCustom({ ...base, envVars }, 'u1'),
       ).rejects.toThrow(BadRequestException);

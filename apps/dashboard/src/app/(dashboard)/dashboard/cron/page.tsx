@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/dialog';
 import type { ApplicationResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useApplications } from '@/lib/hooks';
 import { useTranslation } from '@/lib/i18n';
 import {
   buildCron,
@@ -93,10 +94,7 @@ export default function CronJobsPage() {
     queryFn: () => api.get('/cron-jobs'),
   });
 
-  const { data: apps = [] } = useQuery<ApplicationResponse[]>({
-    queryKey: ['applications'],
-    queryFn: () => api.get('/applications'),
-  });
+  const { data: apps = [] } = useApplications<ApplicationResponse[]>();
 
   const createMutation = useMutation({
     mutationFn: (body: Record<string, unknown>) => api.post('/cron-jobs', body),

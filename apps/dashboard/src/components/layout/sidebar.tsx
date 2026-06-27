@@ -28,6 +28,7 @@ import { cn } from '@/lib/utils';
 import { useSidebarStore, useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { api } from '@/lib/api';
+import { useApplications, usePublicSettings } from '@/lib/hooks';
 
 type NavBadge = 'applications' | 'servers';
 
@@ -67,9 +68,7 @@ export function Sidebar() {
   const { user } = useAuthStore();
   const { t } = useTranslation();
   const isAdmin = user?.role && ADMIN_ROLES.has(user.role);
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
+  const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string }>({
     staleTime: 60_000,
   });
   const isMulti = publicSettings?.deployment_mode === 'MULTI';
@@ -77,9 +76,7 @@ export function Sidebar() {
   // Live count badges. /applications is already per-user sanitized.
   // /servers is admin-only; non-admins use the sanitized /servers/mine.
   const serversEndpoint = isAdmin ? '/servers' : '/servers/mine';
-  const { data: applications, isLoading: appsLoading } = useQuery<Array<{ status?: string }>>({
-    queryKey: ['applications'],
-    queryFn: () => api.get('/applications'),
+  const { data: applications, isLoading: appsLoading } = useApplications<Array<{ status?: string }>>({
     staleTime: 15_000,
   });
   const { data: servers, isLoading: serversLoading } = useQuery<Array<{ status?: string }>>({

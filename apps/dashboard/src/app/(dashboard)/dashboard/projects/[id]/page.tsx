@@ -20,6 +20,7 @@ import { Select } from '@/components/ui/select';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import type { ProjectResponse } from '@dockcontrol/types';
 import { api, ApiError } from '@/lib/api';
+import { useServers, usePublicSettings } from '@/lib/hooks';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -112,9 +113,7 @@ export default function ProjectDetailPage() {
     [t],
   );
 
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string; public_ip?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
+  const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string; public_ip?: string }>({
     staleTime: 60_000,
   });
   const isMulti = publicSettings?.deployment_mode === 'MULTI';
@@ -123,9 +122,7 @@ export default function ProjectDetailPage() {
     ? publicSettings.public_ip
     : undefined;
 
-  const { data: servers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
-    queryKey: ['servers'],
-    queryFn: () => api.get('/servers'),
+  const { data: servers = [] } = useServers<{ id: string; name: string; host: string; status: string }[]>({
     enabled: isMulti,
   });
 

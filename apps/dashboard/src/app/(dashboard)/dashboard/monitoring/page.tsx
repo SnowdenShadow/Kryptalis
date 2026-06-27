@@ -47,6 +47,7 @@ import {
 } from '@/components/ui/dialog';
 import type { AlertRuleResponse, CreateAlertRuleRequest } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useServers } from '@/lib/hooks';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -226,9 +227,7 @@ export default function MonitoringPage() {
   // --- Data fetching (admin-only endpoints) ---
   // Server picker: every registered server (local + remote agents). The
   // local one is the default selection.
-  const { data: servers = [] } = useQuery<ServerRow[]>({
-    queryKey: ['servers'],
-    queryFn: () => api.get('/servers'),
+  const { data: servers = [] } = useServers<ServerRow[]>({
     enabled: isAdmin,
     retry: false,
     refetchInterval: 30000,

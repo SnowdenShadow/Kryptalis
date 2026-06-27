@@ -39,6 +39,7 @@ import {
 } from '@/components/ui/dialog';
 import type { ServerResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useServers, usePublicSettings } from '@/lib/hooks';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { makeTimeAgo } from '@/lib/app-format';
@@ -166,15 +167,10 @@ export default function ServersPage() {
   const { user } = useAuthStore();
   const isAdmin = user?.role === 'ADMIN' || user?.role === 'SUPERADMIN';
 
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
-  });
+  const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string }>();
   const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
 
-  const { data: allServers = [] } = useQuery<ServerItem[]>({
-    queryKey: ['servers'],
-    queryFn: () => api.get('/servers'),
+  const { data: allServers = [] } = useServers<ServerItem[]>({
     refetchInterval: 10000,
     enabled: isMultiMode,
   });

@@ -29,6 +29,7 @@ import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
+import { useApplications } from '@/lib/hooks';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { makeTimeAgo } from '@/lib/app-format';
@@ -114,10 +115,7 @@ export default function DashboardPage() {
   });
 
   // --- applications, domains, deployments ---
-  const { data: applications = [] } = useQuery<any[]>({
-    queryKey: ['applications'],
-    queryFn: () => api.get('/applications'),
-  });
+  const { data: applications = [] } = useApplications<any[]>();
   useQuery<any[]>({
     queryKey: ['domains'],
     queryFn: () => api.get('/domains'),

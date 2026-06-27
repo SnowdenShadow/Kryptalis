@@ -17,6 +17,7 @@ import {
   Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
 import { api } from '@/lib/api';
+import { useProjects, useServers, usePublicSettings } from '@/lib/hooks';
 import { toastError } from '@/lib/toast-error';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -169,9 +170,7 @@ export function QuickDeployDialog({
   const [generatedCreds, setGeneratedCreds] = useState<Record<string, string> | null>(null);
 
   // ── Loaders ─────────────────────────────────────────────────────
-  const { data: projects = [] } = useQuery<Project[]>({
-    queryKey: ['projects'],
-    queryFn: () => api.get('/projects'),
+  const { data: projects = [] } = useProjects<Project[]>({
     enabled: open,
   });
   const { data: providers = [] } = useQuery<GitProvider[]>({
@@ -191,16 +190,12 @@ export function QuickDeployDialog({
   });
 
   // MULTI mode → offer a per-app server picker (default: project's server).
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
+  const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string }>({
     enabled: open,
     staleTime: 60_000,
   });
   const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
-  const { data: servers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
-    queryKey: ['servers'],
-    queryFn: () => api.get('/servers'),
+  const { data: servers = [] } = useServers<{ id: string; name: string; host: string; status: string }[]>({
     enabled: open && isMultiMode,
   });
 

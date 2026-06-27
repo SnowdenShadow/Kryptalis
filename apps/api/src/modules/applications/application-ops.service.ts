@@ -7,6 +7,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { AppStatus } from '@prisma/client';
+import { ApplicationRepository } from './application.repository';
 import { AgentService } from '../agent/agent.service';
 import { DeploymentTargetService } from '../deployment-target/deployment-target.service';
 import { ApplicationDeployService } from './application-deploy.service';
@@ -45,6 +46,7 @@ export class ApplicationOpsService {
     private deploymentTarget: DeploymentTargetService,
     private deploy: ApplicationDeployService,
     private env: ApplicationEnvService,
+    private apps: ApplicationRepository,
   ) {}
 
   // ── lifecycle ──────────────────────────────────────────────────────
@@ -227,10 +229,7 @@ export class ApplicationOpsService {
     const deployment = await this.prisma.deployment.create({
       data: { applicationId: id, status: 'PENDING', triggeredById: userId },
     });
-    await this.prisma.application.update({
-      where: { id },
-      data: { status: AppStatus.DEPLOYING },
-    });
+    await this.apps.setStatus(id, AppStatus.DEPLOYING);
     this.deploy.runDeploy(deployment.id, id, app.name, app.gitUrl, app.gitBranch || 'main', {
       port: app.port,
       hostPort: app.hostPort ?? undefined,
@@ -304,10 +303,7 @@ export class ApplicationOpsService {
           where: { id: deployment.id },
           data: { status: 'RUNNING', finishedAt: new Date() },
         });
-        await this.prisma.application.update({
-          where: { id: app.id },
-          data: { status: 'RUNNING' },
-        });
+        await this.apps.setStatus(app.id, AppStatus.RUNNING);
         return {
           message: 'Stack recreated with the updated environment',
           deploymentId: deployment.id,
@@ -321,10 +317,7 @@ export class ApplicationOpsService {
             buildLogs: String(err?.message || err).slice(0, 50_000),
           },
         });
-        await this.prisma.application.update({
-          where: { id: app.id },
-          data: { status: 'ERROR' },
-        });
+        await this.apps.setStatus(app.id, AppStatus.ERROR);
         throw new BadRequestException(
           `Redeploy failed: ${String(err?.message || err).slice(0, 500)}`,
         );
@@ -385,14 +378,14 @@ export class ApplicationOpsService {
         where: { id: deployment.id },
         data: { status: 'RUNNING', finishedAt: new Date() },
       });
-      await this.prisma.application.update({ where: { id: app.id }, data: { status: 'RUNNING' } });
+      await this.apps.setStatus(app.id, AppStatus.RUNNING);
       return { message: 'Stack recreated with the updated environment', deploymentId: deployment.id };
     } catch (err: any) {
       await this.prisma.deployment.update({
         where: { id: deployment.id },
         data: { status: 'FAILED', finishedAt: new Date(), buildLogs: String(err?.message || err).slice(0, 50_000) },
       });
-      await this.prisma.application.update({ where: { id: app.id }, data: { status: 'ERROR' } });
+      await this.apps.setStatus(app.id, AppStatus.ERROR);
       throw new BadRequestException(`Redeploy failed: ${String(err?.message || err).slice(0, 500)}`);
     }
   }
@@ -440,10 +433,7 @@ export class ApplicationOpsService {
         commitMessage: `Rollback to ${target.commitSha.slice(0, 7)}`,
       },
     });
-    await this.prisma.application.update({
-      where: { id },
-      data: { status: AppStatus.DEPLOYING },
-    });
+    await this.apps.setStatus(id, AppStatus.DEPLOYING);
     this.deploy.runDeploy(deployment.id, id, app.name, app.gitUrl, app.gitBranch || 'main', {
       port: app.port,
       hostPort: app.hostPort ?? undefined,
@@ -624,10 +614,7 @@ export class ApplicationOpsService {
       const { stdout } = await dockerCompose(appDir, ['ps', '--format', 'json'], undefined, 10_000);
       if (!stdout.trim()) {
         if (app.status !== 'STOPPED') {
-          await this.prisma.application.update({
-            where: { id: app.id },
-            data: { status: 'STOPPED' },
-          });
+          await this.apps.setStatus(app.id, AppStatus.STOPPED);
           return { ...app, status: 'STOPPED' };
         }
         return app;
@@ -654,12 +641,9 @@ export class ApplicationOpsService {
       const running = isMultiService
         ? states.length > 0 && states.every((s) => s === 'running')
         : states.some((s) => s === 'running');
-      const realStatus = running ? 'RUNNING' : 'STOPPED';
+      const realStatus = running ? AppStatus.RUNNING : AppStatus.STOPPED;
       if (app.status !== realStatus) {
-        await this.prisma.application.update({
-          where: { id: app.id },
-          data: { status: realStatus },
-        });
+        await this.apps.setStatus(app.id, realStatus);
         return { ...app, status: realStatus };
       }
     } catch {}

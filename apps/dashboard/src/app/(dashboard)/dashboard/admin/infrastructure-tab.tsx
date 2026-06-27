@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { toast } from 'sonner';
@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { useAuthStore } from '@/lib/store';
 import { api } from '@/lib/api';
+import { useApplications, useServers, usePublicSettings } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import { useTranslation } from '@/lib/i18n';
 
@@ -34,24 +35,15 @@ export function InfrastructureTab() {
   const [serverMode, setServerMode] = useState<'local' | 'multi'>('local');
 
   // Load current mode from /admin/settings (single source of truth).
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
-  });
+  const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string }>();
 
   useEffect(() => {
     if (publicSettings?.deployment_mode === 'MULTI') setServerMode('multi');
     else setServerMode('local');
   }, [publicSettings]);
 
-  const { data: servers = [] } = useQuery<any[]>({
-    queryKey: ['servers'],
-    queryFn: () => api.get('/servers'),
-  });
-  const { data: apps = [] } = useQuery<any[]>({
-    queryKey: ['applications'],
-    queryFn: () => api.get('/applications'),
-  });
+  const { data: servers = [] } = useServers<any[]>();
+  const { data: apps = [] } = useApplications<any[]>();
 
   const remoteServers = servers.filter((s) => s.host !== '127.0.0.1');
   const appsOnRemote = apps.filter(

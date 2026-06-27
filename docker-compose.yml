@@ -95,8 +95,11 @@ services:
       JWT_EXPIRATION: ${JWT_EXPIRATION:-15m}
       JWT_REFRESH_EXPIRATION: ${JWT_REFRESH_EXPIRATION:-7d}
       # Optional comma-separated CORS allowlist; empty → derived from
-      # PUBLIC_API_URL + local dev origins.
+      # PUBLIC_API_URL + local dev origins. A literal '*' is ignored unless
+      # ALLOW_INSECURE_CORS=true (a wildcard + credentials would expose
+      # authenticated sessions to any origin).
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      ALLOW_INSECURE_CORS: ${ALLOW_INSECURE_CORS:-}
       # Optional — expose Swagger (/api/docs) in production. Off by default.
       SWAGGER_PUBLIC: ${SWAGGER_PUBLIC:-}
       # Optional — GitHub OAuth app client id (git provider connect flow).
@@ -149,6 +152,13 @@ services:
       DOCKCONTROL_GITHUB_REPO: ${DOCKCONTROL_GITHUB_REPO:-}
       # Which branch the auto-update tracks. Default: main.
       DOCKCONTROL_BRANCH: ${DOCKCONTROL_BRANCH:-main}
+      # Unattended auto-APPLY of updates. OFF by default — the updater does
+      # `git reset --hard` + rebuild with the host docker socket and no commit
+      # signature check, so unattended apply turns a push to the tracked branch
+      # into root RCE. When false the dashboard still shows "update available"
+      # and the operator applies manually. Set true only if you fully trust the
+      # tracked branch.
+      DOCKCONTROL_AUTO_UPDATE: ${DOCKCONTROL_AUTO_UPDATE:-}
     ports:
       # API_BIND lets operators restrict the REST API to loopback once Caddy
       # fronts it (API_BIND=127.0.0.1). Default stays 0.0.0.0 so a fresh

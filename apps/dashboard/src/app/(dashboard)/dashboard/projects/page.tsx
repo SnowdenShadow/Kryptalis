@@ -40,6 +40,7 @@ import {
 } from '@/components/ui/dialog';
 import type { ProjectResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useProjects, useServers, usePublicSettings } from '@/lib/hooks';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 
@@ -133,10 +134,7 @@ export default function ProjectsPage() {
   const isAdmin = user?.role === 'ADMIN' || user?.role === 'SUPERADMIN';
 
   // --- List ---
-  const { data: projects = [], isLoading } = useQuery<Project[]>({
-    queryKey: ['projects'],
-    queryFn: () => api.get('/projects'),
-  });
+  const { data: projects = [], isLoading } = useProjects<Project[]>();
 
   // --- Local server (auto-select for new project in LOCAL mode) ---
   // Use the sanitized -public endpoint so non-admin USERs can still create
@@ -148,16 +146,11 @@ export default function ProjectsPage() {
   });
 
   // --- Deployment mode (LOCAL or MULTI) + servers list (only fetched in MULTI mode)
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
-  });
+  const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string }>();
   const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
 
   // /servers is admin-only — a USER would just get a 403 here.
-  const { data: allServers = [] } = useQuery<LocalServer[]>({
-    queryKey: ['servers'],
-    queryFn: () => api.get('/servers'),
+  const { data: allServers = [] } = useServers<LocalServer[]>({
     enabled: isMultiMode && isAdmin,
     retry: false,
   });

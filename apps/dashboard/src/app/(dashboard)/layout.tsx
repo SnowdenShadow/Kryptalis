@@ -8,6 +8,7 @@ import { Sidebar } from '@/components/layout/sidebar';
 import { Header } from '@/components/layout/header';
 import { useSidebarStore, useAuthStore } from '@/lib/store';
 import { api, sessionReady } from '@/lib/api';
+import { useProjects } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 
 /**
@@ -74,9 +75,7 @@ export default function DashboardLayout({
     enabled: onboardingEnabled,
     staleTime: 60_000,
   });
-  const { data: projects } = useQuery<unknown[]>({
-    queryKey: ['projects'],
-    queryFn: () => api.get('/projects'),
+  const { data: projects } = useProjects<unknown[]>({
     enabled: onboardingEnabled && onboarding?.completed === false,
     staleTime: 60_000,
   });

@@ -44,6 +44,7 @@ import {
 } from '@/components/ui/dialog';
 import type { DatabaseResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useProjects, useApplications, useServers, usePublicSettings } from '@/lib/hooks';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
@@ -127,31 +128,19 @@ export default function DatabasesPage() {
   const [manageMode, setManageMode] = useState<'password' | 'username' | null>(null);
 
   // Projects + applications (for selectors and badges)
-  const { data: projects = [] } = useQuery<ProjectOpt[]>({
-    queryKey: ['projects'],
-    queryFn: () => api.get('/projects'),
-  });
-  const { data: allApps = [] } = useQuery<AppOpt[]>({
-    queryKey: ['applications'],
-    queryFn: () => api.get('/applications'),
-  });
+  const { data: projects = [] } = useProjects<ProjectOpt[]>();
+  const { data: allApps = [] } = useApplications<AppOpt[]>();
   const appsForCurrentProject = projectId
     ? allApps.filter((a) => a.projectId === projectId)
     : [];
 
   // MULTI mode → per-DB server picker; default = the project's server
   // (the API resolves that when serverId is omitted).
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
+  const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string }>({
     staleTime: 60_000,
   });
   const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
-  const { data: servers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
-    queryKey: ['servers'],
-    queryFn: () => api.get('/servers'),
-    enabled: isMultiMode,
-  });
+  const { data: servers = [] } = useServers({ enabled: isMultiMode });
 
   const { data: databases = [], isLoading } = useQuery<DatabaseItem[]>({
     queryKey: ['databases', filterProjectId],

@@ -24,6 +24,8 @@ import { SftpService } from '../sftp/sftp.service';
 import { ApplicationOpsService } from './application-ops.service';
 import { ApplicationNetworkService } from './application-network.service';
 import { ApplicationEnvService } from './application-env.service';
+import { ApplicationRepository } from './application.repository';
+import { AppStatus } from '@prisma/client';
 import {
   execFileAsync,
   slugify,
@@ -74,6 +76,7 @@ export class ApplicationsService implements OnModuleInit {
     private network: ApplicationNetworkService,
     private env: ApplicationEnvService,
     private sftp: SftpService,
+    private apps: ApplicationRepository,
   ) {}
 
   // Register the linked-app refresher so DatabasesService can refresh + redeploy
@@ -501,7 +504,7 @@ export class ApplicationsService implements OnModuleInit {
         phpIni: php.ini,
       }).catch(() => {});
     } else {
-      await this.prisma.application.update({ where: { id: app.id }, data: { status: 'STOPPED' } });
+      await this.apps.setStatus(app.id, AppStatus.STOPPED);
       await this.prisma.deployment.update({
         where: { id: deployment.id },
         data: { status: 'CANCELLED', finishedAt: new Date() },
@@ -1029,9 +1032,7 @@ export class ApplicationsService implements OnModuleInit {
           // recovery deploy itself failed — fall through to ERROR.
         }
       }
-      await this.prisma.application
-        .update({ where: { id }, data: { status: 'ERROR' } })
-        .catch(() => {});
+      await this.apps.setStatus(id, AppStatus.ERROR).catch(() => {});
       throw new BadRequestException(
         `Move to ${target.name} failed (${err?.message || err}) and the app could not be restored automatically. ` +
           `It is currently DOWN. Its docker volumes are preserved on ${sourceName}; re-deploy it there to recover.`,

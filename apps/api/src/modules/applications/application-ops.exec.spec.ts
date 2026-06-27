@@ -36,6 +36,7 @@ function makeService() {
     {} as any, // deploymentTarget
     {} as any, // deploy
     {} as any, // env
+    {} as any, // apps (ApplicationRepository) — not exercised by exec tests
   );
 }
 

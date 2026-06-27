@@ -11,6 +11,7 @@ import { UsersModule } from './modules/users/users.module';
 import { ServersModule } from './modules/servers/servers.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { ApplicationsModule } from './modules/applications/applications.module';
+import { ApplicationRepositoryModule } from './modules/applications/application-repository.module';
 import { DomainsModule } from './modules/domains/domains.module';
 import { DeploymentsModule } from './modules/deployments/deployments.module';
 import { DockerModule } from './modules/docker/docker.module';
@@ -59,6 +60,9 @@ import { CronModule } from './modules/cron/cron.module';
         // Admin UI to fill them in.
         BACKUP_ENCRYPTION_KEY: Joi.string().min(32).allow('').optional(),
         CORS_ORIGINS: Joi.string().allow('').optional(),
+        // Honor a literal '*' in CORS_ORIGINS together with credentials.
+        // INSECURE (any-origin + cookies). Default off — '*' is ignored.
+        ALLOW_INSECURE_CORS: Joi.string().allow('').optional(),
         SWAGGER_PUBLIC: Joi.string().allow('').optional(),
         SMTP_HOST: Joi.string().allow('').optional(),
         // Number() rejects empty string; use Joi.alternatives so both '' and
@@ -80,6 +84,7 @@ import { CronModule } from './modules/cron/cron.module';
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]),
     PrismaModule,
     CryptoModule,
+    ApplicationRepositoryModule,
     AuthModule,
     UsersModule,
     ServersModule,

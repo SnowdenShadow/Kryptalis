@@ -45,6 +45,7 @@ import {
 } from '@/components/ui/dialog';
 import type { ApplicationResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useProjects, useApplications, usePublicSettings } from '@/lib/hooks';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { FRAMEWORK_LABELS, makeTimeAgo, publicAppUrl } from '@/lib/app-format';
@@ -121,16 +122,11 @@ export default function ApplicationsPage() {
   const [filterStatus, setFilterStatus] = useState<'' | 'RUNNING' | 'STOPPED' | 'ERROR' | 'DEPLOYING'>('');
 
   // --- List ---
-  const { data: applications = [], isLoading } = useQuery<Application[]>({
-    queryKey: ['applications'],
-    queryFn: () => api.get('/applications'),
-  });
+  const { data: applications = [], isLoading } = useApplications<Application[]>();
 
   // Direct-IP fallback URLs target the server's real address, not the
   // hostname the panel is browsed through (see app detail page).
-  const { data: publicSettings } = useQuery<{ public_ip?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
+  const { data: publicSettings } = usePublicSettings<{ public_ip?: string }>({
     staleTime: 60_000,
   });
   const serverIp = publicSettings?.public_ip && publicSettings.public_ip !== 'localhost'
@@ -161,10 +157,7 @@ export default function ApplicationsPage() {
   }, [applications, search, filterProject, filterStatus]);
 
   // --- Projects for dropdown ---
-  const { data: projects = [] } = useQuery<ProjectOption[]>({
-    queryKey: ['projects'],
-    queryFn: () => api.get('/projects'),
-  });
+  const { data: projects = [] } = useProjects<ProjectOption[]>();
 
   // --- Deploy dialogs ---
   // Single unified Deploy dialog — Git / Docker / Marketplace all flow

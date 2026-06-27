@@ -19,6 +19,7 @@ import { Select } from '@/components/ui/select';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import type { DomainResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useProjects, useApplications, usePublicSettings } from '@/lib/hooks';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { makeTimeAgo } from '@/lib/app-format';
@@ -729,15 +730,9 @@ export default function DomainsPage() {
     onError: (err: Error) => toastError(err),
   });
 
-  const { data: projects = [] } = useQuery<{ id: string; name: string }[]>({
-    queryKey: ['projects'],
-    queryFn: () => api.get('/projects'),
-  });
+  const { data: projects = [] } = useProjects<{ id: string; name: string }[]>();
 
-  const { data: allApps = [] } = useQuery<{ id: string; name: string; projectId: string }[]>({
-    queryKey: ['applications'],
-    queryFn: () => api.get('/applications'),
-  });
+  const { data: allApps = [] } = useApplications<{ id: string; name: string; projectId: string }[]>();
 
   const appsForCreate = createProjectId
     ? allApps.filter((a) => a.projectId === createProjectId)
@@ -747,10 +742,7 @@ export default function DomainsPage() {
     queryKey: ['server-local'],
     queryFn: () => api.get('/servers/local'),
   });
-  const { data: publicSettings } = useQuery<{ public_ip?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
-  });
+  const { data: publicSettings } = usePublicSettings<{ public_ip?: string }>();
 
   const localFallback = server?.host && server.host !== '127.0.0.1' && server.host !== 'localhost'
     ? server.host : null;

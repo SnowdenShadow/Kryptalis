@@ -58,6 +58,7 @@ import {
 } from '@/components/ui/dialog';
 import type { ApplicationResponse, DeploymentResponse, DomainResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useServers, usePublicSettings } from '@/lib/hooks';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import {
@@ -437,15 +438,11 @@ export default function ApplicationDetailPage() {
   const [showMoveServer, setShowMoveServer] = useState(false);
   const [moveTargetId, setMoveTargetId] = useState('');
   const [moveWithVolumes, setMoveWithVolumes] = useState(true);
-  const { data: publicSettings } = useQuery<{ deployment_mode?: string; public_ip?: string }>({
-    queryKey: ['public-settings'],
-    queryFn: () => api.get('/settings/public'),
+  const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string; public_ip?: string }>({
     staleTime: 60_000,
   });
   const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
-  const { data: allServers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
-    queryKey: ['servers'],
-    queryFn: () => api.get('/servers'),
+  const { data: allServers = [] } = useServers<{ id: string; name: string; host: string; status: string }[]>({
     enabled: isMultiMode,
   });
   const moveServerMutation = useMutation({

@@ -10,6 +10,8 @@ import { DomainAttachService } from '../domains/domain-attach.service';
 import { DatabasesService } from '../databases/databases.service';
 import { AgentService } from '../agent/agent.service';
 import { ApplicationEnvService } from '../applications/application-env.service';
+import { ApplicationRepository } from '../applications/application.repository';
+import { AppStatus } from '@prisma/client';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
@@ -112,6 +114,7 @@ export class MarketplaceService implements OnModuleInit {
     private databases: DatabasesService,
     private agent: AgentService,
     private appEnv: ApplicationEnvService,
+    private apps: ApplicationRepository,
   ) {
     if (!fs.existsSync(APPS_DIR)) {
       fs.mkdirSync(APPS_DIR, { recursive: true });
@@ -129,11 +132,8 @@ export class MarketplaceService implements OnModuleInit {
       const applicationId = (task.payload as any)?.applicationId;
       if (!applicationId) return; // git/agent deploys without an app row marker
       const ok = task.status === 'COMPLETED';
-      await this.prisma.application
-        .update({
-          where: { id: applicationId },
-          data: { status: ok ? 'RUNNING' : 'ERROR' },
-        })
+      await this.apps
+        .setStatus(applicationId, ok ? AppStatus.RUNNING : AppStatus.ERROR)
         .catch(() => {}); // app row may be gone (uninstalled mid-deploy)
       await this.prisma.deployment.updateMany({
         where: { applicationId, status: 'DEPLOYING' },
@@ -436,25 +436,20 @@ export class MarketplaceService implements OnModuleInit {
     // is carried by the linked domain (UI joins on app.domains[0] to render
     // "Roundcube — mail.foo.com"), and by the applicationId suffix in the
     // container_name/dir below.
-    const application = await this.prisma.application.create({
-      data: {
-        name: appName,
-        projectId: data.projectId,
-        serverId: appServerId,
-        framework: 'DOCKER_COMPOSE',
-        status: 'DEPLOYING',
-        port: realPort,
-        customPort,
-        containerPort: app.containerPort,
-      },
+    const application = await this.apps.create({
+      name: appName,
+      projectId: data.projectId,
+      serverId: appServerId,
+      framework: 'DOCKER_COMPOSE',
+      status: 'DEPLOYING',
+      port: realPort,
+      customPort,
+      containerPort: app.containerPort,
     });
 
     const instanceId = application.id.slice(0, 12);
     const containerName = this.computeContainerName(data.appSlug, instanceId, appName);
-    await this.prisma.application.update({
-      where: { id: application.id },
-      data: { containerName },
-    });
+    await this.apps.update(application.id, { containerName });
 
     // Resolve the HOST path of this install's appDir. When the API runs
     // in a container, the docker daemon sits on the host and resolves
@@ -541,10 +536,7 @@ export class MarketplaceService implements OnModuleInit {
       effectiveEnv[k] = v;
       delete generatedCredentials[k]; // user picked their own value
     }
-    await this.prisma.application.update({
-      where: { id: application.id },
-      data: { envVars: this.appEnv.encryptEnvVars(effectiveEnv) as any },
-    });
+    await this.apps.update(application.id, { envVars: this.appEnv.encryptEnvVars(effectiveEnv) as any });
 
     // Templates already declare:
     //   - networks: dockcontrol-apps (external) at top-level
@@ -864,28 +856,23 @@ export class MarketplaceService implements OnModuleInit {
       command: data.command,
     });
 
-    const application = await this.prisma.application.create({
-      data: {
-        name: data.name.trim(),
-        projectId: data.projectId,
-        serverId: appServerId,
-        framework: 'DOCKER_COMPOSE',
-        status: 'DEPLOYING',
-        port: hostPort,
-        customPort: !!data.hostPort,
-        containerPort: data.containerPort,
-        // Encrypted like every other path — the env tab's getEnv() decrypts.
-        // Plaintext here leaked secrets into DB dumps.
-        envVars: this.appEnv.encryptEnvVars(data.envVars || {}) as any,
-      },
+    const application = await this.apps.create({
+      name: data.name.trim(),
+      projectId: data.projectId,
+      serverId: appServerId,
+      framework: 'DOCKER_COMPOSE',
+      status: 'DEPLOYING',
+      port: hostPort,
+      customPort: !!data.hostPort,
+      containerPort: data.containerPort,
+      // Encrypted like every other path — the env tab's getEnv() decrypts.
+      // Plaintext here leaked secrets into DB dumps.
+      envVars: this.appEnv.encryptEnvVars(data.envVars || {}) as any,
     });
 
     const instanceId = application.id.slice(0, 12);
     const containerName = `dockcontrol-custom-${instanceId}`;
-    await this.prisma.application.update({
-      where: { id: application.id },
-      data: { containerName },
-    });
+    await this.apps.update(application.id, { containerName });
 
     composeContent = composeContent
       .replace(/__INSTANCE_ID__/g, instanceId)
@@ -1043,10 +1030,7 @@ export class MarketplaceService implements OnModuleInit {
         where: { id: taskId },
         data: { status: 'COMPLETED', completedAt: new Date() },
       });
-      await this.prisma.application.update({
-        where: { id: applicationId },
-        data: { status: 'RUNNING' },
-      });
+      await this.apps.setStatus(applicationId, AppStatus.RUNNING);
       await this.prisma.deployment.updateMany({
         where: { applicationId, status: 'DEPLOYING' },
         data: { status: 'RUNNING', finishedAt: new Date() },
@@ -1086,10 +1070,7 @@ export class MarketplaceService implements OnModuleInit {
         where: { applicationId, status: 'DEPLOYING' },
         data: { status: 'FAILED', finishedAt: new Date() },
       });
-      await this.prisma.application.update({
-        where: { id: applicationId },
-        data: { status: 'ERROR' },
-      });
+      await this.apps.setStatus(applicationId, AppStatus.ERROR);
       // Refresh Caddy so any stale block from a partially-completed
       // install no longer points at a container that's never coming up.
       this.proxy.regenerate().catch(() => {});

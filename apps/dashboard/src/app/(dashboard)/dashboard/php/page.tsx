@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/dialog';
 import type { ApplicationResponse, DatabaseResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useProjects, useApplications } from '@/lib/hooks';
 import { useTranslation } from '@/lib/i18n';
 import { publicAppUrl } from '@/lib/app-format';
 import { StatusDot } from '@/components/ui/status-dot';
@@ -123,16 +124,10 @@ export default function PhpSitesPage() {
   const [configureSite, setConfigureSite] = useState<ApplicationResponse | null>(null);
 
   // The app list is shared; we just filter to PHP_SITE apps client-side.
-  const { data: apps = [], isLoading } = useQuery<ApplicationResponse[]>({
-    queryKey: ['applications'],
-    queryFn: () => api.get('/applications'),
-  });
+  const { data: apps = [], isLoading } = useApplications<ApplicationResponse[]>();
   const phpSites = apps.filter((a) => a.framework === 'PHP_SITE');
 
-  const { data: projects = [] } = useQuery<ProjectOpt[]>({
-    queryKey: ['projects'],
-    queryFn: () => api.get('/projects'),
-  });
+  const { data: projects = [] } = useProjects<ProjectOpt[]>();
   const { data: domains = [] } = useQuery<DomainOpt[]>({
     queryKey: ['domains'],
     queryFn: () => api.get('/domains'),

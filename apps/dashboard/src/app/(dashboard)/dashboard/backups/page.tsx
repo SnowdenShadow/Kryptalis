@@ -35,6 +35,7 @@ import {
 } from '@/components/ui/dialog';
 import type { BackupResponse, RestoreBackupResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
+import { useProjects } from '@/lib/hooks';
 import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -179,10 +180,7 @@ export default function BackupsPage() {
   // Projects (for the scope selector + resolving a backup's project name).
   // userId = owner; members[] is filtered server-side to the current user so
   // members[0]?.role is THIS user's role on the project.
-  const { data: projects = [] } = useQuery<ProjectLite[]>({
-    queryKey: ['projects'],
-    queryFn: () => api.get('/projects'),
-  });
+  const { data: projects = [] } = useProjects<ProjectLite[]>();
   const projectName = (id?: string | null) => projects.find((p) => p.id === id)?.name;
 
   // Effective project role helpers (mirror the API's RBAC ranks). Platform

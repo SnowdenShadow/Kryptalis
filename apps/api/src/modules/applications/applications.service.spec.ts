@@ -28,6 +28,7 @@ vi.mock('../../common/rbac/project-access', () => ({
 }));
 
 import { slugify, ApplicationsService } from './applications.service';
+import { ApplicationRepository } from './application.repository';
 import { assertCloneHostAllowed } from '../git-providers/git-providers.service';
 import {
   execFileAsync,
@@ -144,6 +145,7 @@ function makeService() {
     {} as any, // network
     {} as any, // env
     { deprovisionForApplication: vi.fn().mockResolvedValue(undefined) } as any, // sftp
+    new ApplicationRepository(prisma as any), // real repo over mock prisma
   );
   return { service, prisma, agent, proxy, ops };
 }
@@ -438,6 +440,7 @@ describe('attachDatabase / detachDatabase', () => {
       {} as any,
       env as any,
       { deprovisionForApplication: vi.fn().mockResolvedValue(undefined) } as any, // sftp
+      new ApplicationRepository(prisma as any), // real repo over mock prisma
     );
     return { service, prisma, ops, databases, env };
   }
