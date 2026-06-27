@@ -1,10 +1,13 @@
 import 'reflect-metadata';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import * as crypto from 'crypto';
+import { ConflictException } from '@nestjs/common';
 import {
   timingSafeStrEq,
   refToBranch,
   extractPushBranch,
   isReplay,
+  ApplicationWebhooksController,
 } from './webhooks.controller';
 
 describe('timingSafeStrEq', () => {
@@ -91,5 +94,65 @@ describe('isReplay (in-memory delivery dedup)', () => {
   it('skips dedup when no delivery id is present (does not break delivery)', () => {
     expect(isReplay(undefined)).toBe(false);
     expect(isReplay(undefined)).toBe(false);
+  });
+});
+
+describe('ApplicationWebhooksController.receive — inflight 409 → benign skip', () => {
+  const SECRET = 'whsec_test';
+  const body = { ref: 'refs/heads/main' };
+  const raw = Buffer.from(JSON.stringify(body));
+  const sig = 'sha256=' + crypto.createHmac('sha256', SECRET).update(raw).digest('hex');
+
+  function makeController(redeployImpl: () => Promise<any>) {
+    const prisma = {
+      application: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'app1',
+          webhookSecret: 'enc',
+          autoDeploy: true,
+          gitBranch: 'main',
+          project: { userId: 'owner1' },
+        }),
+      },
+    } as any;
+    const apps = { redeploy: vi.fn(redeployImpl) } as any;
+    const encryption = { decrypt: vi.fn(() => SECRET) } as any;
+    const controller = new ApplicationWebhooksController(prisma, apps, encryption);
+    const req = { rawBody: raw } as any;
+    return { controller, apps, req };
+  }
+
+  it('a push during an active deploy returns {skipped} instead of bubbling the 409 to the provider', async () => {
+    const { controller, apps, req } = makeController(async () => {
+      throw new ConflictException('A deployment is already running');
+    });
+    const res = await controller.receive(
+      'app1', body, req, sig, undefined, undefined, undefined, undefined,
+      // unique delivery id so the in-memory replay guard doesn't short-circuit
+      `deliv-${Math.random()}`,
+    );
+    expect(res).toEqual({ skipped: true, reason: 'deploy already in progress' });
+    expect(apps.redeploy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a successful redeploy returns {triggered:true}', async () => {
+    const { controller, req } = makeController(async () => ({ deploymentId: 'd1' }));
+    const res = await controller.receive(
+      'app1', body, req, sig, undefined, undefined, undefined, undefined,
+      `deliv-${Math.random()}`,
+    );
+    expect(res).toEqual({ triggered: true });
+  });
+
+  it('a NON-conflict error still propagates (not swallowed as a skip)', async () => {
+    const { controller, req } = makeController(async () => {
+      throw new Error('clone failed');
+    });
+    await expect(
+      controller.receive(
+        'app1', body, req, sig, undefined, undefined, undefined, undefined,
+        `deliv-${Math.random()}`,
+      ),
+    ).rejects.toThrow('clone failed');
   });
 });

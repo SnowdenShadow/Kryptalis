@@ -33,10 +33,16 @@ import {
 } from './backup-storage.util';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { slugify, resolveAppDir } from '../applications/applications.helpers';
-import { resolveDbContainer, dumpPlan, restorePlan } from '../databases/db-dump.util';
+import {
+  resolveDbContainer,
+  dumpPlan,
+  restorePlan,
+  runCommandToFile,
+  runCommandWithInputFile,
+} from '../databases/db-dump.util';
 import { AgentService, AgentTaskCompletion } from '../agent/agent.service';
 import { deterministicVolumeNames } from '../agent/volume-naming.util';
-import { execFile, spawn } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
@@ -718,71 +724,6 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   // interpretable. Large dumps stream stdout straight to disk instead of
   // buffering in memory.
 
-  private runCommandToFile(
-    cmd: string,
-    args: string[],
-    outPath: string,
-    timeoutMs: number,
-  ): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const out = fs.createWriteStream(outPath);
-      const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-      let stderr = '';
-      child.stderr.on('data', (d: Buffer) => {
-        if (stderr.length < 8192) stderr += d.toString();
-      });
-      child.stdout.pipe(out);
-      child.once('error', (err) => {
-        clearTimeout(timer);
-        out.destroy();
-        reject(err);
-      });
-      child.once('close', (code) => {
-        clearTimeout(timer);
-        out.close(() => {
-          if (code === 0) resolve();
-          else reject(new Error(`${cmd} exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
-        });
-      });
-    });
-  }
-
-  private runCommandWithInputFile(
-    cmd: string,
-    args: string[],
-    inPath: string,
-    timeoutMs: number,
-  ): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'pipe'] });
-      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-      let stderr = '';
-      child.stderr.on('data', (d: Buffer) => {
-        if (stderr.length < 8192) stderr += d.toString();
-      });
-      const src = fs.createReadStream(inPath);
-      src.once('error', (err) => {
-        child.kill('SIGKILL');
-        clearTimeout(timer);
-        reject(err);
-      });
-      src.pipe(child.stdin);
-      // A container process that exits early (e.g. auth failure) closes its
-      // stdin — swallow the resulting EPIPE; the exit code carries the error.
-      child.stdin.once('error', () => undefined);
-      child.once('error', (err) => {
-        clearTimeout(timer);
-        reject(err);
-      });
-      child.once('close', (code) => {
-        clearTimeout(timer);
-        if (code === 0) resolve();
-        else reject(new Error(`${cmd} exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
-      });
-    });
-  }
-
   /**
    * Write `MYSQL_PWD=<password>` to a private temp env-file and run `fn` with
    * the `docker` args that pass it via `--env-file`. This keeps the password
@@ -860,7 +801,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         // argv). withMysqlPwdEnvFile writes 0600 + unlinks; splice its
         // `--env-file` token right after `exec`.
         await this.withMysqlPwdEnvFile(password, [], (exec) =>
-          this.runCommandToFile(
+          runCommandToFile(
             'docker',
             [exec[0], ...exec.slice(1), ...plan.argv.slice(1)],
             outPath,
@@ -868,7 +809,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
           ),
         );
       } else {
-        await this.runCommandToFile('docker', plan.argv, outPath, 1_800_000);
+        await runCommandToFile('docker', plan.argv, outPath, 1_800_000);
       }
       manifest.databases.push({
         id: db.id,
@@ -915,7 +856,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     const dir = path.join(stagingDir, 'volumes');
     await fs.promises.mkdir(dir, { recursive: true });
     for (const vol of volumes) {
-      await this.runCommandToFile(
+      await runCommandToFile(
         'docker',
         ['run', '--rm', '-v', `${vol}:/data:ro`, 'busybox', 'tar', '-czf', '-', '-C', '/data', '.'],
         path.join(dir, `${vol}.tar.gz`),
@@ -1375,10 +1316,10 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     // stdin replay (SQL / Mongo). MySQL/MariaDB password via temp --env-file.
     if (plan.envFileContent) {
       await this.withMysqlPwdEnvFile(password, ['-i'], (exec) =>
-        this.runCommandWithInputFile('docker', [...exec, ...plan.argv.slice(2)], file, 1_800_000),
+        runCommandWithInputFile('docker', [...exec, ...plan.argv.slice(2)], file, 1_800_000),
       );
     } else {
-      await this.runCommandWithInputFile('docker', plan.argv, file, 1_800_000);
+      await runCommandWithInputFile('docker', plan.argv, file, 1_800_000);
     }
   }
 
@@ -1407,7 +1348,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     }
     // Idempotent — succeeds when the volume already exists.
     await execFileAsync('docker', ['volume', 'create', volumeName], { timeout: 15_000 });
-    await this.runCommandWithInputFile(
+    await runCommandWithInputFile(
       'docker',
       ['run', '--rm', '-i', '-v', `${volumeName}:/data`, 'busybox', 'tar', '-xzf', '-', '-C', '/data'],
       file,

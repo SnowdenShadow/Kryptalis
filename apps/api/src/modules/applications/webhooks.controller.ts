@@ -6,6 +6,7 @@ import {
   Req,
   Headers,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
@@ -177,7 +178,20 @@ export class ApplicationWebhooksController {
       return { skipped: true, reason: `event ${bbEvent}` };
     }
 
-    await this.apps.redeploy(app!.project.userId, id);
+    // A push that lands WHILE a deploy is already running is a benign no-op,
+    // not a delivery failure. redeploy() throws ConflictException (409) in that
+    // case; if we let it propagate, the git provider records the webhook
+    // delivery as FAILED and burns its finite retry budget re-sending the same
+    // push. Swallow it into a `skipped` 200 instead — the running deploy will
+    // already build whatever was pushed (or the next push re-triggers).
+    try {
+      await this.apps.redeploy(app!.project.userId, id);
+    } catch (err) {
+      if (err instanceof ConflictException) {
+        return { skipped: true, reason: 'deploy already in progress' };
+      }
+      throw err;
+    }
     return { triggered: true };
   }
 }

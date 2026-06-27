@@ -1,12 +1,14 @@
 import {
   Injectable,
+  Logger,
+  OnModuleInit,
   NotFoundException,
   BadRequestException,
   ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
-import { AppStatus } from '@prisma/client';
+import { AppStatus, Prisma } from '@prisma/client';
 import { ApplicationRepository } from './application.repository';
 import { AgentService } from '../agent/agent.service';
 import { DeploymentTargetService } from '../deployment-target/deployment-target.service';
@@ -38,8 +40,15 @@ import * as yaml from 'js-yaml';
  * logs, in-container exec, compose/Dockerfile file editing, and the
  * docker-ps status sync. Split out of ApplicationsService.
  */
+// An in-flight deployment row this much older than the API process can only be
+// an ORPHAN — deploy workers run in-process, so a row still PENDING/BUILDING/
+// DEPLOYING at boot belongs to a previous (killed) process, never a live one.
+const ORPHAN_INFLIGHT_THRESHOLD_MS = 30 * 60 * 1000;
+
 @Injectable()
-export class ApplicationOpsService {
+export class ApplicationOpsService implements OnModuleInit {
+  private readonly logger = new Logger(ApplicationOpsService.name);
+
   constructor(
     private prisma: PrismaService,
     private agent: AgentService,
@@ -49,6 +58,33 @@ export class ApplicationOpsService {
     private env: ApplicationEnvService,
     private apps: ApplicationRepository,
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    // Reconcile orphaned in-flight deployments left by an ungraceful restart.
+    // Deploy workers run IN-PROCESS, so any row still PENDING/BUILDING/DEPLOYING
+    // at boot is dead — its process is gone. Without this, the partial unique
+    // index `deployments_app_inflight_unique` would treat that orphan as a live
+    // deployment forever and reject every future redeploy of the app with a
+    // ConflictException — a permanent dead-end (the old best-effort guard had a
+    // 30-min escape window the DB index intentionally lacks). Fail them on boot
+    // so the app can be redeployed. Best-effort: never block startup.
+    if (process.env.NODE_ENV === 'test') return;
+    try {
+      const cutoff = new Date(Date.now() - ORPHAN_INFLIGHT_THRESHOLD_MS);
+      const swept = await this.prisma.deployment.updateMany({
+        where: {
+          status: { in: ['PENDING', 'BUILDING', 'DEPLOYING'] as any },
+          createdAt: { lt: cutoff },
+        },
+        data: { status: 'FAILED', finishedAt: new Date(), deployLogs: 'Orphaned by API restart' },
+      });
+      if (swept.count > 0) {
+        this.logger.warn(`Reconciled ${swept.count} orphaned in-flight deployment(s) on startup.`);
+      }
+    } catch (e) {
+      this.logger.error(`Orphan-deployment reconcile failed: ${(e as Error).message}`);
+    }
+  }
 
   // ── lifecycle ──────────────────────────────────────────────────────
 
@@ -150,6 +186,30 @@ export class ApplicationOpsService {
   }
 
   /**
+   * Create the in-flight Deployment row, converting the DB-level race loss into
+   * the same friendly 409 as the best-effort pre-check. The partial unique
+   * index `deployments_app_inflight_unique` guarantees only ONE in-flight
+   * (PENDING/BUILDING/DEPLOYING) deployment per app; if a concurrent redeploy
+   * already created one between our assertNoInflightDeployment() read and this
+   * insert, Postgres raises a unique violation (Prisma P2002) which we surface
+   * as ConflictException instead of leaking a raw 500.
+   */
+  private async createInflightDeployment(
+    data: Prisma.DeploymentUncheckedCreateInput,
+  ): Promise<{ id: string }> {
+    try {
+      return await this.prisma.deployment.create({ data });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException(
+          'A deployment is already running. Wait for it to finish or cancel it first.',
+        );
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Resolve the git auth header from the persisted git provider — providers
    * stay private per user, BUT any project member can (re)deploy using the
    * connector chosen at create time. (The token itself is never exposed
@@ -179,8 +239,8 @@ export class ApplicationOpsService {
 
     // Docker-image-only app: re-pull + recreate. No git clone needed.
     if (!app.gitUrl && app.dockerImage) {
-      const deployment = await this.prisma.deployment.create({
-        data: { applicationId: app.id, status: 'PENDING', triggeredById: userId },
+      const deployment = await this.createInflightDeployment({
+        applicationId: app.id, status: 'PENDING', triggeredById: userId,
       });
       await this.deploy.runDockerImageDeploy(deployment.id, app.id, app.name, app.dockerImage, {
         port: app.port ?? undefined,
@@ -194,8 +254,8 @@ export class ApplicationOpsService {
     // a changed PHP version (rebuilds the image) and leaves the live docroot
     // bind mount (the user's SFTP files) untouched.
     if (app.framework === 'PHP_SITE') {
-      const deployment = await this.prisma.deployment.create({
-        data: { applicationId: app.id, status: 'PENDING', triggeredById: userId },
+      const deployment = await this.createInflightDeployment({
+        applicationId: app.id, status: 'PENDING', triggeredById: userId,
       });
       await this.deploy.runPhpSiteDeploy(
         deployment.id,
@@ -227,8 +287,8 @@ export class ApplicationOpsService {
 
     const cloneHeader = await this.resolveCloneHeader(app);
 
-    const deployment = await this.prisma.deployment.create({
-      data: { applicationId: id, status: 'PENDING', triggeredById: userId },
+    const deployment = await this.createInflightDeployment({
+      applicationId: id, status: 'PENDING', triggeredById: userId,
     });
     await this.apps.setStatus(id, AppStatus.DEPLOYING);
     this.deploy.runDeploy(deployment.id, id, app.name, app.gitUrl, app.gitBranch || 'main', {
@@ -270,14 +330,12 @@ export class ApplicationOpsService {
         );
       }
 
-      const deployment = await this.prisma.deployment.create({
-        data: {
-          applicationId: app.id,
-          status: 'DEPLOYING',
-          commitMessage: 'Redeploy (env refresh)',
-          triggeredById: userId,
-          startedAt: new Date(),
-        },
+      const deployment = await this.createInflightDeployment({
+        applicationId: app.id,
+        status: 'DEPLOYING',
+        commitMessage: 'Redeploy (env refresh)',
+        triggeredById: userId,
+        startedAt: new Date(),
       });
 
       try {
@@ -343,14 +401,12 @@ export class ApplicationOpsService {
       );
     }
 
-    const deployment = await this.prisma.deployment.create({
-      data: {
-        applicationId: app.id,
-        status: 'DEPLOYING',
-        commitMessage: 'Redeploy (env refresh)',
-        triggeredById: userId,
-        startedAt: new Date(),
-      },
+    const deployment = await this.createInflightDeployment({
+      applicationId: app.id,
+      status: 'DEPLOYING',
+      commitMessage: 'Redeploy (env refresh)',
+      triggeredById: userId,
+      startedAt: new Date(),
     });
 
     // .env refresh: saved envVars are the user-editable layer. We merge them
@@ -426,13 +482,11 @@ export class ApplicationOpsService {
 
     const cloneHeader = await this.resolveCloneHeader(app);
 
-    const deployment = await this.prisma.deployment.create({
-      data: {
-        applicationId: id,
-        status: 'PENDING',
-        triggeredById: userId,
-        commitMessage: `Rollback to ${target.commitSha.slice(0, 7)}`,
-      },
+    const deployment = await this.createInflightDeployment({
+      applicationId: id,
+      status: 'PENDING',
+      triggeredById: userId,
+      commitMessage: `Rollback to ${target.commitSha.slice(0, 7)}`,
     });
     await this.apps.setStatus(id, AppStatus.DEPLOYING);
     this.deploy.runDeploy(deployment.id, id, app.name, app.gitUrl, app.gitBranch || 'main', {

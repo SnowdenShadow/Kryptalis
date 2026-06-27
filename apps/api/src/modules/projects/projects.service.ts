@@ -23,72 +23,18 @@ import { ApplicationOpsService } from '../applications/application-ops.service';
 import { ApplicationsService } from '../applications/applications.service';
 import { DatabasesService } from '../databases/databases.service';
 import { renderDbCompose as renderDbComposeShared } from '../databases/db-configs';
+import { runCommandToFile, runCommandWithInputFile } from '../databases/db-dump.util';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
-import { execFile, spawn } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 
 const execFileAsync = promisify(execFile);
-
-/** Stream a command's stdout to a file (no shell, never buffered in memory). */
-function runCommandToFile(cmd: string, args: string[], outPath: string, timeoutMs: number): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const out = fs.createWriteStream(outPath);
-    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    let stderr = '';
-    child.stderr.on('data', (d: Buffer) => {
-      if (stderr.length < 8192) stderr += d.toString();
-    });
-    child.stdout.pipe(out);
-    child.once('error', (err) => {
-      clearTimeout(timer);
-      out.destroy();
-      reject(err);
-    });
-    child.once('close', (code) => {
-      clearTimeout(timer);
-      out.close(() => {
-        if (code === 0) resolve();
-        else reject(new Error(`${cmd} exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
-      });
-    });
-  });
-}
-
-/** Pipe a file into a command's stdin (no shell, streaming). */
-function runCommandWithInputFile(cmd: string, args: string[], inPath: string, timeoutMs: number): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'pipe'] });
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    let stderr = '';
-    child.stderr.on('data', (d: Buffer) => {
-      if (stderr.length < 8192) stderr += d.toString();
-    });
-    const src = fs.createReadStream(inPath);
-    src.once('error', (err) => {
-      child.kill('SIGKILL');
-      clearTimeout(timer);
-      reject(err);
-    });
-    src.pipe(child.stdin);
-    child.stdin.once('error', () => undefined);
-    child.once('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.once('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(`${cmd} exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
-    });
-  });
-}
 
 @Injectable()
 export class ProjectsService implements OnModuleInit {

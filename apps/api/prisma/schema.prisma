@@ -451,6 +451,13 @@ model Deployment {
   triggeredBy User        @relation(fields: [triggeredById], references: [id])
 
   @@index([applicationId])
+  // NOTE: a PARTIAL unique index `deployments_app_inflight_unique` on
+  // (applicationId) WHERE status IN ('PENDING','BUILDING','DEPLOYING') is
+  // enforced at the DB level (migration 20260627120000_deploy_inflight_unique)
+  // to guarantee at most ONE in-flight deployment per app. Prisma can't express
+  // partial unique indexes in the schema, so it lives in raw SQL; this comment
+  // documents it so it isn't "lost". The app catches its unique-violation
+  // (P2002) as a ConflictException in assertNoInflightDeployment.
   @@map("deployments")
 }
 

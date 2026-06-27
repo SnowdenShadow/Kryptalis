@@ -21,6 +21,8 @@
  * the host process argv (where `ps` would leak it), matching how Backups does
  * it via withMysqlPwdEnvFile.
  */
+import { spawn } from 'child_process';
+import * as fs from 'fs';
 
 /** The subset of a Database row these helpers need. */
 export interface DumpableDb {
@@ -219,4 +221,78 @@ export function restorePlan(db: DumpableDb, container: string, opts: { dumpAll: 
     default:
       return null;
   }
+}
+
+// ─── streaming exec helpers (execute the plans above) ─────────────────
+//
+// These run a dump/restore command with NO shell, streaming straight to/from a
+// file so multi-GB dumps are never buffered in memory. They were duplicated
+// byte-for-byte in BackupsService (private methods) and ProjectsService
+// (module functions); centralized here next to the plans they execute.
+
+/** Stream a command's stdout to a file (no shell, never buffered in memory). */
+export function runCommandToFile(
+  cmd: string,
+  args: string[],
+  outPath: string,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const out = fs.createWriteStream(outPath);
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    let stderr = '';
+    child.stderr.on('data', (d: Buffer) => {
+      if (stderr.length < 8192) stderr += d.toString();
+    });
+    child.stdout.pipe(out);
+    child.once('error', (err) => {
+      clearTimeout(timer);
+      out.destroy();
+      reject(err);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      out.close(() => {
+        if (code === 0) resolve();
+        else reject(new Error(`${cmd} exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
+      });
+    });
+  });
+}
+
+/** Pipe a file into a command's stdin (no shell, streaming). */
+export function runCommandWithInputFile(
+  cmd: string,
+  args: string[],
+  inPath: string,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'pipe'] });
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    let stderr = '';
+    child.stderr.on('data', (d: Buffer) => {
+      if (stderr.length < 8192) stderr += d.toString();
+    });
+    const src = fs.createReadStream(inPath);
+    src.once('error', (err) => {
+      child.kill('SIGKILL');
+      clearTimeout(timer);
+      reject(err);
+    });
+    src.pipe(child.stdin);
+    // A container process that exits early (e.g. auth failure) closes its
+    // stdin — swallow the resulting EPIPE; the exit code carries the error.
+    child.stdin.once('error', () => undefined);
+    child.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`${cmd} exited with code ${code}: ${stderr.trim().slice(0, 500)}`));
+    });
+  });
 }
