@@ -535,7 +535,11 @@ model MailServer {
   smtpsPort    Int              @default(465)
   dkimSelector String           @default("dockcontrol")
   dkimPublicKey String?
-  dkimPrivateKey String?         // PEM-encoded, encrypted at rest in V4
+  // PEM-encoded DKIM signing key, ENCRYPTED at rest (AES-256-GCM via
+  // EncryptionService). Written through encryption.encrypt() in
+  // mail-server.service (generateDkim) and only ever read back through
+  // encryption.decrypt(). Never store a raw PEM here.
+  dkimPrivateKey String?
   hostname     String?
   lastError    String?
   // ── antispam config (applied to the generated compose + rspamd files on
@@ -643,6 +647,14 @@ model DNSRecord {
 model SSLCertificate {
   id          String   @id @default(cuid())
   domainId    String   @unique
+  // NOTE: this table is currently NEVER written — Caddy owns certificate
+  // issuance/storage on disk and ssl.service.ts only ever READS this table
+  // (findUnique/findMany for diagnostics). `certificate`/`privateKey` are
+  // therefore plain String today. IF a future code path ever populates this
+  // table, the privateKey (and chain/certificate) MUST be encrypted at rest
+  // via EncryptionService.encrypt() — exactly like MailServer.dkimPrivateKey
+  // and every other secret column — and decrypted on read. Do not write a raw
+  // PEM private key here.
   certificate String
   privateKey  String
   chain       String?

@@ -12,6 +12,7 @@ import { ServersModule } from './modules/servers/servers.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { ApplicationsModule } from './modules/applications/applications.module';
 import { ApplicationRepositoryModule } from './modules/applications/application-repository.module';
+import { SchedulerModule } from './common/scheduler/scheduler.module';
 import { DomainsModule } from './modules/domains/domains.module';
 import { DeploymentsModule } from './modules/deployments/deployments.module';
 import { DockerModule } from './modules/docker/docker.module';
@@ -64,6 +65,9 @@ import { CronModule } from './modules/cron/cron.module';
         // INSECURE (any-origin + cookies). Default off — '*' is ignored.
         ALLOW_INSECURE_CORS: Joi.string().allow('').optional(),
         SWAGGER_PUBLIC: Joi.string().allow('').optional(),
+        // Background-scheduler leader flag. "false" → this replica runs no
+        // schedulers (multi-replica follower). Default/unset → leader.
+        SCHEDULER_ENABLED: Joi.string().allow('').optional(),
         SMTP_HOST: Joi.string().allow('').optional(),
         // Number() rejects empty string; use Joi.alternatives so both '' and
         // a real number are accepted.
@@ -85,6 +89,7 @@ import { CronModule } from './modules/cron/cron.module';
     PrismaModule,
     CryptoModule,
     ApplicationRepositoryModule,
+    SchedulerModule,
     AuthModule,
     UsersModule,
     ServersModule,

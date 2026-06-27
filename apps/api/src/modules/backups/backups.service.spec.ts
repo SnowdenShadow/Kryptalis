@@ -48,6 +48,7 @@ vi.mock('fs', () => {
 import * as fs from 'fs';
 import { execFile } from 'child_process';
 import { BackupsService } from './backups.service';
+import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { previousOccurrence, scheduledRunName, BACKUP_SCHEDULE_PATTERN } from './backup-schedule.util';
 
@@ -104,6 +105,7 @@ function makeService() {
     encryption as any,
     notifications as any,
     agent as any,
+    new SchedulerLeaderService(),
   );
   return { service, prisma, systemConfig, encryption, notifications, agent };
 }

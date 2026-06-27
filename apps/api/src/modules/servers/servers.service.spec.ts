@@ -66,6 +66,7 @@ vi.mock('fs', () => {
 });
 
 import { ServersService } from './servers.service';
+import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 
 const configStub = {
@@ -117,6 +118,7 @@ function makeService() {
     encryption as any,
     systemConfig as any,
     notifications as any,
+    new SchedulerLeaderService(),
   );
   return { service, prisma, systemConfig, notifications };
 }

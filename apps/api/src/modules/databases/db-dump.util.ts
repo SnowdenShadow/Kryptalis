@@ -119,15 +119,26 @@ export function dumpPlan(
       };
     }
     case 'MONGODB': {
-      // KNOWN LIMITATION (pre-existing, also in Backups): the Mongo password
-      // is on the `docker exec` argv (visible via `ps`/proc to a co-located
-      // process during the dump window). Unlike MySQL (MYSQL_PWD env-file) and
-      // Redis (REDISCLI_AUTH env), mongodump has no password ENV — the off-argv
-      // fix is a `--config <yaml>` file docker-cp'd into the container, which
-      // needs the recent mongodb-database-tools and a live Mongo to verify.
-      // Deferred rather than shipped blind against a working path. Local-only,
-      // medium severity. If addressed: surface a configFileContent descriptor
-      // here + have every caller cp it in, symmetric with restorePlan.
+      // KNOWN, ACCEPTED RESIDUAL (pre-existing, also in Backups): the Mongo
+      // password rides the `docker exec` argv, visible via `ps`/proc to a
+      // process ALREADY running on the same host during the dump window.
+      //
+      // Why this isn't fixed inline: mongodump/mongorestore have NO password
+      // env var (unlike MySQL's MYSQL_PWD env-file or Redis' REDISCLI_AUTH), so
+      // the only off-argv route is `--config <yaml>` — and that YAML must be
+      // read by mongodump INSIDE the container, i.e. docker-cp'd in, spliced as
+      // `--config <path>`, then removed, symmetrically across all three callers
+      // (Backups, Databases, ProjectTransfer) for BOTH dump and restore. That
+      // mechanism cannot be functionally verified without a live Mongo +
+      // matching mongodb-database-tools; shipping it blind risks breaking a
+      // data-restore path (data loss) to close a host-local exposure.
+      //
+      // Threat model keeps it LOW: reading another process's argv requires code
+      // already executing on the host, which on a single-tenant self-hosted box
+      // implies the attacker already has host access (a strictly larger
+      // compromise). Revisit with a live Mongo in the loop. If addressed:
+      // surface a `configFileContent` descriptor here and have every caller cp
+      // it in, mirroring the existing envFileContent path.
       const inner = [
         'mongodump', '--archive', '--quiet',
         '--username', db.username, '--password', db.password,

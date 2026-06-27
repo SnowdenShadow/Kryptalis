@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import { ServersService } from './servers.service';
+import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
 
 /**
  * Offline-sweep logic tests — every dependency is a plain object of
@@ -25,6 +26,7 @@ function makeService() {
     encryption as any,
     systemConfig as any,
     notifications as any,
+    new SchedulerLeaderService(),
   );
   return { service, prisma, notifications };
 }

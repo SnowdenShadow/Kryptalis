@@ -17,6 +17,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess, listAccessibleProjectIds } from '../../common/rbac/project-access';
 import { SystemConfigService } from '../system/system-config.service';
+import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateBackupDto } from './dto/create-backup.dto';
@@ -163,6 +164,9 @@ const SCHEDULE_TICK_INTERVAL_MS = 60_000;
 export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(BackupsService.name);
   private scheduleTimer: NodeJS.Timeout | null = null;
+  // Latches so the "backups are unencrypted" advisory is logged once per
+  // process, not on every backup run (which would spam the log).
+  private warnedUnencryptedBackup = false;
 
   constructor(
     private prisma: PrismaService,
@@ -171,6 +175,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     // Injected from the @Global NotificationsModule (same as monitoring/auth).
     private notifications: NotificationsService,
     private agent: AgentService,
+    private schedulerLeader: SchedulerLeaderService,
   ) {
     if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
   }
@@ -191,8 +196,11 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       }
     });
 
-    // Same convention as MonitoringService: no live interval in test runs.
-    if (process.env.NODE_ENV === 'test') return;
+    // Single-instance scheduler guard: no live interval in test runs OR on a
+    // follower replica (SCHEDULER_ENABLED=false), so scheduled backups don't
+    // fire on every replica. The completion handlers above are still wired
+    // everywhere (they're driven by agent reports, not the timer).
+    if (!this.schedulerLeader.shouldRun()) return;
     this.scheduleTimer = setInterval(
       () => void this.runScheduledBackups().catch((e) =>
         this.logger.error(`Backup schedule tick crashed: ${(e as Error).message}`),
@@ -360,6 +368,18 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     const hash = crypto.createHash('sha256');
     await pipeline(fs.createReadStream(filePath), hash);
     return hash.digest('hex');
+  }
+
+  /** One-time advisory that backups are being written WITHOUT encryption. */
+  private warnUnencryptedBackupOnce(): void {
+    if (this.warnedUnencryptedBackup) return;
+    this.warnedUnencryptedBackup = true;
+    this.logger.warn(
+      'Backups are being written UNENCRYPTED (no BACKUP_ENCRYPTION_KEY configured). ' +
+        'Archives contain tenant database/app data at rest with integrity (sha256) but ' +
+        'NO confidentiality. Set BACKUP_ENCRYPTION_KEY (>=32 chars) in env or Admin → ' +
+        'System Config to encrypt future backups at rest. Existing plaintext dumps remain restorable.',
+    );
   }
 
   private backupEncryptionKey(): Buffer | null {
@@ -1014,6 +1034,14 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     if (masterKey) {
       await this.encryptFileInPlace(archivePath, masterKey);
       encrypted = true;
+    } else {
+      // Encryption is opt-in (default off) and we keep that default to avoid
+      // breaking restore of existing plaintext dumps. But a plaintext archive
+      // holds tenant DB/app data at rest with only sha256 integrity (no
+      // confidentiality), so warn loudly ONCE per process so an operator who
+      // never set BACKUP_ENCRYPTION_KEY is aware rather than surprised. The
+      // sha256 still protects against tampering on restore.
+      this.warnUnencryptedBackupOnce();
     }
     // sha256 + sizeBytes are computed AFTER any encryption so restore can
     // verify the bytes that actually live on disk — and, for remote

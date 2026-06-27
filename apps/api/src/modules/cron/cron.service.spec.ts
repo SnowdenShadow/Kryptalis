@@ -6,6 +6,7 @@ vi.mock('../applications/applications.helpers', () => ({
 }));
 
 import { CronService } from './cron.service';
+import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
 
 function makePrisma() {
   return {
@@ -30,7 +31,7 @@ function makePrisma() {
 
 function makeService(prisma: any) {
   const ops = { execCommand: vi.fn().mockResolvedValue({ output: 'ok', exitCode: 0 }) };
-  const svc = new CronService(prisma, ops as any);
+  const svc = new CronService(prisma, ops as any, new SchedulerLeaderService());
   return { svc, ops, prisma };
 }
 

@@ -102,6 +102,10 @@ services:
       ALLOW_INSECURE_CORS: ${ALLOW_INSECURE_CORS:-}
       # Optional — expose Swagger (/api/docs) in production. Off by default.
       SWAGGER_PUBLIC: ${SWAGGER_PUBLIC:-}
+      # Background schedulers. Single-instance by default (runs them). Set false
+      # on all-but-one replica in a multi-replica deploy to avoid duplicate
+      # backups/metrics/cron runs.
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-}
       # Optional — GitHub OAuth app client id (git provider connect flow).
       GITHUB_OAUTH_CLIENT_ID: ${GITHUB_OAUTH_CLIENT_ID:-}
       # Optional — enables AES-256-GCM at-rest encryption of backup dumps.

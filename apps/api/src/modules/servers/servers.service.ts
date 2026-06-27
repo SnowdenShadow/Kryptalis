@@ -3,6 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { SystemConfigService } from '../system/system-config.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
 import { UpdateServerDto } from './dto/update-server.dto';
 import { randomBytes } from 'crypto';
 import { exec } from 'child_process';
@@ -41,6 +42,7 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
     private systemConfig: SystemConfigService,
     // Injected from the @Global NotificationsModule (same as monitoring/backups).
     private notifications: NotificationsService,
+    private schedulerLeader: SchedulerLeaderService,
   ) {}
 
   /** Generate a fresh install/agent token and return both raw + hash. */
@@ -50,6 +52,10 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
+    // Single-instance scheduler guard: a follower replica (SCHEDULER_ENABLED=
+    // false) and test runs start NO timers, so metrics aren't double-collected
+    // across replicas. Single-instance installs are unaffected (default leader).
+    if (!this.schedulerLeader.shouldRun()) return;
     this.collectInterval = setInterval(() => this.collectMetrics(), 30000);
     setTimeout(() => this.collectMetrics(), 2000);
     // Prune old ServerMetric rows hourly. Without this the table grows
@@ -59,17 +65,14 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
     // single-tenant install.
     this.retentionInterval = setInterval(() => this.pruneOldMetrics(), 60 * 60 * 1000);
     setTimeout(() => this.pruneOldMetrics(), 30_000);
-    // Heartbeat watchdog — same convention as MonitoringService/BackupsService:
-    // no live interval in test runs, unref'd so it never holds the process open.
-    if (process.env.NODE_ENV !== 'test') {
-      this.offlineSweepInterval = setInterval(
-        () => void this.sweepOfflineServers().catch((e) =>
-          this.logger.error(`Offline sweep crashed: ${(e as Error).message}`),
-        ),
-        OFFLINE_SWEEP_INTERVAL_MS,
-      );
-      this.offlineSweepInterval.unref?.();
-    }
+    // Heartbeat watchdog.
+    this.offlineSweepInterval = setInterval(
+      () => void this.sweepOfflineServers().catch((e) =>
+        this.logger.error(`Offline sweep crashed: ${(e as Error).message}`),
+      ),
+      OFFLINE_SWEEP_INTERVAL_MS,
+    );
+    this.offlineSweepInterval.unref?.();
   }
 
   async onModuleDestroy() {

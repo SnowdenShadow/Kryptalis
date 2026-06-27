@@ -9,6 +9,7 @@ import {
 import { BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
 import { CreateAlertRuleDto } from './dto/create-alert-rule.dto';
 import { UpdateAlertRuleDto } from './dto/update-alert-rule.dto';
 
@@ -33,12 +34,14 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
+    private schedulerLeader: SchedulerLeaderService,
   ) {}
 
   onModuleInit() {
-    // Skip the eval loop in test runs so unit tests don't carry a live
-    // interval. `NODE_ENV=test` is the convention; anything else opts in.
-    if (process.env.NODE_ENV === 'test') return;
+    // Single-instance scheduler guard: no eval loop in tests OR on a follower
+    // replica (SCHEDULER_ENABLED=false) — otherwise every replica evaluates
+    // the same alert rules and fires duplicate notifications.
+    if (!this.schedulerLeader.shouldRun()) return;
     this.evalTimer = setInterval(
       () => this.evaluateAlerts().catch((e) =>
         this.logger.error(`Alert eval loop crashed: ${e.message}`),

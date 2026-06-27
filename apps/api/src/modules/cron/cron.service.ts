@@ -8,6 +8,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertAppOwnership } from '../applications/applications.helpers';
 import { ApplicationOpsService } from '../applications/application-ops.service';
+import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
 import { CreateCronJobDto } from './dto/create-cron-job.dto';
 import { UpdateCronJobDto } from './dto/update-cron-job.dto';
 import { previousOccurrence, nextOccurrence } from './cron-schedule.util';
@@ -33,11 +34,14 @@ export class CronService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private prisma: PrismaService,
     private ops: ApplicationOpsService,
+    private schedulerLeader: SchedulerLeaderService,
   ) {}
 
   onModuleInit() {
-    // Same convention as BackupsService/MonitoringService: no live timer in tests.
-    if (process.env.NODE_ENV === 'test') return;
+    // Single-instance scheduler guard: no live timer in tests OR on a follower
+    // replica (SCHEDULER_ENABLED=false) — otherwise each replica would fire
+    // every due cron job, running user commands N× per tick.
+    if (!this.schedulerLeader.shouldRun()) return;
     this.timer = setInterval(
       () => void this.runDueJobs().catch((e) =>
         this.logger.error(`Cron tick crashed: ${(e as Error).message}`),
