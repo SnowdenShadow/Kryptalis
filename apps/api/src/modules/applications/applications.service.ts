@@ -558,7 +558,10 @@ export class ApplicationsService implements OnModuleInit {
         },
       },
     });
-    const synced = await Promise.all(apps.map((app) => this.ops.syncStatus(app)));
+    // Batched status sync: ONE `docker ps` for the whole local fleet instead
+    // of one `docker compose ps` per app (the N+1 the audit flagged — the
+    // dashboard polls this every 5s). Remote/DEPLOYING apps are left untouched.
+    const synced = await this.ops.syncStatusMany(apps);
     return synced.map((a) => this.withDisplayName(a));
   }
 

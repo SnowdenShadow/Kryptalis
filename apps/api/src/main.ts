@@ -13,6 +13,7 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
+import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
@@ -158,6 +159,11 @@ async function bootstrap() {
       transform: true,
     }),
   );
+
+  // Global exception filter — single 5xx capture point with a correlation id.
+  // It preserves 4xx response bodies verbatim (ValidationPipe message[] and
+  // fields like `code` the dashboard relies on) and only logs/normalizes 5xx.
+  app.useGlobalFilters(new GlobalExceptionFilter());
 
   // Swagger docs — disabled in production by default; opt-in via
   // SWAGGER_PUBLIC=true. The route map is sensitive info, no reason to

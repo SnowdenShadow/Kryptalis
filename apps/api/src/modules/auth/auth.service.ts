@@ -6,7 +6,7 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
+import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { randomBytes, createHash } from 'crypto';
@@ -17,6 +17,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 // mutating per-request.
 import { authenticator } from 'otplib';
 authenticator.options = { window: 1 };
+import { SessionStatus, UserStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { SystemConfigService } from '../system/system-config.service';
@@ -144,7 +145,7 @@ export class AuthService {
             where: { key: LEGACY_BOOTSTRAP_FLAG_KEY },
           });
       const isBootstrapped =
-        !!(bootstrappedSetting?.value as any) || !!(legacyBootstrappedSetting?.value as any);
+        bootstrappedSetting?.value === true || legacyBootstrappedSetting?.value === true;
 
       // If bootstrapped, registration_enabled rules. If NOT yet bootstrapped
       // and userCount===0 (first install), we let the registrant through
@@ -156,7 +157,7 @@ export class AuthService {
         const setting = await tx.systemSetting.findUnique({
           where: { key: 'registration_enabled' },
         });
-        const enabled = setting ? !!(setting.value as any) : true;
+        const enabled = setting ? setting.value === true : true;
         if (!enabled) {
           throw new ForbiddenException('Registration is disabled');
         }
@@ -216,8 +217,8 @@ export class AuthService {
         // will see bootstrapped=true and require registration_enabled.
         await tx.systemSetting.upsert({
           where: { key: BOOTSTRAP_FLAG_KEY },
-          create: { key: BOOTSTRAP_FLAG_KEY, value: true as any, updatedBy: user.id },
-          update: { value: true as any, updatedBy: user.id },
+          create: { key: BOOTSTRAP_FLAG_KEY, value: true, updatedBy: user.id },
+          update: { value: true, updatedBy: user.id },
         });
       }
 
@@ -367,7 +368,7 @@ export class AuthService {
       ...(row.user.status === 'PENDING_VERIFICATION'
         ? [this.prisma.user.update({
             where: { id: row.userId },
-            data: { status: 'ACTIVE' as any },
+            data: { status: UserStatus.ACTIVE },
           })]
         : []),
     ]);
@@ -482,7 +483,7 @@ export class AuthService {
 
     // Enforce 2FA when enabled — the totpCode (or backup code) is required.
     if (user.twoFactorEnabled) {
-      const code = (dto as any).totpCode || (dto as any).backupCode;
+      const code = dto.totpCode || dto.backupCode;
       if (!code) {
         // Structured `code` field: the dashboard branches on TOTP_REQUIRED
         // instead of regex-matching the (locale-dependent) English message.
@@ -492,7 +493,7 @@ export class AuthService {
         });
       }
       const ok = await this.verifyTwoFactor(user.id, user.twoFactorSecret, code, {
-        forBackup: !!(dto as any).backupCode,
+        forBackup: !!dto.backupCode,
       });
       if (!ok) {
         await this.bumpFailedAttempt(user.id, { freshAfterLockExpiry: lockExpired });
@@ -580,7 +581,7 @@ export class AuthService {
         userId: session.user.id,
         refreshTokenHash: placeholderHash,
         familyId: session.familyId,
-        status: 'PENDING' as any, // not loggable-with yet
+        status: SessionStatus.PENDING, // not loggable-with yet
         expiresAt,
         ipAddress: ctx.ip,
         userAgent: ctx.userAgent,
@@ -625,7 +626,7 @@ export class AuthService {
     const rows = await this.prisma.session.findMany({
       where: {
         userId,
-        status: { in: ['ACTIVE' as any, 'PENDING' as any] },
+        status: { in: [SessionStatus.ACTIVE, SessionStatus.PENDING] },
         expiresAt: { gt: new Date() },
       },
       orderBy: { createdAt: 'desc' },
@@ -659,15 +660,15 @@ export class AuthService {
         where: {
           userId,
           id: { not: currentSessionId! },
-          status: { not: 'REVOKED' as any },
+          status: { not: SessionStatus.REVOKED },
         },
-        data: { status: 'REVOKED' as any },
+        data: { status: SessionStatus.REVOKED },
       });
       return { revoked: true, keptCurrent: true };
     }
     await this.prisma.session.update({
       where: { id: sessionId },
-      data: { status: 'REVOKED' as any },
+      data: { status: SessionStatus.REVOKED },
     });
     return { revoked: true, keptCurrent: false };
   }
@@ -677,9 +678,9 @@ export class AuthService {
       where: {
         userId,
         ...(currentSessionId ? { id: { not: currentSessionId } } : {}),
-        status: { not: 'REVOKED' as any },
+        status: { not: SessionStatus.REVOKED },
       },
-      data: { status: 'REVOKED' as any },
+      data: { status: SessionStatus.REVOKED },
     });
     return { revoked: result.count };
   }
@@ -907,14 +908,14 @@ export class AuthService {
     const row = await this.prisma.systemSetting.findUnique({
       where: { key: this.onboardingKey(userId) },
     });
-    return { completed: !!(row?.value as any) };
+    return { completed: row?.value === true };
   }
 
   async completeOnboarding(userId: string): Promise<{ completed: true }> {
     await this.prisma.systemSetting.upsert({
       where: { key: this.onboardingKey(userId) },
-      create: { key: this.onboardingKey(userId), value: true as any, updatedBy: userId },
-      update: { value: true as any, updatedBy: userId },
+      create: { key: this.onboardingKey(userId), value: true, updatedBy: userId },
+      update: { value: true, updatedBy: userId },
     });
     return { completed: true };
   }
@@ -1146,12 +1147,20 @@ export class AuthService {
     // still by sha256(refreshToken).
     const payload: Record<string, unknown> = { sub: userId, email, role };
     if (sessionId) payload.sid = sessionId;
+    // `expiresIn` is typed by @nestjs/jwt as the `ms` library's branded
+    // `StringValue` template-literal (e.g. "7d"), which a plain runtime string
+    // from config can't structurally satisfy. Cast to the EXACT field type
+    // (not `any`) so we keep type-safety on the rest of the options object.
+    const refreshOpts: JwtSignOptions = {
+      secret: this.config.get<string>('JWT_REFRESH_SECRET')!,
+      expiresIn: this.config.get<string>(
+        'JWT_REFRESH_EXPIRATION',
+        '7d',
+      ) as JwtSignOptions['expiresIn'],
+    };
     const [accessToken, refreshToken] = await Promise.all([
       this.jwt.signAsync(payload),
-      this.jwt.signAsync(payload, {
-        secret: this.config.get<string>('JWT_REFRESH_SECRET')!,
-        expiresIn: this.config.get('JWT_REFRESH_EXPIRATION', '7d') as any,
-      }),
+      this.jwt.signAsync(payload, refreshOpts),
     ]);
     return { accessToken, refreshToken };
   }

@@ -316,6 +316,11 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
     if (!target) throw new NotFoundException('User not found');
     this.assertCanModifyTarget(actor.role, target.role);
     this.assertCanGrantRole(actor.role, role);
+    // Demoting the last SUPERADMIN away from SUPERADMIN would lock the platform
+    // out of every superadmin-only control — same invariant deleteUser guards.
+    if (target.role === 'SUPERADMIN' && role !== 'SUPERADMIN') {
+      await this.assertNotLastSuperadmin();
+    }
     return this.prisma.user.update({
       where: { id: userId },
       data: { role },
@@ -333,6 +338,11 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
     });
     if (!target) throw new NotFoundException('User not found');
     this.assertCanModifyTarget(actor.role, target.role);
+    // Making the last SUPERADMIN non-ACTIVE (suspend/ban) would lock the
+    // platform out just like deleting them — block it.
+    if (target.role === 'SUPERADMIN' && status !== 'ACTIVE') {
+      await this.assertNotLastSuperadmin();
+    }
     return this.prisma.user.update({
       where: { id: userId },
       data: { status },
@@ -366,14 +376,21 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
     if (!target) throw new NotFoundException('User not found');
     this.assertCanModifyTarget(actor.role, target.role);
     if (target.role === 'SUPERADMIN') {
-      // never let the last superadmin be deleted
-      const count = await this.prisma.user.count({ where: { role: 'SUPERADMIN' } });
-      if (count <= 1) {
-        throw new BadRequestException('Cannot delete the last SUPERADMIN');
-      }
+      await this.assertNotLastSuperadmin();
     }
     await this.prisma.user.delete({ where: { id: userId } });
     return { message: 'User deleted' };
+  }
+
+  /**
+   * Guard the platform against locking itself out of every SUPERADMIN-only
+   * control. Used by delete / demote / suspend-or-ban of a SUPERADMIN target.
+   */
+  private async assertNotLastSuperadmin() {
+    const count = await this.prisma.user.count({ where: { role: 'SUPERADMIN' } });
+    if (count <= 1) {
+      throw new BadRequestException('Cannot remove the last SUPERADMIN');
+    }
   }
 
   // ── stats / overview ──────────────────────────────────────────────

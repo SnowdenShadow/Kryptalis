@@ -16,6 +16,7 @@ import { ApplicationEnvService } from './application-env.service';
 import {
   execFileAsync,
   slugify,
+  containerName,
   remoteAppSlug,
   resolveAppDir,
   resolveContainerName,
@@ -648,5 +649,88 @@ export class ApplicationOpsService {
       }
     } catch {}
     return app;
+  }
+
+  /**
+   * Batched status sync for a LIST of apps (the dashboard's `GET /applications`
+   * polls every 5s). The per-app {@link syncStatus} forks one `docker compose
+   * ps` PER app — with N local apps × open tabs that's N concurrent docker
+   * processes every 5s on the single-process control plane (the N+1 the audit
+   * flagged). This collapses it to ONE `docker ps` and matches by container
+   * name, exactly like the agent heartbeat path (syncRemoteAppStatuses) does.
+   *
+   * Semantics vs syncStatus:
+   *  - DEPLOYING apps are left untouched (the deploy pipeline owns that state).
+   *  - REMOTE apps are left untouched here — their status is reconciled by the
+   *    agent heartbeat, not the platform-host docker daemon.
+   *  - LOCAL apps: RUNNING iff their main container (app.containerName) is
+   *    running; for nginx-mode PHP sites the `${containerName}-fpm` sidecar
+   *    must ALSO be running (mirrors syncStatus's conjunction so a dead fpm
+   *    behind a live nginx reports STOPPED, not a false RUNNING).
+   *  - An app with no containerName, or whose container isn't in the snapshot,
+   *    is reported STOPPED (the stack is down) unless already STOPPED.
+   *
+   * Only apps whose status actually changed are written (one setStatus each),
+   * so a steady-state poll does zero writes.
+   */
+  async syncStatusMany(apps: any[]): Promise<any[]> {
+    if (apps.length === 0) return apps;
+
+    // One docker ps for the whole local fleet. Tab-separated Names + State so
+    // we never depend on JSON shape across docker versions. Failure → leave
+    // every app's status as-is (best-effort, same as syncStatus's catch).
+    let stateByName = new Map<string, string>();
+    try {
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['ps', '--all', '--format', '{{.Names}}\t{{.State}}'],
+        { timeout: 10_000 },
+      );
+      stateByName = new Map(
+        stdout
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => {
+            const [name, state] = line.split('\t');
+            return [name, (state || '').toLowerCase()] as const;
+          }),
+      );
+    } catch {
+      return apps; // docker unavailable → don't churn statuses
+    }
+
+    const isRunning = (name: string | null | undefined): boolean =>
+      !!name && stateByName.get(name) === 'running';
+
+    return Promise.all(
+      apps.map(async (app) => {
+        // Owned by the deploy pipeline / the remote agent — don't touch.
+        if (app.status === 'DEPLOYING') return app;
+        const server = app.server ?? app.project?.server ?? null;
+        if (!isAppLocal(server)) return app;
+
+        // Not every deploy path persists app.containerName (language-autodetect
+        // git deploys and Dockerfile-without-EXPOSE leave it null), but they
+        // still create a container named `dockcontrol-<slug>`. Fall back to the
+        // deterministic deploy name so those apps aren't falsely reported
+        // STOPPED while actually running.
+        const cname = app.containerName || containerName(slugify(app.name));
+
+        let running: boolean;
+        if (app.framework === 'PHP_SITE' && app.phpWebServer === 'nginx') {
+          // nginx web + php-fpm sidecar — BOTH must be up (a dead fpm behind a
+          // live nginx 502s every request, so that's not "running").
+          running = isRunning(cname) && isRunning(`${cname}-fpm`);
+        } else {
+          running = isRunning(cname);
+        }
+        const realStatus = running ? AppStatus.RUNNING : AppStatus.STOPPED;
+        if (app.status !== realStatus) {
+          await this.apps.setStatus(app.id, realStatus);
+          return { ...app, status: realStatus };
+        }
+        return app;
+      }),
+    );
   }
 }
