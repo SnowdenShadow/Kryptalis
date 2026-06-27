@@ -26,6 +26,19 @@ import * as path from 'path';
 const AGENT_VERSION = '0.1.0';
 const ALLOWED_ARCHS = new Set(['amd64', 'arm64']);
 
+/**
+ * Read an agent credential from a request header, falling back to a (legacy,
+ * deprecated) query-param value. Headers are preferred so the root-equivalent
+ * agent token never lands in the query string (and thus access logs). The
+ * query fallback exists only so a freshly-upgraded API keeps working with an
+ * agent binary that hasn't been updated yet.
+ */
+function agentCred(req: Request, headerName: string, queryFallback?: string): string {
+  const h = req.headers[headerName];
+  const fromHeader = Array.isArray(h) ? h[0] : h;
+  return (fromHeader ?? queryFallback ?? '') as string;
+}
+
 function findBinary(arch: string): string | null {
   const name = `dockcontrol-agent-linux-${arch}`;
   const cwd = process.cwd();
@@ -139,10 +152,17 @@ export class AgentController {
   async transferUpload(
     @Param('taskId') taskId: string,
     @Query('name') name: string,
-    @Query('serverId') serverId: string,
-    @Query('token') token: string,
+    @Query('serverId') serverIdQuery: string,
+    @Query('token') tokenQuery: string,
     @Req() req: Request,
   ) {
+    // Credentials come from headers (X-Server-Id / X-Agent-Token). The query
+    // params are a deprecated fallback kept only for version-skew during an
+    // upgrade (a new API serving an old agent binary). The token must never
+    // sit in the query in normal operation — query strings leak into access
+    // logs (see transfer.go).
+    const serverId = agentCred(req, 'x-server-id', serverIdQuery);
+    const token = agentCred(req, 'x-agent-token', tokenQuery);
     const filePath = await this.svc.resolveTransferPath(taskId, serverId, token, name, 'upload');
     const max = this.svc.transferMaxBytes;
 
@@ -201,10 +221,13 @@ export class AgentController {
   async transferDownload(
     @Param('taskId') taskId: string,
     @Query('name') name: string,
-    @Query('serverId') serverId: string,
-    @Query('token') token: string,
+    @Query('serverId') serverIdQuery: string,
+    @Query('token') tokenQuery: string,
+    @Req() req: Request,
     @Res() res: Response,
   ) {
+    const serverId = agentCred(req, 'x-server-id', serverIdQuery);
+    const token = agentCred(req, 'x-agent-token', tokenQuery);
     const filePath = await this.svc.resolveTransferPath(taskId, serverId, token, name, 'download');
     const stat = await fs.promises.stat(filePath).catch(() => null);
     if (!stat || !stat.isFile()) {

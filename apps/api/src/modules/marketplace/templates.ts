@@ -15,6 +15,7 @@
 // docker-compose. Marketplace install MAY strip the host `ports:` block
 // when a port-pinned binding is requested — Caddy publishes the port on
 // the host in that case, so the container only needs the internal port.
+import * as yaml from 'js-yaml';
 import { checkVolumeSafety } from './dto/install-custom.dto';
 
 export const COMPOSE_TEMPLATES: Record<string, { compose: string; healthCheck?: string }> = {
@@ -1038,6 +1039,15 @@ export const PORT_MAP: Record<string, number> = {
   mailu: 8088,
 };
 
+// An env-var key must be a normal shell-style identifier. This blocks the
+// compose-injection vector where a key containing a newline + indentation
+// (e.g. "X: 0\n    privileged: true") would otherwise smuggle sibling
+// service-level keys (privileged, cap_add, a "/:/host" bind-mount) into the
+// generated YAML. yaml.dump already escapes such keys, but we reject them
+// outright as defense-in-depth and to fail loudly rather than silently
+// quote-mangle a key the user expected to work.
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+
 /**
  * Build a docker-compose body for an arbitrary Docker Hub image — no template
  * required. The dashboard's "Deploy custom image" dialog feeds this so users
@@ -1050,9 +1060,6 @@ export function renderCustomComposeTemplate(opts: {
   volumes?: string[];
   command?: string;
 }): string {
-  const env = Object.entries(opts.envVars || {})
-    .map(([k, v]) => `      ${k}: ${JSON.stringify(String(v))}`)
-    .join('\n');
   // Defensive: never interpolate a volume raw. A newline or non-named-volume
   // spec would inject arbitrary compose keys (privileged, cap_add, pid:host)
   // or bind-mount the host fs. checkVolumeSafety() is the same guard the DTO
@@ -1061,20 +1068,43 @@ export function renderCustomComposeTemplate(opts: {
     const err = checkVolumeSafety(v);
     if (err) throw new Error(`Unsafe volume: ${err}`);
   }
-  // Quote each safe spec via JSON.stringify so it lands on exactly one line.
-  const vols = (opts.volumes || []).map((v) => `      - ${JSON.stringify(v)}`).join('\n');
+
+  // Validate env-var KEYS. The DTO only enforces @IsObject() on envVars, and
+  // class-validator does not constrain dynamic Record keys — so without this
+  // a project-DEVELOPER could inject compose keys via the key side. (Values
+  // are safe: yaml.dump quotes them and they only ever land as scalars.)
+  const environment: Record<string, string> = {};
+  for (const [k, v] of Object.entries(opts.envVars || {})) {
+    if (!ENV_KEY_RE.test(k)) {
+      throw new Error(`Unsafe environment variable name: ${JSON.stringify(k)}`);
+    }
+    environment[k] = String(v);
+  }
   const hasVolumes = (opts.volumes || []).length > 0;
-  return `services:
-  app:
-    image: ${opts.image}
-    container_name: dockcontrol-custom-__INSTANCE_ID__
-    restart: unless-stopped
-    networks:
-      - dockcontrol-apps
-    ports:
-      - "__HOST_PORT__:${opts.containerPort}"
-${opts.command ? `    command: ${JSON.stringify(opts.command)}\n` : ''}${env ? `    environment:\n${env}\n` : ''}${vols ? `    volumes:\n${vols}\n` : ''}${hasVolumes ? `volumes: {}\n` : ''}networks:
-  dockcontrol-apps:
-    external: true
-`;
+
+  // Build the compose as a plain object and serialize via yaml.dump. This is
+  // the same injection-proof pattern every application-deploy path uses
+  // (application-deploy.service.ts): yaml.dump emits data as data, so no
+  // image / env-key / command / volume string can break out into a structural
+  // YAML key. Placeholders (__HOST_PORT__/__INSTANCE_ID__) survive untouched
+  // and are substituted by the caller after rendering.
+  const composeDoc: any = {
+    services: {
+      app: {
+        image: opts.image,
+        container_name: 'dockcontrol-custom-__INSTANCE_ID__',
+        restart: 'unless-stopped',
+        networks: ['dockcontrol-apps'],
+        ports: [`__HOST_PORT__:${opts.containerPort}`],
+        ...(opts.command ? { command: opts.command } : {}),
+        ...(Object.keys(environment).length ? { environment } : {}),
+        ...(hasVolumes ? { volumes: [...(opts.volumes || [])] } : {}),
+      },
+    },
+    ...(hasVolumes ? { volumes: {} } : {}),
+    networks: {
+      'dockcontrol-apps': { external: true },
+    },
+  };
+  return yaml.dump(composeDoc, { lineWidth: 200 });
 }

@@ -12,10 +12,13 @@ import { SystemUpdatesService } from './system-updates.service';
  * new (broken) SHA on disk; and a genuinely newer commit clears the failure.
  */
 
-function makeService(repo = 'owner/repo') {
+function makeService(repo = 'owner/repo', autoApply = true) {
   const svc = new SystemUpdatesService();
   // Pin the repo (resolveRepo normally parses .git/config).
   (svc as any).state.repo = repo;
+  // Auto-apply defaults OFF in production (DOCKCONTROL_AUTO_UPDATE); most of
+  // these tests exercise the apply path, so opt them in explicitly.
+  (svc as any).autoApply = autoApply;
   // Never spawn a real updater — record that an auto-run WAS requested.
   const runUpdate = vi.fn().mockResolvedValue(undefined);
   (svc as any).runUpdate = runUpdate;
@@ -49,7 +52,7 @@ describe('SystemUpdatesService.poll — sticky failure', () => {
     ({ svc, runUpdate } = makeService());
   });
 
-  it('auto-runs the update when a newer commit appears', async () => {
+  it('auto-runs the update when a newer commit appears (auto-apply on)', async () => {
     (svc as any).state.currentSha = 'a'.repeat(40);
     vi.spyOn(svc as any, 'readCurrentSha').mockResolvedValue('a'.repeat(40));
     mockGithubSha('b'.repeat(40));
@@ -58,6 +61,18 @@ describe('SystemUpdatesService.poll — sticky failure', () => {
 
     expect(runUpdate).toHaveBeenCalledTimes(1);
     expect(svc.getStatus().status).toBe('UPDATE_AVAILABLE');
+  });
+
+  it('check-only by default: a newer commit is surfaced but NOT auto-applied', async () => {
+    const { svc: checkOnly, runUpdate: ru } = makeService('owner/repo', false);
+    (checkOnly as any).state.currentSha = 'a'.repeat(40);
+    vi.spyOn(checkOnly as any, 'readCurrentSha').mockResolvedValue('a'.repeat(40));
+    mockGithubSha('b'.repeat(40));
+
+    await (checkOnly as any).poll();
+
+    expect(ru).not.toHaveBeenCalled();
+    expect(checkOnly.getStatus().status).toBe('UPDATE_AVAILABLE');
   });
 
   it('a SHA that just failed stays ERROR and does NOT auto-retry, even though it is now on disk', async () => {

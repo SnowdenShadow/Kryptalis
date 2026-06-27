@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as yaml from 'js-yaml';
 import { COMPOSE_TEMPLATES, PORT_MAP, renderCustomComposeTemplate, domainPinEnv } from './templates';
 
 /**
@@ -129,11 +130,12 @@ describe('domainPinEnv — public-domain pinning for web apps', () => {
 describe('renderCustomComposeTemplate — volume hardening', () => {
   const base = { image: 'linuxserver/jellyfin:latest', containerPort: 8096 };
 
-  it('emits a safe named volume on a single quoted line', () => {
+  it('emits a safe named volume as compose data', () => {
     const out = renderCustomComposeTemplate({ ...base, volumes: ['media:/data'] });
-    expect(out).toContain('    volumes:\n      - "media:/data"');
+    const doc = yaml.load(out) as any;
+    expect(doc.services.app.volumes).toEqual(['media:/data']);
     // Declares the named volume so compose accepts it.
-    expect(out).toContain('volumes: {}');
+    expect(doc.volumes).toEqual({});
   });
 
   it('throws on host bind-mounts (full host escape)', () => {
@@ -149,6 +151,49 @@ describe('renderCustomComposeTemplate — volume hardening', () => {
 
   it('no volumes → no volumes block', () => {
     const out = renderCustomComposeTemplate(base);
-    expect(out).not.toContain('volumes:');
+    const doc = yaml.load(out) as any;
+    expect(doc.services.app.volumes).toBeUndefined();
+    expect(doc.volumes).toBeUndefined();
+  });
+});
+
+describe('renderCustomComposeTemplate — env-var KEY injection (C-1)', () => {
+  const base = { image: 'linuxserver/jellyfin:latest', containerPort: 8096 };
+
+  it('rejects an env key carrying a newline + sibling compose keys', () => {
+    // This is the exact host-escape: a key that, under naive string
+    // interpolation, would add `privileged: true` + a `/:/host` bind-mount as
+    // siblings of the app service.
+    const evil = 'X: 0\n      privileged: true\n      volumes:\n        - /:/host\n      ignore';
+    expect(() =>
+      renderCustomComposeTemplate({ ...base, envVars: { [evil]: 'y' } }),
+    ).toThrow(/environment variable name/i);
+  });
+
+  it('rejects env keys with control chars or shell metacharacters', () => {
+    for (const k of ['A B', 'A=B', 'A\tB', 'A\nB', '"A"', 'a:b', '-flag', '']) {
+      expect(() => renderCustomComposeTemplate({ ...base, envVars: { [k]: 'v' } }), k).toThrow();
+    }
+  });
+
+  it('accepts normal env keys and renders them as data (not structure)', () => {
+    const out = renderCustomComposeTemplate({
+      ...base,
+      envVars: { FOO: 'bar', NODE_ENV: 'production', MY_VAR_1: 'x' },
+    });
+    const doc = yaml.load(out) as any;
+    expect(doc.services.app.environment).toEqual({ FOO: 'bar', NODE_ENV: 'production', MY_VAR_1: 'x' });
+    // Crucially: no injected structural keys leaked to service level.
+    expect(doc.services.app.privileged).toBeUndefined();
+  });
+
+  it('even if a malicious value mimics YAML, yaml.dump keeps it a scalar', () => {
+    const out = renderCustomComposeTemplate({
+      ...base,
+      envVars: { FOO: 'bar\n      privileged: true' },
+    });
+    const doc = yaml.load(out) as any;
+    expect(doc.services.app.environment.FOO).toBe('bar\n      privileged: true');
+    expect(doc.services.app.privileged).toBeUndefined();
   });
 });

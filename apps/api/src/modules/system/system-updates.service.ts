@@ -57,6 +57,19 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   // toward the quota anyway.
   private readonly POLL_INTERVAL_MS = 60_000;
 
+  // Unattended auto-APPLY is OFF by default. Polling/checking always runs
+  // (so the dashboard can show "update available"), but actually running
+  // update.sh — which does `git reset --hard origin/<branch>` + rebuild with
+  // the host docker socket, i.e. root-equivalent code execution from whatever
+  // is at the branch tip, with no commit-signature verification — only happens
+  // automatically when the operator explicitly opts in. Otherwise a single
+  // push to (or compromise of) the tracked branch would be fleet-wide root RCE
+  // within ~60s. With auto-apply off, a detected update is surfaced as
+  // UPDATE_AVAILABLE and applied only when the operator clicks "update now"
+  // (forceUpdate()), after reviewing the diff/SHA.
+  private readonly autoApply =
+    (process.env.DOCKCONTROL_AUTO_UPDATE || '').toLowerCase() === 'true';
+
   private timer: NodeJS.Timeout | null = null;
 
   // The shared log file written by update.sh inside the docker:cli
@@ -152,7 +165,8 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.logger.log(
-      `Auto-update: tracking ${this.state.repo}@${this.state.branch}, polling every ${this.POLL_INTERVAL_MS / 1000}s.`,
+      `Auto-update: tracking ${this.state.repo}@${this.state.branch}, polling every ${this.POLL_INTERVAL_MS / 1000}s ` +
+        `(${this.autoApply ? 'AUTO-APPLY on' : 'check-only — apply from dashboard'}).`,
     );
 
     // Kick off an immediate check, then schedule.
@@ -418,11 +432,25 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
     // A genuinely newer commit supersedes any prior failure — allow it to run.
     this.lastFailedSha = null;
 
-    // New commit available → run the update.
+    // New commit available.
     this.state.status = 'UPDATE_AVAILABLE';
     this.state.message = `New commit on ${this.state.branch} (${this.short(sha)}).`;
+
+    if (!this.autoApply) {
+      // Check-only mode (default). Surface the available update but DO NOT
+      // apply it unattended — the operator applies from the dashboard after
+      // reviewing it. This is the safe default; see `autoApply` above.
+      this.logger.log(
+        `Update available: ${this.short(this.state.currentSha)} → ${this.short(sha)}. ` +
+          `Auto-apply is disabled — apply it from the dashboard (set ` +
+          `DOCKCONTROL_AUTO_UPDATE=true to apply automatically).`,
+      );
+      return;
+    }
+
     this.logger.log(
-      `Update available: ${this.short(this.state.currentSha)} → ${this.short(sha)}. Running update.sh.`,
+      `Update available: ${this.short(this.state.currentSha)} → ${this.short(sha)}. ` +
+        `Auto-apply enabled — running update.sh.`,
     );
     void this.runUpdate().catch((e) =>
       this.logger.warn(`update run failed: ${e?.message || e}`),

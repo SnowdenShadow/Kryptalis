@@ -135,17 +135,42 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     if (stale.length === 0) return;
 
     const error = 'Task timed out — agent disconnected';
-    await this.prisma.agentTask.updateMany({
-      where: { id: { in: stale.map((t) => t.id) } },
+    // Re-assert status IN (QUEUED, RUNNING) in the UPDATE predicate, not just
+    // the prior SELECT. Between the findMany above and this updateMany an agent
+    // can legitimately report COMPLETED; without this guard we'd clobber that
+    // back to FAILED (a lost update) and re-run handleTaskTermination as FAILED
+    // — which drops the onComplete chain (e.g. a cross-server VOLUME_IMPORT /
+    // RESTORE would never enqueue). Keyed on id alone, the row would match
+    // regardless of its current status; the status predicate makes the sweep
+    // idempotent against a concurrent terminal report.
+    const swept = await this.prisma.agentTask.updateMany({
+      where: {
+        id: { in: stale.map((t) => t.id) },
+        status: { in: ['QUEUED', 'RUNNING'] as any },
+      },
       data: {
         status: 'FAILED' as any,
         error,
         completedAt: new Date(),
       },
     });
-    this.logger.warn(`Failed ${stale.length} stale agent task(s) (>30m in QUEUED/RUNNING)`);
+    // Only run termination hooks for tasks this sweep actually transitioned.
+    // If a task completed in the race window it was not updated, so we must
+    // not fire FAILED-side termination for it. Re-read the rows that are still
+    // FAILED with our error string to get the authoritative set.
+    if (swept.count === 0) return;
+    const failedIds = new Set(
+      (
+        await this.prisma.agentTask.findMany({
+          where: { id: { in: stale.map((t) => t.id) }, status: 'FAILED' as any, error },
+          select: { id: true },
+        })
+      ).map((t) => t.id),
+    );
+    this.logger.warn(`Failed ${failedIds.size} stale agent task(s) (>30m in QUEUED/RUNNING)`);
 
     for (const task of stale) {
+      if (!failedIds.has(task.id)) continue;
       await this.handleTaskTermination({
         id: task.id,
         serverId: task.serverId,
@@ -173,12 +198,21 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Operator-facing task read (GET /agent/tasks/:id). The raw payload can
-   * carry sensitive operational data — BACKUP/RESTORE tasks hold database
-   * credentials while in flight — so it is only returned to platform
-   * ADMIN/SUPERADMIN. Everyone else gets the status projection the dashboard
-   * actually consumes (status/type/error/result/createdAt + timestamps),
-   * with the payload omitted entirely.
+   * Operator-facing task read (GET /agent/tasks/:id). Several fields can carry
+   * sensitive operational data:
+   *  - `payload` holds BACKUP/RESTORE database credentials while in flight.
+   *  - `result` captures `docker exec` stdout/stderr (EXEC runs, file/DB ops)
+   *    and `error` the failure output — either can echo secrets, env dumps,
+   *    or file contents from ANOTHER tenant's task.
+   *
+   * AgentTask has no project column and the only ownership link (via the
+   * task's serverId / payload) is inconsistent across task types, so there is
+   * no reliable per-project check to apply here. Because `AgentTask.id` is a
+   * non-enumerable cuid, a non-admin can still hit this with a task id learned
+   * from logs/referrals — a cross-tenant IDOR (M-1). We therefore fail closed:
+   * only platform ADMIN/SUPERADMIN see payload/result/error; everyone else
+   * gets the non-sensitive status projection (id/type/status/timestamps) the
+   * dashboard consumes, with payload AND result/error omitted.
    */
   async getTaskForUser(taskId: string, role: string | undefined) {
     const task = await this.getTask(taskId);
@@ -187,8 +221,6 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
       id: task.id,
       type: task.type,
       status: task.status,
-      error: task.error,
-      result: task.result,
       createdAt: task.createdAt,
       startedAt: task.startedAt,
       completedAt: task.completedAt,

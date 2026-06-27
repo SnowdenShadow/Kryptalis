@@ -849,10 +849,7 @@ export class ApplicationsService implements OnModuleInit {
         } else if (current) {
           const listTask = await this.agent.enqueueAndWait(
             current.id,
-            // VOLUME_LIST is handled by the Phase-1 agent but is not yet a
-            // member of the Prisma TaskType enum — cast until the enum is
-            // migrated (the agent already dispatches it).
-            'VOLUME_LIST' as any,
+            'VOLUME_LIST',
             { prefixes: [prefix] },
             60_000,
           );

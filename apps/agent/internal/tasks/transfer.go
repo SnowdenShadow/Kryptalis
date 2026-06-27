@@ -14,8 +14,13 @@ import (
 
 // Client performs file transfers against the API's agent transfer endpoints:
 //
-//	POST {apiUrl}/api/agent/transfers/{taskId}/upload?name=...&serverId=...&token=...
-//	GET  {apiUrl}/api/agent/transfers/{taskId}/download?name=...&serverId=...&token=...
+//	POST {apiUrl}/api/agent/transfers/{taskId}/upload?name=...
+//	GET  {apiUrl}/api/agent/transfers/{taskId}/download?name=...
+//
+// The agent token (root-equivalent) and serverId are sent as request HEADERS
+// (X-Agent-Token / X-Server-Id), never in the query string — query params
+// routinely land in reverse-proxy/access logs, leaking the token. This matches
+// how poll/heartbeat/reportResult already authenticate (token in the body).
 //
 // Upload bodies are raw bytes (application/octet-stream), streamed — no
 // buffering of whole archives in memory.
@@ -41,10 +46,14 @@ func NewClient(apiURL, serverID, token string) *Client {
 func (c *Client) transferURL(kind, taskID, fileName string) string {
 	q := url.Values{}
 	q.Set("name", fileName)
-	q.Set("serverId", c.serverID)
-	q.Set("token", c.token)
 	return fmt.Sprintf("%s/api/agent/transfers/%s/%s?%s",
 		c.apiURL, url.PathEscape(taskID), kind, q.Encode())
+}
+
+// authHeaders sets the agent credentials as request headers (off the URL).
+func (c *Client) authHeaders(req *http.Request) {
+	req.Header.Set("X-Server-Id", c.serverID)
+	req.Header.Set("X-Agent-Token", c.token)
 }
 
 // Upload streams body to the API as the file fileName under taskID.
@@ -56,6 +65,7 @@ func (c *Client) Upload(ctx context.Context, taskID, fileName string, body io.Re
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	c.authHeaders(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -77,6 +87,7 @@ func (c *Client) Download(ctx context.Context, taskID, fileName string) (io.Read
 	if err != nil {
 		return nil, err
 	}
+	c.authHeaders(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("download %s: %w", fileName, err)

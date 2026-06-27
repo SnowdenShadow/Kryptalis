@@ -3,7 +3,7 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { APPS_DIR } from '../../common/paths';
 import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate, domainPinEnv } from './templates';
-import { checkVolumeSafety } from './dto/install-custom.dto';
+import { checkVolumeSafety, checkEnvVarsSafety } from './dto/install-custom.dto';
 import { projectNetworkName, listComposeContainerNames, remoteAppSlug } from '../applications/applications.helpers';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
@@ -792,6 +792,15 @@ export class MarketplaceService implements OnModuleInit {
     // callers / future controllers can't bypass it.
     for (const v of data.volumes ?? []) {
       const err = checkVolumeSafety(v);
+      if (err) throw new BadRequestException(err);
+    }
+    // Env-var KEY hardening — a malicious key (newline + indentation) could
+    // otherwise inject sibling compose keys (privileged, cap_add, host
+    // bind-mount) into the generated YAML environment block (C-1). Enforced
+    // HERE (not just in the DTO + renderer) so direct service callers get a
+    // clean 400 rather than a 500 from the renderer's defensive throw.
+    {
+      const err = checkEnvVarsSafety(data.envVars);
       if (err) throw new BadRequestException(err);
     }
     // Reserved host ports are managed by the platform (Caddy 80/443,

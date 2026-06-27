@@ -7,6 +7,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import * as path from 'path';
+import * as yaml from 'js-yaml';
 
 /**
  * MarketplaceService unit tests — same recipe as projects.service.spec.ts:
@@ -949,10 +950,13 @@ describe('installCustom — arbitrary image deploys', () => {
       expect.objectContaining({ data: { containerName: `dockcontrol-custom-${INSTANCE_ID}` } }),
     );
     const compose = writtenFile('docker-compose.yml')!;
-    expect(compose).toContain('image: linuxserver/jellyfin:latest');
-    expect(compose).toContain(`container_name: dockcontrol-custom-${INSTANCE_ID}`);
-    expect(compose).toContain('"18500:8096"');
-    expect(compose).toContain('TZ: "Europe/Paris"');
+    // Parse rather than string-match: the custom renderer now serializes via
+    // yaml.dump (injection-proof), so exact quoting/spacing is yaml's choice.
+    const doc = yaml.load(compose) as any;
+    expect(doc.services.app.image).toBe('linuxserver/jellyfin:latest');
+    expect(doc.services.app.container_name).toBe(`dockcontrol-custom-${INSTANCE_ID}`);
+    expect(doc.services.app.ports).toEqual(['18500:8096']);
+    expect(doc.services.app.environment).toEqual({ TZ: 'Europe/Paris' });
     expect(compose).not.toContain('__INSTANCE_ID__');
     expect(compose).not.toContain('__HOST_PORT__');
   });
@@ -973,11 +977,28 @@ describe('installCustom — arbitrary image deploys', () => {
     }
   });
 
-  it('accepts a safe named volume and renders it as one quoted line', async () => {
+  it('rejects env-var KEY compose injection (C-1)', async () => {
+    const { service } = makeService();
+    const evilKey = 'X: 0\n      privileged: true\n      volumes:\n        - /:/host\n      ignore';
+    for (const envVars of [
+      { [evilKey]: 'y' },
+      { 'A B': 'v' },
+      { 'A=B': 'v' },
+      { '"A"': 'v' },
+    ]) {
+      await expect(
+        service.installCustom({ ...base, envVars }, 'u1'),
+      ).rejects.toThrow(BadRequestException);
+    }
+  });
+
+  it('accepts a safe named volume and renders it as compose data', async () => {
     const { service } = makeService();
     await service.installCustom({ ...base, hostPort: 18500, volumes: ['media:/data'] }, 'u1');
     const compose = writtenFile('docker-compose.yml')!;
-    expect(compose).toContain('    volumes:\n      - "media:/data"');
+    const doc = yaml.load(compose) as any;
+    expect(doc.services.app.volumes).toEqual(['media:/data']);
+    expect(doc.volumes).toEqual({});
     expect(compose).not.toContain('privileged');
   });
 

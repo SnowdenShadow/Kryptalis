@@ -87,26 +87,30 @@ describe('getTaskForUser', () => {
     expect(await service.getTaskForUser('t1', 'SUPERADMIN')).toBe(row);
   });
 
-  it('redacts the payload for non-admin users (status projection only)', async () => {
+  it('redacts payload AND result/error for non-admin users (M-1: status projection only)', async () => {
     const { service, prisma } = makeService();
     prisma.agentTask.findUnique.mockResolvedValue(row);
 
     const res = await service.getTaskForUser('t1', 'USER');
 
+    // result/error are now admin-only too: `result` captures docker exec
+    // stdout (cross-tenant secret leak via a learned task id — M-1).
     expect(res).toEqual({
       id: 't1',
       type: 'BACKUP',
       status: 'RUNNING',
-      error: null,
-      result: { ok: true },
       createdAt: row.createdAt,
       startedAt: row.startedAt,
       completedAt: null,
     });
     expect((res as any).payload).toBeUndefined();
+    expect((res as any).result).toBeUndefined();
+    expect((res as any).error).toBeUndefined();
     expect(JSON.stringify(res)).not.toContain('secret');
     // Missing/unknown roles are treated as non-admin too.
-    expect(((await service.getTaskForUser('t1', undefined)) as any).payload).toBeUndefined();
+    const anon = (await service.getTaskForUser('t1', undefined)) as any;
+    expect(anon.payload).toBeUndefined();
+    expect(anon.result).toBeUndefined();
   });
 });
 

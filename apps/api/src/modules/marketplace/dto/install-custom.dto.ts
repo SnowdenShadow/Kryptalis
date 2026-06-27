@@ -65,6 +65,45 @@ export function checkVolumeSafety(v: unknown): string | null {
   return null;
 }
 
+/**
+ * An env-var KEY must be a normal shell-style identifier.
+ *
+ * The renderer emits each entry into a YAML `environment:` block. Without this
+ * a key containing a newline + indentation (e.g. "X: 0\n    privileged: true")
+ * would smuggle sibling service-level compose keys (privileged, cap_add, a
+ * "/:/host" bind-mount) — a full host escape reachable by a project-DEVELOPER.
+ * Values are unconstrained (they only ever land as quoted scalars).
+ */
+export const SAFE_ENV_KEY = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+
+/** Returns an error string when the env map has an unsafe key, else null. */
+export function checkEnvVarsSafety(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) return 'envVars must be an object';
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    if (hasControlChars(key) || !SAFE_ENV_KEY.test(key)) {
+      return `unsafe environment variable name: "${key}"`;
+    }
+  }
+  return null;
+}
+
+@ValidatorConstraint({ name: 'safeEnvVars', async: false })
+export class SafeEnvVarsConstraint implements ValidatorConstraintInterface {
+  private lastError = 'invalid environment variable';
+  validate(value: unknown): boolean {
+    const err = checkEnvVarsSafety(value);
+    if (err) {
+      this.lastError = err;
+      return false;
+    }
+    return true;
+  }
+  defaultMessage(_args: ValidationArguments): string {
+    return this.lastError;
+  }
+}
+
 @ValidatorConstraint({ name: 'safeVolumes', async: false })
 export class SafeVolumesConstraint implements ValidatorConstraintInterface {
   private lastError = 'invalid volume';
@@ -133,6 +172,7 @@ export class InstallCustomDto {
   @ApiProperty({ required: false, type: Object })
   @IsOptional()
   @IsObject()
+  @Validate(SafeEnvVarsConstraint)
   envVars?: Record<string, string>;
 
   @ApiProperty({

@@ -115,12 +115,33 @@ async function bootstrap() {
       }
     }
   } catch {}
-  Logger.debug(`[cors] allowlist: ${allowlist.join(', ')}`, 'Bootstrap');
+  // Because we send credentials (cookies) on CORS requests, a literal '*' in
+  // the allowlist is dangerous: the origin callback below would reflect ANY
+  // Origin back together with Access-Control-Allow-Credentials:true, i.e. any
+  // website could make authenticated requests with the user's session. That is
+  // never what an operator wants by default, so we strip '*' from the allowlist
+  // unless they explicitly opt into the insecure behavior. (The browser-safe
+  // bare-'*' semantics — wildcard WITHOUT credentials — isn't expressible here
+  // since credentials are on, so the only safe move is to refuse it.)
+  const allowInsecureCors =
+    configService.get<string>('ALLOW_INSECURE_CORS', 'false') === 'true';
+  const wildcard = allowlist.includes('*');
+  if (wildcard && !allowInsecureCors) {
+    Logger.warn(
+      `[cors] Ignoring '*' in CORS_ORIGINS: a wildcard with credentials would ` +
+        `reflect any Origin and expose authenticated sessions. Set an explicit ` +
+        `origin list, or ALLOW_INSECURE_CORS=true to override (not recommended).`,
+      'Bootstrap',
+    );
+  }
+  const honorWildcard = wildcard && allowInsecureCors;
+  const effectiveAllowlist = allowlist.filter((o) => o !== '*');
+  Logger.debug(`[cors] allowlist: ${effectiveAllowlist.join(', ')}`, 'Bootstrap');
   app.enableCors({
     origin: (origin: string | undefined, cb: (err: Error | null, ok?: boolean) => void) => {
       // No origin → same-origin / curl / native — always allow.
       if (!origin) return cb(null, true);
-      if (allowlist.includes(origin) || allowlist.includes('*')) return cb(null, true);
+      if (honorWildcard || effectiveAllowlist.includes(origin)) return cb(null, true);
       // Refuse SILENTLY (no thrown error) — browser surfaces it as a CORS
       // block instead of a 500 preflight.
       return cb(null, false);

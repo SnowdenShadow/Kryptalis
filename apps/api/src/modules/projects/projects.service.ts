@@ -16,7 +16,7 @@ import {
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
-import { AgentService, AgentTaskCompletion, AgentTaskType } from '../agent/agent.service';
+import { AgentService, AgentTaskCompletion } from '../agent/agent.service';
 import { appVolumePrefix, dbVolumePrefix } from '../agent/volume-naming.util';
 import { slugify, remoteAppSlug, RESERVED_HOST_PORTS } from '../applications/applications.helpers';
 import { ApplicationOpsService } from '../applications/application-ops.service';
@@ -464,12 +464,9 @@ export class ProjectsService implements OnModuleInit {
       } else {
         // Ask the source agent for the host's REAL volume names matching our
         // compose-project prefixes (exact-prefix) — no name guessing.
-        // VOLUME_LIST is a Phase-1 agent capability not yet mirrored in the
-        // Prisma TaskType enum (schema.prisma is outside this batch — see the
-        // deferred note), so the type is asserted at the call site.
         const task = await this.agent.enqueueAndWait(
           oldServerId,
-          'VOLUME_LIST' as unknown as AgentTaskType,
+          'VOLUME_LIST',
           { prefixes },
           2 * 60_000,
         );
@@ -803,7 +800,12 @@ export class ProjectsService implements OnModuleInit {
       case 'MYSQL':
         return `services:\n  ${name}:\n    image: mysql:8\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:3306"\n    environment:\n      MYSQL_DATABASE: ${name}\n      MYSQL_USER: ${user}\n      MYSQL_PASSWORD: ${pass}\n      MYSQL_ROOT_PASSWORD: ${pass}\n    volumes:\n      - data:/var/lib/mysql\nvolumes:\n  data:`;
       case 'MARIADB':
-        return `services:\n  ${name}:\n    image: mariadb:11\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:3306"\n    environment:\n      MARIADB_DATABASE: ${name}\n      MARIADB_USER: ${user}\n      MARIADB_PASSWORD: ${pass}\n      MARIADB_ROOT_PASSWORD: ${pass}\n    volumes:\n      - data:/var/lib/mysql\nvolumes:\n  data:`;
+        // MUST match databases.service DB_CONFIGS.MARIADB, which uses the
+        // MYSQL_* env keys (mariadb:11 honors both, but the two renderers had
+        // drifted — this copy used MARIADB_*, so a managed MariaDB rebuilt via
+        // this projects path initialized a fresh volume with DIFFERENT env
+        // than the databases path. Keep them identical.)
+        return `services:\n  ${name}:\n    image: mariadb:11\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:3306"\n    environment:\n      MYSQL_DATABASE: ${name}\n      MYSQL_USER: ${user}\n      MYSQL_PASSWORD: ${pass}\n      MYSQL_ROOT_PASSWORD: ${pass}\n    volumes:\n      - data:/var/lib/mysql\nvolumes:\n  data:`;
       case 'REDIS':
         return `services:\n  ${name}:\n    image: redis:7-alpine\n    container_name: dockcontrol-db-${name}\n    restart: unless-stopped\n    ports:\n      - "${port}:6379"\n    command: redis-server${pass ? ` --requirepass ${pass}` : ''}\n    volumes:\n      - data:/data\nvolumes:\n  data:`;
       case 'MONGODB':

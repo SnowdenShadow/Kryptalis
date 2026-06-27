@@ -133,11 +133,13 @@ func TestRestoreRequiresSourceTaskID(t *testing.T) {
 func TestTransferURLs(t *testing.T) {
 	var gotPath, gotQuery string
 	var gotBody []byte
-	var gotContentType string
+	var gotContentType, gotServerID, gotToken string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		gotPath = req.URL.Path
 		gotQuery = req.URL.RawQuery
 		gotContentType = req.Header.Get("Content-Type")
+		gotServerID = req.Header.Get("X-Server-Id")
+		gotToken = req.Header.Get("X-Agent-Token")
 		gotBody, _ = io.ReadAll(req.Body)
 		if req.Method == http.MethodPost {
 			w.WriteHeader(http.StatusCreated)
@@ -162,10 +164,21 @@ func TestTransferURLs(t *testing.T) {
 	if string(gotBody) != "payload" {
 		t.Errorf("upload body = %q", gotBody)
 	}
-	for _, frag := range []string{"name=vol1.tar.gz", "serverId=srv-1", "token=tok%26en"} {
-		if !strings.Contains(gotQuery, frag) {
-			t.Errorf("upload query %q missing %q", gotQuery, frag)
+	// name still rides the query, but the credentials must be HEADERS, never
+	// the query string (which leaks into proxy/access logs).
+	if !strings.Contains(gotQuery, "name=vol1.tar.gz") {
+		t.Errorf("upload query %q missing name", gotQuery)
+	}
+	for _, leaked := range []string{"serverId", "token"} {
+		if strings.Contains(gotQuery, leaked) {
+			t.Errorf("upload query %q must NOT contain credential %q", gotQuery, leaked)
 		}
+	}
+	if gotServerID != "srv-1" {
+		t.Errorf("X-Server-Id header = %q, want srv-1", gotServerID)
+	}
+	if gotToken != "tok&en" {
+		t.Errorf("X-Agent-Token header = %q, want tok&en", gotToken)
 	}
 
 	// Download

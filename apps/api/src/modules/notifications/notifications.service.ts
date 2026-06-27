@@ -1027,8 +1027,24 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
         signal: ctrl.signal,
+        // SSRF hardening: do NOT follow redirects. undici defaults to
+        // redirect:'follow' (up to 20 hops), which lets a public, allow-listed
+        // host 302 us to http://169.254.169.254/ or http://127.0.0.1/ —
+        // bypassing validateWebhookUrl() entirely (it only screened the
+        // original URL string). With 'manual', a redirect surfaces here as a
+        // 3xx status that we treat as a hard failure rather than chasing the
+        // Location into an internal target.
+        redirect: 'manual',
       });
-      if (!res.ok) {
+      // With redirect:'manual', undici yields an opaque-redirect response
+      // (type 'opaqueredirect', status 0); other runtimes surface the raw 3xx.
+      // Treat either as a refused redirect.
+      if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+        this.logger.warn(
+          `Webhook ${url} attempted a redirect; refusing to follow ` +
+            `(SSRF protection) for rule ${payload.ruleId}.`,
+        );
+      } else if (!res.ok) {
         this.logger.warn(
           `Webhook ${url} returned HTTP ${res.status} for rule ${payload.ruleId}.`,
         );
