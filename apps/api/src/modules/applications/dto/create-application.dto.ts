@@ -38,7 +38,7 @@ export class CreateApplicationDto {
   @ApiProperty({
     required: false,
     enum: SUPPORTED_PHP_VERSIONS as unknown as string[],
-    example: '8.3',
+    example: '8.4',
     description: 'PHP runtime version — only for framework=PHP_SITE (Apache + mod_php).',
   })
   @IsOptional()

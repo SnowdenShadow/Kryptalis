@@ -50,6 +50,7 @@ import { execFile } from 'child_process';
 import { detectStack } from './dockerfile-templates';
 import { ApplicationDeployService } from './application-deploy.service';
 import { ApplicationRepository } from './application.repository';
+import { DEFAULT_PHP_VERSION } from './php-site.constants';
 import { resolveAppDir } from './applications.helpers';
 
 const vfs = fs as unknown as {
@@ -1337,7 +1338,7 @@ describe('runPhpSiteDeploy', () => {
   it('falls back to the default PHP version for an out-of-range value', async () => {
     const { service } = makeService();
     await service.runPhpSiteDeploy('dep1', APP_ID, APP_NAME, '5.6' as any, {});
-    expect(readComposeDoc().services.app.build.args.PHP_VERSION).toBe('8.3');
+    expect(readComposeDoc().services.app.build.args.PHP_VERSION).toBe(DEFAULT_PHP_VERSION);
   });
 
   it('publishes a host port only when one was chosen', async () => {

@@ -258,7 +258,7 @@ CMD ["sh", "-c", "if [ -f main.py ]; then python main.py; elif [ -f app.py ]; th
 
 /** PHP-served via Apache. */
 export const PHP_DOCKERFILE = `# syntax=docker/dockerfile:1
-FROM php:8.3-apache
+FROM php:8.4-apache
 COPY . /var/www/html/
 EXPOSE 80
 `;

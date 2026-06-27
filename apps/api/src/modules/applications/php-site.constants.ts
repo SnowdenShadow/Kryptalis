@@ -6,12 +6,17 @@
  * Keep this list in sync with the tags Docker Hub still publishes — dropping an
  * EOL tag here stops new sites using it without touching existing deploys.
  */
-export const SUPPORTED_PHP_VERSIONS = ['8.3', '8.2', '8.1', '8.0', '7.4'] as const;
+export const SUPPORTED_PHP_VERSIONS = ['8.5', '8.4', '8.3', '8.2', '8.1', '8.0', '7.4'] as const;
 
 export type PhpVersion = (typeof SUPPORTED_PHP_VERSIONS)[number];
 
-/** Default chosen when the user doesn't pick one (latest stable). */
-export const DEFAULT_PHP_VERSION: PhpVersion = '8.3';
+/**
+ * Default chosen when the user doesn't pick one. We default to 8.4 (the newest
+ * release with broad extension/framework maturity) rather than 8.5 (offered,
+ * but very new — Nov 2025), so a "just deploy" PHP site lands on the safest
+ * current version. Users wanting the absolute latest can pick 8.5 in the UI.
+ */
+export const DEFAULT_PHP_VERSION: PhpVersion = '8.4';
 
 /** Internal port the php:*-apache image listens on (mod_php under Apache). */
 export const PHP_SITE_CONTAINER_PORT = 80;

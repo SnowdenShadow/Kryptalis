@@ -5,8 +5,43 @@ import {
   buildNginxConf,
   sanitizePhpExtensions,
   resolvePhpConfig,
+  isSupportedPhpVersion,
+  SUPPORTED_PHP_VERSIONS,
+  DEFAULT_PHP_VERSION,
   PHP_PRESETS,
 } from './php-site.constants';
+
+describe('supported PHP versions', () => {
+  it('offers the latest releases (8.5, 8.4) newest-first', () => {
+    expect(SUPPORTED_PHP_VERSIONS).toContain('8.5');
+    expect(SUPPORTED_PHP_VERSIONS).toContain('8.4');
+    // newest-first ordering: 8.5 before 8.4 before 8.3.
+    expect(SUPPORTED_PHP_VERSIONS.indexOf('8.5')).toBeLessThan(SUPPORTED_PHP_VERSIONS.indexOf('8.4'));
+    expect(SUPPORTED_PHP_VERSIONS.indexOf('8.4')).toBeLessThan(SUPPORTED_PHP_VERSIONS.indexOf('8.3'));
+  });
+
+  it('default is a supported version (8.4)', () => {
+    expect(DEFAULT_PHP_VERSION).toBe('8.4');
+    expect(isSupportedPhpVersion(DEFAULT_PHP_VERSION)).toBe(true);
+  });
+
+  it('isSupportedPhpVersion accepts the new versions and rejects EOL/garbage', () => {
+    expect(isSupportedPhpVersion('8.5')).toBe(true);
+    expect(isSupportedPhpVersion('8.4')).toBe(true);
+    expect(isSupportedPhpVersion('5.6')).toBe(false);
+    expect(isSupportedPhpVersion('9.9')).toBe(false);
+    expect(isSupportedPhpVersion(null)).toBe(false);
+  });
+
+  it('every supported version builds a valid FROM tag for both apache and fpm', () => {
+    for (const v of SUPPORTED_PHP_VERSIONS) {
+      expect(buildPhpDockerfile({ version: v, webServer: 'apache', extensions: [] }))
+        .toContain('-apache');
+      expect(buildPhpDockerfile({ version: v, webServer: 'nginx', extensions: [] }))
+        .toContain('-fpm');
+    }
+  });
+});
 
 describe('buildPhpDockerfile', () => {
   it('apache (default): mod_php image + a2enmod + base pack', () => {

@@ -42,7 +42,9 @@ import { cn } from '@/lib/utils';
 
 // PHP versions offered — mirrors SUPPORTED_PHP_VERSIONS on the API
 // (apps/api/.../applications/php-site.constants.ts). Newest first.
-const PHP_VERSIONS = ['8.3', '8.2', '8.1', '8.0', '7.4'] as const;
+const PHP_VERSIONS = ['8.5', '8.4', '8.3', '8.2', '8.1', '8.0', '7.4'] as const;
+// Default selection — mirrors DEFAULT_PHP_VERSION on the API.
+const DEFAULT_PHP_VERSION = '8.4';
 
 // Optional extensions (mirror PHP_OPTIONAL_EXTENSIONS on the API). The base
 // pack (DB drivers, gd, intl, zip, opcache, bcmath) is always included.
@@ -110,7 +112,7 @@ export default function PhpSitesPage() {
 
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState('');
-  const [version, setVersion] = useState<string>('8.3');
+  const [version, setVersion] = useState<string>(DEFAULT_PHP_VERSION);
   const [projectId, setProjectId] = useState('');
   const [domainChoice, setDomainChoice] = useState(''); // '', 'new', or an existing domain id
   const [newDomain, setNewDomain] = useState('');
@@ -188,7 +190,7 @@ export default function PhpSitesPage() {
   // (those values are sent even if the Advanced panel stays collapsed).
   function openCreate() {
     setName('');
-    setVersion('8.3');
+    setVersion(DEFAULT_PHP_VERSION);
     setProjectId('');
     setDomainChoice('');
     setNewDomain('');
@@ -200,7 +202,7 @@ export default function PhpSitesPage() {
   function closeCreate() {
     setShowCreate(false);
     setName('');
-    setVersion('8.3');
+    setVersion(DEFAULT_PHP_VERSION);
     setProjectId('');
     setDomainChoice('');
     setNewDomain('');
@@ -275,7 +277,7 @@ export default function PhpSitesPage() {
                         <div className="inline-flex items-center gap-1 rounded bg-indigo-500/20 text-indigo-400 pl-2 pr-1 py-0.5 text-xs">
                           <span>PHP</span>
                           <select
-                            value={site.phpVersion || '8.3'}
+                            value={site.phpVersion || DEFAULT_PHP_VERSION}
                             onChange={(e) => versionMutation.mutate({ id: site.id, phpVersion: e.target.value })}
                             disabled={versionMutation.isPending}
                             className="bg-transparent outline-none cursor-pointer font-medium [&>option]:bg-zinc-900 [&>option]:text-foreground"
