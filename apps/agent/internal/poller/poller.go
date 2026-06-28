@@ -55,12 +55,14 @@ type SftpSyncer interface {
 
 // SftpAccountPayload mirrors sftpserver.Account field-for-field.
 type SftpAccountPayload struct {
-	Username     string            `json:"username"`
-	PasswordHash string            `json:"passwordHash,omitempty"`
-	PublicKeys   []string          `json:"publicKeys,omitempty"`
-	Permission   string            `json:"permission"`
-	Disabled     bool              `json:"disabled"`
-	Roots        map[string]string `json:"roots"`
+	Username      string            `json:"username"`
+	PasswordHash  string            `json:"passwordHash,omitempty"`
+	PublicKeys    []string          `json:"publicKeys,omitempty"`
+	Permission    string            `json:"permission"`
+	Disabled      bool              `json:"disabled"`
+	Roots         map[string]string `json:"roots"`
+	AllowShell    bool              `json:"allowShell,omitempty"`
+	ContainerName string            `json:"containerName,omitempty"`
 }
 
 const maxConcurrentTasks = 4

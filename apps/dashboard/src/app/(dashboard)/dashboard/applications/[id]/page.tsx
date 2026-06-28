@@ -62,6 +62,7 @@ import { useServers, usePublicSettings } from '@/lib/hooks';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { PhpConfigCard } from './php-config-card';
+import { InteractiveTerminal } from './interactive-terminal';
 import {
   STATUS_VARIANT,
   STATUS_COLOR,
@@ -81,12 +82,6 @@ import {
 type ApplicationDetail = ApplicationResponse;
 type Deployment = DeploymentResponse;
 
-interface TerminalEntry {
-  cmd: string;
-  output: string;
-  exitCode: number;
-  timestamp: number;
-}
 
 type TabId = 'overview' | 'logs' | 'terminal' | 'deployments' | 'files' | 'ports' | 'env' | 'settings';
 
@@ -294,12 +289,6 @@ export default function ApplicationDetailPage() {
   const [logsAutoRefresh, setLogsAutoRefresh] = useState(true);
   const logsRef = useRef<HTMLDivElement>(null);
 
-  // Terminal state
-  const [termHistory, setTermHistory] = useState<TerminalEntry[]>([]);
-  const [termInput, setTermInput] = useState('');
-  const termRef = useRef<HTMLDivElement>(null);
-  const termInputRef = useRef<HTMLInputElement>(null);
-
   // --- Application data ---
   const { data: app, isLoading } = useQuery<ApplicationDetail>({
     queryKey: ['application', id],
@@ -350,19 +339,6 @@ export default function ApplicationDetailPage() {
     }
   }, [logsData?.logs, activeTab]);
 
-  // Scroll terminal to bottom when history changes
-  useEffect(() => {
-    if (termRef.current) {
-      termRef.current.scrollTop = termRef.current.scrollHeight;
-    }
-  }, [termHistory]);
-
-  // Auto-focus terminal input when switching to terminal tab
-  useEffect(() => {
-    if (activeTab === 'terminal') {
-      termInputRef.current?.focus();
-    }
-  }, [activeTab]);
 
   // --- Mutations ---
   const actionMutation = useMutation({
@@ -625,26 +601,6 @@ export default function ApplicationDetailPage() {
 
   // Confirmation dialog for webhook secret rotation (replaces native confirm).
   const [showRotateSecret, setShowRotateSecret] = useState(false);
-
-  const execMutation = useMutation({
-    mutationFn: (command: string) => api.post(`/applications/${id}/exec`, { command }),
-    onSuccess: (res: any, command) => {
-      setTermHistory(prev => [...prev, {
-        cmd: command,
-        output: res.output,
-        exitCode: res.exitCode,
-        timestamp: Date.now(),
-      }]);
-      setTermInput('');
-    },
-    onError: (err: Error) => toast.error(err.message),
-  });
-
-  const handleTermSubmit = useCallback(() => {
-    const cmd = termInput.trim();
-    if (!cmd || execMutation.isPending) return;
-    execMutation.mutate(cmd);
-  }, [termInput, execMutation]);
 
   // --- Loading state ---
   if (isLoading) {
@@ -1113,71 +1069,10 @@ export default function ApplicationDetailPage() {
               <CardTitle className="flex items-center gap-2 text-lg">
                 <Terminal size={18} /> {t('apps.terminal')}
               </CardTitle>
-              <CardDescription>{t('apps.terminalDesc')}</CardDescription>
+              <CardDescription>{t('apps.term.desc')}</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="rounded-lg bg-zinc-950 overflow-hidden">
-                {/* Terminal output */}
-                <div
-                  ref={termRef}
-                  className="p-4 max-h-[500px] overflow-y-auto min-h-[200px]"
-                >
-                  {termHistory.length === 0 && (
-                    <p className="text-xs text-zinc-500 font-mono">
-                      {t('apps.terminalTypeCmd')}
-                    </p>
-                  )}
-                  {termHistory.map((entry, i) => (
-                    <div key={i} className="mb-3 last:mb-0">
-                      <div className="flex items-center gap-2 text-xs font-mono">
-                        <span className="text-blue-400">$</span>
-                        <span className="text-zinc-200">{entry.cmd}</span>
-                      </div>
-                      <pre
-                        className={cn(
-                          'text-xs font-mono whitespace-pre-wrap break-all mt-1 pl-4',
-                          entry.exitCode === 0 ? 'text-green-400' : 'text-red-400'
-                        )}
-                      >
-                        {entry.output || t('apps.terminalNoOut')}
-                      </pre>
-                      {entry.exitCode !== 0 && (
-                        <p className="text-xs font-mono text-red-500 pl-4 mt-0.5">
-                          {t('apps.terminalExitCode', { code: entry.exitCode })}
-                        </p>
-                      )}
-                    </div>
-                  ))}
-                  {execMutation.isPending && (
-                    <div className="flex items-center gap-2 text-xs font-mono text-zinc-400">
-                      <span className="animate-pulse">{t('apps.terminalRunning')}</span>
-                    </div>
-                  )}
-                </div>
-                {/* Terminal input */}
-                <div className="flex items-center gap-2 border-t border-zinc-800 px-4 py-3 bg-zinc-900">
-                  <span className="text-blue-400 text-sm font-mono">$</span>
-                  <input
-                    ref={termInputRef}
-                    type="text"
-                    value={termInput}
-                    onChange={(e) => setTermInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleTermSubmit();
-                    }}
-                    placeholder={t('apps.terminalPlaceholder')}
-                    disabled={execMutation.isPending}
-                    className="flex-1 bg-transparent text-zinc-200 text-sm font-mono outline-none placeholder:text-zinc-600 disabled:opacity-50"
-                  />
-                  <button
-                    onClick={handleTermSubmit}
-                    disabled={!termInput.trim() || execMutation.isPending}
-                    className="text-zinc-400 hover:text-zinc-200 disabled:opacity-30 transition-colors"
-                  >
-                    <Send size={14} />
-                  </button>
-                </div>
-              </div>
+              <InteractiveTerminal appId={id} />
             </CardContent>
           </Card>
         )}

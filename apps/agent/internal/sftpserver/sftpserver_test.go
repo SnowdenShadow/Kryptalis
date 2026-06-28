@@ -152,8 +152,8 @@ func TestCanWrite_Permissions(t *testing.T) {
 		{"ADMIN", false, true},
 		{"admin", false, true}, // case-insensitive
 		{"READ", false, false},
-		{"WRITE", true, false},  // disabled overrides
-		{"ADMIN", true, false},  // disabled overrides
+		{"WRITE", true, false}, // disabled overrides
+		{"ADMIN", true, false}, // disabled overrides
 		{"", false, false},
 	}
 	for _, c := range cases {
@@ -189,5 +189,88 @@ func TestResolve_NewFileInRootOK(t *testing.T) {
 	h := newHandlers(t, root)
 	if _, err := h.resolve("/app/brand-new.txt"); err != nil {
 		t.Fatalf("new file in root should resolve: %v", err)
+	}
+}
+
+// ── interactive shell channel gating + payload parsing ───────────────
+
+func TestShellAllowed_Gating(t *testing.T) {
+	s := &Server{}
+	cases := []struct {
+		name string
+		acc  Account
+		want bool
+	}{
+		{"write+shell+container", Account{Permission: "WRITE", AllowShell: true, ContainerName: "c"}, true},
+		{"admin+shell+container", Account{Permission: "ADMIN", AllowShell: true, ContainerName: "c"}, true},
+		{"no AllowShell", Account{Permission: "WRITE", AllowShell: false, ContainerName: "c"}, false},
+		{"no container", Account{Permission: "WRITE", AllowShell: true, ContainerName: ""}, false},
+		{"read-only refused", Account{Permission: "READ", AllowShell: true, ContainerName: "c"}, false},
+	}
+	for _, tc := range cases {
+		if got := s.shellAllowed(tc.acc); got != tc.want {
+			t.Errorf("%s: shellAllowed = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestParsePtyReq_Dimensions(t *testing.T) {
+	// pty-req payload: string term ("xterm-256color") + cols + rows + ...
+	term := "xterm-256color"
+	buf := make([]byte, 4+len(term)+16)
+	putU32(buf[0:], uint32(len(term)))
+	copy(buf[4:], term)
+	off := 4 + len(term)
+	putU32(buf[off:], 120)  // cols
+	putU32(buf[off+4:], 40) // rows
+	w, ok := parsePtyReq(buf)
+	if !ok || w.cols != 120 || w.rows != 40 {
+		t.Fatalf("parsePtyReq = %+v ok=%v, want cols=120 rows=40", w, ok)
+	}
+}
+
+func TestParseWindowChange_Dimensions(t *testing.T) {
+	buf := make([]byte, 16)
+	putU32(buf[0:], 100)
+	putU32(buf[4:], 30)
+	w, ok := parseWindowChange(buf)
+	if !ok || w.cols != 100 || w.rows != 30 {
+		t.Fatalf("parseWindowChange = %+v ok=%v, want cols=100 rows=30", w, ok)
+	}
+}
+
+func TestParsePtyReq_TooShort(t *testing.T) {
+	if _, ok := parsePtyReq([]byte{0, 0}); ok {
+		t.Fatal("expected parse failure on short payload")
+	}
+}
+
+// putU32 is a tiny test helper (avoids importing encoding/binary in the test).
+func putU32(b []byte, v uint32) {
+	b[0] = byte(v >> 24)
+	b[1] = byte(v >> 16)
+	b[2] = byte(v >> 8)
+	b[3] = byte(v)
+}
+
+// B1 regression: a wrapping length prefix must NOT panic (it crashed the whole
+// agent before the 64-bit guard).
+func TestParsePtyReq_OverflowNoPanic(t *testing.T) {
+	buf := make([]byte, 8)
+	putU32(buf[0:], 0xFFFFFFF8) // termLen that wraps termLen+8 to 0 in uint32
+	if _, ok := parsePtyReq(buf); ok {
+		t.Fatal("overflowing termLen must be rejected, not accepted")
+	}
+}
+
+func TestClampDim_Bounds(t *testing.T) {
+	if clampDim(0, 500) != 1 {
+		t.Fatal("0 should clamp to 1")
+	}
+	if clampDim(99999, 500) != 500 {
+		t.Fatal("over-max should clamp to max")
+	}
+	if clampDim(120, 500) != 120 {
+		t.Fatal("in-range should pass through")
 	}
 }

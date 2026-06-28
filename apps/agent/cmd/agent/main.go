@@ -22,12 +22,14 @@ func (a sftpAdapter) Sync(accounts []poller.SftpAccountPayload) int {
 	converted := make([]sftpserver.Account, 0, len(accounts))
 	for _, acc := range accounts {
 		converted = append(converted, sftpserver.Account{
-			Username:     acc.Username,
-			PasswordHash: acc.PasswordHash,
-			PublicKeys:   acc.PublicKeys,
-			Permission:   acc.Permission,
-			Disabled:     acc.Disabled,
-			Roots:        acc.Roots,
+			Username:      acc.Username,
+			PasswordHash:  acc.PasswordHash,
+			PublicKeys:    acc.PublicKeys,
+			Permission:    acc.Permission,
+			Disabled:      acc.Disabled,
+			Roots:         acc.Roots,
+			AllowShell:    acc.AllowShell,
+			ContainerName: acc.ContainerName,
 		})
 	}
 	return a.srv.Sync(converted)

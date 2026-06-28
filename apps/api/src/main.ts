@@ -182,6 +182,12 @@ async function bootstrap() {
 
   const port = configService.get<number>('API_PORT', 4000);
   await app.listen(port);
+
+  // Attach the interactive-terminal WebSocket gateway to the SAME HTTP server
+  // (path /ws/terminal) — no extra port. Must run AFTER listen() so the
+  // underlying http.Server exists.
+  const { TerminalGateway } = await import('./modules/terminal/terminal.gateway');
+  app.get(TerminalGateway).bind(app.getHttpServer());
 }
 
 bootstrap();

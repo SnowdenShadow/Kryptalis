@@ -19,6 +19,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 
 FROM base AS deps
 WORKDIR /app
+# node-pty is a native addon (interactive terminal PTY) with no musl prebuild,
+# so it compiles from source on alpine — needs python3 + a C/C++ toolchain.
+# These live ONLY in the deps stage; the compiled .node binary is copied into
+# the runner, which stays slim (just needs libstdc++ at runtime, added below).
+RUN apk add --no-cache python3 make g++
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api/package.json ./apps/api/
 COPY packages/types/package.json ./packages/types/
@@ -45,7 +50,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 # The API talks to the host Docker daemon (compose stacks, mail server, Caddy reload,
 # port checks, etc.) — it MUST have the docker CLI + compose plugin + git for deploys.
-RUN apk add --no-cache docker-cli docker-cli-compose git openssh-client ca-certificates
+RUN apk add --no-cache docker-cli docker-cli-compose git openssh-client ca-certificates libstdc++
 # Copy the whole workspace so pnpm symlinks resolve (.pnpm store lives at the root).
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/packages ./packages

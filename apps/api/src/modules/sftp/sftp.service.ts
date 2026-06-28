@@ -238,8 +238,11 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
         projectId: scope === 'project' ? scopeId : null,
         permission: dto.permission ?? 'WRITE',
         expiresAt: dto.expiresAt,
-        // Shell chroots only exist in the local SFTP container.
-        allowShell: remoteServer ? false : !!dto.allowShell,
+        // Shell access: locally it's a chroot in the SFTP container; on a remote
+        // server the agent opens an interactive `docker exec` INTO the app's
+        // container (app-scoped accounts only — a project account has no single
+        // container to target).
+        allowShell: remoteServer ? (scope === 'app' && !!dto.allowShell) : !!dto.allowShell,
         createdById: userId,
       },
     });
@@ -276,6 +279,58 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Create a short-lived, KEY-ONLY SFTP account that the web terminal uses to
+   * SSH-bridge into a REMOTE app's container (allowShell + that container). No
+   * password; the public key is the only credential and the matching private
+   * key stays in the gateway's memory for the session. Synced to the agent.
+   * Caller MUST call removeEphemeralShellAccount() when the session ends — a
+   * short expiresAt is the safety net if it doesn't.
+   */
+  async createEphemeralShellAccount(opts: {
+    username: string;
+    applicationId: string;
+    publicKey: string;
+    serverId: string;
+    createdById?: string;
+  }): Promise<{ id: string }> {
+    // Fall back to the app's project owner if no creator is supplied (the FK is
+    // Restrict). Terminal sessions are already RBAC-gated upstream.
+    let createdById = opts.createdById;
+    if (!createdById) {
+      const owner = await this.prisma.user.findFirst({
+        where: { role: { in: ['ADMIN', 'SUPERADMIN'] } },
+        select: { id: true },
+      });
+      createdById = owner?.id;
+    }
+    const account = await this.prisma.sftpAccount.create({
+      data: {
+        username: opts.username,
+        passwordHash: null,
+        passwordEnc: null,
+        publicKeys: [opts.publicKey] as any,
+        applicationId: opts.applicationId,
+        projectId: null,
+        permission: 'WRITE',
+        allowShell: true,
+        // 15-min safety expiry — sessions are far shorter and explicitly
+        // removed on close; this just bounds the leak window if cleanup never
+        // runs (the sweeper revokes it on the agent).
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+        createdById: createdById!,
+      },
+    });
+    await this.syncRemoteSftpAccounts(opts.serverId);
+    return { id: account.id };
+  }
+
+  /** Delete an ephemeral terminal account and re-sync the agent (revoke). */
+  async removeEphemeralShellAccount(id: string, serverId: string): Promise<void> {
+    await this.prisma.sftpAccount.delete({ where: { id } }).catch(() => {});
+    await this.syncRemoteSftpAccounts(serverId);
+  }
+
+  /**
    * Push the FULL desired account set for a remote server to its agent
    * (SFTP_SYNC). Full-state + idempotent: every call rebuilds the list
    * from the DB, so create/update/delete/rotate all share this one sync
@@ -294,7 +349,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
         ],
       },
       include: {
-        application: { select: { id: true, name: true } },
+        application: { select: { id: true, name: true, containerName: true } },
         project: {
           select: {
             serverId: true,
@@ -324,6 +379,11 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
         permission: acc.permission,
         disabled: acc.disabled || (acc.expiresAt ? acc.expiresAt < new Date() : false),
         roots,
+        // Shell access: only meaningful for an app-scoped account (a single
+        // container to exec into). The agent refuses the shell channel unless
+        // BOTH allowShell and containerName are set.
+        allowShell: acc.allowShell && !!acc.application?.containerName,
+        containerName: acc.application?.containerName ?? undefined,
       };
     });
 
@@ -394,11 +454,12 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Remote account → persist, then one full-state sync covers every
-    // patched field (the agent reads permission/disabled/keys from the
-    // synced set). allowShell is local-only — force false.
+    // patched field (the agent reads permission/disabled/keys/shell from the
+    // synced set). Shell is only meaningful for an APP-scoped remote account
+    // (a single container to exec into) — force off for project-scoped ones.
     const remoteForUpdate = await this.remoteServerForAccount(acc);
     if (remoteForUpdate) {
-      if (patch.allowShell) data.allowShell = false;
+      if (patch.allowShell && !acc.applicationId) data.allowShell = false;
       const updatedRemote = await this.prisma.sftpAccount.update({
         where: { id: acc.id },
         data,
@@ -599,12 +660,22 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     });
     if (!expired.length) return;
     this.logger.log(`Auto-disabling ${expired.length} expired SFTP account(s)`);
+    const remoteServerIds = new Set<string>();
     for (const row of expired) {
       try {
-        await this.dockerExec(
-          ['usermod', '-L', row.username],
-          { allowFailure: true, timeoutMs: 10_000 },
-        );
+        // Remote (agent) accounts — including ephemeral terminal accounts whose
+        // session cleanup never ran (API restart/crash) — are revoked by a full
+        // re-sync below; locally we lock the unix user. We collect remote server
+        // ids first so one sync per server covers all its expired rows.
+        const remote = await this.remoteServerForAccount(row).catch(() => null);
+        if (remote) {
+          remoteServerIds.add(remote.id);
+        } else {
+          await this.dockerExec(
+            ['usermod', '-L', row.username],
+            { allowFailure: true, timeoutMs: 10_000 },
+          );
+        }
         await this.prisma.sftpAccount.update({
           where: { id: row.id },
           data: { disabled: true },
@@ -613,6 +684,14 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       } catch (err: any) {
         this.logger.warn(`Sweep of ${row.username} failed: ${err?.message || err}`);
       }
+    }
+    // Push the now-disabled set to each affected agent so a leaked ephemeral
+    // shell account actually stops working (the sync marks expired rows
+    // disabled). Best-effort: a failed sync self-heals on the next sweep.
+    for (const serverId of remoteServerIds) {
+      await this.syncRemoteSftpAccounts(serverId).catch((e: any) =>
+        this.logger.warn(`expired-account re-sync for ${serverId} failed: ${e?.message || e}`),
+      );
     }
   }
 

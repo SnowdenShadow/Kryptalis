@@ -38,12 +38,15 @@
     "helmet": "^8.2.0",
     "joi": "^17.13.0",
     "js-yaml": "^4.2.0",
+    "node-pty": "^1.1.0",
     "nodemailer": "^6.9.16",
     "otplib": "12",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "ssh2": "^1.17.0",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@nestjs/cli": "^11.0.0",
@@ -54,6 +57,8 @@
     "@types/node": "^22.0.0",
     "@types/nodemailer": "^6.4.16",
     "@types/passport-jwt": "^4.0.1",
+    "@types/ssh2": "^1.15.5",
+    "@types/ws": "^8.18.1",
     "eslint": "^9.0.0",
     "prisma": "^6.0.0",
     "typescript": "^5.7.0",

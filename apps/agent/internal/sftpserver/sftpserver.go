@@ -21,8 +21,10 @@
 package sftpserver
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -31,10 +33,12 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 
+	"github.com/creack/pty"
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
@@ -50,6 +54,13 @@ type Account struct {
 	// Root dirs this account may access, keyed by the display dir name
 	// shown at the top level (e.g. "app" or "<slug>-<id12>").
 	Roots map[string]string `json:"roots"`
+	// AllowShell opens an interactive shell channel (pty/shell/exec) INTO the
+	// named container — in addition to the SFTP subsystem. Off by default; the
+	// API sets it only for WRITE/ADMIN accounts that asked for shell access.
+	AllowShell bool `json:"allowShell,omitempty"`
+	// ContainerName is the ONLY container an AllowShell session may `docker
+	// exec` into. Empty → shell is refused even if AllowShell is true.
+	ContainerName string `json:"containerName,omitempty"`
 }
 
 type Server struct {
@@ -217,34 +228,210 @@ func (s *Server) handleConn(raw net.Conn) {
 
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
-			_ = newChan.Reject(ssh.Prohibited, "only sftp sessions are allowed")
+			_ = newChan.Reject(ssh.Prohibited, "only session channels are allowed")
 			continue
 		}
 		channel, requests, err := newChan.Accept()
 		if err != nil {
 			continue
 		}
-		go func(ch ssh.Channel, in <-chan *ssh.Request) {
-			defer ch.Close()
-			sftpRequested := false
-			for req := range in {
-				// Accept ONLY the sftp subsystem; refuse shell/exec/pty.
-				if req.Type == "subsystem" && len(req.Payload) > 4 && string(req.Payload[4:]) == "sftp" {
-					sftpRequested = true
-					_ = req.Reply(true, nil)
-					break
-				}
-				_ = req.Reply(false, nil)
-			}
-			if !sftpRequested {
+		go s.handleSession(acc, channel, requests)
+	}
+}
+
+// ptyReq carries the parsed window size from an SSH "pty-req"/"window-change".
+type ptyReq struct {
+	cols, rows uint32
+}
+
+// parseWinch decodes an SSH pty-req / window-change payload's leading window
+// dimensions. pty-req: term(string) cols rows widthpx heightpx modes(string).
+// window-change: cols rows widthpx heightpx. We only need cols/rows.
+func parsePtyReq(payload []byte) (ptyReq, bool) {
+	// term is a length-prefixed string; skip it.
+	if len(payload) < 4 {
+		return ptyReq{}, false
+	}
+	termLen := binary.BigEndian.Uint32(payload[:4])
+	rest := payload[4:]
+	// 64-bit comparison: termLen is attacker-controlled, so termLen+8 in uint32
+	// space could WRAP and pass a naive guard, then panic on the slice.
+	if uint64(len(rest)) < uint64(termLen)+8 {
+		return ptyReq{}, false
+	}
+	rest = rest[termLen:]
+	return ptyReq{
+		cols: binary.BigEndian.Uint32(rest[0:4]),
+		rows: binary.BigEndian.Uint32(rest[4:8]),
+	}, true
+}
+
+// clampDim bounds an attacker-supplied terminal dimension to [1, max] and fits
+// it into the uint16 pty.Winsize fields (parity with the gateway's clamp).
+func clampDim(v uint32, max uint32) uint16 {
+	if v < 1 {
+		return 1
+	}
+	if v > max {
+		return uint16(max)
+	}
+	return uint16(v)
+}
+
+func parseWindowChange(payload []byte) (ptyReq, bool) {
+	if len(payload) < 8 {
+		return ptyReq{}, false
+	}
+	return ptyReq{
+		cols: binary.BigEndian.Uint32(payload[0:4]),
+		rows: binary.BigEndian.Uint32(payload[4:8]),
+	}, true
+}
+
+// handleSession routes a session channel to either the SFTP subsystem (always
+// allowed) or an interactive shell/exec INTO the account's container (only when
+// AllowShell + a container are set and the account is not read-only).
+func (s *Server) handleSession(acc Account, ch ssh.Channel, in <-chan *ssh.Request) {
+	defer ch.Close()
+	// Defense-in-depth: a malformed SSH request must never crash the agent
+	// process (which would take down monitoring/deploys/SFTP for every app on
+	// this host). Confine any panic to this one session goroutine.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("sftpserver: recovered from session panic: %v", r)
+		}
+	}()
+	var win ptyReq
+	havePty := false
+
+	for req := range in {
+		switch req.Type {
+		case "subsystem":
+			if len(req.Payload) > 4 && string(req.Payload[4:]) == "sftp" {
+				_ = req.Reply(true, nil)
+				handlers := newScopedHandlers(acc)
+				server := sftp.NewRequestServer(ch, handlers)
+				_ = server.Serve()
+				_ = server.Close()
 				return
 			}
-			handlers := newScopedHandlers(acc)
-			server := sftp.NewRequestServer(ch, handlers)
-			_ = server.Serve()
-			_ = server.Close()
-		}(channel, requests)
+			_ = req.Reply(false, nil)
+
+		case "pty-req":
+			if !s.shellAllowed(acc) {
+				_ = req.Reply(false, nil)
+				continue
+			}
+			if w, ok := parsePtyReq(req.Payload); ok {
+				win = w
+				havePty = true
+			}
+			_ = req.Reply(true, nil)
+
+		case "window-change":
+			if w, ok := parseWindowChange(req.Payload); ok {
+				win = w
+			}
+			// no reply expected for window-change
+
+		case "shell", "exec":
+			if !s.shellAllowed(acc) {
+				_ = req.Reply(false, nil)
+				return
+			}
+			// exec carries a command string (length-prefixed); shell is login.
+			var command string
+			if req.Type == "exec" && len(req.Payload) >= 4 {
+				n := binary.BigEndian.Uint32(req.Payload[:4])
+				// 64-bit guard: 4+n in uint32 space could wrap and pass.
+				if uint64(len(req.Payload)) >= uint64(n)+4 {
+					command = string(req.Payload[4 : 4+n])
+				}
+			}
+			_ = req.Reply(true, nil)
+			s.runContainerShell(acc, ch, command, win, havePty)
+			return
+
+		default:
+			_ = req.Reply(false, nil)
+		}
 	}
+}
+
+// shellAllowed: interactive access requires AllowShell, a target container, and
+// a non-read-only permission (READ accounts are file-transfer only).
+func (s *Server) shellAllowed(acc Account) bool {
+	return acc.AllowShell && acc.ContainerName != "" && strings.ToUpper(acc.Permission) != "READ"
+}
+
+// runContainerShell `docker exec`s into the account's container (and ONLY that
+// container — argv, no shell concat) and bridges it to the SSH channel over a
+// PTY. A shell login runs the container's default shell; exec runs `sh -lc
+// <command>`. Window size from pty-req drives the initial TTY geometry.
+func (s *Server) runContainerShell(acc Account, ch ssh.Channel, command string, win ptyReq, havePty bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	args := []string{"exec", "-i"}
+	if havePty {
+		args = append(args, "-t")
+	}
+	// `--` ends docker's flag parsing so the (API-synced) container name can
+	// never be parsed as a flag.
+	args = append(args, "--", acc.ContainerName)
+	if command != "" {
+		// Non-interactive exec: run the command through a shell so pipes/globs
+		// work, but the command itself is a single argv element (no injection
+		// into OUR argv). Falls back across shells the image may have.
+		args = append(args, "sh", "-lc", command)
+	} else {
+		// Interactive login: try bash, then sh.
+		args = append(args, "sh", "-c", "exec $(command -v bash || command -v sh) -l 2>/dev/null || exec sh")
+	}
+	cmd := exec.CommandContext(ctx, "docker", args...)
+
+	if havePty {
+		ptmx, err := pty.Start(cmd)
+		if err != nil {
+			fmt.Fprintf(ch, "failed to start shell: %v\r\n", err)
+			s.sendExit(ch, 1)
+			return
+		}
+		defer func() { _ = ptmx.Close() }()
+		if win.cols > 0 && win.rows > 0 {
+			_ = pty.Setsize(ptmx, &pty.Winsize{Cols: clampDim(win.cols, 500), Rows: clampDim(win.rows, 300)})
+		}
+		// channel → pty (stdin)
+		go func() { _, _ = io.Copy(ptmx, ch) }()
+		// pty → channel (stdout); ends when the shell exits
+		_, _ = io.Copy(ch, ptmx)
+	} else {
+		stdin, _ := cmd.StdinPipe()
+		cmd.Stdout = ch
+		cmd.Stderr = ch.Stderr()
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(ch, "failed to start shell: %v\r\n", err)
+			s.sendExit(ch, 1)
+			return
+		}
+		go func() { _, _ = io.Copy(stdin, ch); _ = stdin.Close() }()
+	}
+
+	code := 0
+	if err := cmd.Wait(); err != nil {
+		code = 1
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		}
+	}
+	s.sendExit(ch, code)
+}
+
+// sendExit sends the SSH "exit-status" then lets the deferred ch.Close run.
+func (s *Server) sendExit(ch ssh.Channel, code int) {
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint32(payload, uint32(code))
+	_, _ = ch.SendRequest("exit-status", false, payload)
 }
 
 func loadOrCreateHostKey(path string) (ssh.Signer, error) {
