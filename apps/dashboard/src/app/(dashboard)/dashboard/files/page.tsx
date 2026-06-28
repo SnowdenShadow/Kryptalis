@@ -127,6 +127,12 @@ function iconForFile(name: string) {
   return { Icon: FileIcon, color: 'text-muted-foreground' };
 }
 
+// Archives the file manager can extract in place (mirrors the API's
+// detectArchiveFormat). Used to decide when to show the "Extract" action.
+function isExtractable(name: string): boolean {
+  return /\.(zip|tar\.gz|tgz|tar|gz)$/i.test(name);
+}
+
 // ── relative date formatter ──────────────────────────────────────────────
 function fmtRelativeDate(iso: string, t: (k: string, v?: Record<string, string | number>) => string) {
   const ts = new Date(iso).getTime();
@@ -479,6 +485,38 @@ export default function FilesPage() {
       .catch((e: Error) => toast.error(e.message));
   }
 
+  // Compress the selected paths into a .zip / .tar.gz and download it. Goes
+  // through api.rawFetch so the 401→refresh pipeline applies; the response is
+  // a binary attachment we turn into a browser download (like handleDownload).
+  const [compressing, setCompressing] = useState(false);
+  async function handleCompress(format: 'zip' | 'tar.gz') {
+    if (!selected || selectedPaths.size === 0) return;
+    setCompressing(true);
+    try {
+      const res = await api.rawFetch(`/files/${selected.scope}/${selected.id}/compress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paths: Array.from(selectedPaths), format }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ message: 'Compression failed' }));
+        throw new Error(err.message || 'Compression failed');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `archive-${new Date().toISOString().slice(0, 10)}.${format === 'zip' ? 'zip' : 'tar.gz'}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success(t('files.toastCompressed', { n: selectedPaths.size }));
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setCompressing(false);
+    }
+  }
+
   function toggleProject(id: string) {
     setExpandedProjects(s => {
       const next = new Set(s);
@@ -742,6 +780,29 @@ export default function FilesPage() {
                         {t('files.clear')}
                       </button>
                       <div className="flex-1" />
+                      {/* Compress is read-only → available to anyone who can see
+                          the files (the service enforces VIEWER). */}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-xs h-7"
+                        disabled={compressing}
+                        onClick={() => handleCompress('zip')}
+                        title={t('files.compressZipHint')}
+                      >
+                        {compressing ? <Loader2 size={12} className="animate-spin" /> : <FileArchive size={12} />}
+                        {' '}{t('files.compressZip')}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-xs h-7"
+                        disabled={compressing}
+                        onClick={() => handleCompress('tar.gz')}
+                        title={t('files.compressTarHint')}
+                      >
+                        <FileArchive size={12} /> {t('files.compressTar')}
+                      </Button>
                       {canDelete && (
                         <Button
                           size="sm"
@@ -873,7 +934,7 @@ export default function FilesPage() {
                                       <Download size={13} />
                                     </Button>
                                   )}
-                                  {!isDir && canEdit && /\.zip$/i.test(e.name) && (
+                                  {!isDir && canEdit && isExtractable(e.name) && (
                                     <Button size="icon" variant="ghost" className="h-7 w-7" title={t('files.actionExtract')}
                                       onClick={() => { setExtractTarget(e); setExtractDeleteAfter(false); }}>
                                       <FileArchive size={13} />

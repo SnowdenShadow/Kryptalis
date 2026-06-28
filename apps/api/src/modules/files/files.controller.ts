@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import { FilesService } from './files.service';
 import { MkdirDto } from './dto/mkdir.dto';
 import { ExtractZipDto } from './dto/extract-zip.dto';
+import { CompressDto } from './dto/compress.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 type Scope = 'app' | 'db';
@@ -118,6 +119,34 @@ export class FilesController {
     return this.svc.extract(userId, parseScope(scope), scopeId, dto.path, {
       deleteAfter: dto.deleteAfter,
     });
+  }
+
+  @Post(':scope/:scopeId/compress')
+  @ApiOperation({ summary: 'Compress selected files/dirs and download as .zip / .tar.gz' })
+  async compress(
+    @CurrentUser('id') userId: string,
+    @Param('scope') scope: string,
+    @Param('scopeId') scopeId: string,
+    @Body() dto: CompressDto,
+    @Res() res: Response,
+  ) {
+    const { buffer, filename } = await this.svc.compress(
+      userId,
+      parseScope(scope),
+      scopeId,
+      dto.paths,
+      dto.format ?? 'zip',
+    );
+    // ASCII-safe + RFC5987 filename; prevents Content-Disposition injection.
+    const asciiSafe = filename.replace(/[^\x20-\x7e]/g, '_');
+    const encoded = encodeURIComponent(filename);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${asciiSafe}"; filename*=UTF-8''${encoded}`,
+    );
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', String(buffer.length));
+    res.end(buffer);
   }
 
   @Delete(':scope/:scopeId/entry')

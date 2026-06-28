@@ -1,8 +1,10 @@
 package poller
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -65,19 +67,20 @@ const maxConcurrentTasks = 4
 // (network stall) permanently occupied a semaphore slot; four such tasks
 // silently bricked the agent.
 var taskTimeouts = map[string]time.Duration{
-	"DEPLOY":       30 * time.Minute, // image builds can be slow
-	"BUILD":        30 * time.Minute,
-	"START":        5 * time.Minute,
-	"RESTART":      5 * time.Minute,
-	"STOP":         5 * time.Minute,
-	"REMOVE":       5 * time.Minute,
-	"LOGS":         1 * time.Minute,
-	"SFTP_SYNC":    1 * time.Minute,
-	"EXEC":         2 * time.Minute,
-	"STATUS":       1 * time.Minute,
-	"FILE_READ":    30 * time.Second,
-	"FILE_WRITE":   30 * time.Second,
-	"FILE_EXTRACT": 5 * time.Minute, // unzip can touch many files
+	"DEPLOY":        30 * time.Minute, // image builds can be slow
+	"BUILD":         30 * time.Minute,
+	"START":         5 * time.Minute,
+	"RESTART":       5 * time.Minute,
+	"STOP":          5 * time.Minute,
+	"REMOVE":        5 * time.Minute,
+	"LOGS":          1 * time.Minute,
+	"SFTP_SYNC":     1 * time.Minute,
+	"EXEC":          2 * time.Minute,
+	"STATUS":        1 * time.Minute,
+	"FILE_READ":     30 * time.Second,
+	"FILE_WRITE":    30 * time.Second,
+	"FILE_EXTRACT":  5 * time.Minute,  // unzip can touch many files
+	"FILE_COMPRESS": 10 * time.Minute, // archive many files
 	// Data-transfer tasks move whole volumes / database dumps over the
 	// network — generous deadlines by design.
 	"VOLUME_LIST":   1 * time.Minute,
@@ -239,6 +242,8 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.runFileDelete(task)
 	case "FILE_EXTRACT":
 		result, taskErr = p.runFileExtract(task)
+	case "FILE_COMPRESS":
+		result, taskErr = p.runFileCompress(task)
 	case "DISK_USAGE":
 		result, taskErr = p.runDiskUsage(task)
 	case "SFTP_SYNC":
@@ -275,8 +280,12 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 	p.reportResult(task.ID, result, taskErr)
 }
 
+// appsBaseDir is the root under which app dirs live. A package var (not a
+// const) so tests can point it at a temp dir; production never changes it.
+var appsBaseDir = "/opt/dockcontrol/apps"
+
 func appDir(slug string) string {
-	return filepath.Join("/opt/dockcontrol/apps", slug)
+	return filepath.Join(appsBaseDir, slug)
 }
 
 // isHexRef: 7-64 hex chars — a git commit SHA (abbreviated or full).
@@ -1003,9 +1012,27 @@ func touchesManaged(rel string) bool {
 	return false
 }
 
-// runFileExtract unzips an archive IN PLACE inside the app dir. Payload:
+// archiveFormat detects the archive kind from a filename (mirrors the API's
+// detectArchiveFormat). Returns "" for an unsupported name.
+func archiveFormat(name string) string {
+	n := strings.ToLower(name)
+	switch {
+	case strings.HasSuffix(n, ".zip"):
+		return "zip"
+	case strings.HasSuffix(n, ".tar.gz"), strings.HasSuffix(n, ".tgz"):
+		return "tar.gz"
+	case strings.HasSuffix(n, ".tar"):
+		return "tar"
+	case strings.HasSuffix(n, ".gz"):
+		return "gz"
+	default:
+		return ""
+	}
+}
+
+// runFileExtract extracts an archive IN PLACE inside the app dir. Payload:
 //
-//	{ slug|legacySlug, file: "<relpath>.zip", dest: "<reldir>", deleteAfter: bool }
+//	{ slug|legacySlug, file: "<relpath>", dest: "<reldir>", format: "zip|tar.gz|tar|gz", deleteAfter: bool }
 //
 // Security mirrors untarGz (backup restore): every entry is filepath.Clean'd
 // and rejected if it escapes the destination (zip-slip); non-regular entries
@@ -1013,13 +1040,17 @@ func touchesManaged(rel string) bool {
 func (p *Poller) runFileExtract(task Task) (map[string]interface{}, string) {
 	name, _ := task.Payload["file"].(string)
 	dest, _ := task.Payload["dest"].(string)
+	format, _ := task.Payload["format"].(string)
 	deleteAfter, _ := task.Payload["deleteAfter"].(bool)
 	dir, errStr := resolveTaskDir(task.Payload)
 	if errStr != "" || name == "" {
 		return nil, "missing slug or file"
 	}
-	if !strings.HasSuffix(strings.ToLower(name), ".zip") {
-		return nil, "only .zip archives can be extracted"
+	if format == "" {
+		format = archiveFormat(name)
+	}
+	if format == "" {
+		return nil, "unsupported archive format"
 	}
 
 	safeZip := filepath.Clean(name)
@@ -1038,7 +1069,7 @@ func (p *Poller) runFileExtract(task Task) (map[string]interface{}, string) {
 	}
 	destAbs := filepath.Join(dir, destClean)
 
-	written, errStr := extractZipInto(zipPath, destAbs)
+	written, errStr := extractArchiveInto(zipPath, destAbs, format)
 	if errStr != "" {
 		return nil, errStr
 	}
@@ -1125,6 +1156,297 @@ func extractZipInto(zipPath, destAbs string) (int, string) {
 		written++
 	}
 	return written, ""
+}
+
+// maxCompressBytes caps the total bytes the agent reads when building an
+// archive. The archive is base64'd into the task-result JSON, which the API
+// receives through express.json({ limit: '10mb' }) — base64 adds ~33% plus
+// JSON overhead, so the COMPRESSED archive must stay well under 10 MiB or the
+// result POST is rejected and the task hangs. We cap the RAW input read at
+// 6 MiB; even with poor compression the archive + base64 stays under the API
+// body limit. Larger remote selections should use SFTP, not this path.
+const maxCompressBytes int64 = 6 * 1024 * 1024
+
+// runFileCompress builds a .zip or .tar.gz of the selected paths and returns it
+// base64 in the result. Payload: { slug|legacySlug, paths: []string, format }.
+func (p *Poller) runFileCompress(task Task) (map[string]interface{}, string) {
+	format, _ := task.Payload["format"].(string)
+	rawPaths, _ := task.Payload["paths"].([]interface{})
+	dir, errStr := resolveTaskDir(task.Payload)
+	if errStr != "" {
+		return nil, errStr
+	}
+	if format != "zip" && format != "tar.gz" {
+		return nil, "unsupported compression format"
+	}
+	if len(rawPaths) == 0 {
+		return nil, "no paths selected"
+	}
+
+	// Collect (archiveRelPath, absPath) for every regular file under the
+	// selection, validating each against traversal.
+	type entry struct{ rel, abs string }
+	var files []entry
+	var total int64
+	var walk func(rel string) string
+	walk = func(rel string) string {
+		clean := filepath.Clean(rel)
+		if strings.HasPrefix(clean, "..") || strings.Contains(clean, "..") || filepath.IsAbs(clean) {
+			return "path traversal rejected"
+		}
+		abs := filepath.Join(dir, clean)
+		fi, err := os.Lstat(abs)
+		if err != nil {
+			return "not found: " + rel
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return "refusing to compress a symlink: " + rel
+		}
+		if fi.IsDir() {
+			ents, err := os.ReadDir(abs)
+			if err != nil {
+				return err.Error()
+			}
+			for _, e := range ents {
+				if errStr := walk(filepath.ToSlash(filepath.Join(clean, e.Name()))); errStr != "" {
+					return errStr
+				}
+			}
+			return ""
+		}
+		if !fi.Mode().IsRegular() {
+			return "" // skip devices/fifo
+		}
+		total += fi.Size()
+		if total > maxCompressBytes {
+			return fmt.Sprintf("selection exceeds %d bytes (use SFTP for large transfers)", maxCompressBytes)
+		}
+		files = append(files, entry{rel: filepath.ToSlash(clean), abs: abs})
+		return ""
+	}
+	for _, rp := range rawPaths {
+		s, _ := rp.(string)
+		if s == "" {
+			continue
+		}
+		if errStr := walk(s); errStr != "" {
+			return nil, errStr
+		}
+	}
+	if len(files) == 0 {
+		return nil, "selection is empty"
+	}
+
+	var buf bytes.Buffer
+	if format == "zip" {
+		zw := zip.NewWriter(&buf)
+		for _, f := range files {
+			w, err := zw.Create(f.rel)
+			if err != nil {
+				return nil, err.Error()
+			}
+			src, err := os.Open(f.abs)
+			if err != nil {
+				return nil, err.Error()
+			}
+			_, copyErr := io.Copy(w, src)
+			src.Close()
+			if copyErr != nil {
+				return nil, copyErr.Error()
+			}
+		}
+		if err := zw.Close(); err != nil {
+			return nil, err.Error()
+		}
+	} else { // tar.gz
+		gw := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gw)
+		for _, f := range files {
+			fi, err := os.Stat(f.abs)
+			if err != nil {
+				return nil, err.Error()
+			}
+			hdr := &tar.Header{Name: f.rel, Mode: 0644, Size: fi.Size(), Typeflag: tar.TypeReg}
+			if err := tw.WriteHeader(hdr); err != nil {
+				return nil, err.Error()
+			}
+			src, err := os.Open(f.abs)
+			if err != nil {
+				return nil, err.Error()
+			}
+			_, copyErr := io.Copy(tw, src)
+			src.Close()
+			if copyErr != nil {
+				return nil, copyErr.Error()
+			}
+		}
+		if err := tw.Close(); err != nil {
+			return nil, err.Error()
+		}
+		if err := gw.Close(); err != nil {
+			return nil, err.Error()
+		}
+	}
+
+	// Defence-in-depth: the archive rides the task-result JSON through the API's
+	// 10 MiB body limit. Refuse if the produced archive is too big to fit
+	// (rather than have the API silently reject the result POST and hang the
+	// caller until timeout). 7 MiB raw → ~9.4 MiB base64, still under 10 MiB.
+	if int64(buf.Len()) > 7*1024*1024 {
+		return nil, "archive too large to return over the agent channel — use SFTP for large selections"
+	}
+
+	return map[string]interface{}{
+		"archive": base64.StdEncoding.EncodeToString(buf.Bytes()),
+		"files":   len(files),
+	}, ""
+}
+
+// extractArchiveInto dispatches to the right extractor by format. All share the
+// same zip-slip / managed-file / zip-bomb guards (writeArchiveEntry).
+func extractArchiveInto(archivePath, destAbs, format string) (int, string) {
+	switch format {
+	case "zip":
+		return extractZipInto(archivePath, destAbs)
+	case "tar":
+		f, err := os.Open(archivePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return 0, "archive not found"
+			}
+			return 0, err.Error()
+		}
+		defer f.Close()
+		return extractTarStream(f, destAbs)
+	case "tar.gz":
+		f, err := os.Open(archivePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return 0, "archive not found"
+			}
+			return 0, err.Error()
+		}
+		defer f.Close()
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return 0, "not a valid gzip stream: " + err.Error()
+		}
+		defer gz.Close()
+		return extractTarStream(gz, destAbs)
+	case "gz":
+		return extractGzInto(archivePath, destAbs)
+	default:
+		return 0, "unsupported archive format"
+	}
+}
+
+// writeArchiveEntry validates one entry's relative name against zip-slip and
+// the managed-file guard, then copies up to the remaining byte budget into
+// destAbs. Returns bytes written (-1 on a skipped/dir entry) or an error string.
+func writeArchiveEntry(destAbs, entryName string, mode os.FileMode, src io.Reader, remaining int64) (int64, string) {
+	clean := filepath.Clean(filepath.FromSlash(entryName))
+	if clean == "." {
+		return -1, ""
+	}
+	target := filepath.Join(destAbs, clean)
+	if target != destAbs && !strings.HasPrefix(target, destAbs+string(os.PathSeparator)) {
+		return 0, fmt.Sprintf("entry %q escapes the destination", entryName)
+	}
+	if touchesManaged(clean) {
+		return 0, fmt.Sprintf("entry %q targets a managed file", entryName)
+	}
+	if remaining <= 0 {
+		return 0, fmt.Sprintf("archive decompresses beyond %d bytes (possible zip bomb)", maxExtractBytes)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		return 0, err.Error()
+	}
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return 0, err.Error()
+	}
+	n, copyErr := io.Copy(out, io.LimitReader(src, remaining+1))
+	closeErr := out.Close()
+	if copyErr != nil {
+		return 0, copyErr.Error()
+	}
+	if closeErr != nil {
+		return 0, closeErr.Error()
+	}
+	if n > remaining {
+		_ = os.Remove(target)
+		return 0, fmt.Sprintf("archive decompresses beyond %d bytes (possible zip bomb)", maxExtractBytes)
+	}
+	return n, ""
+}
+
+// extractTarStream extracts a (possibly gunzipped) tar stream into destAbs,
+// only writing regular files; symlinks/devices/dirs are skipped or mkdir'd.
+func extractTarStream(r io.Reader, destAbs string) (int, string) {
+	tr := tar.NewReader(r)
+	var total int64
+	written := 0
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return 0, "corrupt tar: " + err.Error()
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			clean := filepath.Clean(filepath.FromSlash(hdr.Name))
+			target := filepath.Join(destAbs, clean)
+			if target != destAbs && !strings.HasPrefix(target, destAbs+string(os.PathSeparator)) {
+				return 0, fmt.Sprintf("entry %q escapes the destination", hdr.Name)
+			}
+			_ = os.MkdirAll(target, 0755)
+		case tar.TypeReg:
+			n, errStr := writeArchiveEntry(destAbs, hdr.Name, 0644, tr, maxExtractBytes-total)
+			if errStr != "" {
+				return 0, errStr
+			}
+			if n >= 0 {
+				total += n
+				written++
+			}
+		default:
+			// symlink / hardlink / char / block / fifo — never created.
+		}
+	}
+	return written, ""
+}
+
+// extractGzInto inflates a single-file .gz into destAbs, naming the output by
+// stripping the trailing ".gz" from the archive's basename.
+func extractGzInto(gzPath, destAbs string) (int, string) {
+	f, err := os.Open(gzPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, "archive not found"
+		}
+		return 0, err.Error()
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return 0, "not a valid gzip stream: " + err.Error()
+	}
+	defer gz.Close()
+	base := filepath.Base(gzPath)
+	out := strings.TrimSuffix(base, filepath.Ext(base)) // drop ".gz"
+	if out == "" {
+		out = "extracted"
+	}
+	n, errStr := writeArchiveEntry(destAbs, out, 0644, gz, maxExtractBytes)
+	if errStr != "" {
+		return 0, errStr
+	}
+	if n < 0 {
+		return 0, ""
+	}
+	return 1, ""
 }
 
 // sanitize must stay byte-for-byte equivalent to apps/api/.../applications.service.ts:slugify.

@@ -15,7 +15,13 @@ import { assertProjectAccess } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
 import * as dockerFs from './docker-fs';
 import { pickRootForImage, type DockerFsTarget } from './docker-fs';
-import { decodeZipSafely } from './zip-extract';
+import {
+  decodeArchive,
+  detectArchiveFormat,
+  encodeArchive,
+  type CompressFormat,
+  type ExtractedFile,
+} from './zip-extract';
 import { AgentService } from '../agent/agent.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { remoteAppSlug, slugify as appSlugify } from '../applications/applications.helpers';
@@ -130,6 +136,10 @@ function isDotenvName(name: string): boolean {
 
 const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024; // 2MB
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50MB
+// Caps for "compress selection" — the whole archive is built in memory, so
+// bound how much we read (anti-DoS). Big transfers should use SFTP/backup.
+const MAX_COMPRESS_BYTES = 500 * 1024 * 1024; // 500MB total uncompressed read
+const MAX_COMPRESS_ENTRIES = 20_000;
 
 // Quota walk caps — guard against pathological trees (symlink loops the
 // O_NOFOLLOW guard didn't catch, runaway node_modules nesting, etc.).
@@ -1477,8 +1487,9 @@ export class FilesService {
     if (!zipRelPath || zipRelPath === '.') {
       throw new BadRequestException('No archive path given');
     }
-    if (!/\.zip$/i.test(zipRelPath)) {
-      throw new BadRequestException('Only .zip archives can be extracted.');
+    const format = detectArchiveFormat(zipRelPath);
+    if (!format) {
+      throw new BadRequestException('Unsupported archive (.zip, .tar.gz, .tgz, .tar, .gz).');
     }
     const resolved = await this.resolvePath(userId, scope, scopeId, zipRelPath, 'DEVELOPER');
     this.assertNotManaged(resolved.relPath);
@@ -1486,6 +1497,9 @@ export class FilesService {
     const destRel = resolved.relPath.includes('/')
       ? resolved.relPath.slice(0, resolved.relPath.lastIndexOf('/'))
       : '';
+    const archiveBasename = resolved.relPath.includes('/')
+      ? resolved.relPath.slice(resolved.relPath.lastIndexOf('/') + 1)
+      : resolved.relPath;
 
     // ── REMOTE: delegate to the agent (Go-side extraction). ──
     const remote = await this.resolveRemoteFsTarget(scope, scopeId);
@@ -1498,6 +1512,7 @@ export class FilesService {
           legacySlug: remote.legacySlug,
           file: resolved.relPath,
           dest: destRel,
+          format,
           deleteAfter: !!opts.deleteAfter,
         },
         5 * 60_000,
@@ -1526,11 +1541,11 @@ export class FilesService {
       if (target) {
         const st = await dockerFs.stat(target, resolved.relPath);
         if (!st.exists || !st.isFile) throw new NotFoundException('Archive not found');
-        const tmpZip = path.join(TMP_DIR, `dc-extract-${crypto.randomBytes(8).toString('hex')}.zip`);
+        const tmpZip = path.join(TMP_DIR, `dc-extract-${crypto.randomBytes(8).toString('hex')}`);
         try {
           await dockerFs.copyOut(target, resolved.relPath, tmpZip);
           const zipBuf = await fs.promises.readFile(tmpZip);
-          const files = decodeZipSafely(zipBuf, remaining);
+          const files = decodeArchive(format, zipBuf, archiveBasename, remaining);
           for (const f of files) {
             // Per-entry managed-file guard (parity with LOCAL mode) — an archive
             // entry must not overwrite a DockControl-managed file.
@@ -1560,7 +1575,7 @@ export class FilesService {
       throw new NotFoundException('Archive not found');
     }
     const zipBuf = await fs.promises.readFile(resolved.absPath);
-    const files = decodeZipSafely(zipBuf, remaining);
+    const files = decodeArchive(format, zipBuf, archiveBasename, remaining);
     // Charge the whole decompressed total against quota up front (one check).
     const totalBytes = files.reduce((n, f) => n + f.data.length, 0);
     await this.checkQuota(projectId, totalBytes);
@@ -1588,6 +1603,164 @@ export class FilesService {
     }
     await this.audit(userId, scope, scopeId, 'extract', resolved.relPath);
     return { path: destRel || '.', files: written, deletedArchive };
+  }
+
+  // ── compress (download selection as archive) ───────────────────────
+
+  /**
+   * Build a .zip or .tar.gz of the selected paths (files and/or directories,
+   * recursively) and return it as a stream for download. Read-only → min role
+   * VIEWER. Works in all three modes:
+   *  - REMOTE app → a FILE_COMPRESS agent task tars the selection server-side
+   *    and ships the blob back over the transfer channel.
+   *  - DOCKER-FS  → read each file out of the container (`docker cp`), encode
+   *    on the API.
+   *  - LOCAL      → walk the host fs (symlink/managed-safe) and encode.
+   *
+   * Safety: every path is sandbox-resolved; symlinks and managed files are
+   * refused; the total bytes read are capped (anti-DoS). Encoding is pure-JS
+   * (fflate), so no system `zip`/`tar` is required.
+   */
+  async compress(
+    userId: string,
+    scope: 'app' | 'db',
+    scopeId: string,
+    paths: string[],
+    format: CompressFormat,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    if (!Array.isArray(paths) || paths.length === 0) {
+      throw new BadRequestException('No files selected');
+    }
+    if (paths.length > 1000) {
+      throw new BadRequestException('Too many items selected (max 1000).');
+    }
+    // VIEWER is enough — compression only READS. resolvePath enforces RBAC.
+    const collected: ExtractedFile[] = [];
+    let totalBytes = 0;
+    const addFile = (relInArchive: string, data: Buffer) => {
+      totalBytes += data.length;
+      if (totalBytes > MAX_COMPRESS_BYTES) {
+        throw new PayloadTooLargeException(
+          `Selection exceeds the ${MAX_COMPRESS_BYTES} byte compression limit. Use SFTP for very large transfers.`,
+        );
+      }
+      if (collected.length >= MAX_COMPRESS_ENTRIES) {
+        throw new BadRequestException(`Too many files to compress (> ${MAX_COMPRESS_ENTRIES}).`);
+      }
+      collected.push({ path: relInArchive, data });
+    };
+
+    const remote = await this.resolveRemoteFsTarget(scope, scopeId);
+    if (remote) {
+      // Validate each selected path before handing them to the agent.
+      const rels: string[] = [];
+      for (const p of paths) {
+        const r = await this.resolvePath(userId, scope, scopeId, p, 'VIEWER');
+        this.assertNotManaged(r.relPath);
+        rels.push(r.relPath);
+      }
+      // The agent builds the archive server-side and returns it base64 in the
+      // task result. Bounded by REMOTE_COMPRESS_MAX on the agent — big remote
+      // selections should use SFTP, not this path.
+      const task = await this.agent.enqueueAndWait(
+        remote.serverId,
+        'FILE_COMPRESS',
+        { slug: remote.slug, legacySlug: remote.legacySlug, paths: rels, format },
+        10 * 60_000,
+      );
+      if (task.status === 'FAILED') {
+        throw new BadRequestException(task.error || 'Remote compression failed');
+      }
+      const r: any = task.result || {};
+      if (typeof r.archive !== 'string' || !r.archive) {
+        throw new BadRequestException('Remote compression returned no archive');
+      }
+      const buffer = Buffer.from(r.archive, 'base64');
+      await this.audit(userId, scope, scopeId, 'compress', rels.join(','));
+      return { buffer, filename: this.compressFilename(scope, scopeId, format) };
+    }
+
+    // ── DOCKER-FS ──
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        for (const p of paths) {
+          const r = await this.resolvePath(userId, scope, scopeId, p, 'VIEWER');
+          this.assertNotManaged(r.relPath);
+          await this.collectDockerEntries(target, r.relPath, addFile);
+        }
+        const buffer = encodeArchive(format, collected);
+        await this.audit(userId, scope, scopeId, 'compress', paths.join(','));
+        return { buffer, filename: this.compressFilename(scope, scopeId, format) };
+      }
+    }
+
+    // ── LOCAL ──
+    for (const p of paths) {
+      const r = await this.resolvePath(userId, scope, scopeId, p, 'VIEWER');
+      this.assertNotManaged(r.relPath);
+      this.collectLocalEntries(r.rootDir, r.absPath, r.relPath, addFile);
+    }
+    const buffer = encodeArchive(format, collected);
+    await this.audit(userId, scope, scopeId, 'compress', paths.join(','));
+    return { buffer, filename: this.compressFilename(scope, scopeId, format) };
+  }
+
+  /** Filename for a compressed download: <scopeId>-<date>.<ext>. */
+  private compressFilename(scope: string, scopeId: string, format: CompressFormat): string {
+    const ext = format === 'zip' ? 'zip' : 'tar.gz';
+    const stamp = new Date().toISOString().slice(0, 10);
+    return `archive-${stamp}.${ext}`;
+  }
+
+  /** Walk a LOCAL path (file or dir) collecting regular files; refuse symlinks. */
+  private collectLocalEntries(
+    rootDir: string,
+    absPath: string,
+    relPath: string,
+    add: (rel: string, data: Buffer) => void,
+  ): void {
+    const st = fs.lstatSync(absPath);
+    if (st.isSymbolicLink()) {
+      throw new ForbiddenException(`Refusing to compress a symlink: ${relPath}`);
+    }
+    if (st.isFile()) {
+      this.assertNoSymlinkInPath(rootDir, absPath);
+      add(relPath, fs.readFileSync(absPath));
+      return;
+    }
+    if (st.isDirectory()) {
+      for (const name of fs.readdirSync(absPath)) {
+        this.collectLocalEntries(rootDir, path.join(absPath, name), `${relPath}/${name}`, add);
+      }
+    }
+    // anything else (device/fifo) is silently skipped.
+  }
+
+  /** Walk a DOCKER-FS path (file or dir) collecting regular files. */
+  private async collectDockerEntries(
+    target: DockerFsTarget,
+    relPath: string,
+    add: (rel: string, data: Buffer) => void,
+  ): Promise<void> {
+    const st = await dockerFs.stat(target, relPath);
+    if (!st.exists) throw new NotFoundException(`Not found: ${relPath}`);
+    if (st.isFile) {
+      const tmp = path.join(TMP_DIR, `dc-comp-${crypto.randomBytes(8).toString('hex')}`);
+      try {
+        await dockerFs.copyOut(target, relPath, tmp);
+        add(relPath, await fs.promises.readFile(tmp));
+      } finally {
+        await fs.promises.unlink(tmp).catch(() => {});
+      }
+      return;
+    }
+    if (st.isDir) {
+      const entries = await dockerFs.listDir(target, relPath);
+      for (const e of entries) {
+        await this.collectDockerEntries(target, `${relPath}/${e.name}`, add);
+      }
+    }
   }
 
   // ── quota ─────────────────────────────────────────────────────────
