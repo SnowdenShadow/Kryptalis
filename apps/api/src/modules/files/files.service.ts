@@ -5,6 +5,7 @@ import {
   BadRequestException,
   ForbiddenException,
   PayloadTooLargeException,
+  HttpException,
 } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -1921,6 +1922,21 @@ export class FilesService {
           await dockerFs.copyOut(target, resolved.relPath, tmpZip);
           const zipBuf = await fs.promises.readFile(tmpZip);
           const files = decodeArchive(format, zipBuf, archiveBasename, remaining);
+          // `docker cp -` requires the destination DIRECTORY to already exist —
+          // it won't create an archive entry's nested subfolders. Pre-create
+          // every unique subdir (deepest-safe: mkdir -p) ONCE before pushing
+          // files, otherwise an archive with a `foo/bar.txt` entry 500s with
+          // `destination "<container>:…/foo" must be a directory`.
+          const subDirs = new Set<string>();
+          for (const f of files) {
+            const sub = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '';
+            const fullSub = [destRel, sub].filter(Boolean).join('/');
+            if (fullSub) subDirs.add(fullSub);
+          }
+          for (const dir of subDirs) {
+            this.assertNotManaged(dir);
+            await dockerFs.mkdir(target, dir);
+          }
           for (const f of files) {
             // Per-entry managed-file guard (parity with LOCAL mode) — an archive
             // entry must not overwrite a DockControl-managed file.
@@ -1939,6 +1955,17 @@ export class FilesService {
           if (opts.deleteAfter) await dockerFs.remove(target, resolved.relPath);
           await this.audit(userId, scope, scopeId, 'extract', resolved.relPath);
           return { path: destRel || '.', files: files.length, deletedArchive: !!opts.deleteAfter };
+        } catch (e: any) {
+          // Re-throw clean HTTP errors (quota, managed-file, not-found) as-is;
+          // convert raw docker/fs failures into a clear 4xx instead of a 500.
+          if (e instanceof HttpException) throw e;
+          if (e instanceof dockerFs.ContainerNotRunningError || e instanceof dockerFs.NoShellError) {
+            throw new BadRequestException(e.message);
+          }
+          this.logger.warn(`docker-fs extract failed for ${target.containerName}: ${e?.stderr || e?.message}`);
+          throw new BadRequestException(
+            `Extraction failed inside container '${target.containerName}': ${String(e?.stderr || e?.message || 'docker error').slice(0, 300)}`,
+          );
         } finally {
           await fs.promises.unlink(tmpZip).catch(() => {});
         }
