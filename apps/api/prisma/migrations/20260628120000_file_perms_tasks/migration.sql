@@ -3,3 +3,4 @@
 -- `IF NOT EXISTS` makes the migration idempotent / safe to re-run.
 ALTER TYPE "TaskType" ADD VALUE IF NOT EXISTS 'FILE_CHMOD';
 ALTER TYPE "TaskType" ADD VALUE IF NOT EXISTS 'FILE_CHOWN';
+ALTER TYPE "TaskType" ADD VALUE IF NOT EXISTS 'FILE_FIXPERMS';

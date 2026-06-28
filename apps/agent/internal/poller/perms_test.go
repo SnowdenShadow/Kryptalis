@@ -114,3 +114,55 @@ func TestRunFileChown_RejectsTraversal(t *testing.T) {
 		t.Fatalf("expected traversal rejection, got %q", errStr)
 	}
 }
+
+func TestRunFileFixPerms_AppliesAndSkipsManaged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod bits are not meaningful on Windows")
+	}
+	root, appDir := setupAppDir(t, "app6")
+	// A secret file at the app root, hardened to 0600.
+	if err := os.WriteFile(filepath.Join(appDir, ".dockcontrol.env"), []byte("S=1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := appsBaseDir
+	appsBaseDir = root
+	defer func() { appsBaseDir = old }()
+
+	p := &Poller{}
+	// Empty path = whole app root (fix-perms allows the root, unlike chmod).
+	res, errStr := p.runFileFixPerms(Task{Payload: map[string]interface{}{
+		"slug": "app6", "path": "", "dirMode": float64(0o775), "fileMode": float64(0o664),
+	}})
+	if errStr != "" {
+		t.Fatalf("fixperms: %s", errStr)
+	}
+	// a regular file → 0664
+	if fi, _ := os.Stat(filepath.Join(appDir, "var", "f.txt")); fi.Mode().Perm() != 0o664 {
+		t.Fatalf("file mode = %o, want 664", fi.Mode().Perm())
+	}
+	// a directory → 0775
+	if fi, _ := os.Stat(filepath.Join(appDir, "var")); fi.Mode().Perm() != 0o775 {
+		t.Fatalf("dir mode = %o, want 775", fi.Mode().Perm())
+	}
+	// the managed secret stays 0600 — NEVER downgraded
+	if fi, _ := os.Stat(filepath.Join(appDir, ".dockcontrol.env")); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("SECRET LEAK: .dockcontrol.env = %o, want 600", fi.Mode().Perm())
+	}
+	if res["files"].(int) < 1 || res["dirs"].(int) < 1 {
+		t.Fatalf("unexpected counts: %+v", res)
+	}
+}
+
+func TestRunFileFixPerms_TraversalRejected(t *testing.T) {
+	root, _ := setupAppDir(t, "app7")
+	old := appsBaseDir
+	appsBaseDir = root
+	defer func() { appsBaseDir = old }()
+	p := &Poller{}
+	_, errStr := p.runFileFixPerms(Task{Payload: map[string]interface{}{
+		"slug": "app7", "path": "../../etc", "dirMode": float64(0o775), "fileMode": float64(0o664),
+	}})
+	if errStr == "" || !strings.Contains(errStr, "traversal") {
+		t.Fatalf("expected traversal rejection, got %q", errStr)
+	}
+}

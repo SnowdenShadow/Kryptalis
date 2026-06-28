@@ -950,3 +950,41 @@ describe('chown (local mode)', () => {
     await expect(service.chown('u1', 'app', 'app1', 'f', 'root; rm -rf /', false)).rejects.toThrow();
   });
 });
+
+describe('fixWebPermissions (local mode)', () => {
+  it('sets dirs to 775 and files to 664 recursively', async () => {
+    const { service } = makeService();
+    mkDir(`${APP_DIR}/var`);
+    mkFile(`${APP_DIR}/var/cache.txt`, '1');
+    mkFile(`${APP_DIR}/index.php`, '<?php');
+    const res = await service.fixWebPermissions('u1', 'app', 'app1', '');
+    expect(res.dirs).toBeGreaterThan(0);
+    expect(res.files).toBe(2);
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/var`)) as any).mode).toBe(0o775);
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/var/cache.txt`)) as any).mode).toBe(0o664);
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/index.php`)) as any).mode).toBe(0o664);
+  });
+
+  it('fixes only the given subdirectory', async () => {
+    const { service } = makeService();
+    mkDir(`${APP_DIR}/app`);
+    mkFile(`${APP_DIR}/app/x.php`, 'x');
+    mkFile(`${APP_DIR}/outside.txt`, 'y');
+    await service.fixWebPermissions('u1', 'app', 'app1', 'app');
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/app/x.php`)) as any).mode).toBe(0o664);
+    // a file outside the target subdir is untouched (stays 0644 from mkFile)
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/outside.txt`)) as any).mode).toBe(0o644);
+  });
+
+  it('NEVER downgrades a managed secret file (.dockcontrol.env)', async () => {
+    const { service } = makeService();
+    // Stage a secret at a hardened 0600 inside the walked tree.
+    mkFile(`${APP_DIR}/.dockcontrol.env`, 'DB_PASSWORD=hunter2');
+    (vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/.dockcontrol.env`)) as any).mode = 0o600;
+    mkFile(`${APP_DIR}/index.php`, '<?php');
+    await service.fixWebPermissions('u1', 'app', 'app1', '');
+    // index.php fixed, but the secret stays 0600 (not 0664 = group/world readable)
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/index.php`)) as any).mode).toBe(0o664);
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/.dockcontrol.env`)) as any).mode).toBe(0o600);
+  });
+});

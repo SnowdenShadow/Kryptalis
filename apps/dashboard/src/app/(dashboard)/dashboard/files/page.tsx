@@ -409,11 +409,14 @@ export default function FilesPage() {
     onError: (err: Error) => toast.error(err.message),
   });
 
-  const fixPrestaMutation = useMutation({
+  const fixPermsMutation = useMutation({
     mutationFn: () =>
-      api.post<{ fixed: string[]; skipped: string[] }>(`/files/${selected!.scope}/${selected!.id}/fix-permissions`, { preset: 'prestashop' }),
+      // Fix the CURRENT directory recursively (dirs→775, files→664). Empty path
+      // = the whole app root.
+      api.post<{ dirs: number; files: number }>(`/files/${selected!.scope}/${selected!.id}/fix-permissions`, { path: currentPath }),
     onSuccess: (res) => {
-      toast.success(t('files.toastFixedPresta', { n: res?.fixed?.length ?? 0 }));
+      const n = (res?.dirs ?? 0) + (res?.files ?? 0);
+      toast.success(n >= 0 ? t('files.toastFixedPerms', { n }) : t('files.toastFixedPermsDone'));
       refetchListing();
     },
     onError: (err: Error) => toast.error(err.message),
@@ -718,12 +721,12 @@ export default function FilesPage() {
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={fixPrestaMutation.isPending}
-                        onClick={() => fixPrestaMutation.mutate()}
-                        title={t('files.fixPrestaHint')}
+                        disabled={fixPermsMutation.isPending}
+                        onClick={() => fixPermsMutation.mutate()}
+                        title={t('files.fixPermsHint')}
                       >
-                        {fixPrestaMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
-                        {' '}{t('files.fixPresta')}
+                        {fixPermsMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
+                        {' '}{t('files.fixPerms')}
                       </Button>
                       <Button size="sm" onClick={() => uploadInputRef.current?.click()}>
                         <Upload size={12} /> {t('files.upload')}

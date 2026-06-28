@@ -387,6 +387,33 @@ export async function chmod(
  * whitespace, so it is safe as a single unquoted argv-equivalent. We still wrap
  * the PATH in single quotes (joinAndValidate already rejects `'`).
  */
+/**
+ * Apply the web-app permission preset inside the container: every directory
+ * under `relPath` → dirMode, every regular file → fileMode. Uses `find -type`
+ * so dirs and files get different modes in one pass. `-P` (don't follow
+ * symlinks) keeps it from chmod-ing a symlink's target outside the tree.
+ */
+export async function fixWebPerms(
+  target: DockerFsTarget,
+  relPath: string,
+  dirMode: number,
+  fileMode: number,
+): Promise<void> {
+  const abs = joinAndValidate(target.rootDir, relPath);
+  const d = (dirMode & 0o777).toString(8).padStart(3, '0');
+  const f = (fileMode & 0o777).toString(8).padStart(3, '0');
+  // -P: never traverse symlinks. Two passes (dirs then files) so each gets its
+  // own mode. `find` is in busybox + coreutils. The `-name … -prune -o` prefix
+  // EXCLUDES managed secret files (.dockcontrol.env / override) so we never make
+  // them group-readable — parity with the host-fs/agent walkers.
+  const prune = `-name .dockcontrol.env -prune -o -name docker-compose.override.yml -prune -o`;
+  await dockerSh(
+    target.containerName,
+    `find -P '${abs}' ${prune} -type d -exec chmod ${d} {} + ; ` +
+      `find -P '${abs}' ${prune} -type f -exec chmod ${f} {} +`,
+  );
+}
+
 export async function chown(
   target: DockerFsTarget,
   relPath: string,

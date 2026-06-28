@@ -23,7 +23,6 @@ import {
   type ExtractedFile,
 } from './zip-extract';
 import { parseChmodMode, parseChownOwner } from './perms-util';
-import { PRESTASHOP_WRITABLE_DIRS, PRESTASHOP_OWNER } from './prestashop-perms';
 import { AgentService } from '../agent/agent.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { remoteAppSlug, slugify as appSlugify } from '../applications/applications.helpers';
@@ -144,6 +143,11 @@ const MAX_COMPRESS_BYTES = 500 * 1024 * 1024; // 500MB total uncompressed read
 const MAX_COMPRESS_ENTRIES = 20_000;
 // Cap entries touched by a recursive chmod/chown (anti-DoS on huge trees).
 const MAX_PERMS_ENTRIES = 100_000;
+// Standard "web app" permission preset (the Fix-permissions button): dirs are
+// group-writable + traversable, files group-writable + readable. Unblocks
+// PrestaShop/WordPress/Laravel without making anything world-writable.
+const WEB_DIR_MODE = 0o775;
+const WEB_FILE_MODE = 0o664;
 
 // Quota walk caps — guard against pathological trees (symlink loops the
 // O_NOFOLLOW guard didn't catch, runaway node_modules nesting, etc.).
@@ -1626,46 +1630,99 @@ export class FilesService {
   }
 
   /**
-   * Apply the PrestaShop writable-dir preset: chmod the var/config/img/… tree
-   * group-writable so PrestaShop can install/run. In container/remote modes we
-   * also chown them to www-data. Idempotent; absent dirs are skipped. Returns
-   * the list of directories that were fixed.
+   * Apply the standard "web app" permission preset to a directory tree:
+   * directories → 0775, files → 0664 (group-writable, world-readable). This is
+   * the de-facto layout that unblocks PrestaShop, WordPress, Laravel, etc. —
+   * the web-server user (in its group) can write, nothing is world-writable.
+   *
+   * Applied to `relPath` RECURSIVELY (default: the whole app dir). Optionally
+   * chowns to www-data in container/remote modes (best-effort; LOCAL skips).
+   * Min role DEVELOPER. Works in all 3 modes. Returns how many entries changed.
    */
-  async fixPrestashopPermissions(
+  async fixWebPermissions(
     userId: string,
     scope: 'app' | 'db',
     scopeId: string,
-  ): Promise<{ fixed: string[]; skipped: string[] }> {
-    const fixed: string[] = [];
-    const skipped: string[] = [];
-    for (const dir of PRESTASHOP_WRITABLE_DIRS) {
-      try {
-        // chmod recursive 775 — covers both the dir and its files group-writable
-        // enough for PrestaShop (it's stricter about dirs than files).
-        await this.chmod(userId, scope, scopeId, dir, 0o775, true);
-        // chown to www-data in container/remote modes. On the LOCAL host this
-        // throws (name chown is numeric-only) — that's EXPECTED, so we swallow
-        // only that specific BadRequestException and let any OTHER chown failure
-        // (e.g. permission denied in-container) surface. The chmod already
-        // unblocks PrestaShop; the chown is a best-effort bonus.
-        try {
-          await this.chown(userId, scope, scopeId, dir, PRESTASHOP_OWNER, true);
-        } catch (e) {
-          if (!(e instanceof BadRequestException)) throw e;
+    relPath = '',
+    owner?: string,
+  ): Promise<{ path: string; dirs: number; files: number; owner: string | null }> {
+    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
+    this.assertNotManaged(resolved.relPath);
+
+    // ── REMOTE: a single FILE_FIXPERMS agent task. ──
+    const remote = await this.resolveRemoteFsTarget(scope, scopeId);
+    if (remote) {
+      const task = await this.agent.enqueueAndWait(
+        remote.serverId,
+        'FILE_FIXPERMS',
+        {
+          slug: remote.slug,
+          legacySlug: remote.legacySlug,
+          path: resolved.relPath,
+          dirMode: WEB_DIR_MODE,
+          fileMode: WEB_FILE_MODE,
+          owner: owner || null,
+        },
+        5 * 60_000,
+      );
+      if (task.status === 'FAILED') {
+        if ((task.error || '').includes('not found')) throw new NotFoundException('Path not found');
+        throw new BadRequestException(task.error || 'Remote fix-permissions failed');
+      }
+      const r: any = task.result || {};
+      await this.audit(userId, scope, scopeId, 'fix-permissions', resolved.relPath || '.');
+      return { path: resolved.relPath || '.', dirs: r.dirs ?? 0, files: r.files ?? 0, owner: owner || null };
+    }
+
+    // ── DOCKER-FS: walk inside the container. ──
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        const s = await dockerFs.stat(target, resolved.relPath);
+        if (!s.exists) throw new NotFoundException('Path not found');
+        await dockerFs.fixWebPerms(target, resolved.relPath, WEB_DIR_MODE, WEB_FILE_MODE);
+        if (owner) {
+          try {
+            await dockerFs.chown(target, resolved.relPath, owner, true);
+          } catch { /* best-effort */ }
         }
-        fixed.push(dir);
-      } catch (e) {
-        // A missing directory (NotFound) is normal — not every install has all
-        // of them. Anything else (Forbidden/BadRequest) bubbles up.
-        if (e instanceof NotFoundException) {
-          skipped.push(dir);
-          continue;
-        }
-        throw e;
+        await this.audit(userId, scope, scopeId, 'fix-permissions', resolved.relPath || '.');
+        return { path: resolved.relPath || '.', dirs: -1, files: -1, owner: owner || null };
       }
     }
-    await this.audit(userId, scope, scopeId, 'fix-permissions', `prestashop (${fixed.length} dirs)`);
-    return { fixed, skipped };
+
+    // ── LOCAL host fs. ──
+    if (!fs.existsSync(resolved.absPath)) throw new NotFoundException('Path not found');
+    this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
+    const counts = { dirs: 0, files: 0 };
+    this.fixWebPermsLocal(resolved.absPath, counts);
+    await this.audit(userId, scope, scopeId, 'fix-permissions', resolved.relPath || '.');
+    return { path: resolved.relPath || '.', dirs: counts.dirs, files: counts.files, owner: null };
+  }
+
+  /** LOCAL recursive web-perms walk: dirs→775, files→664; skips symlinks. */
+  private fixWebPermsLocal(absPath: string, counts: { dirs: number; files: number }): void {
+    // NEVER touch a managed file (.dockcontrol.env holds secrets at 0600;
+    // docker-compose.override.yml). 664 would make them group/world-readable.
+    // assertNotManaged only guards the TOP path, so we must re-check each child.
+    if (this.isManaged(path.basename(absPath))) return;
+    const st = fs.lstatSync(absPath);
+    if (st.isSymbolicLink()) return; // never touch symlinks
+    if (st.isDirectory()) {
+      fs.chmodSync(absPath, WEB_DIR_MODE);
+      counts.dirs++;
+      for (const name of fs.readdirSync(absPath)) {
+        if (counts.dirs + counts.files > MAX_PERMS_ENTRIES) {
+          throw new BadRequestException(
+            `Too many entries to fix (> ${MAX_PERMS_ENTRIES}). Fix a subfolder instead.`,
+          );
+        }
+        this.fixWebPermsLocal(path.join(absPath, name), counts);
+      }
+    } else if (st.isFile()) {
+      fs.chmodSync(absPath, WEB_FILE_MODE);
+      counts.files++;
+    }
   }
 
   // ── extract (.zip) ─────────────────────────────────────────────────

@@ -175,14 +175,14 @@ export class FilesController {
   }
 
   @Post(':scope/:scopeId/fix-permissions')
-  @ApiOperation({ summary: 'Apply a permission preset (e.g. PrestaShop writable dirs)' })
+  @ApiOperation({ summary: 'Fix permissions of a directory tree (dirs→775, files→664)' })
   fixPermissions(
     @CurrentUser('id') userId: string,
     @Param('scope') scope: string,
     @Param('scopeId') scopeId: string,
-    @Body() _dto: FixPermissionsDto,
+    @Body() dto: FixPermissionsDto,
   ) {
-    return this.svc.fixPrestashopPermissions(userId, parseScope(scope), scopeId);
+    return this.svc.fixWebPermissions(userId, parseScope(scope), scopeId, dto.path ?? '', dto.owner);
   }
 
   @Delete(':scope/:scopeId/entry')

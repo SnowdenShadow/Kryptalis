@@ -85,6 +85,7 @@ var taskTimeouts = map[string]time.Duration{
 	"FILE_COMPRESS": 10 * time.Minute, // archive many files
 	"FILE_CHMOD":    5 * time.Minute,  // recursive chmod can touch many files
 	"FILE_CHOWN":    5 * time.Minute,
+	"FILE_FIXPERMS": 5 * time.Minute,
 	// Data-transfer tasks move whole volumes / database dumps over the
 	// network — generous deadlines by design.
 	"VOLUME_LIST":   1 * time.Minute,
@@ -252,6 +253,8 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.runFileChmod(task)
 	case "FILE_CHOWN":
 		result, taskErr = p.runFileChown(task)
+	case "FILE_FIXPERMS":
+		result, taskErr = p.runFileFixPerms(task)
 	case "DISK_USAGE":
 		result, taskErr = p.runDiskUsage(task)
 	case "SFTP_SYNC":
@@ -1019,6 +1022,72 @@ func (p *Poller) runFileChown(task Task) (map[string]interface{}, string) {
 		}
 	}
 	return map[string]interface{}{"entries": count + 1}, ""
+}
+
+// runFileFixPerms applies the web-app preset recursively: dirs→dirMode,
+// files→fileMode. Payload: { slug, path, dirMode, fileMode }. Skips symlinks;
+// bounded. (chown, when requested, is a separate FILE_CHOWN task.)
+func (p *Poller) runFileFixPerms(task Task) (map[string]interface{}, string) {
+	dirF, _ := task.Payload["dirMode"].(float64)
+	fileF, _ := task.Payload["fileMode"].(float64)
+	dirMode := os.FileMode(int(dirF) & 0o777)
+	fileMode := os.FileMode(int(fileF) & 0o777)
+	// Unlike chmod/chown, fix-perms legitimately targets the whole app root, so
+	// an empty path ("." / "") is allowed here — but traversal is still rejected.
+	dir, errStr := resolveTaskDir(task.Payload)
+	if errStr != "" {
+		return nil, errStr
+	}
+	rel, _ := task.Payload["path"].(string)
+	safe := filepath.Clean(rel)
+	if safe == "" || safe == "." || safe == "/" {
+		safe = "."
+	} else if strings.Contains(safe, "..") || filepath.IsAbs(safe) {
+		return nil, "path traversal rejected"
+	}
+	full := filepath.Join(dir, safe)
+	if _, err := os.Lstat(full); err != nil {
+		if os.IsNotExist(err) {
+			return nil, "path not found"
+		}
+		return nil, err.Error()
+	}
+	dirs, files := 0, 0
+	werr := filepath.WalkDir(full, func(p string, d os.DirEntry, e error) error {
+		if e != nil {
+			return e
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil // never chmod through a symlink
+		}
+		// Never touch a managed file (.dockcontrol.env secrets / override) —
+		// 664 would expose them. Parity with the API's fixWebPermsLocal.
+		if managedFiles[strings.ToLower(d.Name())] {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if dirs+files > maxPermsEntries {
+			return fmt.Errorf("too many entries to fix")
+		}
+		if d.IsDir() {
+			dirs++
+			return os.Chmod(p, dirMode)
+		}
+		if d.Type().IsRegular() {
+			files++
+			return os.Chmod(p, fileMode)
+		}
+		return nil
+	})
+	if werr != nil {
+		return nil, werr.Error()
+	}
+	return map[string]interface{}{"dirs": dirs, "files": files}, ""
 }
 
 // resolveOwner parses "user[:group]" or "uid[:gid]" to numeric ids. Names are
