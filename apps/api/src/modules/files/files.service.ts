@@ -22,6 +22,8 @@ import {
   type CompressFormat,
   type ExtractedFile,
 } from './zip-extract';
+import { parseChmodMode, parseChownOwner } from './perms-util';
+import { PRESTASHOP_WRITABLE_DIRS, PRESTASHOP_OWNER } from './prestashop-perms';
 import { AgentService } from '../agent/agent.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { remoteAppSlug, slugify as appSlugify } from '../applications/applications.helpers';
@@ -140,6 +142,8 @@ const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // 50MB
 // bound how much we read (anti-DoS). Big transfers should use SFTP/backup.
 const MAX_COMPRESS_BYTES = 500 * 1024 * 1024; // 500MB total uncompressed read
 const MAX_COMPRESS_ENTRIES = 20_000;
+// Cap entries touched by a recursive chmod/chown (anti-DoS on huge trees).
+const MAX_PERMS_ENTRIES = 100_000;
 
 // Quota walk caps — guard against pathological trees (symlink loops the
 // O_NOFOLLOW guard didn't catch, runaway node_modules nesting, etc.).
@@ -1456,6 +1460,212 @@ export class FilesService {
     this.invalidateQuota(removeProjectId);
     await this.audit(userId, scope, scopeId, 'remove', resolved.relPath);
     return { path: resolved.relPath, deleted: true };
+  }
+
+  // ── permissions (chmod / chown) ────────────────────────────────────
+
+  /**
+   * chmod a file/dir. `mode` is an octal string ('755') or number; only the 9
+   * rwx bits are allowed (parseChmodMode refuses setuid/setgid/sticky). Min role
+   * DEVELOPER. Works in all 3 modes. `recursive` applies to directory trees.
+   */
+  async chmod(
+    userId: string,
+    scope: 'app' | 'db',
+    scopeId: string,
+    relPath: string,
+    modeInput: string | number,
+    recursive = false,
+  ): Promise<{ path: string; mode: string }> {
+    if (!relPath || relPath === '.') throw new BadRequestException('No path given');
+    const mode = parseChmodMode(modeInput);
+    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
+    this.assertNotManaged(resolved.relPath);
+    const octal = mode.toString(8).padStart(3, '0');
+
+    const remote = await this.resolveRemoteFsTarget(scope, scopeId);
+    if (remote) {
+      const task = await this.agent.enqueueAndWait(
+        remote.serverId,
+        'FILE_CHMOD',
+        { slug: remote.slug, legacySlug: remote.legacySlug, path: resolved.relPath, mode, recursive },
+        60_000,
+      );
+      if (task.status === 'FAILED') {
+        if ((task.error || '').includes('not found')) throw new NotFoundException('Path not found');
+        throw new BadRequestException(task.error || 'Remote chmod failed');
+      }
+      await this.audit(userId, scope, scopeId, 'chmod', `${resolved.relPath} → ${octal}`);
+      return { path: resolved.relPath, mode: octal };
+    }
+
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        const s = await dockerFs.stat(target, resolved.relPath);
+        if (!s.exists) throw new NotFoundException('Path not found');
+        await dockerFs.chmod(target, resolved.relPath, mode, recursive);
+        await this.audit(userId, scope, scopeId, 'chmod', `${resolved.relPath} → ${octal}`);
+        return { path: resolved.relPath, mode: octal };
+      }
+    }
+
+    if (!fs.existsSync(resolved.absPath)) throw new NotFoundException('Path not found');
+    this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
+    this.chmodLocal(resolved.absPath, mode, recursive);
+    await this.audit(userId, scope, scopeId, 'chmod', `${resolved.relPath} → ${octal}`);
+    return { path: resolved.relPath, mode: octal };
+  }
+
+  /** Local chmod, optionally recursive (walk skips symlinks; bounded). */
+  private chmodLocal(absPath: string, mode: number, recursive: boolean): void {
+    const st = fs.lstatSync(absPath);
+    if (st.isSymbolicLink()) throw new ForbiddenException('Refusing to chmod a symlink');
+    fs.chmodSync(absPath, mode);
+    if (recursive && st.isDirectory()) {
+      let count = 0;
+      const walk = (dir: string) => {
+        for (const name of fs.readdirSync(dir)) {
+          if (++count > MAX_PERMS_ENTRIES) {
+            throw new BadRequestException(`Too many entries for a recursive chmod (> ${MAX_PERMS_ENTRIES}).`);
+          }
+          const child = path.join(dir, name);
+          const cst = fs.lstatSync(child);
+          if (cst.isSymbolicLink()) continue; // never follow / chmod symlinks
+          fs.chmodSync(child, mode);
+          if (cst.isDirectory()) walk(child);
+        }
+      };
+      walk(absPath);
+    }
+  }
+
+  /**
+   * chown a file/dir. `owner` is "user", "user:group", or numeric "uid[:gid]"
+   * (parseChownOwner enforces a strict charset — no shell metacharacters). Names
+   * are only honored in container/remote modes (a `chown` binary resolves them);
+   * LOCAL host-fs requires NUMERIC uid:gid. Min role DEVELOPER.
+   */
+  async chown(
+    userId: string,
+    scope: 'app' | 'db',
+    scopeId: string,
+    relPath: string,
+    ownerInput: string,
+    recursive = false,
+  ): Promise<{ path: string; owner: string }> {
+    if (!relPath || relPath === '.') throw new BadRequestException('No path given');
+    const owner = parseChownOwner(ownerInput);
+    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
+    this.assertNotManaged(resolved.relPath);
+
+    const remote = await this.resolveRemoteFsTarget(scope, scopeId);
+    if (remote) {
+      const task = await this.agent.enqueueAndWait(
+        remote.serverId,
+        'FILE_CHOWN',
+        { slug: remote.slug, legacySlug: remote.legacySlug, path: resolved.relPath, owner: owner.raw, recursive },
+        60_000,
+      );
+      if (task.status === 'FAILED') {
+        if ((task.error || '').includes('not found')) throw new NotFoundException('Path not found');
+        throw new BadRequestException(task.error || 'Remote chown failed');
+      }
+      await this.audit(userId, scope, scopeId, 'chown', `${resolved.relPath} → ${owner.raw}`);
+      return { path: resolved.relPath, owner: owner.raw };
+    }
+
+    if (scope === 'app') {
+      const target = await this.resolveDockerTarget(scopeId);
+      if (target) {
+        const s = await dockerFs.stat(target, resolved.relPath);
+        if (!s.exists) throw new NotFoundException('Path not found');
+        await dockerFs.chown(target, resolved.relPath, owner.raw, recursive);
+        await this.audit(userId, scope, scopeId, 'chown', `${resolved.relPath} → ${owner.raw}`);
+        return { path: resolved.relPath, owner: owner.raw };
+      }
+    }
+
+    // LOCAL host-fs: only numeric uid:gid (name resolution on the host is
+    // fragile and out of scope). Reject names here with a clear message.
+    if (!owner.numeric || owner.uid === undefined) {
+      throw new BadRequestException(
+        'chown by name is only supported for apps running in a container; on the local host use numeric "uid:gid".',
+      );
+    }
+    if (!fs.existsSync(resolved.absPath)) throw new NotFoundException('Path not found');
+    this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
+    // When no group is given, pass -1 → "leave the group unchanged" (matches
+    // the `chown 1000` CLI), rather than forcing gid = uid.
+    this.chownLocal(resolved.absPath, owner.uid, owner.gid ?? -1, recursive);
+    await this.audit(userId, scope, scopeId, 'chown', `${resolved.relPath} → ${owner.raw}`);
+    return { path: resolved.relPath, owner: owner.raw };
+  }
+
+  /** Local chown (numeric), optionally recursive; never follows symlinks. */
+  private chownLocal(absPath: string, uid: number, gid: number, recursive: boolean): void {
+    const st = fs.lstatSync(absPath);
+    if (st.isSymbolicLink()) throw new ForbiddenException('Refusing to chown a symlink');
+    fs.chownSync(absPath, uid, gid);
+    if (recursive && st.isDirectory()) {
+      let count = 0;
+      const walk = (dir: string) => {
+        for (const name of fs.readdirSync(dir)) {
+          if (++count > MAX_PERMS_ENTRIES) {
+            throw new BadRequestException(`Too many entries for a recursive chown (> ${MAX_PERMS_ENTRIES}).`);
+          }
+          const child = path.join(dir, name);
+          const cst = fs.lstatSync(child);
+          if (cst.isSymbolicLink()) continue;
+          fs.chownSync(child, uid, gid);
+          if (cst.isDirectory()) walk(child);
+        }
+      };
+      walk(absPath);
+    }
+  }
+
+  /**
+   * Apply the PrestaShop writable-dir preset: chmod the var/config/img/… tree
+   * group-writable so PrestaShop can install/run. In container/remote modes we
+   * also chown them to www-data. Idempotent; absent dirs are skipped. Returns
+   * the list of directories that were fixed.
+   */
+  async fixPrestashopPermissions(
+    userId: string,
+    scope: 'app' | 'db',
+    scopeId: string,
+  ): Promise<{ fixed: string[]; skipped: string[] }> {
+    const fixed: string[] = [];
+    const skipped: string[] = [];
+    for (const dir of PRESTASHOP_WRITABLE_DIRS) {
+      try {
+        // chmod recursive 775 — covers both the dir and its files group-writable
+        // enough for PrestaShop (it's stricter about dirs than files).
+        await this.chmod(userId, scope, scopeId, dir, 0o775, true);
+        // chown to www-data in container/remote modes. On the LOCAL host this
+        // throws (name chown is numeric-only) — that's EXPECTED, so we swallow
+        // only that specific BadRequestException and let any OTHER chown failure
+        // (e.g. permission denied in-container) surface. The chmod already
+        // unblocks PrestaShop; the chown is a best-effort bonus.
+        try {
+          await this.chown(userId, scope, scopeId, dir, PRESTASHOP_OWNER, true);
+        } catch (e) {
+          if (!(e instanceof BadRequestException)) throw e;
+        }
+        fixed.push(dir);
+      } catch (e) {
+        // A missing directory (NotFound) is normal — not every install has all
+        // of them. Anything else (Forbidden/BadRequest) bubbles up.
+        if (e instanceof NotFoundException) {
+          skipped.push(dir);
+          continue;
+        }
+        throw e;
+      }
+    }
+    await this.audit(userId, scope, scopeId, 'fix-permissions', `prestashop (${fixed.length} dirs)`);
+    return { fixed, skipped };
   }
 
   // ── extract (.zip) ─────────────────────────────────────────────────

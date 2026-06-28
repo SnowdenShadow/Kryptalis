@@ -14,7 +14,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -81,6 +83,8 @@ var taskTimeouts = map[string]time.Duration{
 	"FILE_WRITE":    30 * time.Second,
 	"FILE_EXTRACT":  5 * time.Minute,  // unzip can touch many files
 	"FILE_COMPRESS": 10 * time.Minute, // archive many files
+	"FILE_CHMOD":    5 * time.Minute,  // recursive chmod can touch many files
+	"FILE_CHOWN":    5 * time.Minute,
 	// Data-transfer tasks move whole volumes / database dumps over the
 	// network — generous deadlines by design.
 	"VOLUME_LIST":   1 * time.Minute,
@@ -244,6 +248,10 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.runFileExtract(task)
 	case "FILE_COMPRESS":
 		result, taskErr = p.runFileCompress(task)
+	case "FILE_CHMOD":
+		result, taskErr = p.runFileChmod(task)
+	case "FILE_CHOWN":
+		result, taskErr = p.runFileChown(task)
 	case "DISK_USAGE":
 		result, taskErr = p.runDiskUsage(task)
 	case "SFTP_SYNC":
@@ -883,6 +891,191 @@ func (p *Poller) runFileDelete(task Task) (map[string]interface{}, string) {
 		return nil, err.Error()
 	}
 	return map[string]interface{}{"deleted": true}, ""
+}
+
+const maxPermsEntries = 100000
+
+// resolveFilePathArg validates the `path` payload field against the app dir,
+// rejecting traversal/absolute/root — shared by chmod/chown.
+func resolveFilePathArg(payload map[string]interface{}) (full string, errStr string) {
+	rel, _ := payload["path"].(string)
+	dir, e := resolveTaskDir(payload)
+	if e != "" || rel == "" {
+		return "", "missing slug or path"
+	}
+	safe := filepath.Clean(rel)
+	if safe == "." || safe == "/" || strings.HasPrefix(safe, "..") || strings.Contains(safe, "..") || filepath.IsAbs(safe) {
+		return "", "path traversal rejected"
+	}
+	full = filepath.Join(dir, safe)
+	if _, err := os.Lstat(full); err != nil {
+		if os.IsNotExist(err) {
+			return "", "path not found"
+		}
+		return "", err.Error()
+	}
+	return full, ""
+}
+
+// runFileChmod chmods a path inside the app dir. Payload: { slug, path, mode
+// (number 0-0o777), recursive }. Refuses setuid/setgid/sticky; never follows
+// symlinks; recursion is bounded.
+func (p *Poller) runFileChmod(task Task) (map[string]interface{}, string) {
+	modeF, _ := task.Payload["mode"].(float64) // JSON numbers arrive as float64
+	recursive, _ := task.Payload["recursive"].(bool)
+	mode := os.FileMode(int(modeF))
+	if int(modeF) < 0 || (int(modeF)&^0o777) != 0 {
+		return nil, "mode must be within 0000-0777 (setuid/setgid/sticky not allowed)"
+	}
+	full, errStr := resolveFilePathArg(task.Payload)
+	if errStr != "" {
+		return nil, errStr
+	}
+	st, err := os.Lstat(full)
+	if err != nil {
+		return nil, err.Error()
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		return nil, "refusing to chmod a symlink"
+	}
+	if err := os.Chmod(full, mode); err != nil {
+		return nil, err.Error()
+	}
+	count := 0
+	if recursive && st.IsDir() {
+		werr := filepath.WalkDir(full, func(p string, d os.DirEntry, e error) error {
+			if e != nil {
+				return e
+			}
+			if p == full {
+				return nil
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil // never chmod through a symlink
+			}
+			count++
+			if count > maxPermsEntries {
+				return fmt.Errorf("too many entries for recursive chmod")
+			}
+			return os.Chmod(p, mode)
+		})
+		if werr != nil {
+			return nil, werr.Error()
+		}
+	}
+	return map[string]interface{}{"entries": count + 1}, ""
+}
+
+// runFileChown chowns a path inside the app dir. Payload: { slug, path, owner
+// ("user[:group]" | "uid[:gid]"), recursive }. Resolves names via the agent's
+// /etc/passwd; never follows symlinks (Lchown); recursion is bounded.
+func (p *Poller) runFileChown(task Task) (map[string]interface{}, string) {
+	owner, _ := task.Payload["owner"].(string)
+	recursive, _ := task.Payload["recursive"].(bool)
+	uid, gid, errStr := resolveOwner(owner)
+	if errStr != "" {
+		return nil, errStr
+	}
+	full, errStr := resolveFilePathArg(task.Payload)
+	if errStr != "" {
+		return nil, errStr
+	}
+	st, err := os.Lstat(full)
+	if err != nil {
+		return nil, err.Error()
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		return nil, "refusing to chown a symlink"
+	}
+	if err := os.Lchown(full, uid, gid); err != nil {
+		return nil, err.Error()
+	}
+	count := 0
+	if recursive && st.IsDir() {
+		werr := filepath.WalkDir(full, func(p string, d os.DirEntry, e error) error {
+			if e != nil {
+				return e
+			}
+			if p == full {
+				return nil
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			count++
+			if count > maxPermsEntries {
+				return fmt.Errorf("too many entries for recursive chown")
+			}
+			return os.Lchown(p, uid, gid)
+		})
+		if werr != nil {
+			return nil, werr.Error()
+		}
+	}
+	return map[string]interface{}{"entries": count + 1}, ""
+}
+
+// resolveOwner parses "user[:group]" or "uid[:gid]" to numeric ids. Names are
+// resolved against the agent's account db. Strict: any lookup failure errors.
+func resolveOwner(owner string) (uid, gid int, errStr string) {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return 0, 0, "owner is required"
+	}
+	parts := strings.SplitN(owner, ":", 2)
+	u, err := resolveUID(parts[0])
+	if err != "" {
+		return 0, 0, err
+	}
+	// Default gid = -1 ("leave the group unchanged", honored by os.Lchown),
+	// NOT the uid — matches `chown <user>` CLI semantics. We only set a group
+	// when one is given OR the user's primary gid is resolvable by name.
+	g := -1
+	if len(parts) == 2 && parts[1] != "" {
+		gg, gerr := resolveGID(parts[1])
+		if gerr != "" {
+			return 0, 0, gerr
+		}
+		g = gg
+	} else {
+		// no group given: use the user's primary gid when resolvable by name.
+		if usr, e := user.Lookup(parts[0]); e == nil {
+			if pg, e2 := strconv.Atoi(usr.Gid); e2 == nil {
+				g = pg
+			}
+		}
+	}
+	return u, g, ""
+}
+
+func resolveUID(s string) (int, string) {
+	if n, err := strconv.Atoi(s); err == nil {
+		return n, ""
+	}
+	usr, err := user.Lookup(s)
+	if err != nil {
+		return 0, "unknown user: " + s
+	}
+	n, _ := strconv.Atoi(usr.Uid)
+	return n, ""
+}
+
+func resolveGID(s string) (int, string) {
+	if n, err := strconv.Atoi(s); err == nil {
+		return n, ""
+	}
+	grp, err := user.LookupGroup(s)
+	if err != nil {
+		return 0, "unknown group: " + s
+	}
+	n, _ := strconv.Atoi(grp.Gid)
+	return n, ""
 }
 
 // runSftpSync replaces the embedded SFTP server's full account set with

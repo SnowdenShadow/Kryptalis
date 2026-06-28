@@ -32,6 +32,8 @@ import {
   AlertTriangle,
   Pencil,
   ArrowUpDown,
+  Lock,
+  ShieldCheck,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -196,6 +198,11 @@ export default function FilesPage() {
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
   const [extractTarget, setExtractTarget] = useState<FileEntry | null>(null);
   const [extractDeleteAfter, setExtractDeleteAfter] = useState(false);
+  // Permissions modal state.
+  const [permsTarget, setPermsTarget] = useState<FileEntry | null>(null);
+  const [permsMode, setPermsMode] = useState('755');
+  const [permsOwner, setPermsOwner] = useState('');
+  const [permsRecursive, setPermsRecursive] = useState(false);
   const [search, setSearch] = useState('');
   const uploadInputRef = useRef<HTMLInputElement>(null);
 
@@ -381,6 +388,33 @@ export default function FilesPage() {
       setExtractDeleteAfter(false);
       refetchListing();
       refetchUsage();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  // chmod + chown applied together from the Permissions modal (chown only when
+  // an owner is filled in).
+  const permsMutation = useMutation({
+    mutationFn: async ({ path, mode, owner, recursive }: { path: string; mode: string; owner: string; recursive: boolean }) => {
+      await api.patch(`/files/${selected!.scope}/${selected!.id}/chmod`, { path, mode, recursive });
+      if (owner.trim()) {
+        await api.patch(`/files/${selected!.scope}/${selected!.id}/chown`, { path, owner: owner.trim(), recursive });
+      }
+    },
+    onSuccess: () => {
+      toast.success(t('files.toastPerms'));
+      setPermsTarget(null);
+      refetchListing();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const fixPrestaMutation = useMutation({
+    mutationFn: () =>
+      api.post<{ fixed: string[]; skipped: string[] }>(`/files/${selected!.scope}/${selected!.id}/fix-permissions`, { preset: 'prestashop' }),
+    onSuccess: (res) => {
+      toast.success(t('files.toastFixedPresta', { n: res?.fixed?.length ?? 0 }));
+      refetchListing();
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -681,6 +715,16 @@ export default function FilesPage() {
                       <Button size="sm" variant="outline" onClick={() => setNewFolderOpen(true)}>
                         <FolderPlus size={12} /> {t('files.newFolder')}
                       </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={fixPrestaMutation.isPending}
+                        onClick={() => fixPrestaMutation.mutate()}
+                        title={t('files.fixPrestaHint')}
+                      >
+                        {fixPrestaMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
+                        {' '}{t('files.fixPresta')}
+                      </Button>
                       <Button size="sm" onClick={() => uploadInputRef.current?.click()}>
                         <Upload size={12} /> {t('files.upload')}
                       </Button>
@@ -940,6 +984,17 @@ export default function FilesPage() {
                                       <FileArchive size={13} />
                                     </Button>
                                   )}
+                                  {canEdit && e.type !== 'symlink' && (
+                                    <Button size="icon" variant="ghost" className="h-7 w-7" title={t('files.actionPerms')}
+                                      onClick={() => {
+                                        setPermsTarget(e);
+                                        setPermsMode(e.permissions || '755');
+                                        setPermsOwner('');
+                                        setPermsRecursive(false);
+                                      }}>
+                                      <Lock size={13} />
+                                    </Button>
+                                  )}
                                   {canEdit && (
                                     <Button size="icon" variant="ghost" className="h-7 w-7" title={t('files.actionRename')}
                                       onClick={() => { setRenameTarget(e); setRenameValue(e.name); }}>
@@ -1057,6 +1112,67 @@ export default function FilesPage() {
             onClick={() => extractTarget && extractMutation.mutate({ path: extractTarget.path, deleteAfter: extractDeleteAfter })}
           >
             {extractMutation.isPending ? t('files.dlgExtracting') : t('files.dlgExtract')}
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      {/* ── permissions (chmod/chown) dialog ── */}
+      <Dialog open={!!permsTarget} onClose={() => setPermsTarget(null)}>
+        <DialogHeader>
+          <DialogTitle>{t('files.dlgPermsTitle', { name: permsTarget?.name || '' })}</DialogTitle>
+          <DialogDescription>{t('files.dlgPermsDesc')}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3 px-1 py-2">
+          <div>
+            <label className="text-xs text-muted-foreground">{t('files.mode')}</label>
+            <div className="flex items-center gap-2 mt-1">
+              {['755', '775', '777', '644', '664'].map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setPermsMode(m)}
+                  className={cn(
+                    'px-2 py-1 rounded text-xs font-mono border',
+                    permsMode === m ? 'bg-primary text-primary-foreground border-primary' : 'border-input hover:bg-muted',
+                  )}
+                >{m}</button>
+              ))}
+              <input
+                value={permsMode}
+                onChange={(e) => setPermsMode(e.target.value.replace(/[^0-7]/g, '').slice(0, 4))}
+                className="w-20 px-2 py-1 rounded border border-input bg-background text-xs font-mono"
+                placeholder="755"
+              />
+            </div>
+          </div>
+          <div>
+            <label className="text-xs text-muted-foreground">{t('files.owner')} <span className="opacity-60">({t('common.optional')})</span></label>
+            <input
+              value={permsOwner}
+              onChange={(e) => setPermsOwner(e.target.value)}
+              className="w-full mt-1 px-2 py-1.5 rounded border border-input bg-background text-sm font-mono"
+              placeholder="www-data:www-data"
+            />
+          </div>
+          {permsTarget?.type === 'directory' && (
+            <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={permsRecursive}
+                onChange={(e) => setPermsRecursive(e.target.checked)}
+                className="h-4 w-4 rounded border-input"
+              />
+              {t('files.recursive')}
+            </label>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setPermsTarget(null)}>{t('common.cancel')}</Button>
+          <Button
+            disabled={permsMutation.isPending || !/^[0-7]{3,4}$/.test(permsMode)}
+            onClick={() => permsTarget && permsMutation.mutate({ path: permsTarget.path, mode: permsMode, owner: permsOwner, recursive: permsRecursive })}
+          >
+            {permsMutation.isPending ? t('common.saving') : t('common.apply')}
           </Button>
         </DialogFooter>
       </Dialog>

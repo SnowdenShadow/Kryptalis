@@ -358,6 +358,56 @@ export async function rename(target: DockerFsTarget, fromRel: string, toRel: str
 }
 
 /**
+ * chmod a path inside the container. `mode` is an integer in [0, 0o777]
+ * (validated by the caller via parseChmodMode) — rendered as a 3-digit octal so
+ * no shell metacharacter can appear. `recursive` adds -R for directories.
+ */
+export async function chmod(
+  target: DockerFsTarget,
+  relPath: string,
+  mode: number,
+  recursive: boolean,
+): Promise<void> {
+  const abs = joinAndValidate(target.rootDir, relPath);
+  const octal = (mode & 0o777).toString(8).padStart(3, '0'); // e.g. "755"
+  const flag = recursive ? '-R ' : '';
+  // Refuse a symlink TARGET so chmod can't be pointed (via an in-container
+  // symlink) at a file outside the browse root — parity with the host-fs and
+  // agent paths which lstat-refuse symlinks. `-h`-style no-deref isn't portable
+  // across busybox/coreutils, so we guard with a `test -L` precheck instead.
+  await dockerSh(
+    target.containerName,
+    `if [ -L '${abs}' ]; then echo "refusing to chmod a symlink" >&2; exit 9; fi; chmod ${flag}${octal} '${abs}'`,
+  );
+}
+
+/**
+ * chown a path inside the container. `owner` is the pre-validated user[:group]
+ * token (parseChownOwner) — it cannot contain shell metacharacters or
+ * whitespace, so it is safe as a single unquoted argv-equivalent. We still wrap
+ * the PATH in single quotes (joinAndValidate already rejects `'`).
+ */
+export async function chown(
+  target: DockerFsTarget,
+  relPath: string,
+  owner: string,
+  recursive: boolean,
+): Promise<void> {
+  const abs = joinAndValidate(target.rootDir, relPath);
+  const flag = recursive ? '-R ' : '';
+  // `owner` is validated to [a-z0-9_:-]/digits only (parseChownOwner), so it
+  // carries no shell metacharacters — but we single-quote it anyway so the
+  // no-injection guarantee is LOCAL to this line and survives any future
+  // loosening of the regex (defense-in-depth). Also refuse a symlink target,
+  // matching chmod above and the host-fs/agent paths. `chown` defaults to NOT
+  // dereferencing the top-level symlink, but we refuse it outright for parity.
+  await dockerSh(
+    target.containerName,
+    `if [ -L '${abs}' ]; then echo "refusing to chown a symlink" >&2; exit 9; fi; chown ${flag}'${owner}' '${abs}'`,
+  );
+}
+
+/**
  * Upload a file via `docker cp` — STDIN tar stream is the cheapest way
  * to push arbitrary bytes without buffering them in process memory.
  * We tar a single entry on the fly: the ustar header needs the payload

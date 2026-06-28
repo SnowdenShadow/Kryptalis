@@ -27,6 +27,8 @@ vi.mock('fs', async () => {
     content?: Buffer;
     target?: string;
     mode: number;
+    uid?: number;
+    gid?: number;
     mtime: Date;
   };
   const nodes = new Map<string, Node>();
@@ -191,6 +193,12 @@ vi.mock('fs', async () => {
       const n = nodes.get(resolveKey(keyOf(p), false));
       if (!n) throw err('ENOENT', String(p));
       n.mode = mode;
+    },
+    chownSync: (p: any, uid: number, gid: number) => {
+      const n = nodes.get(resolveKey(keyOf(p), false));
+      if (!n) throw err('ENOENT', String(p));
+      n.uid = uid;
+      n.gid = gid;
     },
     writeFileSync: (p: any, c: any) => {
       const k = resolveKey(keyOf(p), false);
@@ -884,5 +892,61 @@ describe('docker-fs routing (container-only apps)', () => {
     const res = await service.list('u1', 'app', 'app1', '');
     expect(mockedDockerFs.listDir).not.toHaveBeenCalled();
     expect(res.entries.map((e: any) => e.name)).toContain('package.json');
+  });
+});
+
+// ── permissions (chmod / chown) ──────────────────────────────────────
+describe('chmod (local mode)', () => {
+  it('applies a valid mode to a file', async () => {
+    const { service } = makeService();
+    mkFile(`${APP_DIR}/index.php`, '<?php');
+    const res = await service.chmod('u1', 'app', 'app1', 'index.php', '775', false);
+    expect(res.mode).toBe('775');
+    const n: any = vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/index.php`));
+    expect(n.mode).toBe(0o775);
+  });
+
+  it('rejects setuid/setgid/sticky modes', async () => {
+    const { service } = makeService();
+    mkFile(`${APP_DIR}/x`, 'y');
+    await expect(service.chmod('u1', 'app', 'app1', 'x', '4755', false)).rejects.toThrow();
+    await expect(service.chmod('u1', 'app', 'app1', 'x', '1777', false)).rejects.toThrow();
+  });
+
+  it('rejects a managed file', async () => {
+    const { service } = makeService();
+    mkFile(`${APP_DIR}/.dockcontrol.env`, 'SECRET=1');
+    await expect(service.chmod('u1', 'app', 'app1', '.dockcontrol.env', '777', false)).rejects.toThrow();
+  });
+
+  it('recursive chmod walks the tree', async () => {
+    const { service } = makeService();
+    mkDir(`${APP_DIR}/var`);
+    mkFile(`${APP_DIR}/var/a.txt`, '1');
+    mkFile(`${APP_DIR}/var/sub/b.txt`, '2');
+    await service.chmod('u1', 'app', 'app1', 'var', '775', true);
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/var/a.txt`)) as any).mode).toBe(0o775);
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/var/sub/b.txt`)) as any).mode).toBe(0o775);
+  });
+});
+
+describe('chown (local mode)', () => {
+  it('accepts numeric uid:gid', async () => {
+    const { service } = makeService();
+    mkFile(`${APP_DIR}/f`, 'x');
+    const res = await service.chown('u1', 'app', 'app1', 'f', '1000:1000', false);
+    expect(res.owner).toBe('1000:1000');
+  });
+
+  it('rejects chown-by-NAME on the local host (numeric only)', async () => {
+    const { service } = makeService();
+    mkFile(`${APP_DIR}/f`, 'x');
+    await expect(service.chown('u1', 'app', 'app1', 'f', 'www-data', false)).rejects.toThrow(/numeric/i);
+  });
+
+  it('rejects shell-injection owner', async () => {
+    const { service } = makeService();
+    mkFile(`${APP_DIR}/f`, 'x');
+    await expect(service.chown('u1', 'app', 'app1', 'f', 'root; rm -rf /', false)).rejects.toThrow();
   });
 });

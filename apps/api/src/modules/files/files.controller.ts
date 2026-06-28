@@ -20,6 +20,9 @@ import { FilesService } from './files.service';
 import { MkdirDto } from './dto/mkdir.dto';
 import { ExtractZipDto } from './dto/extract-zip.dto';
 import { CompressDto } from './dto/compress.dto';
+import { ChmodDto } from './dto/chmod.dto';
+import { ChownDto } from './dto/chown.dto';
+import { FixPermissionsDto } from './dto/fix-permissions.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 type Scope = 'app' | 'db';
@@ -147,6 +150,39 @@ export class FilesController {
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Length', String(buffer.length));
     res.end(buffer);
+  }
+
+  @Patch(':scope/:scopeId/chmod')
+  @ApiOperation({ summary: 'Change permissions (chmod) of a file/dir' })
+  chmod(
+    @CurrentUser('id') userId: string,
+    @Param('scope') scope: string,
+    @Param('scopeId') scopeId: string,
+    @Body() dto: ChmodDto,
+  ) {
+    return this.svc.chmod(userId, parseScope(scope), scopeId, dto.path, dto.mode, dto.recursive ?? false);
+  }
+
+  @Patch(':scope/:scopeId/chown')
+  @ApiOperation({ summary: 'Change owner (chown) of a file/dir' })
+  chown(
+    @CurrentUser('id') userId: string,
+    @Param('scope') scope: string,
+    @Param('scopeId') scopeId: string,
+    @Body() dto: ChownDto,
+  ) {
+    return this.svc.chown(userId, parseScope(scope), scopeId, dto.path, dto.owner, dto.recursive ?? false);
+  }
+
+  @Post(':scope/:scopeId/fix-permissions')
+  @ApiOperation({ summary: 'Apply a permission preset (e.g. PrestaShop writable dirs)' })
+  fixPermissions(
+    @CurrentUser('id') userId: string,
+    @Param('scope') scope: string,
+    @Param('scopeId') scopeId: string,
+    @Body() _dto: FixPermissionsDto,
+  ) {
+    return this.svc.fixPrestashopPermissions(userId, parseScope(scope), scopeId);
   }
 
   @Delete(':scope/:scopeId/entry')
