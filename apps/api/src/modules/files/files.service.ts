@@ -14,7 +14,7 @@ import { DATA_DIR, APPS_DIR, DBS_DIR, TMP_DIR } from '../../common/paths';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import type { ProjectRole } from '@prisma/client';
 import * as dockerFs from './docker-fs';
-import { pickRootForImage, type DockerFsTarget } from './docker-fs';
+import { pickRootForImage, buildFixWebPermsScript, isWwwDataRoot, type DockerFsTarget } from './docker-fs';
 import {
   decodeArchive,
   detectArchiveFormat,
@@ -758,6 +758,33 @@ export class FilesService {
       slug: remoteAppSlug(app.name, scopeId),
       legacySlug: appSlugify(app.name),
     };
+  }
+
+  /**
+   * For a CONTAINERIZED remote app (PrestaShop/WordPress/Nextcloud/… running on
+   * an official web image), the user's files live INSIDE the container at a
+   * known docroot — NOT in the host app dir the agent walks. fix-permissions
+   * must therefore run via `docker exec` on the agent, not a host-fs walk.
+   *
+   * Returns `{ containerName, rootDir }` ONLY for a www-data-served docroot
+   * (the fix-permissions preset chowns to 33:33, which would break a non-
+   * www-data app like Grafana/Gitea). Else null → host-fs FILE_FIXPERMS path.
+   * DB read only — never touches the host disk.
+   */
+  private async resolveRemoteContainer(
+    scopeId: string,
+  ): Promise<{ containerName: string; rootDir: string } | null> {
+    const app = await this.prisma.application.findUnique({
+      where: { id: scopeId },
+      select: { containerName: true, dockerImage: true },
+    });
+    if (!app?.containerName) return null;
+    const rootDir = pickRootForImage(app.dockerImage || app.containerName);
+    // Gate to www-data docroots only: chowning e.g. /var/lib/grafana or /data
+    // to 33:33 would break those containers. Non-www-data apps fall back to the
+    // host walk (harmless / no-op for stateless apps).
+    if (!isWwwDataRoot(rootDir)) return null;
+    return { containerName: app.containerName, rootDir };
   }
 
   // ── listing ───────────────────────────────────────────────────────
@@ -1662,9 +1689,43 @@ export class FilesService {
     // charset guard; an explicit owner from the caller overrides the default.
     const ownerSpec = parseChownOwner(owner || WEB_DEFAULT_OWNER);
 
-    // ── REMOTE: a single FILE_FIXPERMS agent task (chmod + chown in one pass). ──
+    // ── REMOTE: dispatch to the agent. ──
     const remote = await this.resolveRemoteFsTarget(scope, scopeId);
     if (remote) {
+      // CONTAINERIZED remote app (PrestaShop/WordPress/…): the files live INSIDE
+      // the container (a docker volume), not in the host app dir. Fix perms via
+      // `docker exec` on the container docroot — a host-fs walk would touch the
+      // wrong tree and leave the app's var/logs unwritable. Reuses the existing
+      // EXEC task, so NO agent change/redeploy is needed.
+      const container = await this.resolveRemoteContainer(scopeId);
+      if (container) {
+        const cmd = buildFixWebPermsScript(
+          container.rootDir, WEB_DIR_MODE, WEB_FILE_MODE, ownerSpec.raw,
+        );
+        const task = await this.agent.enqueueAndWait(
+          remote.serverId,
+          'EXEC',
+          { slug: remote.slug, containerName: container.containerName, command: cmd },
+          5 * 60_000,
+        );
+        if (task.status === 'FAILED') {
+          throw new BadRequestException(task.error || 'Remote fix-permissions failed');
+        }
+        const r: any = task.result || {};
+        if ((r.exitCode ?? 0) !== 0) {
+          throw new BadRequestException(
+            `fix-permissions failed in container (exit ${r.exitCode}): ${String(r.output || '').slice(0, 300)}`,
+          );
+        }
+        await this.audit(
+          userId, scope, scopeId, 'fix-permissions',
+          `container:${container.rootDir} → ${ownerSpec.raw}`,
+        );
+        return { path: container.rootDir, dirs: -1, files: -1, owner: ownerSpec.raw };
+      }
+
+      // Non-containerized remote app (PHP_SITE bind-mount, host-file compose):
+      // walk the host app dir via FILE_FIXPERMS (chmod + chown in one pass).
       const task = await this.agent.enqueueAndWait(
         remote.serverId,
         'FILE_FIXPERMS',

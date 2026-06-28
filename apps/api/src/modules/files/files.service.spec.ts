@@ -229,6 +229,7 @@ vi.mock('fs', async () => {
 
 vi.mock('./docker-fs', () => ({
   pickRootForImage: vi.fn(() => '/'),
+  isWwwDataRoot: vi.fn((r: string) => r === '/var/www/html'),
   listDir: vi.fn(),
   stat: vi.fn(),
   readFile: vi.fn(),
@@ -238,6 +239,17 @@ vi.mock('./docker-fs', () => ({
   mkdir: vi.fn(),
   rename: vi.fn(),
   remove: vi.fn(),
+  // Real-ish builder so the EXEC-command assertion is meaningful (mirrors the
+  // production string: chmod find passes + chown -R '<owner>' '<abs>').
+  buildFixWebPermsScript: vi.fn(
+    (abs: string, dirMode: number, fileMode: number, owner?: string) => {
+      const d = (dirMode & 0o777).toString(8).padStart(3, '0');
+      const f = (fileMode & 0o777).toString(8).padStart(3, '0');
+      let s = `find -P '${abs}' -type d -exec chmod ${d} {} + ; find -P '${abs}' -type f -exec chmod ${f} {} +`;
+      if (owner) s += ` ; chown -R '${owner}' '${abs}'`;
+      return s;
+    },
+  ),
 }));
 
 vi.mock('../../common/rbac/project-access', () => ({
@@ -1007,5 +1019,91 @@ describe('fixWebPermissions (local mode)', () => {
     const res = await service.fixWebPermissions('u1', 'app', 'app1', '', '82:82');
     expect(res.owner).toBe('82:82');
     expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/index.php`)) as any).uid).toBe(82);
+  });
+});
+
+// ── fix-permissions on a REMOTE app: container EXEC vs host FILE_FIXPERMS ──
+describe('fixWebPermissions (remote app)', () => {
+  // A remote app: server.host is non-local so resolveRemoteFsTarget fires.
+  function makeRemote(opts: { containerName?: string | null; dockerImage?: string | null; root?: string }) {
+    const ctx = makeService();
+    // resolveRemoteFsTarget reads { name, server, project }; resolveRemoteContainer
+    // reads { containerName, dockerImage } — return a row that satisfies both.
+    ctx.prisma.application.findUnique.mockResolvedValue({
+      ...APP,
+      server: { id: 'srv1', host: '203.0.113.5' },
+      project: { server: { id: 'srv1', host: '203.0.113.5' } },
+      containerName: opts.containerName ?? null,
+      dockerImage: opts.dockerImage ?? null,
+    });
+    mockedDockerFs.pickRootForImage.mockReturnValue(opts.root ?? '/');
+    return ctx;
+  }
+
+  it('containerized remote app → docker EXEC chmod+chown on the container docroot', async () => {
+    const { service, agent } = makeRemote({
+      containerName: 'dockcontrol-prestashop-abc',
+      dockerImage: 'prestashop/prestashop:latest',
+      root: '/var/www/html',
+    });
+    agent.enqueueAndWait.mockResolvedValue({ status: 'COMPLETED', result: { exitCode: 0, output: '' } });
+
+    const res = await service.fixWebPermissions('u1', 'app', 'app1', '');
+    expect(res).toEqual({ path: '/var/www/html', dirs: -1, files: -1, owner: '33:33' });
+    // It used the EXEC task (NOT FILE_FIXPERMS), targeting the container.
+    const [, type, payload] = agent.enqueueAndWait.mock.calls[0];
+    expect(type).toBe('EXEC');
+    expect(payload.containerName).toBe('dockcontrol-prestashop-abc');
+    expect(payload.command).toContain("chown -R '33:33' '/var/www/html'");
+    expect(payload.command).toContain('/var/www/html');
+    expect(payload.command).toContain('chmod 775');
+    expect(payload.command).toContain('chmod 664');
+  });
+
+  it('surfaces a non-zero container exit as an error', async () => {
+    const { service, agent } = makeRemote({
+      containerName: 'dockcontrol-prestashop-abc',
+      dockerImage: 'prestashop/prestashop:latest',
+      root: '/var/www/html',
+    });
+    agent.enqueueAndWait.mockResolvedValue({ status: 'COMPLETED', result: { exitCode: 1, output: 'chown: denied' } });
+    await expect(service.fixWebPermissions('u1', 'app', 'app1', '')).rejects.toThrow(/denied|failed/i);
+  });
+
+  it('non-containerized remote app → host FILE_FIXPERMS (unchanged path)', async () => {
+    const { service, agent } = makeRemote({ containerName: null, root: '/' });
+    agent.enqueueAndWait.mockResolvedValue({ status: 'COMPLETED', result: { dirs: 3, files: 9 } });
+
+    const res = await service.fixWebPermissions('u1', 'app', 'app1', '');
+    const [, type, payload] = agent.enqueueAndWait.mock.calls[0];
+    expect(type).toBe('FILE_FIXPERMS');
+    expect(payload.owner).toBe('33:33');
+    expect(res.dirs).toBe(3);
+    expect(res.files).toBe(9);
+  });
+
+  it('unknown-image container (root "/") falls back to host FILE_FIXPERMS', async () => {
+    // e.g. a generic image we have no docroot mapping for → don't guess.
+    const { service, agent } = makeRemote({
+      containerName: 'dockcontrol-thing-abc',
+      dockerImage: 'some/random:image',
+      root: '/',
+    });
+    agent.enqueueAndWait.mockResolvedValue({ status: 'COMPLETED', result: { dirs: 1, files: 1 } });
+    await service.fixWebPermissions('u1', 'app', 'app1', '');
+    expect(agent.enqueueAndWait.mock.calls[0][1]).toBe('FILE_FIXPERMS');
+  });
+
+  it('NON-www-data container (grafana /var/lib/grafana) does NOT EXEC-chown — host fallback', async () => {
+    // chowning /var/lib/grafana to 33:33 would break grafana (uid 472), so the
+    // container EXEC path must be gated off for non-www-data docroots.
+    const { service, agent } = makeRemote({
+      containerName: 'dockcontrol-grafana-abc',
+      dockerImage: 'grafana/grafana',
+      root: '/var/lib/grafana',
+    });
+    agent.enqueueAndWait.mockResolvedValue({ status: 'COMPLETED', result: { dirs: 1, files: 1 } });
+    await service.fixWebPermissions('u1', 'app', 'app1', '');
+    expect(agent.enqueueAndWait.mock.calls[0][1]).toBe('FILE_FIXPERMS');
   });
 });

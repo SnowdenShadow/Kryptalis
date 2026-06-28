@@ -65,6 +65,7 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2 MiB — mirror host-fs
 const IMAGE_ROOTS: Array<[RegExp, string]> = [
   [/prestashop/, '/var/www/html'],
   [/wordpress/, '/var/www/html'],
+  [/phpmyadmin/, '/var/www/html'],
   [/ghost/, '/var/lib/ghost/content'],
   [/nextcloud/, '/var/www/html'],
   [/gitea/, '/data'],
@@ -86,6 +87,21 @@ export function pickRootForImage(image: string | null | undefined): string {
     if (re.test(lc)) return dir;
   }
   return '/';
+}
+
+/**
+ * Docroots served by the `www-data` user on official PHP/web images. The
+ * "Fix permissions" preset chowns to www-data (33:33), which ONLY makes sense
+ * for these. A Grafana (`/var/lib/grafana`, uid 472) or Gitea (`/data`, uid
+ * 1000) tree chowned to 33:33 would break the container — so the container
+ * fix-permissions path is gated to this set (others fall back to the host walk
+ * or are simply not www-data apps).
+ */
+const WWW_DATA_ROOTS = new Set(['/var/www/html']);
+
+/** Is `rootDir` a www-data-served docroot the fix-permissions preset targets? */
+export function isWwwDataRoot(rootDir: string): boolean {
+  return WWW_DATA_ROOTS.has(rootDir);
 }
 
 /**
@@ -388,6 +404,40 @@ export async function chmod(
  * the PATH in single quotes (joinAndValidate already rejects `'`).
  */
 /**
+ * Build the shell script that applies the web-app permission preset to an
+ * ABSOLUTE in-container path `abs`: directories → dirMode, files → fileMode,
+ * and (optionally) `chown -R owner`. Pure string builder so it can be reused by
+ * both the docker-fs local path AND a remote agent EXEC task (same container,
+ * different transport). `-P` never traverses symlinks; managed secret files are
+ * pruned from the chmod so they're never made group-readable.
+ *
+ * SAFETY: `abs` comes from joinAndValidate / the internal IMAGE_ROOTS table
+ * (never raw user input) and `owner` is pre-validated by parseChownOwner
+ * (strict charset, no shell metacharacters) — both are single-quoted here as
+ * defense-in-depth. `dirMode`/`fileMode` render to pure octal digits.
+ */
+export function buildFixWebPermsScript(
+  abs: string,
+  dirMode: number,
+  fileMode: number,
+  owner?: string,
+): string {
+  const d = (dirMode & 0o777).toString(8).padStart(3, '0');
+  const f = (fileMode & 0o777).toString(8).padStart(3, '0');
+  const prune = `-name .dockcontrol.env -prune -o -name docker-compose.override.yml -prune -o`;
+  let script =
+    `find -P '${abs}' ${prune} -type d -exec chmod ${d} {} + ; ` +
+    `find -P '${abs}' ${prune} -type f -exec chmod ${f} {} +`;
+  if (owner) {
+    // chown the whole tree so the web-server user OWNS it (not just group). -R
+    // is bounded to `abs`. We let chown follow into the tree (the files are the
+    // app's own); the leaf `abs` is a real dir here (a container docroot).
+    script += ` ; chown -R '${owner}' '${abs}'`;
+  }
+  return script;
+}
+
+/**
  * Apply the web-app permission preset inside the container: every directory
  * under `relPath` → dirMode, every regular file → fileMode. Uses `find -type`
  * so dirs and files get different modes in one pass. `-P` (don't follow
@@ -400,18 +450,7 @@ export async function fixWebPerms(
   fileMode: number,
 ): Promise<void> {
   const abs = joinAndValidate(target.rootDir, relPath);
-  const d = (dirMode & 0o777).toString(8).padStart(3, '0');
-  const f = (fileMode & 0o777).toString(8).padStart(3, '0');
-  // -P: never traverse symlinks. Two passes (dirs then files) so each gets its
-  // own mode. `find` is in busybox + coreutils. The `-name … -prune -o` prefix
-  // EXCLUDES managed secret files (.dockcontrol.env / override) so we never make
-  // them group-readable — parity with the host-fs/agent walkers.
-  const prune = `-name .dockcontrol.env -prune -o -name docker-compose.override.yml -prune -o`;
-  await dockerSh(
-    target.containerName,
-    `find -P '${abs}' ${prune} -type d -exec chmod ${d} {} + ; ` +
-      `find -P '${abs}' ${prune} -type f -exec chmod ${f} {} +`,
-  );
+  await dockerSh(target.containerName, buildFixWebPermsScript(abs, dirMode, fileMode));
 }
 
 export async function chown(
