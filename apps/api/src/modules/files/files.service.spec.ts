@@ -234,6 +234,12 @@ vi.mock('fs', async () => {
       unlink: vi.fn(async (p: any) => {
         nodes.delete(resolveKey(keyOf(p), false));
       }),
+      rm: vi.fn(async (p: any, _o?: any) => {
+        const k = resolveKey(keyOf(p), false);
+        for (const nk of [...nodes.keys()]) {
+          if (nk === k || nk.startsWith(k + '/')) nodes.delete(nk);
+        }
+      }),
     },
   };
   return { ...api, default: api };
@@ -249,6 +255,7 @@ vi.mock('./docker-fs', () => ({
   uploadFile: vi.fn(),
   downloadFile: vi.fn(),
   copyOut: vi.fn(),
+  copyInDir: vi.fn(),
   mkdir: vi.fn(),
   rename: vi.fn(),
   remove: vi.fn(),
@@ -921,30 +928,50 @@ describe('docker-fs routing (container-only apps)', () => {
     expect(res.entries.map((e: any) => e.name)).toContain('package.json');
   });
 
-  it('extract pre-creates nested subdirs in the container before docker cp (the var/logs 500 fix)', async () => {
+  it('extract pushes the whole decoded archive in ONE copyInDir (nested tree staged on host)', async () => {
     const { zipSync } = await import('fflate');
     const { service } = setupDockerApp();
-    // A zip with a NESTED entry — `docker cp -` would 500 ("must be a directory")
-    // if the subdir isn't created first.
-    const zip = Buffer.from(
-      zipSync({ 'override/classes/Foo.php': new Uint8Array([60, 63]) }),
-    );
-    // The archive lives in the container; copyOut writes it to the API tmp file.
+    // Multi-level zip — the perf fix stages it all on the host then does ONE
+    // docker cp (not one per file). Deep paths must survive.
+    const zip = Buffer.from(zipSync({
+      'override/classes/Foo.php': new Uint8Array([60, 63]),
+      'override/classes/sub/Bar.php': new Uint8Array([1, 2, 3]),
+      'index.php': new Uint8Array([9]),
+    }));
     mockedDockerFs.stat.mockResolvedValue({ exists: true, isFile: true, isDir: false, size: zip.length } as any);
     mockedDockerFs.copyOut.mockImplementation(async (_t: any, _p: any, hostPath: string) => {
       await (fs as any).promises.writeFile(hostPath, zip);
     });
-    mockedDockerFs.mkdir.mockResolvedValue(undefined as any);
-    mockedDockerFs.uploadFile.mockResolvedValue(undefined as any);
+    // Snapshot the staged tree DURING the docker cp — the service's `finally`
+    // rm()s the stage dir right after return, so we can't inspect it later.
+    let staged: string[] = [];
+    mockedDockerFs.copyInDir.mockImplementation(async (_t: any, _dest: string, hostDir: string) => {
+      const root = (fs as any).__keyOf(hostDir);
+      staged = [...(fs as any).__nodes.keys()]
+        .filter((k: string) => k.startsWith(root + '/'))
+        .map((k: string) => k.slice(root.length + 1));
+    });
 
     const res = await service.extract('u1', 'app', 'app1', 'archive.zip', {});
-    expect(res.files).toBe(1);
-    // mkdir was called for the nested subdir BEFORE uploadFile.
-    expect(mockedDockerFs.mkdir).toHaveBeenCalledWith(TARGET, 'override/classes');
-    expect(mockedDockerFs.uploadFile).toHaveBeenCalledWith(TARGET, 'override/classes', 'Foo.php', expect.any(String));
-    const mkdirOrder = mockedDockerFs.mkdir.mock.invocationCallOrder[0];
-    const uploadOrder = mockedDockerFs.uploadFile.mock.invocationCallOrder[0];
-    expect(mkdirOrder).toBeLessThan(uploadOrder);
+    expect(res.files).toBe(3);
+    // EXACTLY one docker cp (the whole point — not 3), and NO per-file uploadFile.
+    expect(mockedDockerFs.copyInDir).toHaveBeenCalledTimes(1);
+    expect(mockedDockerFs.uploadFile).not.toHaveBeenCalled();
+    expect(staged).toContain('override/classes/Foo.php');
+    expect(staged).toContain('override/classes/sub/Bar.php');
+    expect(staged).toContain('index.php');
+  });
+
+  it('extract refuses an archive entry targeting a managed file (before any docker cp)', async () => {
+    const { zipSync } = await import('fflate');
+    const { service } = setupDockerApp();
+    const zip = Buffer.from(zipSync({ '.dockcontrol.env': new Uint8Array([1]) }));
+    mockedDockerFs.stat.mockResolvedValue({ exists: true, isFile: true, isDir: false, size: zip.length } as any);
+    mockedDockerFs.copyOut.mockImplementation(async (_t: any, _p: any, hostPath: string) => {
+      await (fs as any).promises.writeFile(hostPath, zip);
+    });
+    await expect(service.extract('u1', 'app', 'app1', 'archive.zip', {})).rejects.toThrow();
+    expect(mockedDockerFs.copyInDir).not.toHaveBeenCalled();
   });
 
   it('extract surfaces a raw docker cp failure as a clean 400, not a 500', async () => {
@@ -955,8 +982,7 @@ describe('docker-fs routing (container-only apps)', () => {
     mockedDockerFs.copyOut.mockImplementation(async (_t: any, _p: any, hostPath: string) => {
       await (fs as any).promises.writeFile(hostPath, zip);
     });
-    mockedDockerFs.mkdir.mockResolvedValue(undefined as any);
-    mockedDockerFs.uploadFile.mockRejectedValue(new Error('Command failed: docker cp -'));
+    mockedDockerFs.copyInDir.mockRejectedValue(new Error('Command failed: docker cp'));
     await expect(service.extract('u1', 'app', 'app1', 'archive.zip', {})).rejects.toThrow(BadRequestException);
   });
 });

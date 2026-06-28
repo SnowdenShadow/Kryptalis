@@ -353,6 +353,30 @@ export async function copyOut(
   );
 }
 
+/**
+ * Copy the CONTENTS of a host directory INTO the container at `destRelPath`, in
+ * a SINGLE `docker cp`. Used by the extract flow to push a whole decoded archive
+ * at once instead of one `docker cp` per file (44k files → 44k process spawns
+ * was the cause of multi-minute extractions). `docker cp <dir>/. <c>:<dest>`
+ * uses docker's own internal tar: it recreates every subdirectory and has NO
+ * path-length limit (unlike a hand-rolled ustar). No shell — argv array.
+ * `hostDir` is an API-generated temp path, never user input.
+ */
+export async function copyInDir(
+  target: DockerFsTarget,
+  destRelPath: string,
+  hostDir: string,
+): Promise<void> {
+  const destAbs = joinAndValidate(target.rootDir, destRelPath);
+  // The destination dir must exist for `docker cp <dir>/.` to land its contents.
+  await dockerSh(target.containerName, `mkdir -p '${destAbs}'`);
+  await execFileAsync(
+    'docker',
+    ['cp', `${hostDir}/.`, `${target.containerName}:${destAbs}`],
+    { timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024 },
+  );
+}
+
 export async function mkdir(target: DockerFsTarget, relPath: string): Promise<void> {
   const abs = joinAndValidate(target.rootDir, relPath);
   await dockerSh(target.containerName, `mkdir -p '${abs}'`);

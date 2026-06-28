@@ -1918,40 +1918,33 @@ export class FilesService {
         const st = await dockerFs.stat(target, resolved.relPath);
         if (!st.exists || !st.isFile) throw new NotFoundException('Archive not found');
         const tmpZip = path.join(TMP_DIR, `dc-extract-${crypto.randomBytes(8).toString('hex')}`);
+        // Stage the WHOLE decoded archive in one host temp dir, then push it in
+        // a SINGLE `docker cp`. The old path did one `docker cp` per file — 44k
+        // files = 44k process spawns = multi-minute extractions. One cp lets
+        // docker's internal tar recreate the tree in seconds.
+        const stageDir = path.join(TMP_DIR, `dc-stage-${crypto.randomBytes(8).toString('hex')}`);
         try {
           await dockerFs.copyOut(target, resolved.relPath, tmpZip);
           const zipBuf = await fs.promises.readFile(tmpZip);
           const files = decodeArchive(format, zipBuf, archiveBasename, remaining);
-          // `docker cp -` requires the destination DIRECTORY to already exist —
-          // it won't create an archive entry's nested subfolders. Pre-create
-          // every unique subdir (deepest-safe: mkdir -p) ONCE before pushing
-          // files, otherwise an archive with a `foo/bar.txt` entry 500s with
-          // `destination "<container>:…/foo" must be a directory`.
-          const subDirs = new Set<string>();
-          for (const f of files) {
-            const sub = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '';
-            const fullSub = [destRel, sub].filter(Boolean).join('/');
-            if (fullSub) subDirs.add(fullSub);
-          }
-          for (const dir of subDirs) {
-            this.assertNotManaged(dir);
-            await dockerFs.mkdir(target, dir);
-          }
+          fs.mkdirSync(stageDir, { recursive: true });
+          const stageRoot = fs.realpathSync(stageDir);
           for (const f of files) {
             // Per-entry managed-file guard (parity with LOCAL mode) — an archive
             // entry must not overwrite a DockControl-managed file.
             this.assertNotManaged([destRel, f.path].filter(Boolean).join('/'));
-            const entryTmp = path.join(TMP_DIR, `dc-entry-${crypto.randomBytes(8).toString('hex')}`);
-            await fs.promises.writeFile(entryTmp, f.data);
-            try {
-              const sub = f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '';
-              const name = f.path.includes('/') ? f.path.slice(f.path.lastIndexOf('/') + 1) : f.path;
-              const fullSub = [destRel, sub].filter(Boolean).join('/');
-              await dockerFs.uploadFile(target, fullSub, name, entryTmp);
-            } finally {
-              await fs.promises.unlink(entryTmp).catch(() => {});
+            // Belt-and-suspenders containment: decodeArchive already strips `..`,
+            // but re-confirm each staged path stays under the temp root before we
+            // write (the entries become real host files momentarily).
+            const abs = path.resolve(stageRoot, f.path);
+            if (abs !== stageRoot && !abs.startsWith(stageRoot + path.sep)) {
+              throw new BadRequestException(`Archive entry escapes staging: ${f.path}`);
             }
+            fs.mkdirSync(path.dirname(abs), { recursive: true });
+            fs.writeFileSync(abs, f.data);
           }
+          // One docker cp: stageDir/. → <container>:<destRel> (creates subdirs).
+          await dockerFs.copyInDir(target, destRel, stageRoot);
           if (opts.deleteAfter) await dockerFs.remove(target, resolved.relPath);
           await this.audit(userId, scope, scopeId, 'extract', resolved.relPath);
           return { path: destRel || '.', files: files.length, deletedArchive: !!opts.deleteAfter };
@@ -1968,6 +1961,7 @@ export class FilesService {
           );
         } finally {
           await fs.promises.unlink(tmpZip).catch(() => {});
+          await fs.promises.rm(stageDir, { recursive: true, force: true }).catch(() => {});
         }
       }
     }
