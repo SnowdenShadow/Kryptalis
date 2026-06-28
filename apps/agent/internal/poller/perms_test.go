@@ -130,6 +130,7 @@ func TestRunFileFixPerms_AppliesAndSkipsManaged(t *testing.T) {
 
 	p := &Poller{}
 	// Empty path = whole app root (fix-perms allows the root, unlike chmod).
+	// owner omitted here so the test doesn't need root to chown.
 	res, errStr := p.runFileFixPerms(Task{Payload: map[string]interface{}{
 		"slug": "app6", "path": "", "dirMode": float64(0o775), "fileMode": float64(0o664),
 	}})

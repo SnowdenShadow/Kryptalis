@@ -411,12 +411,23 @@ export default function FilesPage() {
 
   const fixPermsMutation = useMutation({
     mutationFn: () =>
-      // Fix the CURRENT directory recursively (dirs→775, files→664). Empty path
-      // = the whole app root.
-      api.post<{ dirs: number; files: number }>(`/files/${selected!.scope}/${selected!.id}/fix-permissions`, { path: currentPath }),
+      // Fix the CURRENT directory recursively (dirs→775, files→664) and chown to
+      // www-data so the web server can write (the real PrestaShop fix). Empty
+      // path = the whole app root.
+      api.post<{ dirs: number; files: number; owner: string | null }>(
+        `/files/${selected!.scope}/${selected!.id}/fix-permissions`,
+        { path: currentPath },
+      ),
     onSuccess: (res) => {
       const n = (res?.dirs ?? 0) + (res?.files ?? 0);
-      toast.success(n >= 0 ? t('files.toastFixedPerms', { n }) : t('files.toastFixedPermsDone'));
+      const base = n >= 0 ? t('files.toastFixedPerms', { n }) : t('files.toastFixedPermsDone');
+      // Tell the user whether ownership was set (the part that unblocks writes)
+      // or only the mode bits (agent/host not privileged enough to chown).
+      if (res?.owner) {
+        toast.success(`${base} — ${t('files.toastFixedOwner', { owner: res.owner })}`);
+      } else {
+        toast.success(base, { description: t('files.toastFixedNoChown') });
+      }
       refetchListing();
     },
     onError: (err: Error) => toast.error(err.message),

@@ -986,5 +986,26 @@ describe('fixWebPermissions (local mode)', () => {
     // index.php fixed, but the secret stays 0600 (not 0664 = group/world readable)
     expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/index.php`)) as any).mode).toBe(0o664);
     expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/.dockcontrol.env`)) as any).mode).toBe(0o600);
+    // …and is never chowned to www-data either (uid stays undefined).
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/.dockcontrol.env`)) as any).uid).toBeUndefined();
+  });
+
+  it('chowns the tree to www-data (33:33) by default — the real PrestaShop fix', async () => {
+    const { service } = makeService();
+    mkDir(`${APP_DIR}/var`);
+    mkFile(`${APP_DIR}/var/cache.txt`, '1');
+    const res = await service.fixWebPermissions('u1', 'app', 'app1', '');
+    expect(res.owner).toBe('33:33');
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/var`)) as any).uid).toBe(33);
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/var`)) as any).gid).toBe(33);
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/var/cache.txt`)) as any).uid).toBe(33);
+  });
+
+  it('honors an explicit numeric owner override', async () => {
+    const { service } = makeService();
+    mkFile(`${APP_DIR}/index.php`, '<?php');
+    const res = await service.fixWebPermissions('u1', 'app', 'app1', '', '82:82');
+    expect(res.owner).toBe('82:82');
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/index.php`)) as any).uid).toBe(82);
   });
 });

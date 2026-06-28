@@ -1052,7 +1052,20 @@ func (p *Poller) runFileFixPerms(task Task) (map[string]interface{}, string) {
 		}
 		return nil, err.Error()
 	}
+	// Optional owner: the web-server user (www-data) must OWN the writable tree,
+	// not just be in its group — otherwise a "775" dir owned by root leaves
+	// www-data as "other" (r-x) and PrestaShop/WordPress still can't write
+	// var/cache. We chown in the SAME walk so it's one atomic pass.
+	uid, gid := -1, -1
+	if ownerStr, _ := task.Payload["owner"].(string); ownerStr != "" {
+		u, g, oerr := resolveOwner(ownerStr)
+		if oerr != "" {
+			return nil, oerr
+		}
+		uid, gid = u, g
+	}
 	dirs, files := 0, 0
+	chownFailed := false // chmod is authoritative; chown is best-effort (EPERM)
 	werr := filepath.WalkDir(full, func(p string, d os.DirEntry, e error) error {
 		if e != nil {
 			return e
@@ -1074,20 +1087,39 @@ func (p *Poller) runFileFixPerms(task Task) (map[string]interface{}, string) {
 		if dirs+files > maxPermsEntries {
 			return fmt.Errorf("too many entries to fix")
 		}
+		var mode os.FileMode
 		if d.IsDir() {
 			dirs++
-			return os.Chmod(p, dirMode)
-		}
-		if d.Type().IsRegular() {
+			mode = dirMode
+		} else if d.Type().IsRegular() {
 			files++
-			return os.Chmod(p, fileMode)
+			mode = fileMode
+		} else {
+			return nil // skip sockets/devices/fifos
+		}
+		if cerr := os.Chmod(p, mode); cerr != nil {
+			return cerr
+		}
+		if (uid >= 0 || gid >= 0) && !chownFailed {
+			// Lchown so a symlink (already filtered above, but be safe) target
+			// is never followed. If the agent lacks privilege (EPERM), record
+			// it and stop trying — the chmod above still applied, so the user
+			// gets the perms fix and a clear "chown skipped" signal rather than
+			// a hard failure that loses everything.
+			if cerr := os.Lchown(p, uid, gid); cerr != nil {
+				if os.IsPermission(cerr) {
+					chownFailed = true
+				} else {
+					return cerr
+				}
+			}
 		}
 		return nil
 	})
 	if werr != nil {
 		return nil, werr.Error()
 	}
-	return map[string]interface{}{"dirs": dirs, "files": files}, ""
+	return map[string]interface{}{"dirs": dirs, "files": files, "chownFailed": chownFailed}, ""
 }
 
 // resolveOwner parses "user[:group]" or "uid[:gid]" to numeric ids. Names are

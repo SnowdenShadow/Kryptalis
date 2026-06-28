@@ -148,6 +148,13 @@ const MAX_PERMS_ENTRIES = 100_000;
 // PrestaShop/WordPress/Laravel without making anything world-writable.
 const WEB_DIR_MODE = 0o775;
 const WEB_FILE_MODE = 0o664;
+// Default owner the Fix-permissions button applies so the web-server process
+// actually OWNS the tree (775 alone leaves a root-owned dir unwritable by
+// www-data — the #1 cause of PrestaShop's "mkdir var/cache: Permission denied").
+// 33:33 = www-data on Debian/Ubuntu, which is what the official PrestaShop,
+// WordPress, and php/apache images use. Numeric so no fragile name lookup is
+// needed. Callers can override (e.g. Alpine www-data is 82) via the `owner` arg.
+const WEB_DEFAULT_OWNER = '33:33';
 
 // Quota walk caps — guard against pathological trees (symlink loops the
 // O_NOFOLLOW guard didn't catch, runaway node_modules nesting, etc.).
@@ -1649,7 +1656,13 @@ export class FilesService {
     const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
     this.assertNotManaged(resolved.relPath);
 
-    // ── REMOTE: a single FILE_FIXPERMS agent task. ──
+    // Default to chowning the tree to www-data (33:33) — without it, a 775 dir
+    // owned by root stays unwritable by the web-server process (the actual
+    // PrestaShop "Permission denied" cause). Validate to reuse the strict
+    // charset guard; an explicit owner from the caller overrides the default.
+    const ownerSpec = parseChownOwner(owner || WEB_DEFAULT_OWNER);
+
+    // ── REMOTE: a single FILE_FIXPERMS agent task (chmod + chown in one pass). ──
     const remote = await this.resolveRemoteFsTarget(scope, scopeId);
     if (remote) {
       const task = await this.agent.enqueueAndWait(
@@ -1661,7 +1674,7 @@ export class FilesService {
           path: resolved.relPath,
           dirMode: WEB_DIR_MODE,
           fileMode: WEB_FILE_MODE,
-          owner: owner || null,
+          owner: ownerSpec.raw,
         },
         5 * 60_000,
       );
@@ -1670,8 +1683,12 @@ export class FilesService {
         throw new BadRequestException(task.error || 'Remote fix-permissions failed');
       }
       const r: any = task.result || {};
-      await this.audit(userId, scope, scopeId, 'fix-permissions', resolved.relPath || '.');
-      return { path: resolved.relPath || '.', dirs: r.dirs ?? 0, files: r.files ?? 0, owner: owner || null };
+      const remoteOwner = r.chownFailed ? null : ownerSpec.raw;
+      await this.audit(
+        userId, scope, scopeId, 'fix-permissions',
+        `${resolved.relPath || '.'}${remoteOwner ? ` → ${remoteOwner}` : ' (chmod only — agent not privileged for chown)'}`,
+      );
+      return { path: resolved.relPath || '.', dirs: r.dirs ?? 0, files: r.files ?? 0, owner: remoteOwner };
     }
 
     // ── DOCKER-FS: walk inside the container. ──
@@ -1681,13 +1698,11 @@ export class FilesService {
         const s = await dockerFs.stat(target, resolved.relPath);
         if (!s.exists) throw new NotFoundException('Path not found');
         await dockerFs.fixWebPerms(target, resolved.relPath, WEB_DIR_MODE, WEB_FILE_MODE);
-        if (owner) {
-          try {
-            await dockerFs.chown(target, resolved.relPath, owner, true);
-          } catch { /* best-effort */ }
-        }
-        await this.audit(userId, scope, scopeId, 'fix-permissions', resolved.relPath || '.');
-        return { path: resolved.relPath || '.', dirs: -1, files: -1, owner: owner || null };
+        // chown to www-data inside the container — this is the part that
+        // actually unblocks writes. Surfaces a real failure (not best-effort).
+        await dockerFs.chown(target, resolved.relPath, ownerSpec.raw, true);
+        await this.audit(userId, scope, scopeId, 'fix-permissions', `${resolved.relPath || '.'} → ${ownerSpec.raw}`);
+        return { path: resolved.relPath || '.', dirs: -1, files: -1, owner: ownerSpec.raw };
       }
     }
 
@@ -1695,33 +1710,65 @@ export class FilesService {
     if (!fs.existsSync(resolved.absPath)) throw new NotFoundException('Path not found');
     this.assertNoSymlinkInPath(resolved.rootDir, resolved.absPath);
     const counts = { dirs: 0, files: 0 };
-    this.fixWebPermsLocal(resolved.absPath, counts);
-    await this.audit(userId, scope, scopeId, 'fix-permissions', resolved.relPath || '.');
-    return { path: resolved.relPath || '.', dirs: counts.dirs, files: counts.files, owner: null };
+    // chown the tree numerically when possible. On the host this needs the API
+    // process to be privileged; if it can't (EPERM), the chmod still applies —
+    // `chownFailed` records that so we report "chmod only" honestly.
+    const chownUid = ownerSpec.numeric && ownerSpec.uid !== undefined ? ownerSpec.uid : -1;
+    const chownGid = ownerSpec.numeric ? (ownerSpec.gid ?? -1) : -1;
+    const state = { ...counts, chownFailed: false };
+    this.fixWebPermsLocal(resolved.absPath, state, chownUid, chownGid);
+    const ownerApplied = chownUid >= 0 && !state.chownFailed ? ownerSpec.raw : null;
+    await this.audit(
+      userId, scope, scopeId, 'fix-permissions',
+      `${resolved.relPath || '.'}${ownerApplied ? ` → ${ownerApplied}` : ' (chmod only)'}`,
+    );
+    return { path: resolved.relPath || '.', dirs: state.dirs, files: state.files, owner: ownerApplied };
   }
 
-  /** LOCAL recursive web-perms walk: dirs→775, files→664; skips symlinks. */
-  private fixWebPermsLocal(absPath: string, counts: { dirs: number; files: number }): void {
+  /**
+   * LOCAL recursive web-perms walk: dirs→775, files→664; optionally chown to
+   * uid/gid (-1 = skip). Skips symlinks and managed secret files. chmod is
+   * authoritative; chown is best-effort (sets `chownFailed` on EPERM and stops
+   * retrying it) so an unprivileged API process still applies the perms fix.
+   */
+  private fixWebPermsLocal(
+    absPath: string,
+    state: { dirs: number; files: number; chownFailed: boolean },
+    uid = -1,
+    gid = -1,
+  ): void {
     // NEVER touch a managed file (.dockcontrol.env holds secrets at 0600;
     // docker-compose.override.yml). 664 would make them group/world-readable.
     // assertNotManaged only guards the TOP path, so we must re-check each child.
     if (this.isManaged(path.basename(absPath))) return;
     const st = fs.lstatSync(absPath);
     if (st.isSymbolicLink()) return; // never touch symlinks
+    const applyChown = () => {
+      if (uid < 0 && gid < 0) return;
+      if (state.chownFailed) return; // already denied — don't hammer
+      try {
+        fs.chownSync(absPath, uid, gid);
+      } catch (e: any) {
+        if (e?.code === 'EPERM' || e?.code === 'ENOSYS') state.chownFailed = true;
+        else throw e;
+      }
+    };
     if (st.isDirectory()) {
       fs.chmodSync(absPath, WEB_DIR_MODE);
-      counts.dirs++;
+      applyChown();
+      state.dirs++;
       for (const name of fs.readdirSync(absPath)) {
-        if (counts.dirs + counts.files > MAX_PERMS_ENTRIES) {
+        if (state.dirs + state.files > MAX_PERMS_ENTRIES) {
           throw new BadRequestException(
             `Too many entries to fix (> ${MAX_PERMS_ENTRIES}). Fix a subfolder instead.`,
           );
         }
-        this.fixWebPermsLocal(path.join(absPath, name), counts);
+        this.fixWebPermsLocal(path.join(absPath, name), state, uid, gid);
       }
     } else if (st.isFile()) {
       fs.chmodSync(absPath, WEB_FILE_MODE);
-      counts.files++;
+      applyChown();
+      state.files++;
     }
   }
 
