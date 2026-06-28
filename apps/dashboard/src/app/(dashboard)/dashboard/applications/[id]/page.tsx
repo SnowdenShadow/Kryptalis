@@ -61,6 +61,7 @@ import { api } from '@/lib/api';
 import { useServers, usePublicSettings } from '@/lib/hooks';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
+import { PhpConfigCard } from './php-config-card';
 import {
   STATUS_VARIANT,
   STATUS_COLOR,
@@ -1553,6 +1554,10 @@ export default function ApplicationDetailPage() {
                 />
               </CardContent>
             </Card>
+
+            {/* PHP configuration — php.ini overrides. Shown for PHP_SITE apps
+                AND PHP marketplace apps (PrestaShop, WordPress, …). */}
+            {(app as any).phpConfigurable && <PhpConfigCard app={app as any} appId={id} />}
 
             <Card>
               <CardHeader>

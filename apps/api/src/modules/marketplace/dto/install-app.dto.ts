@@ -56,4 +56,12 @@ export class InstallAppDto {
   @IsOptional()
   @IsObject()
   envVars?: Record<string, string>;
+
+  @ApiProperty({
+    required: false,
+    description: 'php.ini overrides for PHP marketplace apps (memory_limit, short_open_tag, …). Ignored for non-PHP apps.',
+  })
+  @IsOptional()
+  @IsObject()
+  phpIni?: Record<string, string>;
 }

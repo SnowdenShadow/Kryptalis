@@ -11,6 +11,12 @@ import { DatabasesService } from '../databases/databases.service';
 import { AgentService } from '../agent/agent.service';
 import { ApplicationEnvService } from '../applications/application-env.service';
 import { ApplicationRepository } from '../applications/application.repository';
+import {
+  isPhpMarketplaceSlug,
+  buildPhpIniSideFileForSlug,
+  PRESTASHOP_DEFAULT_INI,
+} from '../applications/php-ini-marketplace';
+import { sanitizePhpIniInput, type PhpIniSettings } from '../applications/php-site.constants';
 import { AppStatus } from '@prisma/client';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { exec, execFile } from 'child_process';
@@ -172,6 +178,7 @@ export class MarketplaceService implements OnModuleInit {
       hostPort?: number;
       port?: number;
       envVars?: Record<string, string>;
+      phpIni?: Record<string, string>;
     },
     userId?: string,
   ) {
@@ -451,6 +458,26 @@ export class MarketplaceService implements OnModuleInit {
     const containerName = this.computeContainerName(data.appSlug, instanceId, appName);
     await this.apps.update(application.id, { containerName });
 
+    // PHP marketplace apps (PrestaShop, WordPress, …) accept php.ini overrides.
+    // Sanitize the requested ini; PrestaShop defaults to short_open_tag=Off so
+    // the installer's warning is gone out of the box. Persist on the row so the
+    // app-page card + every redeploy can regenerate the drop-in. The compose
+    // ALWAYS bind-mounts zz-dockcontrol-php.ini, so we ALWAYS ship the side-file
+    // (empty-ish when no overrides) — a missing source would make Docker create
+    // a directory at the mount point.
+    let phpIniSideFiles: Record<string, string> = {};
+    if (isPhpMarketplaceSlug(data.appSlug)) {
+      const requested = sanitizePhpIniInput(data.phpIni);
+      const effective: PhpIniSettings =
+        data.appSlug === 'prestashop'
+          ? { ...PRESTASHOP_DEFAULT_INI, ...requested }
+          : requested;
+      await this.apps.update(application.id, {
+        phpIni: Object.keys(effective).length ? (effective as any) : undefined,
+      });
+      phpIniSideFiles = buildPhpIniSideFileForSlug(data.appSlug, effective);
+    }
+
     // Resolve the HOST path of this install's appDir. When the API runs
     // in a container, the docker daemon sits on the host and resolves
     // bind-mount sources against the HOST filesystem — `./` / relative
@@ -587,13 +614,19 @@ export class MarketplaceService implements OnModuleInit {
         new RegExp(hostAppDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
         `/opt/dockcontrol/apps/${remoteSlug}`,
       );
+      const sideFiles = { ...(SIDE_FILES[data.appSlug] || {}), ...phpIniSideFiles };
+      // Persist the rendered compose so a later redeploy (env refresh / PHP
+      // config change) can re-ship it — redeployComposeDir requires it for
+      // remote apps. Without this, PHP-config saves on a remote install would
+      // silently no-op (redeploy throws "no saved compose").
+      await this.apps.update(application.id, { dockerComposeFile: composeContent });
       const task = await this.agent.enqueueTask(data.serverId, 'DEPLOY', {
         slug: remoteSlug,
         appName,
         applicationId: application.id,
         compose: composeContent,
         envVars: envOverride,
-        sideFiles: SIDE_FILES[data.appSlug] || undefined,
+        sideFiles: Object.keys(sideFiles).length ? sideFiles : undefined,
         projectNetwork: projectNetworkName(data.projectId),
       });
       taskId = task.id;
@@ -634,7 +667,7 @@ export class MarketplaceService implements OnModuleInit {
     // and the DEPLOY completion handler (onRemoteDeployComplete) flips the
     // application status when the agent reports back.
     if (!isRemoteServer) {
-      this.runDockerCompose(data.appSlug, composeContent, application.id, taskId, envOverride, true, data.projectId);
+      this.runDockerCompose(data.appSlug, composeContent, application.id, taskId, envOverride, true, data.projectId, phpIniSideFiles);
     }
 
     return {
@@ -984,6 +1017,7 @@ export class MarketplaceService implements OnModuleInit {
     envOverride: Record<string, string> = {},
     perInstanceDir = false,
     projectId?: string,
+    extraSideFiles: Record<string, string> = {},
   ) {
     // perInstanceDir = true for apps that support multi-install (webmail).
     // Single-install apps keep using APPS_DIR/<slug> for back-compat with
@@ -1008,11 +1042,9 @@ export class MarketplaceService implements OnModuleInit {
     // (e.g. PrestaShop's Apache proxy-trust conf). The compose body
     // already references each one by relative path; we just have to
     // drop them next to the compose so the mount target exists.
-    const sideFiles = SIDE_FILES[slug];
-    if (sideFiles) {
-      for (const [name, content] of Object.entries(sideFiles)) {
-        fs.writeFileSync(path.join(appDir, name), content);
-      }
+    const sideFiles = { ...(SIDE_FILES[slug] || {}), ...extraSideFiles };
+    for (const [name, content] of Object.entries(sideFiles)) {
+      fs.writeFileSync(path.join(appDir, name), content);
     }
 
     try {

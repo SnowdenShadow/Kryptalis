@@ -73,6 +73,12 @@ export interface ApplicationResponse {
   phpIni?: Record<string, string> | null;
   /** PHP_SITE preset label (wordpress | laravel | symfony | custom). */
   phpPreset?: string | null;
+  /**
+   * True when this app's php.ini can be configured from the UI — native
+   * PHP_SITE apps AND PHP marketplace apps (PrestaShop, WordPress, phpMyAdmin,
+   * Nextcloud). Computed by the API. Drives the "PHP configuration" card.
+   */
+  phpConfigurable?: boolean;
   status: `${ApplicationStatus}`;
   gitUrl: string | null;
   gitBranch: string | null;

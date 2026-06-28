@@ -19,7 +19,8 @@ import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { AgentService } from '../agent/agent.service';
 import { DatabasesService } from '../databases/databases.service';
 import { ApplicationDeployService } from './application-deploy.service';
-import { DEFAULT_PHP_VERSION, resolvePhpConfig } from './php-site.constants';
+import { DEFAULT_PHP_VERSION, resolvePhpConfig, sanitizePhpIniInput } from './php-site.constants';
+import { isPhpMarketplace, isPhpConfigurable } from './php-ini-marketplace';
 import { SftpService } from '../sftp/sftp.service';
 import { ApplicationOpsService } from './application-ops.service';
 import { ApplicationNetworkService } from './application-network.service';
@@ -523,11 +524,25 @@ export class ApplicationsService implements OnModuleInit {
    * `slugName` for advanced UI that needs both. The dashboard treats
    * `app.name` as the display name — no client-side changes required.
    */
-  private withDisplayName<T extends { name: string; displayName?: string | null }>(
-    app: T,
-  ): T & { slugName: string } {
+  private withDisplayName<
+    T extends {
+      name: string;
+      displayName?: string | null;
+      framework?: string | null;
+      containerName?: string | null;
+      id?: string | null;
+    },
+  >(app: T): T & { slugName: string; phpConfigurable: boolean } {
     const displayName = app.displayName || app.name;
-    return { ...app, name: displayName, slugName: app.name };
+    // phpConfigurable: drives the "PHP configuration" card on the app page —
+    // true for native PHP_SITE apps AND for PHP marketplace apps (PrestaShop,
+    // WordPress, …). Computed here so the dashboard never re-derives the rule.
+    return {
+      ...app,
+      name: displayName,
+      slugName: app.name,
+      phpConfigurable: isPhpConfigurable(app as any),
+    };
   }
 
   async findAll(userId: string) {
@@ -642,6 +657,14 @@ export class ApplicationsService implements OnModuleInit {
         data.phpPreset = (extsExplicit ? (dto.phpPreset ?? null) : (next.preset || null)) || null;
       }
       phpChanged = touchesPhp || phpVersionChanged;
+    } else if (isPhpMarketplace(existing) && dto.phpIni !== undefined) {
+      // PHP MARKETPLACE app (PrestaShop/WordPress/…): prebuilt image, so only
+      // php.ini overrides apply (no webServer/extensions/version). Sanitize +
+      // persist; the redeploy regenerates the bind-mounted drop-in and
+      // recreates the container so the new directives take effect.
+      const ini = sanitizePhpIniInput(dto.phpIni as any);
+      data.phpIni = Object.keys(ini).length ? (ini as any) : null;
+      phpChanged = true;
     }
     const result = await this.prisma.application.update({ where: { id }, data });
     // Redeploy to apply: a port change, OR any PHP config change (regenerates

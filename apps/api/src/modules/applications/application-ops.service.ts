@@ -14,6 +14,12 @@ import { AgentService } from '../agent/agent.service';
 import { DeploymentTargetService } from '../deployment-target/deployment-target.service';
 import { ApplicationDeployService } from './application-deploy.service';
 import { DEFAULT_PHP_VERSION } from './php-site.constants';
+import {
+  isPhpMarketplace,
+  buildPhpIniSideFile,
+  ensurePhpIniMount,
+} from './php-ini-marketplace';
+import { PHP_INI_SIDEFILE } from '../marketplace/templates';
 import { ApplicationEnvService } from './application-env.service';
 import {
   execFileAsync,
@@ -311,6 +317,12 @@ export class ApplicationOpsService implements OnModuleInit {
    */
   private async redeployComposeDir(userId: string, app: any) {
     const server = await resolveAppServer(this.prisma, app.id);
+    // PHP marketplace app? Regenerate the php.ini drop-in from app.phpIni and
+    // make sure the compose mounts it (apps installed before this feature have
+    // no mount — inject it idempotently via js-yaml). Persist the rewritten
+    // compose so future redeploys/migrations carry the mount too.
+    const phpMarket = isPhpMarketplace(app);
+    const phpSideFiles = phpMarket ? buildPhpIniSideFile(app) : {};
     if (!this.deploymentTarget.isLocal(server)) {
       // Remote target: we can't touch the agent's app dir from here, so ship
       // the stored compose + saved envVars to the agent exactly like a
@@ -321,13 +333,37 @@ export class ApplicationOpsService implements OnModuleInit {
       //
       // The compose MUST come from the DB (app.dockerComposeFile) — the local
       // APPS_DIR copy is on the platform host, not the agent, so it's the wrong
-      // (or missing) file for a remote app. If it was never persisted, there's
-      // nothing to ship; tell the user to reinstall.
-      const compose: string | null = app.dockerComposeFile;
+      // (or missing) file for a remote app.
+      let compose: string | null = app.dockerComposeFile;
+      // Backfill for installs predating compose persistence: read the live
+      // compose off the agent's app dir (it holds the install-time rendered file
+      // with the real bind paths + baked passwords) and persist it. Without this
+      // an older remote install can't be redeployed and the PHP card would
+      // silently no-op.
+      if (!compose) {
+        compose = await this.readRemoteComposeFile(server!.id, app).catch(() => null);
+        if (compose) {
+          await this.apps.update(app.id, { dockerComposeFile: compose });
+          app.dockerComposeFile = compose;
+        }
+      }
       if (!compose) {
         throw new BadRequestException(
           'No saved compose file for this app — it cannot be redeployed on the remote server. Reinstall it from the marketplace.',
         );
+      }
+      // PHP marketplace: make sure the compose mounts the .ini drop-in. The
+      // bind SOURCE must be the AGENT's absolute app dir (the agent writes the
+      // side-file there) — NOT the __HOST_APP_DIR__ placeholder, which is only
+      // substituted at install time. Persist the rewrite so future redeploys
+      // carry it.
+      if (phpMarket) {
+        const agentDir = `/opt/dockcontrol/apps/${remoteAppSlug(app.name, app.id)}`;
+        const { compose: rewritten, changed } = ensurePhpIniMount(app, compose, agentDir);
+        if (changed) {
+          await this.apps.update(app.id, { dockerComposeFile: rewritten });
+          compose = rewritten;
+        }
       }
 
       const deployment = await this.createInflightDeployment({
@@ -351,6 +387,7 @@ export class ApplicationOpsService implements OnModuleInit {
             applicationId: app.id,
             compose,
             envVars: this.env.decryptEnvVars(app.envVars),
+            sideFiles: Object.keys(phpSideFiles).length ? phpSideFiles : undefined,
             projectNetwork: projectNetworkName(app.projectId),
           },
           15 * 60_000,
@@ -427,6 +464,25 @@ export class ApplicationOpsService implements OnModuleInit {
     ) };
     fs.writeFileSync(envPath, Object.entries(merged).map(([k, v]) => `${k}=${v}`).join('\n') + '\n');
 
+    // PHP marketplace: (re)write the php.ini drop-in next to the compose and
+    // ensure the on-disk compose mounts it (older installs lack the mount).
+    if (phpMarket) {
+      if (phpSideFiles[PHP_INI_SIDEFILE] !== undefined) {
+        fs.writeFileSync(path.join(appDir, PHP_INI_SIDEFILE), phpSideFiles[PHP_INI_SIDEFILE]);
+      }
+      // The bind SOURCE must be the HOST-mapped app dir (the docker daemon
+      // resolves bind sources on the host, not inside the API container). Mirror
+      // the marketplace install: DOCKCONTROL_HOST_DATA_DIR/apps/<dirName>. The
+      // dirName is exactly the appDir basename we resolved above.
+      const hostDataDir =
+        process.env.DOCKCONTROL_HOST_DATA_DIR || path.join(process.cwd(), '.dockcontrol');
+      const hostAppDir = path.join(hostDataDir, 'apps', path.basename(appDir));
+      const composePath = findComposePath(appDir)!;
+      const onDisk = fs.readFileSync(composePath, 'utf-8');
+      const { compose: rewritten, changed } = ensurePhpIniMount(app, onDisk, hostAppDir);
+      if (changed) fs.writeFileSync(composePath, rewritten);
+    }
+
     try {
       // --force-recreate: env changes alone don't alter the compose hash,
       // so a plain `up -d` would conclude "nothing to do".
@@ -445,6 +501,37 @@ export class ApplicationOpsService implements OnModuleInit {
       await this.apps.setStatus(app.id, AppStatus.ERROR);
       throw new BadRequestException(`Redeploy failed: ${String(err?.message || err).slice(0, 500)}`);
     }
+  }
+
+  /**
+   * Read a remote compose-app's docker-compose.yml off the agent (used to
+   * backfill app.dockerComposeFile for installs that predate compose
+   * persistence). Tries the per-instance slug then the legacy slug. Returns
+   * null when the agent has no compose (e.g. truly missing install).
+   */
+  private async readRemoteComposeFile(serverId: string, app: any): Promise<string | null> {
+    for (const candidate of ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml']) {
+      try {
+        const task = await this.agent.enqueueAndWait(
+          serverId,
+          'FILE_READ',
+          {
+            slug: remoteAppSlug(app.name, app.id),
+            legacySlug: slugify(app.name),
+            file: candidate,
+          },
+          60_000,
+        );
+        const r: any = task.result || {};
+        if (task.status !== 'FAILED' && r.exists && typeof r.content === 'string' && r.content.trim()) {
+          return r.content;
+        }
+      } catch {
+        // Timeout / agent vanished on this candidate — try the next filename
+        // rather than aborting the whole backfill on the first miss.
+      }
+    }
+    return null;
   }
 
   /**
