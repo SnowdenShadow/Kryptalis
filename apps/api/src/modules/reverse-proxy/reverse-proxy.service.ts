@@ -383,7 +383,7 @@ ${email ? `  email ${email}\n` : ''}}
     // mail server domains — we provision a Let's Encrypt cert for mail.<apex>
     // so the mail server container can re-use it.
     const mailServers = await this.prisma.mailServer.findMany({
-      include: { domain: { select: { domain: true } } },
+      select: { serverId: true, domain: { select: { domain: true } } },
     });
 
     // ACME contact email — Let's Encrypt refuses bogus addresses ("localhost",
@@ -648,6 +648,11 @@ ${email ? `  email ${email}\n` : ''}}
     // Same SAFE_DOMAIN_RE gate as the main loop — legacy rows that predate
     // strict validation cannot reach the renderer.
     for (const ms of mailServers) {
+      // Mail servers running on a REMOTE agent host issue their OWN cert via an
+      // embedded Caddy (mail.<apex> DNS points at that server, so the platform
+      // Caddy here can't pass HTTP-01 anyway). Skip them — only render blocks
+      // for mail servers on the primary host (serverId null).
+      if (ms.serverId) continue;
       const apex = ms.domain.domain;
       if (this.isLocalHostname(apex)) continue;
       if (!SAFE_DOMAIN_RE.test(apex)) {
@@ -963,11 +968,14 @@ ${portLines.length > 0 ? portLines.join('\n') : '      []'}
     if (!this.mailReloadHook) return;
     if (Object.keys(this.mailCertMtime).length === 0) this.loadMailCertMtime();
     const servers = await this.prisma.mailServer.findMany({
-      include: { domain: { select: { id: true, domain: true } } },
+      select: { serverId: true, domain: { select: { id: true, domain: true } } },
     });
     let changed = false;
     for (const s of servers) {
       if (!s.domain) continue;
+      // Remote mail servers manage their own cert (embedded Caddy on their
+      // host); the platform Caddy here has no cert file to stat for them.
+      if (s.serverId) continue;
       const host = `mail.${s.domain.domain}`;
       const mt = await this.getCertMtime(host);
       if (mt == null) continue;

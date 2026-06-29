@@ -199,7 +199,12 @@ export default function EmailDomainPage() {
     queryFn: () => api.get('/email/overview'),
     enabled: !!domainId,
   });
-  const webmail = overviewRows.find((r) => r.id === domainId)?.webmail || null;
+  const overviewRow = overviewRows.find((r) => r.id === domainId) || null;
+  const webmail = overviewRow?.webmail || null;
+  // Real address of the host the mail server (and its co-located webmail) runs
+  // on — remote server IP, or the platform primary host. Falls back to the
+  // current dashboard hostname only when the API couldn't resolve one.
+  const mailServerHost: string | null = overviewRow?.mailServer?.serverHost || null;
 
   // Domains of the same project (for the "existing domain" webmail option).
   const { data: projectDomains = [] } = useQuery<{ id: string; domain: string }[]>({
@@ -212,9 +217,19 @@ export default function EmailDomainPage() {
     if (domain && !wmNewDomain) setWmNewDomain(`webmail.${domain.domain}`);
   }, [domain, wmNewDomain]);
 
+  // Registered servers — used to let the operator choose WHERE the mail stack
+  // runs (primary host by default). Only surfaced when >1 option exists.
+  const { data: servers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
+    queryKey: ['servers'],
+    queryFn: () => api.get('/servers'),
+  });
+  // '' = primary host (default). A non-empty value is a remote server id.
+  const [mailServerId, setMailServerId] = useState('');
+
   // ── mutations ────────────────────────────────────────────────────
   const deployMail = useMutation({
-    mutationFn: () => api.post(`/email/server/${domainId}/deploy`),
+    mutationFn: () =>
+      api.post(`/email/server/${domainId}/deploy`, mailServerId ? { serverId: mailServerId } : {}),
     onSuccess: () => { toast.success(t('emails.cardStatusDeploying')); refetchDns(); },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -361,8 +376,10 @@ export default function EmailDomainPage() {
     body.forwardTo = editForm.forwardTo.trim() || null;
     updateMb.mutate(body);
   }
+  const webmailHost =
+    mailServerHost || (typeof window !== 'undefined' ? window.location.hostname : '');
   const webmailUrl = webmail && webmail.port && webmail.status === 'RUNNING'
-    ? `http://${typeof window !== 'undefined' ? window.location.hostname : ''}:${webmail.port}`
+    ? `http://${webmailHost}:${webmail.port}`
     : null;
 
   const status = dnsHints?.mailServer?.status;
@@ -421,9 +438,35 @@ export default function EmailDomainPage() {
         {/* Server actions */}
         <div className="flex items-center gap-2 flex-wrap">
           {!dnsHints?.mailServer ? (
-            <Button onClick={() => deployMail.mutate()} disabled={deployMail.isPending}>
-              <Plus size={14} /> {t('emails.cardDeploy')}
-            </Button>
+            <>
+              {/* Server picker — only when remote servers exist. Default =
+                  primary host. The mail.<domain> DNS must point at the chosen
+                  server's IP (the help text explains this). */}
+              {servers.filter((s) => s.status === 'ONLINE').length > 1 && (
+                <div className="flex flex-col gap-1">
+                  <Select
+                    value={mailServerId}
+                    onChange={(e) => setMailServerId(e.target.value)}
+                    className="h-9 text-sm"
+                  >
+                    <option value="">{t('emails.serverPrimary')}</option>
+                    {servers
+                      .filter((s) => s.status === 'ONLINE')
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+                      ))}
+                  </Select>
+                  {mailServerId && (
+                    <span className="text-[11px] text-amber-400 max-w-xs">
+                      {t('emails.serverRemoteHint')}
+                    </span>
+                  )}
+                </div>
+              )}
+              <Button onClick={() => deployMail.mutate()} disabled={deployMail.isPending}>
+                <Plus size={14} /> {t('emails.cardDeploy')}
+              </Button>
+            </>
           ) : (
             <>
               {status === 'RUNNING' && (

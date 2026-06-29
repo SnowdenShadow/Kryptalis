@@ -44,7 +44,15 @@ export interface DomainResponse {
     project?: { id: string; name: string };
   } | null;
   /** Attached mail server, appended by GET /domains (null when none). */
-  mailServer?: { domainId: string; status: string; hostname: string } | null;
+  mailServer?: {
+    domainId: string;
+    status: string;
+    hostname: string;
+    /** Host the mail stack runs on. null/undefined = platform primary host. */
+    serverId?: string | null;
+    /** Resolved target server (for display + co-locating the webmail). */
+    server?: { id: string; name: string; host: string } | null;
+  } | null;
   /** Port-pinned apps on this domain (http://<domain>:<port>), GET /domains. */
   portBindings?: {
     id: string;

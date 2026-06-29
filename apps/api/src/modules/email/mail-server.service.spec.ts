@@ -134,6 +134,11 @@ function makeService() {
     mailbox: makeModel(),
     emailAlias: makeModel(),
     application: makeModel(),
+    // project/server are consulted by deploy()'s server-target resolution.
+    // Defaults: project has no default server, server lookups miss → primary
+    // host (local path), which is what the existing tests assume.
+    project: makeModel(),
+    server: makeModel(),
   };
   const proxy = {
     regenerate: vi.fn().mockResolvedValue(undefined),
@@ -149,8 +154,20 @@ function makeService() {
   const marketplace = {
     install: vi.fn().mockResolvedValue({ id: 'webmail-app-1' }),
   };
-  const service = new MailServerService(prisma as any, proxy as any, encryption as any, marketplace as any);
-  return { service, prisma, proxy, encryption, marketplace };
+  // Agent task dispatcher — only exercised on the REMOTE mail path; the local
+  // tests never touch it. Default returns a COMPLETED task with empty result.
+  const agent = {
+    enqueueAndWait: vi.fn().mockResolvedValue({ status: 'COMPLETED', result: {} }),
+    enqueueTask: vi.fn().mockResolvedValue({ id: 't1' }),
+  };
+  const service = new MailServerService(
+    prisma as any,
+    proxy as any,
+    encryption as any,
+    marketplace as any,
+    agent as any,
+  );
+  return { service, prisma, proxy, encryption, marketplace, agent };
 }
 
 const DOMAIN = { id: 'dom1', domain: 'example.com', projectId: 'p1', application: null };
@@ -436,6 +453,8 @@ describe('deploy', () => {
       'example.com',
       expect.objectContaining({ smtp: 25 }),
       expect.stringContaining('BEGIN PRIVATE KEY'),
+      // 5th arg = the resolved target server id (null = primary host here).
+      null,
     );
   });
 });
@@ -528,7 +547,7 @@ describe('runDeploy', () => {
 
     const calls = execCalls().filter((c) => c.cmd === 'docker');
     const rm = calls.find((c) => c.args[0] === 'rm');
-    expect(rm!.args).toEqual(['rm', '-f', CONTAINER]);
+    expect(rm!.args).toEqual(['rm', '-f', '--', CONTAINER]);
     const pull = calls.find((c) => c.args[0] === 'compose' && c.args[1] === 'pull');
     expect(String(pull!.opts.cwd).replace(/\\/g, '/')).toBe(DIR);
     const up = calls.find((c) => c.args[0] === 'compose' && c.args[1] === 'up');
@@ -604,7 +623,7 @@ describe('removeForDomain', () => {
     expect(vfs.__dirs.has(`${MAIL_DIR}/srv1`)).toBe(false);
     expect(prisma.mailServer.delete).toHaveBeenCalledWith({ where: { id: 'srv1' } });
     const rm = findExec((c) => c.cmd === 'docker' && c.args[0] === 'rm');
-    expect(rm!.args).toEqual(['rm', '-f', CONTAINER]);
+    expect(rm!.args).toEqual(['rm', '-f', '--', CONTAINER]);
   });
 
   it('orphan container with no DB row: still force-removes by derived name', async () => {
@@ -616,7 +635,7 @@ describe('removeForDomain', () => {
 
     expect(prisma.mailServer.delete).not.toHaveBeenCalled();
     const rm = findExec((c) => c.cmd === 'docker' && c.args[0] === 'rm');
-    expect(rm!.args).toEqual(['rm', '-f', CONTAINER]);
+    expect(rm!.args).toEqual(['rm', '-f', '--', CONTAINER]);
   });
 
   it('survives a dead docker daemon — DB row and dir are still wiped', async () => {
@@ -1066,7 +1085,11 @@ describe('reloadMailServer — TLS bootstrap', () => {
     const runSpy = vi.spyOn(service as any, 'runDeploy').mockResolvedValue(undefined);
 
     await service.reloadMailServer('dom1');
-    expect(runSpy).toHaveBeenCalledWith('srv1', 'example.com', expect.objectContaining({ imaps: 993 }), '');
+    expect(runSpy).toHaveBeenCalledWith(
+      'srv1', 'example.com', expect.objectContaining({ imaps: 993 }), '',
+      // 5th arg = the mail server's host (undefined here → primary).
+      undefined,
+    );
   });
 
   it('just reloads (no redeploy) when TLS is already configured', async () => {
@@ -1081,5 +1104,103 @@ describe('reloadMailServer — TLS bootstrap', () => {
     expect(runSpy).not.toHaveBeenCalled();
     // falls through to postfix/doveadm reload
     expect(findExec((c) => c.args.includes('postfix'))).toBeTruthy();
+  });
+});
+
+// ── multi-server (remote agent host) ─────────────────────────────────
+// When MailServer.serverId points at a REMOTE server, every docker/fs touch
+// point must dispatch agent tasks instead of running local docker, and the
+// stack compose must bundle a Caddy that does ACME for mail.<domain>.
+
+describe('multi-server (remote)', () => {
+  const REMOTE = { id: 'srv-remote', host: '10.0.0.9', name: 'edge-1' };
+
+  function remoteServerMock(prisma: any) {
+    // resolveMailHost reads prisma.server.findUnique by serverId.
+    prisma.server.findUnique.mockResolvedValue({ id: REMOTE.id, host: REMOTE.host, name: REMOTE.name });
+  }
+
+  it('runDeployRemote dispatches a DEPLOY task with an embedded Caddy + SSL_TYPE manual + relative mounts', async () => {
+    const { service, prisma, agent } = makeService();
+    remoteServerMock(prisma);
+    prisma.mailServer.findUnique.mockResolvedValue({
+      id: 'srv1', domainId: 'dom1', serverId: REMOTE.id,
+      spamPreset: 'standard', greylisting: false, antivirus: false, spamAction: 'add_header', spamThreshold: 6,
+    });
+
+    // call runDeploy with the remote target id (5th arg).
+    await (service as any).runDeploy(
+      'srv1', 'example.com',
+      { smtp: 25, submission: 587, smtps: 465, imap: 143, imaps: 993 },
+      'PRIVKEY', REMOTE.id,
+    );
+
+    const deploy = agent.enqueueAndWait.mock.calls.find((c: any[]) => c[1] === 'DEPLOY')!;
+    expect(deploy).toBeTruthy();
+    expect(deploy[0]).toBe(REMOTE.id); // dispatched to the remote server
+    const payload = deploy[2];
+    expect(payload.slug).toBe('mail-srv1');
+    // embedded Caddy service + cert volume + manual TLS pointing at its certs
+    expect(payload.compose).toContain('image: caddy:2');
+    expect(payload.compose).toContain('SSL_TYPE: manual');
+    expect(payload.compose).toContain('mailcerts:/caddy-certs:ro');
+    // RELATIVE bind-mounts (agent app dir), not absolute host paths
+    expect(payload.compose).toContain('- ./config:/tmp/docker-mailserver');
+    expect(payload.compose).not.toContain('/caddy-certs:ro\n      - dockcontrol_caddy_data');
+    // config + Caddyfile shipped as sideFiles
+    expect(payload.sideFiles['caddy/Caddyfile']).toContain('mail.example.com');
+    expect(payload.sideFiles['config/opendkim/KeyTable']).toContain('example.com');
+    expect(payload.sideFiles['.stack-version']).toBeTruthy();
+  });
+
+  it('syncAccounts on a remote server writes via FILE_WRITE and reloads via EXEC', async () => {
+    const { service, prisma, agent } = makeService();
+    remoteServerMock(prisma);
+    prisma.mailServer.findUnique.mockResolvedValue({ id: 'srv1', domainId: 'dom1', serverId: REMOTE.id });
+    prisma.domain.findUnique.mockResolvedValue(DOMAIN);
+    prisma.mailbox.findMany.mockImplementation(async ({ where }: any) =>
+      where?.forwardTo === null
+        ? [{ address: 'a@example.com', passwordHash: '$2b$10$abc', catchAll: false }]
+        : [],
+    );
+    prisma.emailAlias.findMany.mockResolvedValue([]);
+    // FILE_READ (prev content) returns empty so a write is triggered.
+    agent.enqueueAndWait.mockResolvedValue({ status: 'COMPLETED', result: { content: '' } });
+
+    await service.syncAccounts('dom1');
+
+    const writes = agent.enqueueAndWait.mock.calls.filter((c: any[]) => c[1] === 'FILE_WRITE');
+    expect(writes.some((c: any[]) => c[2].file === 'config/postfix-accounts.cf')).toBe(true);
+    const execs = agent.enqueueAndWait.mock.calls.filter((c: any[]) => c[1] === 'EXEC');
+    expect(execs.some((c: any[]) => String(c[2].command).includes('postfix reload'))).toBe(true);
+    // never touched local docker
+    expect(findExec(() => true)).toBeUndefined();
+  });
+
+  it('deploy() targeting a remote server persists serverId + co-locates would-be webmail', async () => {
+    const { service, prisma } = makeService();
+    prisma.domain.findUnique.mockResolvedValue(DOMAIN);
+    prisma.server.findUnique.mockResolvedValue({ id: REMOTE.id, host: REMOTE.host, name: REMOTE.name, status: 'ONLINE' });
+    prisma.mailServer.findUnique.mockResolvedValue(null);
+    prisma.mailServer.upsert.mockResolvedValue({ id: 'srv1', domainId: 'dom1', serverId: REMOTE.id });
+    vi.spyOn(service as any, 'runDeploy').mockResolvedValue(undefined);
+
+    await service.deploy('u1', 'dom1', REMOTE.id);
+    // upsert stored the target serverId on create.
+    const createArg = prisma.mailServer.upsert.mock.calls[0][0].create;
+    expect(createArg.serverId).toBe(REMOTE.id);
+  });
+
+  it('unbanIp on a remote server routes through an EXEC task, not local docker', async () => {
+    const { service, prisma, agent } = makeService();
+    remoteServerMock(prisma);
+    prisma.domain.findUnique.mockResolvedValue(DOMAIN);
+    prisma.mailServer.findUnique.mockResolvedValue({ id: 'srv1', domainId: 'dom1', serverId: REMOTE.id });
+    agent.enqueueAndWait.mockResolvedValue({ status: 'COMPLETED', result: { output: '', exitCode: 0 } });
+
+    await expect(service.unbanIp('u1', 'dom1', '203.0.113.7')).resolves.toEqual({ unbanned: '203.0.113.7' });
+    const exec = agent.enqueueAndWait.mock.calls.find((c: any[]) => c[1] === 'EXEC')!;
+    expect(exec[2].command).toBe('fail2ban-client unban 203.0.113.7');
+    expect(findExec(() => true)).toBeUndefined();
   });
 });

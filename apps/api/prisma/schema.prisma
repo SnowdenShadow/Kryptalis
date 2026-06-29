@@ -203,6 +203,7 @@ model Server {
   alertRules   AlertRule[]
   metrics      ServerMetric[]
   tasks        AgentTask[]
+  mailServers  MailServer[]
 
   @@map("servers")
 }
@@ -559,11 +560,21 @@ model MailServer {
   spamThreshold Float   @default(6)          // rspamd reject score
   whitelist     String?                      // newline-separated senders/domains
   blacklist     String?                      // newline-separated senders/domains
+  // Host the mail stack runs on. NULL = the platform primary host (the
+  // historical behaviour: docker runs locally on the API host). A non-null
+  // serverId means the stack is deployed to that registered server via the
+  // agent (DEPLOY/EXEC/FILE_WRITE tasks). The webmail app is always co-located
+  // on the SAME host so its internal `tls://dockcontrol-mail-*` connection
+  // resolves. onDelete: SetNull → if the server is removed, the row falls back
+  // to "primary host" semantics rather than cascading the mail server away.
+  serverId     String?
   createdAt    DateTime         @default(now())
   updatedAt    DateTime         @updatedAt
 
-  domain Domain @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  domain Domain  @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  server Server? @relation(fields: [serverId], references: [id], onDelete: SetNull)
 
+  @@index([serverId])
   @@map("mail_servers")
 }
 

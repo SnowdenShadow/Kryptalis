@@ -17,6 +17,8 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MarketplaceService } from '../marketplace/marketplace.service';
+import { AgentService } from '../agent/agent.service';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { DATA_DIR, MAIL_DIR } from '../../common/paths';
 
 const execFileAsync = promisify(execFile);
@@ -41,6 +43,7 @@ export class MailServerService implements OnApplicationBootstrap {
     private proxy: ReverseProxyService,
     private encryption: EncryptionService,
     private marketplace: MarketplaceService,
+    private agent: AgentService,
   ) {
     if (!fs.existsSync(MAIL_DIR)) fs.mkdirSync(MAIL_DIR, { recursive: true });
   }
@@ -118,14 +121,18 @@ export class MailServerService implements OnApplicationBootstrap {
     if (!domain) return;
     if (!server.dkimPrivateKey) return; // never deployed — nothing to reconcile
 
-    const dir = path.join(MAIL_DIR, serverId);
-    if (!fs.existsSync(dir)) return; // stack was wiped manually — leave alone
+    const host = await this.resolveMailHost(server);
+    if (!this.isRemoteMail(host)) {
+      const dir = path.join(MAIL_DIR, serverId);
+      if (!fs.existsSync(dir)) return; // stack was wiped manually — leave alone
+    }
 
-    const versionPath = path.join(dir, '.stack-version');
-    let onDiskVersion = 0;
-    try {
-      onDiskVersion = parseInt(fs.readFileSync(versionPath, 'utf-8').trim(), 10) || 0;
-    } catch {}
+    // Read the on-stack version marker (local fs or remote FILE_READ).
+    const versionRaw = await this.mailReadFile(host, serverId, '.stack-version');
+    const onDiskVersion = parseInt((versionRaw || '').trim(), 10) || 0;
+    // Remote stacks with no marker yet (e.g. mid-provision) are skipped rather
+    // than redeployed blindly; a missing marker on a remote read returns ''.
+    if (this.isRemoteMail(host) && !versionRaw) return;
 
     if (onDiskVersion >= MailServerService.STACK_VERSION) return; // up to date
 
@@ -137,7 +144,8 @@ export class MailServerService implements OnApplicationBootstrap {
       where: { id: serverId },
       data: { status: 'DEPLOYING', lastError: null },
     });
-    // runDeploy() rewrites everything + `docker compose up -d --build`.
+    // runDeploy() rewrites everything + `docker compose up -d`. The 5th arg
+    // routes it to the right host (null = primary, else the agent server).
     this.runDeploy(
       serverId,
       domain.domain,
@@ -149,6 +157,7 @@ export class MailServerService implements OnApplicationBootstrap {
         imaps: server.imapsPort,
       },
       this.encryption.decrypt(server.dkimPrivateKey),
+      server.serverId,
     ).catch(() => {});
   }
 
@@ -179,6 +188,271 @@ export class MailServerService implements OnApplicationBootstrap {
     return domain;
   }
 
+  // ── remote-aware execution abstraction ────────────────────────────
+  //
+  // A mail server runs either on the platform PRIMARY host (serverId === null —
+  // historical behaviour, docker/fs run locally on the API host) or on a
+  // registered AGENT server (serverId set — everything is dispatched as agent
+  // tasks). Every docker/fs touch point routes through these helpers so the two
+  // worlds stay behind one `isLocalHost` gate and the local path is byte-for-
+  // byte what it was before this feature.
+
+  /** The on-agent directory name (compose dir) for a mail server's stack. */
+  private mailSlug(mailServerId: string): string {
+    return `mail-${mailServerId}`;
+  }
+
+  /**
+   * Resolve the host a mail server runs on. Returns null for the primary host
+   * (serverId null OR a serverId that points at a local-host server row).
+   * Otherwise returns the registered server {id, host, name}.
+   */
+  private async resolveMailHost(
+    mailServer: { serverId?: string | null },
+  ): Promise<{ id: string; host: string; name: string } | null> {
+    if (!mailServer?.serverId) return null;
+    const srv = await this.prisma.server.findUnique({
+      where: { id: mailServer.serverId },
+      select: { id: true, host: true, name: true },
+    });
+    if (!srv || isLocalHost(srv.host)) return null;
+    return srv as { id: string; host: string; name: string };
+  }
+
+  /** True when the resolved server is remote (an agent host). */
+  private isRemoteMail(server: { id: string; host: string } | null): server is { id: string; host: string; name: string } {
+    return !!server && !isLocalHost(server.host);
+  }
+
+  /**
+   * Run a command INSIDE the mail container. Local → `docker exec -- <c>
+   * <argv>` (shell-free on the API host). Remote → an EXEC agent task carrying
+   * the command as a string (the agent runs it via `docker exec -- <c> sh -c`).
+   * argv elements are fixed verbs / pre-validated values (no user free-text),
+   * so joining for the remote string introduces no injection surface.
+   */
+  private async mailDockerExec(
+    server: { id: string; host: string } | null,
+    containerName: string,
+    argv: string[],
+    timeoutMs = 10_000,
+  ): Promise<{ out: string; code: number }> {
+    if (!this.isRemoteMail(server)) {
+      try {
+        const { stdout } = await execFileAsync(
+          'docker',
+          ['exec', containerName, ...argv],
+          { timeout: timeoutMs },
+        );
+        return { out: stdout, code: 0 };
+      } catch (e: any) {
+        return { out: (e?.stdout || '') + (e?.stderr || ''), code: e?.code ?? 1 };
+      }
+    }
+    const task = await this.agent.enqueueAndWait(
+      server.id,
+      'EXEC',
+      { containerName, command: argv.join(' ') },
+      Math.max(timeoutMs, 30_000),
+    );
+    const r: any = task.result || {};
+    return { out: String(r.output ?? ''), code: task.status === 'FAILED' ? 1 : Number(r.exitCode ?? 0) };
+  }
+
+  /**
+   * Probe the mail container's live run state. Local → `docker inspect`.
+   * Remote → STATUS agent task (`docker compose ps --format json`) in the
+   * stack dir, parsed for the mailserver service state. Returns 'running',
+   * another docker state string, or '' when it can't be determined.
+   */
+  private async mailContainerState(
+    server: { id: string; host: string } | null,
+    mailServerId: string,
+    containerName: string,
+  ): Promise<string> {
+    if (!this.isRemoteMail(server)) {
+      try {
+        const { stdout } = await execFileAsync(
+          'docker',
+          ['inspect', '--format', '{{.State.Status}}', containerName],
+          { timeout: 5000 },
+        );
+        return stdout.trim();
+      } catch {
+        return '';
+      }
+    }
+    try {
+      const task = await this.agent.enqueueAndWait(
+        server.id,
+        'STATUS',
+        { slug: this.mailSlug(mailServerId) },
+        30_000,
+      );
+      if (task.status === 'FAILED') return '';
+      const raw = String((task.result as any)?.output ?? '');
+      // `docker compose ps --format json` emits one JSON object per line.
+      for (const line of raw.split('\n').map((l) => l.trim()).filter(Boolean)) {
+        try {
+          const obj = JSON.parse(line);
+          const state = String(obj.State || obj.Status || '').toLowerCase();
+          if (state.includes('run') || state.includes('up')) return 'running';
+        } catch { /* skip non-JSON lines */ }
+      }
+      return 'stopped';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Tail the mail container's logs. Local → `docker logs`. Remote → LOGS agent
+   * task (`docker compose logs --tail`) in the stack dir.
+   */
+  private async mailLogs(
+    server: { id: string; host: string } | null,
+    mailServerId: string,
+    containerName: string,
+    lines: number,
+  ): Promise<string> {
+    if (!this.isRemoteMail(server)) {
+      // Let a local docker failure THROW so getLogs surfaces its friendly
+      // "(failed to read logs: …)" message (existing contract). The 16 MiB
+      // buffer matches the original call.
+      const { stdout, stderr } = await execFileAsync(
+        'docker',
+        ['logs', '--tail', String(lines), '--timestamps', containerName],
+        { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 },
+      );
+      return `${stdout || ''}${stderr || ''}`;
+    }
+    try {
+      const task = await this.agent.enqueueAndWait(
+        server.id,
+        'LOGS',
+        { slug: this.mailSlug(mailServerId), lines },
+        60_000,
+      );
+      return String((task.result as any)?.logs ?? '');
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Write a file into the mail stack's config tree. Local → fs.writeFile under
+   * MAIL_DIR/<serverId>/<relPath>. Remote → FILE_WRITE agent task into the
+   * stack's compose dir (relative paths, traversal-guarded agent-side).
+   */
+  private async mailWriteFile(
+    server: { id: string; host: string } | null,
+    mailServerId: string,
+    relPath: string,
+    content: string,
+  ): Promise<void> {
+    if (!this.isRemoteMail(server)) {
+      const abs = path.join(MAIL_DIR, mailServerId, relPath);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content);
+      return;
+    }
+    await this.agent.enqueueAndWait(
+      server.id,
+      'FILE_WRITE',
+      { slug: this.mailSlug(mailServerId), file: relPath, content },
+      60_000,
+    );
+  }
+
+  /**
+   * Read a file from the mail stack's tree. Local → fs.readFile (returns '' if
+   * absent). Remote → FILE_READ agent task (returns '' on miss/failure).
+   */
+  private async mailReadFile(
+    server: { id: string; host: string } | null,
+    mailServerId: string,
+    relPath: string,
+  ): Promise<string> {
+    if (!this.isRemoteMail(server)) {
+      const abs = path.join(MAIL_DIR, mailServerId, relPath);
+      try { return fs.readFileSync(abs, 'utf-8'); } catch { return ''; }
+    }
+    try {
+      const task = await this.agent.enqueueAndWait(
+        server.id,
+        'FILE_READ',
+        { slug: this.mailSlug(mailServerId), file: relPath },
+        30_000,
+      );
+      const r: any = task.result || {};
+      return String(r.content ?? '');
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Bring the stack up. Local → write compose to disk + `docker compose up -d`.
+   * Remote → a DEPLOY agent task carrying the compose + all config sideFiles;
+   * the agent writes them under its app dir and runs `docker compose up -d`.
+   */
+  private async mailDeployStack(
+    server: { id: string; host: string } | null,
+    mailServerId: string,
+    compose: string,
+    sideFiles: Record<string, string>,
+  ): Promise<{ logs: string; failed: boolean; error?: string }> {
+    if (!this.isRemoteMail(server)) {
+      // Local path is handled inline by runDeploy (fs + execFile) — this branch
+      // is only reached for remote. Kept defensive.
+      return { logs: '', failed: false };
+    }
+    const task = await this.agent.enqueueAndWait(
+      server.id,
+      'DEPLOY',
+      { slug: this.mailSlug(mailServerId), appName: this.mailSlug(mailServerId), compose, sideFiles },
+      15 * 60_000,
+    );
+    const r: any = task.result || {};
+    return {
+      logs: String(r.logs ?? ''),
+      failed: task.status === 'FAILED',
+      error: task.error || undefined,
+    };
+  }
+
+  /**
+   * Run a compose lifecycle action (stop/down) on the stack. Local → execFile
+   * with cwd. Remote → STOP/REMOVE agent task.
+   */
+  private async mailComposeAction(
+    server: { id: string; host: string } | null,
+    mailServerId: string,
+    action: 'stop' | 'down' | 'down-v',
+    containerName?: string,
+  ): Promise<void> {
+    if (!this.isRemoteMail(server)) {
+      const dir = path.join(MAIL_DIR, mailServerId);
+      if (!fs.existsSync(dir)) return;
+      const args =
+        action === 'stop' ? ['compose', 'stop']
+        : action === 'down' ? ['compose', 'down', '--remove-orphans']
+        : ['compose', 'down', '-v', '--remove-orphans'];
+      try { await execFileAsync('docker', args, { cwd: dir, timeout: 60_000 }); } catch {}
+      return;
+    }
+    if (action === 'stop') {
+      await this.agent.enqueueAndWait(server.id, 'STOP', { slug: this.mailSlug(mailServerId) }, 90_000).catch(() => {});
+    } else {
+      await this.agent.enqueueAndWait(
+        server.id,
+        'REMOVE',
+        { slug: this.mailSlug(mailServerId), purgeVolumes: action === 'down-v', containerName },
+        90_000,
+      ).catch(() => {});
+    }
+  }
+
   // ── reads ─────────────────────────────────────────────────────────
 
   async getStatus(userId: string, domainId: string) {
@@ -189,40 +463,29 @@ export class MailServerService implements OnApplicationBootstrap {
     });
     if (!server) return null;
 
-    // also probe docker for live state
+    // also probe docker for live state (local inspect or remote STATUS task)
     const containerName = `dockcontrol-mail-${server.domain.domain.replace(/\./g, '-')}`;
+    const host = await this.resolveMailHost(server);
     let liveStatus = server.status as string;
-    try {
-      const { stdout } = await execFileAsync(
-        'docker',
-        ['inspect', '--format', '{{.State.Status}}', containerName],
-        { timeout: 5000 },
-      );
-      const docker = stdout.trim();
-      if (docker === 'running' && server.status !== 'RUNNING') {
-        await this.prisma.mailServer.update({
-          where: { id: server.id },
-          data: { status: 'RUNNING' },
-        });
-        liveStatus = 'RUNNING';
-      } else if (docker !== 'running' && server.status === 'RUNNING') {
-        await this.prisma.mailServer.update({
-          where: { id: server.id },
-          data: { status: 'STOPPED' },
-        });
-        liveStatus = 'STOPPED';
-      }
-    } catch {
-      if (server.status === 'RUNNING') {
-        await this.prisma.mailServer.update({
-          where: { id: server.id },
-          data: { status: 'STOPPED' },
-        });
-        liveStatus = 'STOPPED';
-      }
+    const docker = await this.mailContainerState(host, server.id, containerName);
+    if (docker === 'running' && server.status !== 'RUNNING') {
+      await this.prisma.mailServer.update({ where: { id: server.id }, data: { status: 'RUNNING' } });
+      liveStatus = 'RUNNING';
+    } else if (docker && docker !== 'running' && server.status === 'RUNNING') {
+      await this.prisma.mailServer.update({ where: { id: server.id }, data: { status: 'STOPPED' } });
+      liveStatus = 'STOPPED';
+    } else if (!docker && server.status === 'RUNNING') {
+      // Couldn't determine (probe failed) — match previous behaviour: a
+      // RUNNING row whose container can't be inspected is treated STOPPED.
+      await this.prisma.mailServer.update({ where: { id: server.id }, data: { status: 'STOPPED' } });
+      liveStatus = 'STOPPED';
     }
 
-    return { ...server, status: liveStatus };
+    // Surface the host the stack runs on (for display + co-locating webmail).
+    const serverInfo = host
+      ? { id: host.id, name: host.name, host: host.host }
+      : null;
+    return { ...server, status: liveStatus, server: serverInfo };
   }
 
   // ── webmail (Roundcube) 1-click ───────────────────────────────────
@@ -281,8 +544,20 @@ export class MailServerService implements OnApplicationBootstrap {
 
     // Map the chosen access mode to a marketplace install. Default = a dedicated
     // subdomain so we never silently take over the mail apex.
+    //
+    // CO-LOCATION: the webmail MUST run on the SAME host as the mail server.
+    // Roundcube connects to the mail container over the internal docker network
+    // (tls://dockcontrol-mail-*), which only resolves when both containers
+    // share a host. Pin the webmail's serverId to the mail server's serverId
+    // (null = primary host) instead of letting marketplace inherit the
+    // project's default server — that mismatch was the original bug.
     const access = opts.access || 'newDomain';
-    const installData: any = { appSlug: 'roundcube', projectId, envVars };
+    const installData: any = {
+      appSlug: 'roundcube',
+      projectId,
+      envVars,
+      ...(mailServer.serverId ? { serverId: mailServer.serverId } : {}),
+    };
     if (access === 'port') {
       if (!opts.hostPort) throw new BadRequestException('A host port is required for direct IP:port access.');
       installData.hostPort = opts.hostPort;
@@ -354,7 +629,7 @@ export class MailServerService implements OnApplicationBootstrap {
 
   // ── deploy ────────────────────────────────────────────────────────
 
-  async deploy(userId: string, domainId: string) {
+  async deploy(userId: string, domainId: string, targetServerId?: string) {
     const domain = await this.assertDomainAccess(userId, domainId, 'ADMIN');
 
     // A mail server MUST belong to a project. New domains already require a
@@ -390,6 +665,16 @@ export class MailServerService implements OnApplicationBootstrap {
       }
     }
 
+    // Resolve which host the mail stack runs on:
+    //   - first deploy: explicit targetServerId if given, else the domain's
+    //     project default server, else the primary host (serverId = null)
+    //   - re-deploy: a mail server does NOT move hosts implicitly — keep the
+    //     server it was first deployed to (ignore targetServerId), since moving
+    //     would orphan the on-host data/volumes.
+    const mailServerId = existing
+      ? existing.serverId
+      : await this.resolveDeployTargetServerId(targetServerId, projectId);
+
     let server = existing;
 
     // Generate DKIM keypair on first deploy. Private key is encrypted at
@@ -413,8 +698,8 @@ export class MailServerService implements OnApplicationBootstrap {
     }
     const dkimKeyEncrypted = this.encryption.encrypt(dkimKey);
 
-    // claim a free port range
-    const ports = await this.allocatePorts(domainId, server);
+    // claim a free port range (scoped to the target host)
+    const ports = await this.allocatePorts(domainId, server, mailServerId);
 
     // Preflight: confirm the host ports we're about to bind aren't already
     // held by a non-Docker process. Classic case: Ubuntu ships with Postfix
@@ -427,7 +712,11 @@ export class MailServerService implements OnApplicationBootstrap {
     // container (allocatePorts returns the existing range) and 400 every
     // time. runDeploy force-removes that container before `compose up`, so
     // its ports are guaranteed to be released mid-pipeline.
-    const portsToCheck = existing
+    //
+    // PRIMARY host only: the busybox probe runs the LOCAL docker — it can't
+    // see a remote host's ports. A real conflict on a remote host surfaces as
+    // a deploy error from the agent instead.
+    const portsToCheck = existing || mailServerId
       ? []
       : [
           { port: ports.smtp, label: 'SMTP' },
@@ -455,6 +744,7 @@ export class MailServerService implements OnApplicationBootstrap {
       where: { domainId },
       create: {
         domainId,
+        serverId: mailServerId,
         status: 'DEPLOYING',
         hostname: `mail.${domain.domain}`,
         smtpPort: ports.smtp,
@@ -481,19 +771,57 @@ export class MailServerService implements OnApplicationBootstrap {
     this.proxy.regenerate().catch(() => {});
 
     // write filesystem + start docker (async, no await)
-    this.runDeploy(server.id, domain.domain, ports, dkimKey!).catch(() => {});
+    this.runDeploy(server.id, domain.domain, ports, dkimKey!, mailServerId).catch(() => {});
 
     return server;
+  }
+
+  /**
+   * Resolve the host a NEW mail server should run on. Explicit target wins;
+   * otherwise inherit the domain's project default server; otherwise the
+   * primary host (null). Validates the target is a registered ONLINE server.
+   * Returns the serverId to store (null = primary host).
+   */
+  private async resolveDeployTargetServerId(
+    targetServerId: string | undefined,
+    projectId: string,
+  ): Promise<string | null> {
+    // Explicit choice from the deploy dialog.
+    if (targetServerId) {
+      const srv = await this.prisma.server.findUnique({ where: { id: targetServerId } });
+      if (!srv) throw new BadRequestException('Target server not found.');
+      if (srv.status !== 'ONLINE') {
+        throw new BadRequestException(`Server "${srv.name}" is ${srv.status} — choose an ONLINE server.`);
+      }
+      // A local-host server row means "primary host" — store null so the local
+      // code path is taken (no agent round-trip to ourselves).
+      return isLocalHost(srv.host) ? null : srv.id;
+    }
+    // Inherit the project default server, if any.
+    const project = await this.prisma.project.findUnique({
+      where: { id: projectId },
+      select: { server: { select: { id: true, host: true, status: true, name: true } } },
+    });
+    const dft = project?.server;
+    if (dft && !isLocalHost(dft.host)) {
+      if (dft.status !== 'ONLINE') {
+        throw new BadRequestException(
+          `The project's default server "${dft.name}" is ${dft.status}. ` +
+            `Bring it online or pick another server for the mail stack.`,
+        );
+      }
+      return dft.id;
+    }
+    // Default: primary host.
+    return null;
   }
 
   async stop(userId: string, domainId: string) {
     await this.assertDomainAccess(userId, domainId, 'DEVELOPER');
     const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
     if (!server) throw new NotFoundException('Mail server not provisioned');
-    const dir = path.join(MAIL_DIR, server.id);
-    if (fs.existsSync(dir)) {
-      try { await execFileAsync('docker', ['compose', 'stop'], { cwd: dir, timeout: 60_000 }); } catch {}
-    }
+    const host = await this.resolveMailHost(server);
+    await this.mailComposeAction(host, server.id, 'stop');
     return this.prisma.mailServer.update({
       where: { id: server.id },
       data: { status: 'STOPPED' },
@@ -655,19 +983,24 @@ export class MailServerService implements OnApplicationBootstrap {
       : null;
 
     if (server) {
-      const dir = path.join(MAIL_DIR, server.id);
-      if (fs.existsSync(dir)) {
-        try { await execFileAsync('docker', ['compose', 'down', '-v', '--remove-orphans'], { cwd: dir, timeout: 60_000 }); } catch {}
-        try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+      const host = await this.resolveMailHost(server);
+      // Tear the stack down (compose down -v + container rm) on its host.
+      await this.mailComposeAction(host, server.id, 'down-v', containerName ?? undefined);
+      // Wipe the on-disk dir on the PRIMARY host only (the agent's REMOVE task
+      // already removes the remote compose dir for a remote stack).
+      if (!this.isRemoteMail(host)) {
+        const dir = path.join(MAIL_DIR, server.id);
+        if (fs.existsSync(dir)) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
       }
       await this.prisma.mailServer.delete({ where: { id: server.id } });
     }
 
-    // belt-and-suspenders: if a container with the expected name still exists
-    // (compose dir missing, prior crash, name reused), force-remove it so the
-    // ports it holds are freed.
-    if (containerName) {
-      try { await execFileAsync('docker', ['rm', '-f', containerName], { timeout: 30_000 }); } catch {}
+    // belt-and-suspenders for the LOCAL case: if a container with the expected
+    // name still exists (compose dir missing, prior crash, name reused),
+    // force-remove it so the ports it holds are freed. For a remote stack the
+    // REMOVE task above already handled this.
+    if (containerName && (!server || !(await this.resolveMailHost(server)))) {
+      try { await execFileAsync('docker', ['rm', '-f', '--', containerName], { timeout: 30_000 }); } catch {}
     }
   }
 
@@ -690,8 +1023,13 @@ export class MailServerService implements OnApplicationBootstrap {
       include: { mailbox: true },
     });
 
-    const dir = path.join(MAIL_DIR, server.id);
-    if (!fs.existsSync(dir)) return;
+    const host = await this.resolveMailHost(server);
+    // For the LOCAL stack, the compose dir must already exist (deploy created
+    // it). For REMOTE we always write through the agent (no local dir check).
+    if (!this.isRemoteMail(host)) {
+      const dir = path.join(MAIL_DIR, server.id);
+      if (!fs.existsSync(dir)) return;
+    }
 
     // postfix-accounts.cf — Dovecot's canonical bcrypt scheme is
     // {BLF-CRYPT}, which has a native verifier inside Dovecot since 2.3 and
@@ -702,7 +1040,6 @@ export class MailServerService implements OnApplicationBootstrap {
     // the legacy $2a$/$2b$ prefix to $2y$ so Dovecot's bcrypt verifier
     // doesn't choke on the identifier; the hash payload is identical
     // across the three variants.
-    const accountsPath = path.join(dir, 'config', 'postfix-accounts.cf');
     const newAccounts =
       mailboxes
         .map((m) => {
@@ -710,13 +1047,12 @@ export class MailServerService implements OnApplicationBootstrap {
           return `${m.address}|{BLF-CRYPT}${hash}`;
         })
         .join('\n') + '\n';
-    const prevAccounts = fs.existsSync(accountsPath) ? fs.readFileSync(accountsPath, 'utf-8') : '';
+    const prevAccounts = await this.mailReadFile(host, server.id, 'config/postfix-accounts.cf');
     const accountsChanged = prevAccounts !== newAccounts;
     if (accountsChanged) {
-      fs.writeFileSync(accountsPath, newAccounts);
+      await this.mailWriteFile(host, server.id, 'config/postfix-accounts.cf', newAccounts);
     }
 
-    const virtualPath = path.join(dir, 'config', 'postfix-virtual.cf');
     const virtualLines: string[] = [];
     for (const f of forwards) virtualLines.push(`${f.address}  ${f.forwardTo}`);
     for (const a of aliases) {
@@ -735,10 +1071,10 @@ export class MailServerService implements OnApplicationBootstrap {
       virtualLines.push(`@${domain.domain}  ${target}`);
     }
     const newVirtual = virtualLines.join('\n') + '\n';
-    const prevVirtual = fs.existsSync(virtualPath) ? fs.readFileSync(virtualPath, 'utf-8') : '';
+    const prevVirtual = await this.mailReadFile(host, server.id, 'config/postfix-virtual.cf');
     const virtualChanged = prevVirtual !== newVirtual;
     if (virtualChanged) {
-      fs.writeFileSync(virtualPath, newVirtual);
+      await this.mailWriteFile(host, server.id, 'config/postfix-virtual.cf', newVirtual);
     }
 
     // Skip the reload entirely when nothing changed. The reload itself is
@@ -748,19 +1084,12 @@ export class MailServerService implements OnApplicationBootstrap {
     if (!accountsChanged && !virtualChanged) return;
 
     const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
-    try {
-      await execFileAsync('docker', ['exec', containerName, 'postfix', 'reload'], { timeout: 5_000 });
-    } catch {}
-    // Also force Dovecot to flush its auth cache + re-read userdb so the new
-    // mailbox is loggable immediately (the docker-mailserver image's
-    // changedetector usually catches this within 2s, but we don't want to
-    // gamble on timing).
-    try {
-      await execFileAsync('docker', ['exec', containerName, 'doveadm', 'reload'], { timeout: 5_000 });
-    } catch {}
-    try {
-      await execFileAsync('docker', ['exec', containerName, 'doveadm', 'auth', 'cache', 'flush'], { timeout: 5_000 });
-    } catch {}
+    // Reload Postfix + flush Dovecot's auth cache so the new mailbox is
+    // loggable immediately. Routed through mailDockerExec → local docker exec
+    // or remote EXEC task. Best-effort; the DMS changedetector also catches it.
+    await this.mailDockerExec(host, containerName, ['postfix', 'reload'], 5_000).catch(() => {});
+    await this.mailDockerExec(host, containerName, ['doveadm', 'reload'], 5_000).catch(() => {});
+    await this.mailDockerExec(host, containerName, ['doveadm', 'auth', 'cache', 'flush'], 5_000).catch(() => {});
   }
 
   /**
@@ -776,6 +1105,8 @@ export class MailServerService implements OnApplicationBootstrap {
     await this.assertDomainAccess(userId, domainId, 'DEVELOPER');
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) throw new NotFoundException('Domain not found');
+    const mailServer = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    const host = mailServer ? await this.resolveMailHost(mailServer) : null;
     const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
     const lines = Math.min(Math.max(opts.lines || 200, 10), 5000);
     const service = opts.service || 'all';
@@ -787,12 +1118,7 @@ export class MailServerService implements OnApplicationBootstrap {
       // container log once and filter by service in JS. Pull a larger window
       // then trim to the requested count after filtering.
       const window = service === 'all' ? lines : Math.min(lines * 8, 5000);
-      const { stdout, stderr } = await execFileAsync(
-        'docker',
-        ['logs', '--tail', String(window), '--timestamps', containerName],
-        { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 },
-      );
-      const raw = `${stdout || ''}${stderr || ''}`;
+      const raw = await this.mailLogs(host, mailServer?.id ?? '', containerName, window);
       if (service === 'all') return { logs: raw };
 
       // Match the daemon name in the syslog-style line (e.g. "… rspamd[123]: …",
@@ -821,35 +1147,30 @@ export class MailServerService implements OnApplicationBootstrap {
     await this.assertDomainAccess(userId, domainId, 'DEVELOPER');
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) throw new NotFoundException('Domain not found');
+    const mailServer = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    const host = mailServer ? await this.resolveMailHost(mailServer) : null;
     const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
-    try {
-      const { stdout: statusOut } = await execFileAsync(
-        'docker',
-        ['exec', containerName, 'fail2ban-client', 'status'],
-        { timeout: 5_000 },
-      );
-      const jailLine = statusOut.split('\n').find((l) => l.includes('Jail list:'));
-      const jailNames = (jailLine ? jailLine.split(':').slice(1).join(':') : '')
-        .split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
-      const jails: { name: string; banned: string[] }[] = [];
-      for (const name of jailNames) {
-        try {
-          const { stdout } = await execFileAsync(
-            'docker',
-            ['exec', containerName, 'fail2ban-client', 'status', name],
-            { timeout: 5_000 },
-          );
-          const ipLine = stdout.split('\n').find((l) => l.includes('Banned IP list:'));
-          const ips = ipLine
-            ? ipLine.split(':').slice(1).join(':').trim().split(/\s+/).filter(Boolean)
-            : [];
-          jails.push({ name, banned: ips });
-        } catch {}
-      }
-      return { jails };
-    } catch (e: any) {
-      throw new NotFoundException(`fail2ban not reachable in mail container: ${e?.message || e}`);
+    const status = await this.mailDockerExec(host, containerName, ['fail2ban-client', 'status'], 5_000);
+    if (status.code !== 0) {
+      throw new NotFoundException(`fail2ban not reachable in mail container: ${status.out.slice(0, 200)}`);
     }
+    const jailLine = status.out.split('\n').find((l) => l.includes('Jail list:'));
+    const jailNames = (jailLine ? jailLine.split(':').slice(1).join(':') : '')
+      .split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+    const jails: { name: string; banned: string[] }[] = [];
+    for (const name of jailNames) {
+      // jail names come from fail2ban itself (not user input); still keep them
+      // simple to avoid any shell surprise in the EXEC string.
+      if (!/^[A-Za-z0-9._-]+$/.test(name)) continue;
+      const jail = await this.mailDockerExec(host, containerName, ['fail2ban-client', 'status', name], 5_000);
+      if (jail.code !== 0) continue;
+      const ipLine = jail.out.split('\n').find((l) => l.includes('Banned IP list:'));
+      const ips = ipLine
+        ? ipLine.split(':').slice(1).join(':').trim().split(/\s+/).filter(Boolean)
+        : [];
+      jails.push({ name, banned: ips });
+    }
+    return { jails };
   }
 
   async unbanIp(userId: string, domainId: string, ip: string): Promise<{ unbanned: string }> {
@@ -863,17 +1184,15 @@ export class MailServerService implements OnApplicationBootstrap {
     }
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) throw new NotFoundException('Domain not found');
+    const mailServer = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    const host = mailServer ? await this.resolveMailHost(mailServer) : null;
     const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
-    try {
-      await execFileAsync(
-        'docker',
-        ['exec', containerName, 'fail2ban-client', 'unban', ip],
-        { timeout: 5_000 },
-      );
-      return { unbanned: ip };
-    } catch (e: any) {
-      throw new NotFoundException(`Could not unban: ${e?.message || e}`);
+    // ip is net.isIP-validated → safe to interpolate into the EXEC command.
+    const res = await this.mailDockerExec(host, containerName, ['fail2ban-client', 'unban', ip], 5_000);
+    if (res.code !== 0) {
+      throw new NotFoundException(`Could not unban: ${res.out.slice(0, 200)}`);
     }
+    return { unbanned: ip };
   }
 
   /**
@@ -886,36 +1205,52 @@ export class MailServerService implements OnApplicationBootstrap {
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) return;
     const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
+    const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    const host = server ? await this.resolveMailHost(server) : null;
 
-    // If the compose was generated WITHOUT TLS (cert wasn't issued yet) but the
-    // cert now exists, an in-place reload can't enable TLS — we must re-render
-    // the compose (SSL_TYPE: manual) and recreate. Detect by checking the stored
-    // compose for SSL_TYPE.
-    try {
-      const server = await this.prisma.mailServer.findUnique({ where: { domainId } });
-      const composePath = path.join(MAIL_DIR, server?.id || '', 'docker-compose.yml');
-      const hasTls = fs.existsSync(composePath) && fs.readFileSync(composePath, 'utf-8').includes('SSL_TYPE: manual');
-      const certNow = await this.proxy.certExists(`mail.${domain.domain}`).catch(() => false);
-      if (server && certNow && !hasTls) {
-        this.logger.log(`Cert for mail.${domain.domain} now present — redeploying mail server to enable TLS.`);
-        const ports = {
-          smtp: server.smtpPort, submission: server.submissionPort, smtps: server.smtpsPort,
-          imap: server.imapPort, imaps: server.imapsPort,
-        };
-        const dkimKey = server.dkimPrivateKey ? this.encryption.decrypt(server.dkimPrivateKey) : '';
-        await this.runDeploy(server.id, domain.domain, ports, dkimKey);
-        return;
+    // The TLS-recheck (cert appeared → re-render compose with SSL_TYPE: manual)
+    // is a PRIMARY-host concern: it's driven by the platform Caddy's cert
+    // watcher, which only tracks local mail servers. A remote mail stack runs
+    // its OWN embedded Caddy + is already deployed with SSL_TYPE: manual, so it
+    // never needs this path. Skip it for remote.
+    if (server && !this.isRemoteMail(host)) {
+      try {
+        const composePath = path.join(MAIL_DIR, server.id, 'docker-compose.yml');
+        const hasTls = fs.existsSync(composePath) && fs.readFileSync(composePath, 'utf-8').includes('SSL_TYPE: manual');
+        const certNow = await this.proxy.certExists(`mail.${domain.domain}`).catch(() => false);
+        if (certNow && !hasTls) {
+          this.logger.log(`Cert for mail.${domain.domain} now present — redeploying mail server to enable TLS.`);
+          const ports = {
+            smtp: server.smtpPort, submission: server.submissionPort, smtps: server.smtpsPort,
+            imap: server.imapPort, imaps: server.imapsPort,
+          };
+          const dkimKey = server.dkimPrivateKey ? this.encryption.decrypt(server.dkimPrivateKey) : '';
+          await this.runDeploy(server.id, domain.domain, ports, dkimKey, server.serverId);
+          return;
+        }
+      } catch (e: any) {
+        this.logger.warn(`Mail TLS recheck failed for ${domain.domain}: ${e?.message || e}`);
       }
-    } catch (e: any) {
-      this.logger.warn(`Mail TLS recheck failed for ${domain.domain}: ${e?.message || e}`);
     }
 
-    try {
-      await execFileAsync('docker', ['exec', containerName, 'postfix', 'reload'], { timeout: 5_000 });
-      await execFileAsync('docker', ['exec', containerName, 'doveadm', 'reload'], { timeout: 5_000 });
-    } catch (e: any) {
-      this.logger.warn(`Mail reload failed for ${domain.domain}: ${e?.message || e}`);
+    await this.mailDockerExec(host, containerName, ['postfix', 'reload'], 5_000).catch(() => {});
+    await this.mailDockerExec(host, containerName, ['doveadm', 'reload'], 5_000).catch(() => {});
+  }
+
+  /**
+   * Email the embedded Caddy registers with Let's Encrypt for a remote mail
+   * stack. Prefer a sanitized ACME_EMAIL override, else admin@<domain>. The
+   * value is interpolated into the Caddyfile global block, so strip anything
+   * that could break out of it (newlines/braces) and require it to look like
+   * an email.
+   */
+  private resolveAcmeEmailSafe(domain: string): string {
+    const raw = process.env.ACME_EMAIL;
+    if (raw) {
+      const cleaned = raw.replace(/[\r\n{}]/g, '').trim();
+      if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned)) return cleaned;
     }
+    return `admin@${domain}`;
   }
 
   // ── antispam config ───────────────────────────────────────────────
@@ -962,54 +1297,63 @@ export class MailServerService implements OnApplicationBootstrap {
   }
 
   /**
-   * Write the rspamd overrides docker-mailserver loads from
-   * /tmp/docker-mailserver/rspamd/. Sets the spam action thresholds and, when
-   * given, sender white/black maps (multimap). Only writes maps when non-empty
-   * so we never ship a half-configured rule.
+   * Build the rspamd override files docker-mailserver loads from
+   * /tmp/docker-mailserver/rspamd/, as a map of {relPath (under rspamd/) →
+   * content}. Pure (no fs) so both the local writer and the remote sideFiles
+   * assembler share one source of truth. Only emits maps when non-empty so we
+   * never ship a half-configured rule.
    */
-  private writeRspamdConfig(cfgDir: string, cfg: ReturnType<MailServerService['antispamFromRow']>) {
-    const rspamdDir = path.join(cfgDir, 'rspamd');
-    const overrideDir = path.join(rspamdDir, 'override.d');
-    fs.mkdirSync(overrideDir, { recursive: true });
-
+  private buildRspamdFiles(cfg: ReturnType<MailServerService['antispamFromRow']>): Record<string, string> {
     // Action thresholds. When the user only wants to MARK (add_header), push
     // reject far out of reach so nothing is ever bounced — just flagged.
     const reject = cfg.spamAction === 'reject' ? cfg.spamThreshold : 999;
     const addHeader = Math.max(1, cfg.spamThreshold - 2);
     const greylist = Math.max(1, cfg.spamThreshold - 3);
-    // IMPORTANT: docker-mailserver's rspamd/override.d/actions.conf is ALREADY
-    // wrapped in an `actions { … }` section by DMS. We must write ONLY the
-    // bare key = value lines — re-wrapping them in `actions { }` produces
-    // `actions { actions { … } }` which rspamd rejects (crash-loops the
-    // container). See lua_cfg_transform "nested section: actions" error.
-    fs.writeFileSync(
-      path.join(overrideDir, 'actions.conf'),
-      `# Managed by DockControl — do not edit by hand.\nreject = ${reject};\nadd_header = ${addHeader};\ngreylist = ${greylist};\n`,
-    );
-
-    // Sender white/black lists via multimap.
+    // IMPORTANT: DMS already wraps override.d/actions.conf in `actions { … }` —
+    // write ONLY bare key = value lines (re-wrapping crash-loops rspamd).
+    const out: Record<string, string> = {
+      'override.d/actions.conf':
+        `# Managed by DockControl — do not edit by hand.\nreject = ${reject};\nadd_header = ${addHeader};\ngreylist = ${greylist};\n`,
+    };
     const white = this.parseList(cfg.whitelist);
     const black = this.parseList(cfg.blacklist);
     const mapsConf: string[] = [];
-    // The config dir is mounted at /tmp/docker-mailserver inside the container,
-    // so the .map files are readable there at runtime.
     if (white.length) {
-      fs.writeFileSync(path.join(rspamdDir, 'whitelist.map'), white.join('\n') + '\n');
+      out['whitelist.map'] = white.join('\n') + '\n';
       mapsConf.push(
         `DOCKCONTROL_WHITELIST {\n  type = "from";\n  map = "/tmp/docker-mailserver/rspamd/whitelist.map";\n  score = -100.0;\n}`,
       );
     }
     if (black.length) {
-      fs.writeFileSync(path.join(rspamdDir, 'blacklist.map'), black.join('\n') + '\n');
+      out['blacklist.map'] = black.join('\n') + '\n';
       mapsConf.push(
         `DOCKCONTROL_BLACKLIST {\n  type = "from";\n  map = "/tmp/docker-mailserver/rspamd/blacklist.map";\n  score = 100.0;\n}`,
       );
     }
-    const multimapPath = path.join(overrideDir, 'multimap.conf');
     if (mapsConf.length) {
-      fs.writeFileSync(multimapPath, `# Managed by DockControl.\n${mapsConf.join('\n')}\n`);
-    } else if (fs.existsSync(multimapPath)) {
-      // Lists cleared → remove the rule so old entries don't linger.
+      out['override.d/multimap.conf'] = `# Managed by DockControl.\n${mapsConf.join('\n')}\n`;
+    }
+    return out;
+  }
+
+  /**
+   * Write the rspamd overrides to disk for the LOCAL (primary host) deploy.
+   * Delegates content to buildRspamdFiles and also clears a stale multimap.conf
+   * when lists were emptied (so old entries don't linger).
+   */
+  private writeRspamdConfig(cfgDir: string, cfg: ReturnType<MailServerService['antispamFromRow']>) {
+    const rspamdDir = path.join(cfgDir, 'rspamd');
+    const overrideDir = path.join(rspamdDir, 'override.d');
+    fs.mkdirSync(overrideDir, { recursive: true });
+    const files = this.buildRspamdFiles(cfg);
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = path.join(rspamdDir, rel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content);
+    }
+    // Lists cleared → remove the rule so old entries don't linger.
+    const multimapPath = path.join(overrideDir, 'multimap.conf');
+    if (!files['override.d/multimap.conf'] && fs.existsSync(multimapPath)) {
       try { fs.unlinkSync(multimapPath); } catch {}
     }
   }
@@ -1021,7 +1365,18 @@ export class MailServerService implements OnApplicationBootstrap {
     domain: string,
     ports: { smtp: number; submission: number; smtps: number; imap: number; imaps: number },
     dkimPrivateKey: string,
+    targetServerId?: string | null,
   ) {
+    // Remote target → dispatch the whole stack (compose + config + an embedded
+    // Caddy that does ACME for mail.<domain>) to the agent. The local path
+    // below is left exactly as it was (primary host).
+    const target = targetServerId
+      ? await this.resolveMailHost({ serverId: targetServerId })
+      : null;
+    if (this.isRemoteMail(target)) {
+      return this.runDeployRemote(serverId, domain, ports, dkimPrivateKey, target);
+    }
+
     const dir = path.join(MAIL_DIR, serverId);
     const cfgDir = path.join(dir, 'config');
     const dataDir = path.join(dir, 'data');
@@ -1196,7 +1551,8 @@ ${sslExternalVolumes}`;
       // Force-remove any stale container with this name. Happens when a prior
       // deploy crashed mid-flight or the mail_servers row was recreated with a
       // new serverId (different compose dir) but the old container survived.
-      try { await execFileAsync('docker', ['rm', '-f', containerName], { timeout: 30_000 }); } catch {}
+      // `--` guards against a containerName parsed as a docker flag.
+      try { await execFileAsync('docker', ['rm', '-f', '--', containerName], { timeout: 30_000 }); } catch {}
       await execFileAsync('docker', ['compose', 'pull'], { cwd: dir, timeout: 600_000 });
       await execFileAsync('docker', ['compose', 'up', '-d'], { cwd: dir, timeout: 300_000 });
       // mark RUNNING after 5s grace (DMS bootstrap)
@@ -1223,6 +1579,171 @@ ${sslExternalVolumes}`;
         data: {
           status: 'ERROR',
           lastError: (err?.stderr || err?.message || 'deploy failed').toString().slice(0, 4000),
+        },
+      });
+    }
+  }
+
+  /**
+   * Deploy the mail stack to a REMOTE agent server. Mirrors runDeploy's local
+   * path but: (1) ships every config file as a DEPLOY task sideFile (relative
+   * paths under the agent's app dir), (2) uses RELATIVE bind-mounts, and (3)
+   * bundles a small Caddy service that runs ACME HTTP-01 for mail.<domain> on
+   * the agent's free ports 80/443 and writes the cert to a shared volume the
+   * mailserver reads (SSL_TYPE: manual). The primary Caddy deliberately skips
+   * mail blocks for remote servers (see reverse-proxy gate), so there's no
+   * cert-issuance conflict.
+   */
+  private async runDeployRemote(
+    serverId: string,
+    domain: string,
+    ports: { smtp: number; submission: number; smtps: number; imap: number; imaps: number },
+    dkimPrivateKey: string,
+    server: { id: string; host: string; name: string },
+  ) {
+    const containerName = `dockcontrol-mail-${domain.replace(/\./g, '-')}`;
+    const mailHost = `mail.${domain}`;
+    const isLocal =
+      domain.endsWith('.local') ||
+      domain.endsWith('.localhost') ||
+      domain.endsWith('.test') ||
+      domain === 'localhost';
+
+    // ── assemble every config file as a relative-path sideFile ──
+    const cleanKey = dkimPrivateKey.replace(/^﻿/, '').trimEnd() + '\n';
+    const srvRow = await this.prisma.mailServer.findUnique({ where: { id: serverId } });
+    const spam = this.antispamFromRow(srvRow as any);
+    const enablePostgrey = spam.greylisting ? 1 : 0;
+    const enableClamav = spam.antivirus ? 1 : 0;
+
+    const sideFiles: Record<string, string> = {
+      [`config/opendkim/keys/${domain}/dockcontrol.private`]: cleanKey,
+      'config/opendkim/KeyTable':
+        `dockcontrol._domainkey.${domain} ${domain}:dockcontrol:/etc/opendkim/keys/${domain}/dockcontrol.private\n`,
+      'config/opendkim/SigningTable': `*@${domain} dockcontrol._domainkey.${domain}\n`,
+      'config/opendkim/TrustedHosts':
+        ['127.0.0.1', 'localhost', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', mailHost, domain].join('\n') + '\n',
+      'config/postfix-accounts.cf': '',
+      'config/postfix-virtual.cf': '',
+      '.stack-version': String(MailServerService.STACK_VERSION) + '\n',
+    };
+    // rspamd overrides — reuse the same content builder as the local path.
+    for (const [rel, content] of Object.entries(this.buildRspamdFiles(spam))) {
+      sideFiles[`config/rspamd/${rel}`] = content;
+    }
+
+    // ── TLS: an embedded Caddy obtains + renews the cert for mail.<domain> ──
+    // For a real (non-local) domain, point DMS at the cert the embedded Caddy
+    // writes. DMS boot-loops harmlessly until the files appear, exactly like
+    // the local "no cert yet" path, then a reconcile/reload picks them up.
+    const acmeEmail = this.resolveAcmeEmailSafe(domain);
+    const useEmbeddedCaddy = !isLocal;
+    const sslEnv = !useEmbeddedCaddy
+      ? `# TLS not configured (local/dev domain).`
+      : [
+          `SSL_TYPE: manual`,
+          `SSL_CERT_PATH: /caddy-certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${mailHost}/${mailHost}.crt`,
+          `SSL_KEY_PATH: /caddy-certs/caddy/certificates/acme-v02.api.letsencrypt.org-directory/${mailHost}/${mailHost}.key`,
+        ].join('\n      ');
+
+    if (useEmbeddedCaddy) {
+      // Minimal Caddyfile: obtain a cert for mail.<domain> and answer HTTP so
+      // the ACME HTTP-01 challenge + a basic health response work. No open
+      // reverse_proxy. Email enables ACME account registration.
+      sideFiles['caddy/Caddyfile'] =
+        `{\n  email ${acmeEmail}\n}\n\n${mailHost} {\n  respond "DockControl mail server. Use IMAP/SMTP clients, not HTTP." 200\n}\n`;
+    }
+
+    const caddyService = useEmbeddedCaddy
+      ? `  caddy:
+    image: caddy:2
+    container_name: ${containerName}-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - mailcerts:/data
+    networks:
+      - default
+`
+      : '';
+    // mailserver mounts the SAME cert volume read-only at the path DMS expects.
+    const sslVolumeMount = useEmbeddedCaddy ? `      - mailcerts:/caddy-certs:ro\n` : '';
+    const namedVolumes = useEmbeddedCaddy ? `\nvolumes:\n  mailcerts:\n` : '';
+    const dependsOn = useEmbeddedCaddy ? `    depends_on:\n      - caddy\n` : '';
+
+    const compose = `services:
+  mailserver:
+    image: ghcr.io/docker-mailserver/docker-mailserver:latest
+    container_name: ${containerName}
+    hostname: ${mailHost}
+    restart: unless-stopped
+    networks:
+      - default
+      - dockcontrol-apps
+    ports:
+      - "${ports.smtp}:25"
+      - "${ports.submission}:587"
+      - "${ports.smtps}:465"
+      - "${ports.imap}:143"
+      - "${ports.imaps}:993"
+    environment:
+      ENABLE_RSPAMD: 1
+      ENABLE_OPENDKIM: 1
+      ENABLE_OPENDMARC: 1
+      ENABLE_POLICYD_SPF: 1
+      ENABLE_RSPAMD_REDIS: 1
+      ENABLE_AMAVIS: 0
+      ENABLE_SPAMASSASSIN: 0
+      ENABLE_CLAMAV: ${enableClamav}
+      ENABLE_FAIL2BAN: 1
+      ENABLE_POSTGREY: ${enablePostgrey}
+      OVERRIDE_HOSTNAME: ${mailHost}
+      PERMIT_DOCKER: network
+      ONE_DIR: 1
+      ${sslEnv}
+      POSTFIX_INET_PROTOCOLS: ipv4
+      DOVECOT_INET_PROTOCOLS: ipv4
+      TZ: UTC
+    volumes:
+      - ./data:/var/mail
+      - ./state:/var/mail-state
+      - ./logs:/var/log/mail
+      - ./config:/tmp/docker-mailserver
+${sslVolumeMount}    cap_add:
+      - NET_ADMIN
+      - SYS_PTRACE
+${dependsOn}    healthcheck:
+      test: ["CMD", "ss", "--listening", "--tcp", "|", "grep", "-P", "LISTEN.+:smtp"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+${caddyService}networks:
+  dockcontrol-apps:
+    external: true
+    name: dockcontrol-apps
+${namedVolumes}`;
+
+    try {
+      const res = await this.mailDeployStack(server, serverId, compose, sideFiles);
+      if (res.failed) throw new Error(res.error || 'agent deploy failed');
+      // Grace period for DMS bootstrap, then mark RUNNING + initial sync.
+      setTimeout(async () => {
+        try {
+          await this.prisma.mailServer.update({ where: { id: serverId }, data: { status: 'RUNNING' } });
+          const srv = await this.prisma.mailServer.findUnique({ where: { id: serverId } });
+          if (srv) await this.syncAccounts(srv.domainId);
+          await this.reconcileWebmails(serverId).catch(() => {});
+        } catch {}
+      }, 8000);
+    } catch (err: any) {
+      await this.prisma.mailServer.update({
+        where: { id: serverId },
+        data: {
+          status: 'ERROR',
+          lastError: (err?.message || 'remote deploy failed').toString().slice(0, 4000),
         },
       });
     }
@@ -1293,16 +1814,14 @@ ${sslExternalVolumes}`;
   async kickMailboxSessions(domainId: string, address: string): Promise<void> {
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });
     if (!domain) return;
+    // address is a stored mailbox address, but it's interpolated into the EXEC
+    // command string for the remote path — keep it to the email charset.
+    if (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(address)) return;
+    const mailServer = await this.prisma.mailServer.findUnique({ where: { domainId } });
+    const host = mailServer ? await this.resolveMailHost(mailServer) : null;
     const containerName = `dockcontrol-mail-${domain.domain.replace(/\./g, '-')}`;
-    try {
-      await execFileAsync(
-        'docker',
-        ['exec', containerName, 'doveadm', 'kick', address],
-        { timeout: 5_000 },
-      );
-    } catch {
-      // Container down, doveadm not in PATH, no sessions — all fine.
-    }
+    // Container down, doveadm not in PATH, no sessions — all fine.
+    await this.mailDockerExec(host, containerName, ['doveadm', 'kick', address], 5_000).catch(() => {});
   }
 
   /**
@@ -1326,7 +1845,7 @@ ${sslExternalVolumes}`;
         name: { in: WEBMAIL_NAMES },
         domains: { some: { id: server.domain.id } },
       },
-      select: { id: true, name: true },
+      select: { id: true, name: true, serverId: true, project: { select: { serverId: true } } },
     });
     if (apps.length === 0) return;
 
@@ -1340,26 +1859,53 @@ ${sslExternalVolumes}`;
       try {
         const slugify = (n: string) => n.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'app';
         const slug = slugify(app.name);
-        const appDir = path.join(DATA_DIR, 'apps', `${slug}-${app.id.slice(0, 12)}`);
-        const composePath = path.join(appDir, 'docker-compose.yml');
-        if (!fs.existsSync(composePath)) continue;
-        let content = fs.readFileSync(composePath, 'utf-8');
+        const appSlugDir = `${slug}-${app.id.slice(0, 12)}`;
+        // The webmail runs on its own server (co-located with the mail server).
+        // Resolve it so we read/write its compose + recreate on the right host.
+        const appServerId = app.serverId ?? app.project?.serverId ?? null;
+        const appHost = await this.resolveMailHost({ serverId: appServerId });
+
+        const composePath = this.isRemoteMail(appHost)
+          ? 'docker-compose.yml'
+          : path.join(DATA_DIR, 'apps', appSlugDir, 'docker-compose.yml');
+        const content0 = this.isRemoteMail(appHost)
+          ? await this.readWebmailComposeRemote(appHost, appSlugDir)
+          : (fs.existsSync(composePath) ? fs.readFileSync(composePath, 'utf-8') : '');
+        if (!content0) continue;
 
         // Re-point any prior host (public mail.<domain>, host.docker.internal…)
         // to the internal container + standard STARTTLS ports.
-        const before = content;
-        content = content
+        const content = content0
           .replace(/ROUNDCUBEMAIL_DEFAULT_HOST:\s*"?(?:ssl|tls|tcp):\/\/[^\s\n"]+"?/g, `ROUNDCUBEMAIL_DEFAULT_HOST: tls://${mailContainer}`)
           .replace(/ROUNDCUBEMAIL_DEFAULT_PORT:\s*"?\d+"?/g, `ROUNDCUBEMAIL_DEFAULT_PORT: "143"`)
           .replace(/ROUNDCUBEMAIL_SMTP_SERVER:\s*"?(?:ssl|tls|tcp):\/\/[^\s\n"]+"?/g, `ROUNDCUBEMAIL_SMTP_SERVER: tls://${mailContainer}`)
           .replace(/ROUNDCUBEMAIL_SMTP_PORT:\s*"?\d+"?/g, `ROUNDCUBEMAIL_SMTP_PORT: "587"`);
-        if (content === before) continue; // nothing to reconcile
+        if (content === content0) continue; // nothing to reconcile
 
-        fs.writeFileSync(composePath, content);
-        await execFileAsync('docker', ['compose', 'up', '-d', '--force-recreate'], { cwd: appDir, timeout: 180_000 });
+        if (this.isRemoteMail(appHost)) {
+          // Write the updated compose + recreate via agent tasks on the app's host.
+          await this.agent.enqueueAndWait(appHost.id, 'FILE_WRITE', { slug: appSlugDir, file: 'docker-compose.yml', content }, 60_000);
+          await this.agent.enqueueAndWait(appHost.id, 'DEPLOY', { slug: appSlugDir, appName: appSlugDir, compose: content }, 5 * 60_000);
+        } else {
+          fs.writeFileSync(composePath, content);
+          await execFileAsync('docker', ['compose', 'up', '-d', '--force-recreate'], { cwd: path.dirname(composePath), timeout: 180_000 });
+        }
       } catch (e: any) {
         this.logger.warn(`Webmail reconcile failed for app ${app.id}: ${e?.message || e}`);
       }
+    }
+  }
+
+  /** Read a remote webmail's compose via FILE_READ (returns '' on miss). */
+  private async readWebmailComposeRemote(
+    appHost: { id: string },
+    appSlugDir: string,
+  ): Promise<string> {
+    try {
+      const task = await this.agent.enqueueAndWait(appHost.id, 'FILE_READ', { slug: appSlugDir, file: 'docker-compose.yml' }, 30_000);
+      return String((task.result as any)?.content ?? '');
+    } catch {
+      return '';
     }
   }
 
@@ -1408,6 +1954,7 @@ ${sslExternalVolumes}`;
   private async allocatePorts(
     domainId: string,
     existing: { smtpPort: number; submissionPort: number; smtpsPort: number; imapPort: number; imapsPort: number } | null,
+    targetServerId?: string | null,
   ) {
     if (existing) {
       return {
@@ -1418,8 +1965,13 @@ ${sslExternalVolumes}`;
         imaps: existing.imapsPort,
       };
     }
+    // Port sharing only matters WITHIN a single physical host: tcp/25 can be
+    // bound by exactly one process per host, but two different servers can each
+    // bind their own 25. So scope the "used" set to mail servers on the SAME
+    // target host (null = primary). A remote host is dedicated to its first
+    // mail server, which therefore gets the standard set.
     const others = await this.prisma.mailServer.findMany({
-      where: { NOT: { domainId } },
+      where: { NOT: { domainId }, serverId: targetServerId ?? null },
       select: { smtpPort: true, submissionPort: true, smtpsPort: true, imapPort: true, imapsPort: true },
     });
     const used = new Set<number>();
@@ -1430,9 +1982,13 @@ ${sslExternalVolumes}`;
       used.add(o.imapPort);
       used.add(o.imapsPort);
     }
-    // also include any ports currently bound on the docker host — guards against
-    // orphan containers whose DB row was wiped (crash, manual cleanup, etc.).
-    for (const p of await this.listDockerHostPorts()) used.add(p);
+    // For the PRIMARY host only, also include ports currently bound on the
+    // docker host — guards against orphan containers whose DB row was wiped.
+    // (We can't cheaply probe a remote host's ports here; a real bind conflict
+    // there surfaces as a deploy error from the agent.)
+    if (!targetServerId) {
+      for (const p of await this.listDockerHostPorts()) used.add(p);
+    }
 
     // Try the canonical SMTP port set first. Anyone sending mail to us via
     // the public Internet hits tcp/25 — if it's free, take it.

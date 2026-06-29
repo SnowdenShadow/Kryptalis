@@ -527,6 +527,8 @@ export class EmailService {
         select: {
           domainId: true, status: true, hostname: true, lastError: true,
           smtpPort: true, submissionPort: true, smtpsPort: true, imapPort: true, imapsPort: true,
+          serverId: true,
+          server: { select: { id: true, name: true, host: true } },
         },
       }),
       this.prisma.mailbox.groupBy({
@@ -556,6 +558,11 @@ export class EmailService {
     for (const w of webmails) {
       for (const d of w.domains) wmBy.set(d.id, { id: w.id, name: w.name, port: w.port, status: w.status });
     }
+    // Host the platform primary runs on, for displaying SMTP/IMAP + IP:port
+    // coordinates of a mail server that lives on the PRIMARY host (serverId
+    // null). Derived from PUBLIC_API_URL; null when it's a local/dev hostname.
+    const primaryHost = this.resolvePrimaryHost();
+
     return domains.map((d) => {
       const ms = srvBy.get(d.id) || null;
       // Only one mail server on a host can bind tcp/25, which is the only
@@ -563,17 +570,34 @@ export class EmailService {
       // 2525+ can SEND but cannot RECEIVE inbound mail from Gmail/Yahoo.
       // Surface that distinction so the dashboard can warn clearly.
       const inboundCapable = ms ? ms.smtpPort === 25 : null;
+      // The reachable address of the host this mail server runs on: the remote
+      // server's host when remote, else the platform primary host. Lets the
+      // dashboard show a REAL IP:port instead of window.location.hostname.
+      const serverHost = ms ? (ms.server?.host ?? primaryHost) : null;
       return {
         id: d.id,
         domain: d.domain,
         project: d.project,
         application: d.application,
-        mailServer: ms ? { ...ms, inboundCapable } : null,
+        mailServer: ms ? { ...ms, inboundCapable, serverHost } : null,
         mailboxCount: mbBy.get(d.id) || 0,
         aliasCount: alBy.get(d.id) || 0,
         webmail: wmBy.get(d.id) || null,
         subdomains: subsByApex.get(d.domain) || [],
       };
     });
+  }
+
+  /** Public host of the platform primary, derived from PUBLIC_API_URL. */
+  private resolvePrimaryHost(): string | null {
+    try {
+      const raw = process.env.PUBLIC_API_URL;
+      if (!raw) return null;
+      const host = new URL(raw).hostname;
+      if (!host || host === 'localhost' || /^127\.|^0\.0\.0\.0$/.test(host)) return null;
+      return host;
+    } catch {
+      return null;
+    }
   }
 }

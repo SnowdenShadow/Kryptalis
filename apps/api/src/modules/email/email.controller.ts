@@ -9,6 +9,7 @@ import { CreateMailboxDto } from './dto/create-mailbox.dto';
 import { UpdateMailboxDto } from './dto/update-mailbox.dto';
 import { UpdateAntispamDto } from './dto/update-antispam.dto';
 import { DeployWebmailDto } from './dto/deploy-webmail.dto';
+import { DeployMailServerDto } from './dto/deploy-mail-server.dto';
 import { CreateAliasDto } from './dto/create-alias.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
@@ -115,8 +116,12 @@ export class EmailController {
 
   @Post('server/:domainId/deploy')
   @ApiOperation({ summary: 'Deploy or redeploy the mail server (Postfix+Dovecot+rspamd)' })
-  deployMailServer(@CurrentUser('id') userId: string, @Param('domainId') domainId: string) {
-    return this.mailServer.deploy(userId, domainId);
+  deployMailServer(
+    @CurrentUser('id') userId: string,
+    @Param('domainId') domainId: string,
+    @Body() dto: DeployMailServerDto,
+  ) {
+    return this.mailServer.deploy(userId, domainId, dto?.serverId);
   }
 
   @Post('server/:domainId/stop')
