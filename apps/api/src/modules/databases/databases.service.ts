@@ -264,10 +264,21 @@ export class DatabasesService {
     return Promise.all(dbs.map(async (db) => {
       const status = await this.getContainerStatus(resolveDbContainer(db as any));
       const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name, this.connHost((db as any).server));
+      // Container→container target (what another app in the project must use:
+      // <db-container>:<internal-port>, NOT localhost:<published-port>). Same
+      // data connectionInfo() already exposes — surfaced here so the card can
+      // show it without a second fetch.
+      const inNetwork = this.inNetworkConnectionInfo({
+        name: db.name, type: db.type, username: db.username,
+        password: db.password, autoImported: (db as any).autoImported, host: db.host,
+      });
       // Expose the DECRYPTED password to API consumers (the dashboard shows it,
       // same as the connection string). The raw row stores it AES-GCM encrypted
       // (`v1.…`) — never leak that envelope to the client.
-      return { ...db, password: this.dbPassword(db), status, connectionString };
+      return {
+        ...db, password: this.dbPassword(db), status, connectionString,
+        inNetwork: { host: inNetwork.host, port: inNetwork.port, url: inNetwork.url },
+      };
     }));
   }
 
@@ -284,9 +295,16 @@ export class DatabasesService {
     if (!db) throw new NotFoundException('Database not found');
     const status = await this.getContainerStatus(resolveDbContainer(db as any));
     const connectionString = this.getConnectionString(db.type, db.username, this.dbPassword(db), db.port, db.name, this.connHost((db as any).server));
+    const inNetwork = this.inNetworkConnectionInfo({
+      name: db.name, type: db.type, username: db.username,
+      password: db.password, autoImported: (db as any).autoImported, host: db.host,
+    });
     // Decrypted password for the client (matches connectionString); the stored
     // row keeps the AES-GCM envelope.
-    return { ...db, password: this.dbPassword(db), status, connectionString };
+    return {
+      ...db, password: this.dbPassword(db), status, connectionString,
+      inNetwork: { host: inNetwork.host, port: inNetwork.port, url: inNetwork.url },
+    };
   }
 
   // ── lifecycle ──────────────────────────────────────────────────────

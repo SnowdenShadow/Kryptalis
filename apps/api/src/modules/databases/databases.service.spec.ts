@@ -476,6 +476,31 @@ describe('RBAC scoping', () => {
     // status was looked up against the dockcontrol-db- prefixed name
     const insp = findExec((c) => c.cmd === 'docker' && c.args[0] === 'inspect');
     expect(insp!.args).toEqual(['inspect', '--format', '{{.State.Status}}', 'dockcontrol-db-pgdb']);
+    // inNetwork: container→container target = <db-container>:<internal-port>,
+    // NOT localhost:<published>. This is what another app in the project pastes.
+    expect(row.inNetwork).toEqual({
+      host: 'dockcontrol-db-pgdb',
+      port: 5432, // POSTGRESQL internal port (NOT the published 5450)
+      url: 'postgresql://u:pw@dockcontrol-db-pgdb:5432/pgdb',
+    });
+  });
+
+  it('findAll: inNetwork for an auto-imported DB uses the real container name (db.host)', async () => {
+    const { service, prisma } = makeService();
+    mockListIds.mockResolvedValue(['p1']);
+    prisma.user.findUnique.mockResolvedValue({ role: 'USER' });
+    prisma.database.findMany.mockResolvedValue([
+      { id: 'db1', name: 'prestashop', type: 'MYSQL', port: 3315, username: 'prestashop',
+        password: 'enc(pw)', autoImported: true, host: 'dockcontrol-prestashop-db-abc' },
+    ]);
+    const [row] = await service.findAll('u1', {});
+    // auto-imported → resolveDbContainer returns db.host (the bundled container),
+    // and the MySQL internal port is 3306 (not the published 3315).
+    expect(row.inNetwork).toEqual({
+      host: 'dockcontrol-prestashop-db-abc',
+      port: 3306,
+      url: 'mysql://prestashop:pw@dockcontrol-prestashop-db-abc:3306/prestashop',
+    });
   });
 
   it('REGRESSION findAll: remote-server rows get a connection string on the server host (loaded via include, no N+1)', async () => {

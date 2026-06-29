@@ -39,6 +39,13 @@ export interface DatabaseResponse {
   status: string;
   /** Ready-to-paste connection URI, appended by the API. */
   connectionString: string;
+  /**
+   * Container→container target: what ANOTHER app/container in this project must
+   * use to reach the DB — its container name + INTERNAL port (e.g. 3306), NOT
+   * localhost:<published-port>. This is the address to paste into PrestaShop /
+   * WordPress / etc. running on the same host.
+   */
+  inNetwork?: { host: string; port: number; url: string };
   project?: { id: string; name: string } | null;
   application?: { id: string; name: string } | null;
 }

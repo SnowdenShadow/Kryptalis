@@ -615,11 +615,62 @@ export default function DatabasesPage() {
                 </CardHeader>
 
                 <CardContent className="space-y-4">
-                  {/* Connection details */}
+                  {/* ── INTERNAL: app→DB inside the project (the one that works
+                      for PrestaShop/WordPress hosted here). Shown FIRST + as
+                      recommended. Only when the API provides inNetwork. ── */}
+                  {db.inNetwork && (
+                    <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-medium uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                          {t('databases.connInternal')}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => copyToClipboard(db.inNetwork!.url, db.id + ':int')}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground"
+                          title={t('databases.copyConnString')}
+                        >
+                          {copiedId === db.id + ':int' ? (
+                            <Check size={14} className="text-emerald-500" />
+                          ) : (
+                            <Copy size={14} />
+                          )}
+                        </button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t('databases.connInternalHint')}</p>
+                      <div className="grid grid-cols-[80px_1fr] gap-y-2 text-sm">
+                        <span className="text-muted-foreground">{t('databases.host')}</span>
+                        <span className="font-mono text-foreground">{db.inNetwork.host}</span>
+                        <span className="text-muted-foreground">{t('databases.port')}</span>
+                        <span className="font-mono text-foreground">{db.inNetwork.port}</span>
+                        <span className="text-muted-foreground">{t('databases.user')}</span>
+                        <span className="font-mono text-foreground">{db.username}</span>
+                        <span className="text-muted-foreground">{t('databases.password')}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono text-foreground">
+                            {pwVisible ? db.password : '••••••••••••'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => togglePasswordVisibility(db.id)}
+                            className="inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:text-foreground"
+                            title={pwVisible ? t('databases.hidePassword') : t('databases.showPassword')}
+                          >
+                            {pwVisible ? <EyeOff size={13} /> : <Eye size={13} />}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── EXTERNAL: from your own machine (localhost:published-port). ── */}
                   <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2.5">
                     <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                      {t('databases.connectionDetails')}
+                      {db.inNetwork ? t('databases.connExternal') : t('databases.connectionDetails')}
                     </p>
+                    {db.inNetwork && (
+                      <p className="text-xs text-muted-foreground">{t('databases.connExternalHint')}</p>
+                    )}
 
                     <div className="grid grid-cols-[80px_1fr] gap-y-2 text-sm">
                       {/* Host */}
@@ -652,7 +703,7 @@ export default function DatabasesPage() {
                     </div>
                   </div>
 
-                  {/* Connection string */}
+                  {/* Connection string (external) */}
                   <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-2">
                     <div className="flex items-center justify-between">
                       <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
