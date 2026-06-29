@@ -103,6 +103,25 @@ describe('decodeZipSafely', () => {
     expect(files.map((f) => f.path)).toEqual(['dir/file.txt']);
   });
 
+  it('PRESERVES an explicit EMPTY directory entry (the var/logs fix)', () => {
+    // An empty dir entry (key ending in '/') — PrestaShop ships var/logs/ empty
+    // and the web server then writes into it. Dropping it broke installs.
+    const zip = zipSync({ 'var/logs/': new Uint8Array(0), 'index.php': strToU8('x') });
+    const files = decodeZipSafely(zip, CAP);
+    const dir = files.find((f) => f.path === 'var/logs');
+    expect(dir).toBeDefined();
+    expect(dir!.isDir).toBe(true);
+    expect(dir!.data.length).toBe(0);
+    // the real file is still there too
+    expect(files.find((f) => f.path === 'index.php' && !f.isDir)).toBeDefined();
+  });
+
+  it('an empty-dir entry does NOT count against the byte cap (0 bytes)', () => {
+    const zip = zipSync({ 'a/': new Uint8Array(0), 'b/': new Uint8Array(0) });
+    const files = decodeZipSafely(zip, 1); // 1-byte cap, but dirs are 0 bytes
+    expect(files.filter((f) => f.isDir).map((f) => f.path).sort()).toEqual(['a', 'b']);
+  });
+
   it('REJECTS a zip-slip entry before writing anything', () => {
     const zip = makeZip({ '../escape.txt': 'pwned' });
     expect(() => decodeZipSafely(zip, CAP)).toThrow(BadRequestException);
@@ -168,15 +187,28 @@ describe('decodeTarSafely', () => {
     const tar = makeTar({ '../escape.sh': 'pwn' });
     expect(() => decodeTarSafely(tar, CAP)).toThrow(BadRequestException);
   });
-  it('skips symlink/dir typeflags (only regular files extracted)', () => {
-    const sym = makeTar({ 'link': 'target' }, { typeflag: '2' }); // symlink
+  it('skips symlink typeflags, but KEEPS directory typeflags', () => {
+    const sym = makeTar({ 'link': 'target' }, { typeflag: '2' }); // symlink → skipped
     expect(decodeTarSafely(sym, CAP)).toHaveLength(0);
-    const dir = makeTar({ 'somedir': '' }, { typeflag: '5' }); // directory
-    expect(decodeTarSafely(dir, CAP)).toHaveLength(0);
+    // directories ARE now preserved (empty-dir fix) — as isDir entries.
+    const dir = makeTar({ 'somedir': '' }, { typeflag: '5' });
+    const out = decodeTarSafely(dir, CAP);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ path: 'somedir', isDir: true });
   });
   it('caps the decompressed total (zip-bomb)', () => {
     const tar = makeTar({ 'big.txt': 'A'.repeat(2000) });
     expect(() => decodeTarSafely(tar, 1000)).toThrow(PayloadTooLargeException);
+  });
+
+  it('PRESERVES a tar directory entry (typeflag 5) as an empty dir', () => {
+    // A '5' (directory) entry must survive as { isDir: true }.
+    const tar = makeTar({ 'var/logs': '' }, { typeflag: '5' });
+    const files = decodeTarSafely(tar, CAP);
+    const dir = files.find((f) => f.path === 'var/logs');
+    expect(dir).toBeDefined();
+    expect(dir!.isDir).toBe(true);
+    expect(dir!.data.length).toBe(0);
   });
 });
 

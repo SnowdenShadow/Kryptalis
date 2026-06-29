@@ -1940,8 +1940,13 @@ export class FilesService {
             if (abs !== stageRoot && !abs.startsWith(stageRoot + path.sep)) {
               throw new BadRequestException(`Archive entry escapes staging: ${f.path}`);
             }
-            fs.mkdirSync(path.dirname(abs), { recursive: true });
-            fs.writeFileSync(abs, f.data);
+            if (f.isDir) {
+              // Empty dir (e.g. var/logs/) — stage it so `docker cp` recreates it.
+              fs.mkdirSync(abs, { recursive: true });
+            } else {
+              fs.mkdirSync(path.dirname(abs), { recursive: true });
+              fs.writeFileSync(abs, f.data);
+            }
           }
           // One docker cp: stageDir/. → <container>:<destRel> (creates subdirs).
           await dockerFs.copyInDir(target, destRel, stageRoot);
@@ -1983,6 +1988,13 @@ export class FilesService {
       const entryRel = [destRel, f.path].filter(Boolean).join('/');
       const entryResolved = await this.resolvePath(userId, scope, scopeId, entryRel, 'DEVELOPER');
       this.assertNotManaged(entryResolved.relPath);
+      if (f.isDir) {
+        // Empty directory entry (e.g. PrestaShop's var/logs/) — create it so it
+        // isn't lost; a missing writable dir breaks apps that expect it.
+        fs.mkdirSync(entryResolved.absPath, { recursive: true });
+        written++;
+        continue;
+      }
       fs.mkdirSync(path.dirname(entryResolved.absPath), { recursive: true });
       this.assertNoSymlinkInPath(entryResolved.rootDir, entryResolved.absPath);
       this.writeFileNoFollow(entryResolved.absPath, f.data);

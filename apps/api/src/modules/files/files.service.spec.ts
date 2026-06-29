@@ -937,6 +937,7 @@ describe('docker-fs routing (container-only apps)', () => {
       'override/classes/Foo.php': new Uint8Array([60, 63]),
       'override/classes/sub/Bar.php': new Uint8Array([1, 2, 3]),
       'index.php': new Uint8Array([9]),
+      'var/logs/': new Uint8Array(0), // EMPTY dir — must be staged + cp'd
     }));
     mockedDockerFs.stat.mockResolvedValue({ exists: true, isFile: true, isDir: false, size: zip.length } as any);
     mockedDockerFs.copyOut.mockImplementation(async (_t: any, _p: any, hostPath: string) => {
@@ -953,13 +954,15 @@ describe('docker-fs routing (container-only apps)', () => {
     });
 
     const res = await service.extract('u1', 'app', 'app1', 'archive.zip', {});
-    expect(res.files).toBe(3);
-    // EXACTLY one docker cp (the whole point — not 3), and NO per-file uploadFile.
+    expect(res.files).toBe(4); // 3 files + 1 empty dir
+    // EXACTLY one docker cp (the whole point — not 4), and NO per-file uploadFile.
     expect(mockedDockerFs.copyInDir).toHaveBeenCalledTimes(1);
     expect(mockedDockerFs.uploadFile).not.toHaveBeenCalled();
     expect(staged).toContain('override/classes/Foo.php');
     expect(staged).toContain('override/classes/sub/Bar.php');
     expect(staged).toContain('index.php');
+    // The EMPTY dir was staged too (a node exists for it) — the var/logs fix.
+    expect(staged).toContain('var/logs');
   });
 
   it('extract refuses an archive entry targeting a managed file (before any docker cp)', async () => {
@@ -984,6 +987,29 @@ describe('docker-fs routing (container-only apps)', () => {
     });
     mockedDockerFs.copyInDir.mockRejectedValue(new Error('Command failed: docker cp'));
     await expect(service.extract('u1', 'app', 'app1', 'archive.zip', {})).rejects.toThrow(BadRequestException);
+  });
+});
+
+// LOCAL host-fs extract — the var/logs empty-dir fix on the local path.
+describe('extract (local host-fs) preserves empty dirs', () => {
+  it('creates an EMPTY directory entry on the host (var/logs)', async () => {
+    const { zipSync } = await import('fflate');
+    const { service } = makeService(); // default app → host-fs (pickRootForImage '/')
+    // Stage the archive on the host at the app root.
+    const zip = Buffer.from(zipSync({
+      'var/logs/': new Uint8Array(0),
+      'index.php': new Uint8Array([60]),
+    }));
+    mkFile(`${APP_DIR}/site.zip`, '');
+    (vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/site.zip`)) as any).content = zip;
+
+    const res = await service.extract('u1', 'app', 'app1', 'site.zip', {});
+    expect(res.files).toBe(2); // file + empty dir
+    // The empty dir now exists as a real dir node on the host.
+    const dirNode = vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/var/logs`)) as any;
+    expect(dirNode).toBeDefined();
+    expect(dirNode.type).toBe('dir');
+    expect((vfs.__nodes.get(vfs.__keyOf(`${APP_DIR}/index.php`)) as any).type).toBe('file');
   });
 });
 

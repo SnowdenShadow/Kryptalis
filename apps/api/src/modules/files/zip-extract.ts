@@ -41,14 +41,24 @@ export function detectArchiveFormat(name: string): ArchiveFormat | null {
 }
 
 /**
- * A single safe, validated file entry ready to be written by the caller.
- * Directories are implicit (the caller mkdir -p's the parent of each file).
+ * A single safe, validated entry ready to be written by the caller. A file
+ * carries `data`; an explicit (possibly EMPTY) directory carries `isDir: true`
+ * and empty `data`. Empty dirs MUST be preserved — e.g. PrestaShop ships an
+ * empty `var/logs/` the web server then writes into; dropping it broke installs.
  */
 export interface ExtractedFile {
   /** Safe, normalized, forward-slash relative path (never starts with `/`). */
   path: string;
-  /** Decompressed file contents. */
+  /** Decompressed file contents (empty for a directory entry). */
   data: Buffer;
+  /** True when this entry is a directory to create (no data). */
+  isDir?: boolean;
+}
+
+/** Validated entry: a safe relative path + whether it's a directory. */
+interface SafeEntry {
+  name: string;
+  isDir: boolean;
 }
 
 /**
@@ -61,12 +71,22 @@ export interface ExtractedFile {
  * enforce — applied here up front so nothing hostile reaches a writer.
  */
 export function safeZipEntryName(rawName: string): string | null {
+  const e = validateEntry(rawName);
+  return e && !e.isDir ? e.name : null;
+}
+
+/**
+ * Validate an archive entry name to a safe relative path AND report whether it's
+ * a directory. Same hardening as before (null byte / control chars / absolute /
+ * drive-letter / `..` / `.` all rejected). Returns null for the root/empty
+ * entry. Unlike {@link safeZipEntryName}, directory entries are RETURNED (with
+ * `isDir: true`) so callers can recreate empty dirs.
+ */
+export function validateEntry(rawName: string): SafeEntry | null {
   if (typeof rawName !== 'string') throw new BadRequestException('Invalid zip entry name');
-  // Directory entries end in '/'. Skip — we create dirs from file parents.
   const isDir = rawName.endsWith('/');
   const name = rawName.replace(/\\/g, '/'); // normalize Windows separators
   if (name.includes('\0')) throw new BadRequestException(`Zip entry has a null byte: ${JSON.stringify(rawName)}`);
-  // C0 control characters (other than the ones we already excluded) are refused.
   for (let i = 0; i < name.length; i++) {
     if (name.charCodeAt(i) < 0x20) {
       throw new BadRequestException(`Zip entry has a control character: ${JSON.stringify(rawName)}`);
@@ -80,8 +100,7 @@ export function safeZipEntryName(rawName: string): string | null {
     if (seg === '.') throw new BadRequestException(`Zip entry has a '.' segment: ${JSON.stringify(rawName)}`);
   }
   if (segments.length === 0) return null; // root / empty → nothing to write
-  if (isDir) return null; // a pure directory entry — caller derives dirs from files
-  return segments.join('/');
+  return { name: segments.join('/'), isDir };
 }
 
 /**
@@ -98,15 +117,23 @@ export function safeZipEntryName(rawName: string): string | null {
 export function decodeZipSafely(zip: Uint8Array, maxUncompressedBytes: number): ExtractedFile[] {
   let entryCount = 0;
   let totalUncompressed = 0;
+  // EXPLICIT directory entries (incl. EMPTY ones like PrestaShop's var/logs/).
+  // fflate's unzipSync only returns FILES in `decoded`, so we capture dir names
+  // here in the filter (which sees every central-directory entry) and emit them
+  // afterwards — otherwise an empty dir vanishes on extract.
+  const dirs: string[] = [];
   // The filter runs over the central directory BEFORE inflating each entry, so
   // we reject oversized/too-many/hostile archives without doing the work.
   const filter = (info: UnzipFileInfo): boolean => {
-    // safeZipEntryName throws on hostile names; null = a dir we skip.
-    const safe = safeZipEntryName(info.name);
-    if (safe === null) return false;
+    const entry = validateEntry(info.name); // throws on hostile names
+    if (entry === null) return false; // root/empty
     entryCount++;
     if (entryCount > MAX_ZIP_ENTRIES) {
       throw new BadRequestException(`Archive has too many entries (> ${MAX_ZIP_ENTRIES}).`);
+    }
+    if (entry.isDir) {
+      dirs.push(entry.name);
+      return false; // a directory has no content to inflate
     }
     totalUncompressed += Math.max(0, info.originalSize || 0);
     if (totalUncompressed > maxUncompressedBytes) {
@@ -127,6 +154,9 @@ export function decodeZipSafely(zip: Uint8Array, maxUncompressedBytes: number): 
   }
 
   const files: ExtractedFile[] = [];
+  for (const name of dirs) {
+    files.push({ path: name, data: Buffer.alloc(0), isDir: true });
+  }
   for (const [rawName, content] of Object.entries(decoded)) {
     const safe = safeZipEntryName(rawName);
     if (safe === null) continue;
@@ -195,26 +225,32 @@ export function decodeTarSafely(tar: Uint8Array, maxUncompressedBytes: number): 
     const dataLen = size;
     const padded = Math.ceil(dataLen / TAR_BLOCK) * TAR_BLOCK;
 
-    // Only regular files ('0' or NUL). Skip dirs '5', symlinks '2', links '1',
-    // char/block/fifo, and GNU/pax extension records ('x','g','L','K').
+    // Regular files ('0'/NUL) carry data; directories ('5') are emitted as
+    // empty-dir entries so EMPTY dirs (e.g. var/logs/) survive. Skip symlinks
+    // '2', hardlinks '1', char/block/fifo, and GNU/pax records ('x','g','L','K').
     const isRegular = typeflag === '0' || typeflag === '\0';
-    if (isRegular) {
-      const safe = safeZipEntryName(fullName); // reuse the zip path guards
-      if (safe !== null) {
+    const isDir = typeflag === '5';
+    if (isRegular || isDir) {
+      const entry = validateEntry(fullName); // reuse the zip path guards
+      if (entry !== null) {
         entryCount++;
         if (entryCount > MAX_ZIP_ENTRIES) {
           throw new BadRequestException(`Archive has too many entries (> ${MAX_ZIP_ENTRIES}).`);
         }
-        total += dataLen;
-        if (total > maxUncompressedBytes) {
-          throw new PayloadTooLargeException(
-            `Archive decompresses beyond the allowed ${maxUncompressedBytes} bytes (possible zip bomb).`,
-          );
+        if (isDir) {
+          files.push({ path: entry.name, data: Buffer.alloc(0), isDir: true });
+        } else {
+          total += dataLen;
+          if (total > maxUncompressedBytes) {
+            throw new PayloadTooLargeException(
+              `Archive decompresses beyond the allowed ${maxUncompressedBytes} bytes (possible zip bomb).`,
+            );
+          }
+          if (off + dataLen > buf.length) {
+            throw new BadRequestException('Corrupt tar: entry data runs past end of archive.');
+          }
+          files.push({ path: entry.name, data: Buffer.from(buf.subarray(off, off + dataLen)) });
         }
-        if (off + dataLen > buf.length) {
-          throw new BadRequestException('Corrupt tar: entry data runs past end of archive.');
-        }
-        files.push({ path: safe, data: Buffer.from(buf.subarray(off, off + dataLen)) });
       }
     }
     off += padded;
