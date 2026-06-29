@@ -311,6 +311,27 @@ describe('deploy', () => {
     expect(mockAssert).toHaveBeenCalledWith(expect.anything(), 'u1', 'p1', 'ADMIN');
   });
 
+  it('refuses to deploy a mail server on a domain with NO project (even for an ADMIN)', async () => {
+    // assertDomainAccess lets a platform ADMIN through an orphan domain, but a
+    // mail server must always belong to a project — deploy() must still reject.
+    const { service, prisma, runDeploy } = setup({ ...DOMAIN, projectId: null, application: null } as any);
+    prisma.user.findUnique.mockResolvedValue({ role: 'ADMIN' });
+    prisma.mailServer.findUnique.mockResolvedValue(null);
+
+    await expect(service.deploy('u1', 'dom1')).rejects.toThrow(/must belong to a project/);
+    expect(runDeploy).not.toHaveBeenCalled();
+    expect(prisma.mailServer.upsert).not.toHaveBeenCalled();
+  });
+
+  it('allows deploy when the domain inherits a project via its linked application', async () => {
+    // No domain.projectId but an app-linked project → the mail server is still
+    // owned by a project, so deploy proceeds.
+    const { service, prisma } = setup({ ...DOMAIN, projectId: null, application: { projectId: 'p-app' } } as any);
+    prisma.mailServer.findUnique.mockResolvedValue(null);
+
+    await expect(service.deploy('u1', 'dom1')).resolves.toBeDefined();
+  });
+
   it('generates a 2048-bit DKIM keypair on first deploy and encrypts the private key at rest', async () => {
     const { service, prisma, encryption } = setup();
     prisma.mailServer.findUnique.mockResolvedValue(null);

@@ -357,6 +357,21 @@ export class MailServerService implements OnApplicationBootstrap {
   async deploy(userId: string, domainId: string) {
     const domain = await this.assertDomainAccess(userId, domainId, 'ADMIN');
 
+    // A mail server MUST belong to a project. New domains already require a
+    // projectId, but legacy / app-only domains (or an orphaned domain) can have
+    // domain.projectId === null while still being reachable by an ADMIN through
+    // assertDomainAccess. Refuse to provision a mail server on such a domain —
+    // even for an ADMIN — so every mail server is always owned by exactly one
+    // project (RBAC, quotas and billing all hang off that). Attach the domain
+    // to a project first (Domains → move, or re-add it under a project).
+    const projectId = (domain as any).projectId || (domain as any).application?.projectId;
+    if (!projectId) {
+      throw new BadRequestException(
+        `"${domain.domain}" is not attached to any project. ` +
+          `A mail server must belong to a project — attach this domain to a project first, then deploy the mail server.`,
+      );
+    }
+
     // Mail server is intended for the APEX domain. If the user picked a
     // subdomain we'd build hostname mail.<sub>.<apex>, generate DKIM/SPF/
     // DMARC against the subdomain (not the parent), and the user would

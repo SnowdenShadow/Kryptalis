@@ -206,7 +206,11 @@ export default function EmailsPage() {
                         size="sm"
                         className="flex-1"
                         onClick={() => deployMutation.mutate(d.id)}
-                        disabled={deployMutation.isPending}
+                        // A mail server must belong to a project. Block the
+                        // action when the domain isn't attached to one (the API
+                        // enforces the same rule) and explain why on hover.
+                        disabled={deployMutation.isPending || !d.project}
+                        title={!d.project ? t('emails.cardDeployNeedsProject') : undefined}
                       >
                         <Plus size={13} /> {t('emails.cardDeploy')}
                       </Button>
