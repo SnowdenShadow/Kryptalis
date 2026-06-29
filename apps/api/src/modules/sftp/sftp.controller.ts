@@ -10,6 +10,7 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  ParseEnumPipe,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
@@ -31,7 +32,10 @@ export class SftpController {
   @ApiOperation({ summary: 'List SFTP accounts for an app or project' })
   list(
     @CurrentUser('id') userId: string,
-    @Query('scope') scope: 'app' | 'project',
+    // Validate the enum at runtime (TS types are erased) so an unexpected
+    // ?scope=foo yields a clean 400 instead of silently falling through the
+    // service's `scope === 'project'` branch as if it were 'app'.
+    @Query('scope', new ParseEnumPipe(['app', 'project'])) scope: 'app' | 'project',
     @Query('scopeId') scopeId: string,
   ) {
     return this.svc.list(userId, scope, scopeId);

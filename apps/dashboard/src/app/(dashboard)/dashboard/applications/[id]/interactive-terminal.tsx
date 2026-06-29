@@ -45,10 +45,12 @@ export function InteractiveTerminal({ appId }: { appId: string }) {
     try { fit.fit(); } catch {}
     termRef.current = term;
 
-    // Build wss://… from the API URL + the in-memory access token.
+    // Build wss://… from the API URL. The access token is NOT placed in the
+    // URL (query-string tokens leak into proxy/access logs, browser history and
+    // the DevTools network panel) — it is sent in the first 'auth' frame below.
     const token = useAuthStore.getState().accessToken || '';
     const wsBase = API_URL.replace(/^http/, 'ws');
-    const ws = new WebSocket(`${wsBase}/ws/terminal?appId=${encodeURIComponent(appId)}&token=${encodeURIComponent(token)}`);
+    const ws = new WebSocket(`${wsBase}/ws/terminal?appId=${encodeURIComponent(appId)}`);
     wsRef.current = ws;
     setStatus('connecting');
 
@@ -62,6 +64,8 @@ export function InteractiveTerminal({ appId }: { appId: string }) {
     };
 
     ws.onopen = () => {
+      // First frame authenticates the session (token kept out of the URL).
+      try { ws.send(JSON.stringify({ type: 'auth', token })); } catch {}
       setStatus('connected');
       term.focus();
       sendResize();

@@ -1162,6 +1162,14 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async execChpasswd(username: string, plainPassword: string): Promise<void> {
+    // chpasswd reads ONE "user:password" record per line on stdin. A newline
+    // (or CR) in the password would split it into a SECOND record, letting a
+    // caller set another account's password (e.g. "good\nroot:evil"). Reject
+    // any CR/LF here — this is the true sink, so guarding it covers every
+    // caller regardless of DTO validation upstream.
+    if (/[\r\n]/.test(plainPassword)) {
+      throw new BadRequestException('Password must not contain newlines.');
+    }
     // chpasswd reads "user:password" on stdin. stdin (not argv) keeps
     // the password out of /proc/<pid>/cmdline.
     await this.dockerExec(['chpasswd'], {

@@ -140,7 +140,12 @@ func (m *Monitor) collectMetrics() SystemMetrics {
 						idle = n
 					}
 				}
-				if m.prevCPUTotal > 0 && total > m.prevCPUTotal {
+				// Both counters increment monotonically; idle < prev means a
+				// reboot, a /proc/stat reset, or a virtualized /proc in a
+				// container. uint64 subtraction would underflow to a huge di and
+				// silently report 0% for the interval — so skip this tick and
+				// re-baseline, same as the first-interval case (prevCPUTotal==0).
+				if m.prevCPUTotal > 0 && total > m.prevCPUTotal && idle >= m.prevCPUIdle {
 					dt := total - m.prevCPUTotal
 					di := idle - m.prevCPUIdle
 					if dt > 0 && dt >= di {

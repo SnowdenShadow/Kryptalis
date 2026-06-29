@@ -251,9 +251,13 @@ export default function FilesPage() {
     queryFn: () => api.get('/files/scopes'),
   });
 
-  // auto-expand all projects when first loaded
+  // Auto-expand all projects ONCE, on the first load that returns scopes. A
+  // ref (not `expandedProjects.size === 0`) gates it so the effect has no stale
+  // closure over expandedProjects and re-runs cleanly when `scopes` changes.
+  const hasAutoExpanded = useRef(false);
   useEffect(() => {
-    if (scopes.length && expandedProjects.size === 0) {
+    if (!hasAutoExpanded.current && scopes.length) {
+      hasAutoExpanded.current = true;
       setExpandedProjects(new Set(scopes.map(p => p.id)));
     }
   }, [scopes]);

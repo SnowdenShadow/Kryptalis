@@ -94,13 +94,26 @@ export class ProjectTransferController {
     const path = await import('path');
     const crypto = await import('crypto');
     const tmp = path.join(os.tmpdir(), `dctproj-upload-${crypto.randomBytes(8).toString('hex')}.dctproj`);
+    // This endpoint bypasses the global body parser (the body is a raw
+    // encrypted .dctproj stream), so it has no size limit of its own. Enforce
+    // one here as we stream to disk, or a client could send an unbounded body
+    // and exhaust the host's temp disk before parseImport ever runs.
+    const MAX_DCTPROJ_BYTES = 512 * 1024 * 1024; // 512 MiB
     try {
       await new Promise<void>((resolve, reject) => {
         const out = fs.createWriteStream(tmp, { flags: 'wx', mode: 0o600 });
         let settled = false;
+        let received = 0;
         const fail = (e: unknown) => { if (settled) return; settled = true; try { out.destroy(); } catch {} reject(e); };
         req.on('error', fail);
         out.on('error', fail);
+        req.on('data', (chunk: Buffer) => {
+          received += chunk.length;
+          if (received > MAX_DCTPROJ_BYTES) {
+            fail(new BadRequestException('Upload exceeds the 512 MiB project-archive limit.'));
+            try { req.destroy(); } catch {}
+          }
+        });
         out.on('finish', () => { if (!settled) { settled = true; resolve(); } });
         req.pipe(out);
       });

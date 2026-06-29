@@ -512,12 +512,25 @@ export default function ApplicationDetailPage() {
       }
       setPortsDraft(init);
     }
+    // portsDraft length intentionally omitted: init-once draft pattern.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [portsData]);
+  // Reset the draft whenever the user leaves the ports tab, so re-entering
+  // re-seeds from a possibly-changed server mapping (e.g. after editing the
+  // compose file in the files tab, which invalidates the app-ports query).
+  useEffect(() => {
+    if (activeTab !== 'ports') setPortsDraft({});
+  }, [activeTab]);
 
   const remapPortsMutation = useMutation({
     mutationFn: (mapping: Record<string, number>) => api.patch(`/applications/${id}/ports`, { mapping }),
     onSuccess: () => {
       toast.success(t('toast.portsRemapped'));
+      // Clear the draft so the init-once effect re-seeds from the freshly
+      // refetched mapping. Without this, the `length === 0` guard stays false
+      // and the draft would keep showing stale host ports if the server-side
+      // mapping changed (e.g. a concurrent compose edit invalidated app-ports).
+      setPortsDraft({});
       refetchPorts();
       queryClient.invalidateQueries({ queryKey: ['app-compose', id] });
       queryClient.invalidateQueries({ queryKey: ['application', id] });
@@ -553,7 +566,11 @@ export default function ApplicationDetailPage() {
 
   const saveEnvMutation = useMutation({
     mutationFn: (envVars: Record<string, string>) => api.patch(`/applications/${id}/env`, { envVars }),
-    onSuccess: () => { toast.success(t('toast.envSaved')); refetchEnv(); },
+    // Clear the draft before refetch so the init-once effect re-seeds from the
+    // freshly fetched env. Otherwise the `length === 0` guard stays false and a
+    // concurrent external change (another session adding/removing a var) would
+    // be silently overwritten on the user's next save.
+    onSuccess: () => { toast.success(t('toast.envSaved')); setEnvDraft([]); refetchEnv(); },
     onError: (err: Error) => toast.error(err.message),
   });
 

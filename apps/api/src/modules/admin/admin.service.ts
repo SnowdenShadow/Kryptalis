@@ -311,14 +311,16 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
     }
     const target = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { role: true },
+      select: { role: true, status: true },
     });
     if (!target) throw new NotFoundException('User not found');
     this.assertCanModifyTarget(actor.role, target.role);
     this.assertCanGrantRole(actor.role, role);
-    // Demoting the last SUPERADMIN away from SUPERADMIN would lock the platform
-    // out of every superadmin-only control — same invariant deleteUser guards.
-    if (target.role === 'SUPERADMIN' && role !== 'SUPERADMIN') {
+    // Demoting the last ACTIVE SUPERADMIN away from SUPERADMIN would lock the
+    // platform out of every superadmin-only control — same invariant deleteUser
+    // guards. Only relevant when the target is currently ACTIVE; demoting an
+    // already-inactive superadmin does not reduce the active-superadmin count.
+    if (target.role === 'SUPERADMIN' && target.status === 'ACTIVE' && role !== 'SUPERADMIN') {
       await this.assertNotLastSuperadmin();
     }
     return this.prisma.user.update({
@@ -334,13 +336,14 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
     }
     const target = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { role: true },
+      select: { role: true, status: true },
     });
     if (!target) throw new NotFoundException('User not found');
     this.assertCanModifyTarget(actor.role, target.role);
-    // Making the last SUPERADMIN non-ACTIVE (suspend/ban) would lock the
-    // platform out just like deleting them — block it.
-    if (target.role === 'SUPERADMIN' && status !== 'ACTIVE') {
+    // Making the last ACTIVE SUPERADMIN non-ACTIVE (suspend/ban) would lock the
+    // platform out just like deleting them — block it. Only matters when the
+    // target is currently ACTIVE (otherwise the active count is unchanged).
+    if (target.role === 'SUPERADMIN' && target.status === 'ACTIVE' && status !== 'ACTIVE') {
       await this.assertNotLastSuperadmin();
     }
     return this.prisma.user.update({
@@ -371,11 +374,13 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
     }
     const target = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { role: true },
+      select: { role: true, status: true },
     });
     if (!target) throw new NotFoundException('User not found');
     this.assertCanModifyTarget(actor.role, target.role);
-    if (target.role === 'SUPERADMIN') {
+    // Deleting an inactive superadmin doesn't reduce the ACTIVE count, so only
+    // guard when removing an ACTIVE superadmin.
+    if (target.role === 'SUPERADMIN' && target.status === 'ACTIVE') {
       await this.assertNotLastSuperadmin();
     }
     await this.prisma.user.delete({ where: { id: userId } });
@@ -387,9 +392,12 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
    * control. Used by delete / demote / suspend-or-ban of a SUPERADMIN target.
    */
   private async assertNotLastSuperadmin() {
-    const count = await this.prisma.user.count({ where: { role: 'SUPERADMIN' } });
+    // Only ACTIVE superadmins can actually use superadmin-only controls, so the
+    // invariant is "at least one ACTIVE SUPERADMIN must remain" — counting
+    // SUSPENDED/BANNED rows would let the last usable superadmin be removed.
+    const count = await this.prisma.user.count({ where: { role: 'SUPERADMIN', status: 'ACTIVE' } });
     if (count <= 1) {
-      throw new BadRequestException('Cannot remove the last SUPERADMIN');
+      throw new BadRequestException('Cannot remove the last active SUPERADMIN');
     }
   }
 

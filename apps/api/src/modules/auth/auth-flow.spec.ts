@@ -420,7 +420,7 @@ describe('AuthService — resetPassword', () => {
       userId: 'u1',
       usedAt: null,
       expiresAt: new Date(Date.now() + 30 * 60_000),
-      user: { id: 'u1', twoFactorEnabled: false, twoFactorSecret: null },
+      user: { id: 'u1', status: 'ACTIVE', twoFactorEnabled: false, twoFactorSecret: null },
       ...overrides,
     };
   }
@@ -474,5 +474,87 @@ describe('AuthService — resetPassword', () => {
     });
     // All three writes went through one $transaction.
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('BANNED account → 403 and password is NOT changed', async () => {
+    prisma.passwordResetToken.findUnique.mockResolvedValue(
+      resetRow({ user: { id: 'u1', status: 'BANNED', twoFactorEnabled: false, twoFactorSecret: null } }),
+    );
+    await expect(svc.resetPassword('raw-token', NEW_PASSWORD)).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(prisma.user.update).not.toHaveBeenCalled();
+    expect(prisma.passwordResetToken.update).not.toHaveBeenCalled();
+  });
+
+  it('SUSPENDED account → 403 and password is NOT changed', async () => {
+    prisma.passwordResetToken.findUnique.mockResolvedValue(
+      resetRow({ user: { id: 'u1', status: 'SUSPENDED', twoFactorEnabled: false, twoFactorSecret: null } }),
+    );
+    await expect(svc.resetPassword('raw-token', NEW_PASSWORD)).rejects.toThrow(
+      ForbiddenException,
+    );
+    expect(prisma.user.update).not.toHaveBeenCalled();
+  });
+
+  it('2FA reset with a wrong code → 401 AND the failed-attempt counter is bumped (lockout participates)', async () => {
+    const secret = authenticator.generateSecret();
+    prisma.passwordResetToken.findUnique.mockResolvedValue(
+      resetRow({
+        user: { id: 'u1', status: 'ACTIVE', twoFactorEnabled: true, twoFactorSecret: encryption.encrypt(secret) },
+      }),
+    );
+    // Live re-fetch for lockout state.
+    prisma.user.findUnique.mockResolvedValue(activeUser({ twoFactorEnabled: true }));
+    await expect(
+      svc.resetPassword('raw-token', NEW_PASSWORD, { totpCode: '000000' }),
+    ).rejects.toThrow('Invalid two-factor code');
+    // bumpFailedAttempt fired the increment write — previously this path had NO
+    // lockout, allowing unbounded TOTP/backup-code grinding.
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { failedLoginAttempts: { increment: 1 } } }),
+    );
+    // Password was NOT changed.
+    expect(prisma.passwordResetToken.update).not.toHaveBeenCalled();
+  });
+
+  it('2FA reset while account is locked → 401 temporarily locked, code never checked', async () => {
+    const secret = authenticator.generateSecret();
+    prisma.passwordResetToken.findUnique.mockResolvedValue(
+      resetRow({
+        user: { id: 'u1', status: 'ACTIVE', twoFactorEnabled: true, twoFactorSecret: encryption.encrypt(secret) },
+      }),
+    );
+    prisma.user.findUnique.mockResolvedValue(
+      activeUser({ twoFactorEnabled: true, lockedUntil: new Date(Date.now() + 10 * 60_000) }),
+    );
+    await expect(
+      svc.resetPassword('raw-token', NEW_PASSWORD, { totpCode: authenticator.generate(secret) }),
+    ).rejects.toThrow(/temporarily locked/);
+  });
+});
+
+describe('AuthService — forgotPassword', () => {
+  let prisma: PrismaMock;
+  let svc: AuthService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    prisma = makePrisma();
+    svc = makeService(prisma);
+  });
+
+  it('non-ACTIVE account → generic message, NO reset token minted', async () => {
+    prisma.user.findUnique.mockResolvedValue(activeUser({ status: 'BANNED' }));
+    const res = await svc.forgotPassword('alice@example.com');
+    expect(res.message).toMatch(/If that email is registered/);
+    expect(prisma.passwordResetToken.create).not.toHaveBeenCalled();
+  });
+
+  it('ACTIVE account → token minted + reset email dispatched', async () => {
+    prisma.user.findUnique.mockResolvedValue(activeUser());
+    await svc.forgotPassword('alice@example.com');
+    expect(prisma.passwordResetToken.create).toHaveBeenCalled();
+    expect(notificationsStub.sendPasswordReset).toHaveBeenCalled();
   });
 });

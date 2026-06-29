@@ -23,7 +23,7 @@ function makePrisma() {
       findUnique: vi.fn().mockResolvedValue({
         status: 'RUNNING',
         name: 'app',
-        project: { members: [{ userId: 'owner1' }] },
+        project: { members: [{ userId: 'owner1', role: 'OWNER' }] },
       }),
     },
   } as any;
@@ -122,7 +122,7 @@ describe('CronService.runDueJobs', () => {
   it('does NOT exec when the app is not running — records a clear skip message instead', async () => {
     const { svc, ops, prisma: p } = makeService(prisma);
     p.application.findUnique.mockResolvedValue({
-      status: 'STOPPED', name: 'web', project: { members: [{ userId: 'owner1' }] },
+      status: 'STOPPED', name: 'web', project: { members: [{ userId: 'owner1', role: 'OWNER' }] },
     });
     const now = new Date(2026, 5, 24, 14, 5, 0);
     p.cronJob.findMany.mockResolvedValue([
@@ -138,6 +138,42 @@ describe('CronService.runDueJobs', () => {
     expect(recorded.lastOutput).toMatch(/stopped|not running/i);
     expect(recorded.lastExitCode).toBe(-1);
     expect(recorded.lastRunAt).toBeInstanceOf(Date);
+  });
+
+  it('runs AS a DEVELOPER member when the project has no OWNER (no silent skip)', async () => {
+    const { svc, ops, prisma: p } = makeService(prisma);
+    // Owner was deleted/demoted — only an ADMIN and a DEVELOPER remain. The
+    // highest-privilege one (ADMIN) is chosen; the job must still run.
+    p.application.findUnique.mockResolvedValue({
+      status: 'RUNNING', name: 'web',
+      project: { members: [
+        { userId: 'dev1', role: 'DEVELOPER' },
+        { userId: 'admin1', role: 'ADMIN' },
+      ] },
+    });
+    const now = new Date(2026, 5, 24, 14, 5, 0);
+    p.cronJob.findMany.mockResolvedValue([
+      { id: 'j1', name: 'tick', schedule: '*/5 * * * *', command: 'echo hi', enabled: true, applicationId: 'app1', lastRunAt: new Date(2026, 5, 24, 14, 0, 0), createdAt: new Date(2026, 5, 24, 13, 0, 0) },
+    ]);
+
+    await svc.runDueJobs(now);
+    await flush();
+    expect(ops.execCommand).toHaveBeenCalledWith('admin1', 'app1', 'echo hi');
+  });
+
+  it('skips only when NO DEVELOPER+ member remains at all', async () => {
+    const { svc, ops, prisma: p } = makeService(prisma);
+    p.application.findUnique.mockResolvedValue({
+      status: 'RUNNING', name: 'web', project: { members: [] },
+    });
+    const now = new Date(2026, 5, 24, 14, 5, 0);
+    p.cronJob.findMany.mockResolvedValue([
+      { id: 'j1', name: 'tick', schedule: '*/5 * * * *', command: 'echo hi', enabled: true, applicationId: 'app1', lastRunAt: new Date(2026, 5, 24, 14, 0, 0), createdAt: new Date(2026, 5, 24, 13, 0, 0) },
+    ]);
+
+    await svc.runDueJobs(now);
+    await flush();
+    expect(ops.execCommand).not.toHaveBeenCalled();
   });
 
   it('one job failing to launch does not stop the others', async () => {

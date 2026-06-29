@@ -846,6 +846,15 @@ export class ApplicationsService implements OnModuleInit {
       throw new BadRequestException('App is already on this server');
     }
 
+    // Refuse to move while a deployment is mid-flight. moveServer tears the app
+    // down on the source (dockerCompose down + docker rm -f) before redeploying
+    // on the target; if a git/compose deploy's build step is concurrently
+    // writing the app dir, the two race and the app can end up running on BOTH
+    // servers (split-brain). redeploy()/rollback() guard the same way — do it
+    // here too, BEFORE any teardown (the only existing guard is downstream,
+    // inside ops.redeploy, which runs only AFTER the irreversible teardown).
+    await this.ops.ensureNoInflightDeployment(id);
+
     const slug = slugify(app.name);
     const currentLocal = isAppLocal(current);
     const targetLocal = isLocalHost(target.host);
@@ -988,8 +997,21 @@ export class ApplicationsService implements OnModuleInit {
     // Reassign a free one (and persist) before the redeploy resolves it.
     let portNote = '';
     if (app.hostPort != null) {
+      // An app physically runs on the target server either when its OWN
+      // serverId points there, OR when it inherits placement from its project
+      // default (serverId NULL + project.serverId === target). The old query
+      // only matched the explicit case, so when the target IS a project
+      // default, every project-inherited neighbour was invisible to the
+      // collision check and the moved app could grab a port already in use.
       const neighbours = await this.prisma.application.findMany({
-        where: { serverId: targetServerId, id: { not: id }, hostPort: { not: null } },
+        where: {
+          id: { not: id },
+          hostPort: { not: null },
+          OR: [
+            { serverId: targetServerId },
+            { serverId: null, project: { serverId: targetServerId } },
+          ],
+        },
         select: { hostPort: true },
       });
       const taken = new Set<number>([
@@ -998,7 +1020,10 @@ export class ApplicationsService implements OnModuleInit {
       ]);
       if (taken.has(app.hostPort)) {
         let free = app.hostPort;
-        while (taken.has(free) && free < 65535) free++;
+        while (taken.has(free) && free <= 65535) free++;
+        if (free > 65535) {
+          throw new BadRequestException(`No free host port available on ${target.name}.`);
+        }
         await this.prisma.application.update({ where: { id }, data: { hostPort: free } });
         portNote = ` Host port ${app.hostPort} was taken on ${target.name} — reassigned to ${free}.`;
       }

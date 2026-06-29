@@ -684,6 +684,18 @@ export class FilesService {
   }
 
   private readFileNoFollow(absPath: string): string {
+    return this.readFileNoFollowBuffer(absPath).toString('utf-8');
+  }
+
+  /**
+   * Read a regular file through an O_NOFOLLOW fd, returning raw bytes. The
+   * O_NOFOLLOW flag is set on the FINAL open() so a symlink swapped in after an
+   * earlier lstat() (the classic TOCTOU window) cannot redirect the read to a
+   * file outside the sandbox — open() fails with ELOOP instead. Used by every
+   * read path (download, file view, AND compress) so none of them follows a
+   * symlink at the leaf. Buffer-returning so binary files survive intact.
+   */
+  private readFileNoFollowBuffer(absPath: string): Buffer {
     let fd: number | null = null;
     try {
       fd = fs.openSync(absPath, this.O_RDONLY | this.O_NOFOLLOW);
@@ -696,7 +708,7 @@ export class FilesService {
         if (n === 0) break;
         read += n;
       }
-      return buf.slice(0, read).toString('utf-8');
+      return buf.subarray(0, read);
     } catch (e: any) {
       if (e?.code === 'ELOOP' || e?.code === 'EMLINK') {
         throw new ForbiddenException('Refusing to read through a symlink.');
@@ -2163,7 +2175,11 @@ export class FilesService {
     }
     if (st.isFile()) {
       this.assertNoSymlinkInPath(rootDir, absPath);
-      add(relPath, fs.readFileSync(absPath));
+      // Read through an O_NOFOLLOW fd, NOT fs.readFileSync: between the lstat
+      // above and the open here a sandbox-writable attacker could swap the file
+      // for a symlink to e.g. /etc/passwd. O_NOFOLLOW closes that TOCTOU window
+      // (fails with ELOOP) — every other read path already does this.
+      add(relPath, this.readFileNoFollowBuffer(absPath));
       return;
     }
     if (st.isDirectory()) {

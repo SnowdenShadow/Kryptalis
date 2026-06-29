@@ -193,7 +193,7 @@ export class DomainsService {
   async update(
     userId: string,
     id: string,
-    data: { applicationId?: string | null; projectId?: string | null },
+    data: { applicationId?: string | null },
   ) {
     await this.assertDomainAccess(userId, id, 'DEVELOPER');
 
@@ -235,14 +235,11 @@ export class DomainsService {
       }
     }
 
-    if (data.projectId !== undefined && data.applicationId === undefined) {
-      if (data.projectId) {
-        await assertProjectAccess(this.prisma, userId, data.projectId, 'DEVELOPER');
-        await this.prisma.domain.update({ where: { id }, data: { projectId: data.projectId } });
-      } else {
-        await this.prisma.domain.update({ where: { id }, data: { projectId: null } });
-      }
-    }
+    // NOTE: re-homing a domain to a different project (and orphaning it via
+    // projectId:null) is intentionally NOT handled here. It is privileged and
+    // only available through the ADMIN-gated transfer() endpoint. The PATCH
+    // body DTO (UpdateDomainDto) strips any projectId field, so a DEVELOPER
+    // cannot orphan a domain by patching projectId:null.
 
     this.proxy.regenerate().catch(() => {});
     return this.prisma.domain.findUnique({ where: { id } });

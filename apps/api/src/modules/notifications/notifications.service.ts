@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AlertRule } from '@prisma/client';
+import * as dns from 'dns';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SystemConfigService } from '../system/system-config.service';
 import { renderEmail, escapeHtml } from './email-templates';
@@ -985,6 +986,35 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Closes the DNS-rebinding hole in validateWebhookUrl(): a public hostname
+   * (which passes the literal screen) can resolve to a private IP — either
+   * because the operator pointed it there, or via a rebind attack that flips
+   * the record between write-time validation and dispatch. So at DISPATCH we
+   * resolve the host and run EVERY returned address back through the same
+   * literal ruleset. Returns a violation string, or null when every resolved
+   * address is public (or the host was itself a literal already screened).
+   */
+  private async screenResolvedHost(raw: string): Promise<string | null> {
+    let url: URL;
+    try { url = new URL(raw); } catch { return 'not a valid URL'; }
+    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+    // IP literals were already fully screened by validateWebhookUrl().
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':')) return null;
+    let addrs: dns.LookupAddress[];
+    try {
+      addrs = await dns.promises.lookup(host, { all: true });
+    } catch {
+      // Unresolvable host — let the fetch fail naturally rather than guess.
+      return null;
+    }
+    for (const { address } of addrs) {
+      const v = this.validateWebhookUrl(`http://${address.includes(':') ? `[${address}]` : address}`);
+      if (v) return `resolves to ${address}: ${v}`;
+    }
+    return null;
+  }
+
+  /**
    * Extract a dotted-quad IPv4 embedded in an IPv6 literal, covering the
    * IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d), and NAT64
    * (64:ff9b::a.b.c.d) forms — including the all-hex spelling where the last
@@ -1015,6 +1045,14 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     const violation = this.validateWebhookUrl(url);
     if (violation) {
       this.logger.warn(`Refusing webhook to ${url}: ${violation}.`);
+      return;
+    }
+    // DNS-rebinding screen: a public hostname can still resolve to a private
+    // IP. Resolve at dispatch and re-screen every address through the same
+    // ruleset before we connect.
+    const resolveViolation = await this.screenResolvedHost(url);
+    if (resolveViolation) {
+      this.logger.warn(`Refusing webhook to ${url}: ${resolveViolation}.`);
       return;
     }
     // Node 20 ships global fetch + AbortController. 5 s ceiling keeps a

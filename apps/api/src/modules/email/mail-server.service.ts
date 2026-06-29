@@ -839,8 +839,11 @@ export class MailServerService implements OnApplicationBootstrap {
 
   async unbanIp(userId: string, domainId: string, ip: string): Promise<{ unbanned: string }> {
     await this.assertDomainAccess(userId, domainId, 'ADMIN');
-    // Tight validation — IP only, no shell metacharacters slipping in.
-    if (!/^[0-9.:a-fA-F]+$/.test(ip)) {
+    // Validate it's a REAL IPv4/IPv6 address. The old charset-only regex
+    // accepted junk like "..." or "0.0.0.999" — execFile blocks injection, but
+    // a malformed string just produces a cryptic fail2ban no-op instead of a
+    // clear 400. net.isIP returns 0 for anything that isn't a valid address.
+    if (net.isIP(ip) === 0) {
       throw new BadRequestException('Invalid IP.');
     }
     const domain = await this.prisma.domain.findUnique({ where: { id: domainId } });

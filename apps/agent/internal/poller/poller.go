@@ -738,7 +738,10 @@ func (p *Poller) runRemove(ctx context.Context, task Task) (map[string]interface
 		}
 	}
 	if cname, ok := task.Payload["containerName"].(string); ok && cname != "" {
-		c := exec.CommandContext(ctx, "docker", "rm", "-f", cname)
+		// `--` terminates docker's flag parsing so a containerName beginning
+		// with `-` can never be reinterpreted as a CLI flag (matches the SFTP
+		// shell path in sftpserver.go).
+		c := exec.CommandContext(ctx, "docker", "rm", "-f", "--", cname)
 		c.Stdout = &logs
 		c.Stderr = &logs
 		// `docker rm -f` on an already-gone container exits non-zero; that's
@@ -790,7 +793,9 @@ func (p *Poller) runExec(ctx context.Context, task Task) (map[string]interface{}
 	}
 	shells := []string{"/bin/sh", "/bin/bash", "sh", "bash"}
 	for _, shell := range shells {
-		c := exec.CommandContext(ctx, "docker", "exec", cname, shell, "-c", command)
+		// `--` terminates docker's flag parsing so a containerName beginning
+		// with `-` can never be reinterpreted as a docker flag.
+		c := exec.CommandContext(ctx, "docker", "exec", "--", cname, shell, "-c", command)
 		out, err := c.CombinedOutput()
 		if err == nil {
 			return map[string]interface{}{"output": string(out), "exitCode": 0}, ""

@@ -5,6 +5,7 @@ import { Throttle } from '@nestjs/throttler';
 import { DomainsService } from './domains.service';
 import { CreateDomainDto } from './dto/create-domain.dto';
 import { TransferDomainDto } from './dto/transfer-domain.dto';
+import { UpdateDomainDto } from './dto/update-domain.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 
 @ApiTags('Domains')
@@ -44,7 +45,7 @@ export class DomainsController {
   update(
     @CurrentUser('id') userId: string,
     @Param('id') id: string,
-    @Body() data: { applicationId?: string | null },
+    @Body() data: UpdateDomainDto,
   ) {
     return this.svc.update(userId, id, data);
   }

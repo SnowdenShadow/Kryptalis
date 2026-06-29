@@ -392,14 +392,16 @@ describe('update (attach/detach app)', () => {
     });
   });
 
-  it('projectId-only update requires DEVELOPER on the target project', async () => {
+  it('does NOT re-home a domain via update() — projectId is ignored (transfer-only)', async () => {
+    // Re-homing / orphaning a domain is privileged and only available through
+    // the ADMIN-gated transfer() endpoint. The PATCH DTO strips projectId, and
+    // even if it reaches the service it must be a no-op so a DEVELOPER cannot
+    // orphan a domain by patching projectId:null.
     const { service, prisma } = setup();
-    await service.update('u1', 'd1', { projectId: 'p3' });
-    expect(mockAssert).toHaveBeenCalledWith(expect.anything(), 'u1', 'p3', 'DEVELOPER');
-    expect(prisma.domain.update).toHaveBeenCalledWith({
-      where: { id: 'd1' },
-      data: { projectId: 'p3' },
-    });
+    await service.update('u1', 'd1', { projectId: null } as any);
+    // No project write happened and assertProjectAccess was never consulted for
+    // a re-home (only the DEVELOPER domain-access check ran).
+    expect(prisma.domain.update).not.toHaveBeenCalled();
   });
 });
 

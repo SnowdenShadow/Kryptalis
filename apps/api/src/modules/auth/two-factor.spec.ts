@@ -554,16 +554,35 @@ describe('resetPassword — 2FA gate', () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
-  it('invalid TOTP on reset → 401', async () => {
+  it('invalid TOTP on reset → 401 + failed-attempt counter bumped (lockout participates)', async () => {
     prisma.passwordResetToken.findUnique.mockResolvedValue(resetRow());
+    // Live re-fetch for lockout state.
+    prisma.user.findUnique.mockResolvedValue(twoFaUser());
     mockVerify.mockReturnValue(false);
     await expect(
       svc.resetPassword('raw-token', NEW_PASSWORD, { totpCode: '000000' }),
     ).rejects.toThrow('Invalid two-factor code.');
+    // The reset path now bumps the failed-attempt counter like every other
+    // 2FA-gated path (previously it had no lockout → unbounded grinding).
+    expect(prisma.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { failedLoginAttempts: { increment: 1 } } }),
+    );
+  });
+
+  it('a locked account cannot grind the reset 2FA (assertNotLocked fires first)', async () => {
+    prisma.passwordResetToken.findUnique.mockResolvedValue(resetRow());
+    prisma.user.findUnique.mockResolvedValue(
+      twoFaUser({ lockedUntil: new Date(Date.now() + 10 * 60_000) }),
+    );
+    await expect(
+      svc.resetPassword('raw-token', NEW_PASSWORD, { totpCode: '123456' }),
+    ).rejects.toThrow(/temporarily locked/);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
   it('valid backup code unlocks the reset (and is consumed)', async () => {
     prisma.passwordResetToken.findUnique.mockResolvedValue(resetRow());
+    prisma.user.findUnique.mockResolvedValue(twoFaUser());
     prisma.twoFactorBackupCode.findMany.mockResolvedValue([{ id: 'bc1', codeHash: backupHash }]);
 
     const res = await svc.resetPassword('raw-token', NEW_PASSWORD, {

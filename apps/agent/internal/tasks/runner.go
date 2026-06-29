@@ -558,8 +558,15 @@ func tarGzDir(dir string, w io.Writer) error {
 	return gz.Close()
 }
 
+// maxRestoreBytes caps the total UNCOMPRESSED output of a single backup
+// restore (zip-bomb defence). A corrupt or adversarial backup archive pulled
+// from the transfer endpoint could otherwise expand without bound and exhaust
+// host disk. 2 GiB matches the FILE_EXTRACT ceiling on the poller side.
+const maxRestoreBytes int64 = 2 * 1024 * 1024 * 1024
+
 // untarGz extracts a gzip'd tar stream into dir, rejecting entries that
-// would escape it (zip-slip) and skipping non-file/dir entry types.
+// would escape it (zip-slip), skipping non-file/dir entry types, and capping
+// total uncompressed output at maxRestoreBytes (zip-bomb defence).
 func untarGz(r io.Reader, dir string) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -568,6 +575,7 @@ func untarGz(r io.Reader, dir string) error {
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	cleanDir := filepath.Clean(dir)
+	var total int64
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -593,17 +601,29 @@ func untarGz(r io.Reader, dir string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 				return err
 			}
+			// Budget remaining BEFORE this file. Header sizes can lie, so we cap
+			// the actual copy with a LimitReader and reject if it overruns.
+			remaining := maxRestoreBytes - total
+			if remaining <= 0 {
+				return fmt.Errorf("archive decompresses beyond %d bytes (possible zip bomb)", maxRestoreBytes)
+			}
 			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(f, tr); err != nil {
+			n, copyErr := io.Copy(f, io.LimitReader(tr, remaining+1))
+			if copyErr != nil {
 				f.Close()
-				return err
+				return copyErr
 			}
 			if err := f.Close(); err != nil {
 				return err
 			}
+			if n > remaining {
+				_ = os.Remove(target)
+				return fmt.Errorf("archive decompresses beyond %d bytes (possible zip bomb)", maxRestoreBytes)
+			}
+			total += n
 		default:
 			// Symlinks/devices have no business in a dockcontrol backup —
 			// skip rather than create escape hatches.

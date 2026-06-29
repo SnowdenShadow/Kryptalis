@@ -203,7 +203,15 @@ export class CronService implements OnModuleInit, OnModuleDestroy {
 
   // ── helpers ─────────────────────────────────────────────────────────
 
-  /** First project member (the owner) — used as the actor for scheduler runs. */
+  /**
+   * Pick a project member to run a scheduled job AS. Scheduler runs route
+   * through execCommand, whose ownership check requires DEVELOPER+, so any
+   * member at that bar is a valid actor. We prefer the highest privilege
+   * (OWNER → ADMIN → DEVELOPER) but DO NOT require an OWNER: a project whose
+   * owner was deleted / demoted / had membership revoked would otherwise have
+   * every scheduled tick silently skipped forever while the job still shows
+   * enabled. Returns null only when no DEVELOPER+ member remains at all.
+   */
   private async resolveActor(applicationId: string): Promise<string | null> {
     const app = await this.prisma.application.findUnique({
       where: { id: applicationId },
@@ -211,15 +219,18 @@ export class CronService implements OnModuleInit, OnModuleDestroy {
         project: {
           select: {
             members: {
-              where: { role: 'OWNER' },
-              select: { userId: true },
-              take: 1,
+              where: { role: { in: ['OWNER', 'ADMIN', 'DEVELOPER'] } },
+              select: { userId: true, role: true },
             },
           },
         },
       },
     });
-    return app?.project?.members?.[0]?.userId ?? null;
+    const members = app?.project?.members ?? [];
+    if (members.length === 0) return null;
+    const rank: Record<string, number> = { OWNER: 0, ADMIN: 1, DEVELOPER: 2 };
+    members.sort((a, b) => (rank[a.role] ?? 9) - (rank[b.role] ?? 9));
+    return members[0].userId;
   }
 
   private async assertJobAccess(

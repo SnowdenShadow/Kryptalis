@@ -42,11 +42,18 @@ export class EncryptionService implements OnModuleInit {
   }
 
   /**
-   * Encrypt arbitrary UTF-8 text. Empty/null returns as-is so callers can
-   * write `enc.encrypt(maybeEmpty)` without a guard.
+   * Encrypt arbitrary UTF-8 text. Empty/null/undefined returns as-is so callers
+   * can write `enc.encrypt(maybeEmpty)` without a guard.
+   *
+   * Overloaded so the return type tells the truth: a definite string in yields
+   * a string out (the common case, no caller changes needed), but a possibly
+   * null/undefined input yields a possibly null/undefined output — TypeScript
+   * then forces those callers to null-check before chaining string operations,
+   * instead of silently trusting a `: string` annotation that lies at runtime.
    */
-  encrypt(plaintext: string | null | undefined): string {
-    if (plaintext == null || plaintext === '') return plaintext as string;
+  encrypt<T extends string | null | undefined>(plaintext: T): T extends string ? string : T;
+  encrypt(plaintext: string | null | undefined): string | null | undefined {
+    if (plaintext == null || plaintext === '') return plaintext;
     const iv = crypto.randomBytes(12);
     const cipher = crypto.createCipheriv('aes-256-gcm', this.key, iv);
     const ct = Buffer.concat([cipher.update(plaintext, 'utf-8'), cipher.final()]);
@@ -63,9 +70,13 @@ export class EncryptionService implements OnModuleInit {
    * Decrypt a payload previously produced by encrypt(). For backward-compat
    * with legacy plaintext columns, anything that doesn't match the v1 prefix
    * is returned as-is. (A migration job should iterate rows and re-encrypt.)
+   *
+   * Overloaded for the same reason as encrypt(): null/undefined in → same out,
+   * so callers passing a nullable DB column are forced to null-check the result.
    */
-  decrypt(payload: string | null | undefined): string {
-    if (payload == null || payload === '') return payload as string;
+  decrypt<T extends string | null | undefined>(payload: T): T extends string ? string : T;
+  decrypt(payload: string | null | undefined): string | null | undefined {
+    if (payload == null || payload === '') return payload;
     if (!payload.startsWith('v1.')) return payload; // legacy plaintext
     const [, ivB64, tagB64, ctB64] = payload.split('.');
     if (!ivB64 || !tagB64 || !ctB64) {
@@ -86,16 +97,5 @@ export class EncryptionService implements OnModuleInit {
    */
   hash(input: string): string {
     return crypto.createHash('sha256').update(input).digest('hex');
-  }
-
-  /**
-   * Constant-time equality. Avoids timing oracles when comparing
-   * user-supplied tokens to stored hashes.
-   */
-  timingSafeEqual(a: string, b: string): boolean {
-    const ab = Buffer.from(a);
-    const bb = Buffer.from(b);
-    if (ab.length !== bb.length) return false;
-    return crypto.timingSafeEqual(ab, bb);
   }
 }

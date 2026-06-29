@@ -265,6 +265,37 @@ func TestUntarGzRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestUntarGzRoundTripsUnderCap(t *testing.T) {
+	// The zip-bomb cap must not break legitimate restores: a normal archive
+	// (well under maxRestoreBytes) round-trips its files intact.
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("hello"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(src, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "sub", "b.bin"), []byte{0, 1, 2, 3, 255}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := tarGzDir(src, &buf); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := untarGz(bytes.NewReader(buf.Bytes()), dst); err != nil {
+		t.Fatalf("untarGz of a normal archive failed: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "a.txt"))
+	if err != nil || string(got) != "hello" {
+		t.Errorf("a.txt = %q (err %v), want \"hello\"", got, err)
+	}
+	gotBin, err := os.ReadFile(filepath.Join(dst, "sub", "b.bin"))
+	if err != nil || !bytes.Equal(gotBin, []byte{0, 1, 2, 3, 255}) {
+		t.Errorf("sub/b.bin = %v (err %v), want binary intact", gotBin, err)
+	}
+}
+
 func TestManifestShape(t *testing.T) {
 	m := manifest{
 		Version: 1,

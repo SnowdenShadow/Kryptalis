@@ -160,6 +160,15 @@ export class ApplicationOpsService implements OnModuleInit {
    * protect against (the gap between row insert and the build step
    * wiping the app dir is when a second redeploy click would conflict).
    */
+  /**
+   * Public wrapper so sibling services (e.g. moveServer in ApplicationsService)
+   * can enforce the same "no deployment is mid-flight" precondition before a
+   * destructive teardown, mirroring redeploy()/rollback().
+   */
+  async ensureNoInflightDeployment(applicationId: string) {
+    return this.assertNoInflightDeployment(applicationId);
+  }
+
   private async assertNoInflightDeployment(applicationId: string) {
     // NOTE: this is a best-effort check, not a lock. There's an inherent
     // TOCTOU window between this read and the caller's subsequent

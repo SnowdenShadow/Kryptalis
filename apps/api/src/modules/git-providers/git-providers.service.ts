@@ -152,6 +152,7 @@ export class GitProvidersService {
         for (const file of files) {
           const res = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${file}?ref=${branch}`, {
             headers: { 'Authorization': `Bearer ${this.getToken(gp)}`, 'Accept': 'application/vnd.github+json' },
+            signal: AbortSignal.timeout(10_000),
           });
           if (res.ok) {
             found[file] = true;
@@ -168,6 +169,7 @@ export class GitProvidersService {
         for (const file of files) {
           const res = await fetch(`https://gitlab.com/api/v4/projects/${projectPath}/repository/files/${encodeURIComponent(file)}?ref=${branch}`, {
             headers: { 'PRIVATE-TOKEN': this.getToken(gp) },
+            signal: AbortSignal.timeout(10_000),
           });
           if (res.ok) {
             found[file] = true;
@@ -257,6 +259,7 @@ export class GitProvidersService {
       if (gp.provider === 'GITHUB') {
         const res = await fetch(`https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(filePath)}?ref=${branch}`, {
           headers: { 'Authorization': `Bearer ${this.getToken(gp)}`, 'Accept': 'application/vnd.github+json' },
+          signal: AbortSignal.timeout(10_000),
         });
         if (!res.ok) return { content: '', exists: false };
         const data: any = await res.json();
@@ -267,6 +270,7 @@ export class GitProvidersService {
         const projectPath = encodeURIComponent(repoFullName);
         const res = await fetch(`https://gitlab.com/api/v4/projects/${projectPath}/repository/files/${encodeURIComponent(filePath)}/raw?ref=${branch}`, {
           headers: { 'PRIVATE-TOKEN': this.getToken(gp) },
+          signal: AbortSignal.timeout(10_000),
         });
         if (!res.ok) return { content: '', exists: false };
         return { content: await res.text(), exists: true };
@@ -274,6 +278,7 @@ export class GitProvidersService {
       if (gp.provider === 'BITBUCKET') {
         const res = await fetch(`https://api.bitbucket.org/2.0/repositories/${repoFullName}/src/${branch}/${filePath}`, {
           headers: { 'Authorization': `Bearer ${this.getToken(gp)}` },
+          signal: AbortSignal.timeout(10_000),
         });
         if (!res.ok) return { content: '', exists: false };
         return { content: await res.text(), exists: true };
@@ -302,6 +307,7 @@ export class GitProvidersService {
       if (provider === 'GITHUB') {
         const res = await fetch('https://api.github.com/user', {
           headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
+          signal: AbortSignal.timeout(10_000),
         });
         if (!res.ok) return null;
         const data: any = await res.json();
@@ -310,6 +316,7 @@ export class GitProvidersService {
       if (provider === 'GITLAB') {
         const res = await fetch('https://gitlab.com/api/v4/user', {
           headers: { 'PRIVATE-TOKEN': token },
+          signal: AbortSignal.timeout(10_000),
         });
         if (!res.ok) return null;
         const data: any = await res.json();
@@ -318,6 +325,7 @@ export class GitProvidersService {
       if (provider === 'BITBUCKET') {
         const res = await fetch('https://api.bitbucket.org/2.0/user', {
           headers: { 'Authorization': `Bearer ${token}` },
+          signal: AbortSignal.timeout(10_000),
         });
         if (!res.ok) return null;
         const data: any = await res.json();
@@ -330,6 +338,7 @@ export class GitProvidersService {
   private async fetchGitHubRepos(token: string): Promise<Repo[]> {
     const res = await fetch('https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member', {
       headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`GitHub API: ${res.status}`);
     const data: any[] = await res.json();
@@ -348,6 +357,7 @@ export class GitProvidersService {
   private async fetchGitLabRepos(token: string): Promise<Repo[]> {
     const res = await fetch('https://gitlab.com/api/v4/projects?membership=true&per_page=100&order_by=updated_at', {
       headers: { 'PRIVATE-TOKEN': token },
+      signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`GitLab API: ${res.status}`);
     const data: any[] = await res.json();
@@ -366,6 +376,7 @@ export class GitProvidersService {
   private async fetchBitbucketRepos(token: string): Promise<Repo[]> {
     const res = await fetch('https://api.bitbucket.org/2.0/repositories?role=member&pagelen=100&sort=-updated_on', {
       headers: { 'Authorization': `Bearer ${token}` },
+      signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) throw new Error(`Bitbucket API: ${res.status}`);
     const data: any = await res.json();

@@ -51,7 +51,8 @@ export class ApplicationEnvService {
     if (!raw) return {};
     if (typeof raw === 'object' && (raw as any).__k === 1 && typeof (raw as any).v === 'string') {
       try {
-        return JSON.parse(this.encryption.decrypt((raw as any).v));
+        const blob: string = (raw as any).v;
+        return JSON.parse(this.encryption.decrypt(blob));
       } catch {
         return {};
       }
@@ -62,6 +63,11 @@ export class ApplicationEnvService {
 
   serializeEnv(env: Record<string, string>) {
     return Object.entries(env)
+      // Drop keys that aren't valid env-var names. Without this a key carrying
+      // a newline (e.g. "KEY\nINJECTED=x") would write a SECOND .env line,
+      // letting a caller inject/override other vars in the container. Values
+      // still get their newlines escaped below.
+      .filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
       .map(([k, v]) => {
         const safe = String(v).replace(/\n/g, '\\n');
         return `${k}=${safe}`;

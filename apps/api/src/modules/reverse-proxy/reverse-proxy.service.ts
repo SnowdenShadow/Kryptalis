@@ -874,19 +874,20 @@ ${portLines.length > 0 ? portLines.join('\n') : '      []'}
       return [];
     }
     const hostLc = (host || '').toLowerCase();
-    const markers = ['acme', 'obtain', 'certificate', 'challenge', 'rate limit', 'rate_limit', 'error', 'tls'];
+    if (!hostLc) return [];
     const out: string[] = [];
     let bytes = 0;
     for (const line of raw.split('\n')) {
       const l = line.toLowerCase();
-      // Keep lines that mention THIS host, or generic ACME/TLS markers (so the
-      // user sees rate-limit / challenge failures even when the host isn't on
-      // the line). No cross-tenant leakage of another domain's specifics: other
-      // hosts' lines only pass if they ALSO carry a generic marker, which is
-      // fine — these are issuance-level diagnostics, not secrets.
-      if (hostLc && l.includes(hostLc)) { out.push(line); }
-      else if (markers.some((m) => l.includes(m))) { out.push(line); }
-      else continue;
+      // ONLY keep lines that mention THIS host. The shared Caddy container logs
+      // every tenant's ACME activity; an earlier version also kept any line
+      // carrying a generic marker (acme/obtain/error/tls/...), which leaked
+      // OTHER tenants' domain names, challenge URLs and rate-limit details to
+      // any project member who could read this domain's SSL logs. Filtering
+      // strictly on the caller's own hostname keeps the diagnostics useful
+      // without cross-tenant disclosure.
+      if (!l.includes(hostLc)) continue;
+      out.push(line);
       bytes += line.length + 1;
       if (bytes > 50_000) break;
     }
@@ -928,6 +929,12 @@ ${portLines.length > 0 ? portLines.join('\n') : '      []'}
   }
 
   private async getCertMtime(host: string): Promise<number | null> {
+    // host is interpolated into a `sh -c` command, so reject anything outside
+    // the DNS charset before it reaches the shell — mirrors the identical guard
+    // in hasIssuedCert(). host is currently always "mail.<validated-domain>",
+    // but this keeps the two cert helpers consistent and fails safe if the
+    // input source ever changes.
+    if (!/^[a-zA-Z0-9.-]+$/.test(host)) return null;
     try {
       const { stdout } = await execFileAsync(
         'docker',
@@ -995,7 +1002,14 @@ ${portLines.length > 0 ? portLines.join('\n') : '      []'}
    * NEVER returns "localhost" — LE rejects it.
    */
   private resolveAcmeEmail(): string | null {
-    if (process.env.ACME_EMAIL) return process.env.ACME_EMAIL;
+    if (process.env.ACME_EMAIL) {
+      // This value is emitted verbatim into the Caddyfile global block as
+      // `email <x>`. Strip anything that could break out of that single
+      // directive (newlines, braces) or smuggle a second global option, and
+      // require it to look like an email; otherwise ignore the override.
+      const cleaned = process.env.ACME_EMAIL.replace(/[\r\n{}]/g, '').trim();
+      if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned)) return cleaned;
+    }
     try {
       if (process.env.PUBLIC_API_URL) {
         const host = new URL(process.env.PUBLIC_API_URL).hostname;

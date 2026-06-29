@@ -625,7 +625,12 @@ export default function MonitoringPage() {
                           axisLine={false}
                         />
                         <YAxis
-                          domain={[0, chartData.length > 0 ? chartData[0].ramTotal : 64]}
+                          // Anchor the axis to the LARGEST total RAM seen across
+                          // the window, not chartData[0] (the oldest sample) —
+                          // if total RAM changed mid-window (reboot with less
+                          // swap, hardware change) the oldest value could clip
+                          // later, higher bars.
+                          domain={[0, chartData.length > 0 ? Math.max(...chartData.map((d) => d.ramTotal), 1) : 64]}
                           stroke="#a1a1aa"
                           fontSize={10}
                           tickLine={false}

@@ -17,11 +17,18 @@ import { ApplicationsService } from './applications.service';
 
 type RawRequest = Request & { rawBody?: Buffer };
 
+// Constant-time string equality with NO length leak. A naive
+// `if (a.length !== b.length) return false` before timingSafeEqual is itself a
+// timing/early-return oracle: for the GitLab path the attacker fully controls
+// the X-Gitlab-Token header and could binary-search the secret's byte length.
+// Hashing both sides to a fixed 32-byte digest first makes the compared buffers
+// always equal-length, so neither length nor content leaks through timing. The
+// SHA-256 inputs are not themselves secret-length-revealing because the digest
+// size is constant regardless of input length.
 export function timingSafeStrEq(a: string, b: string): boolean {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ba.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ba, bb);
+  const ha = crypto.createHash('sha256').update(a).digest();
+  const hb = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(ha, hb);
 }
 
 // Normalize a git ref / branch field to a bare branch name.

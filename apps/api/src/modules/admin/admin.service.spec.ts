@@ -103,19 +103,37 @@ describe('AdminService — self-modification guards', () => {
 });
 
 describe('AdminService — last-SUPERADMIN protection (deleteUser)', () => {
-  it('refuses to delete the LAST superadmin', async () => {
+  it('refuses to delete the LAST active superadmin', async () => {
     const { service, prisma } = makeService();
-    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN' });
+    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN', status: 'ACTIVE' });
     prisma.user.count.mockResolvedValue(1);
-    await expect(service.deleteUser(SUPERADMIN, 'other-sa')).rejects.toThrow(/last SUPERADMIN/i);
+    await expect(service.deleteUser(SUPERADMIN, 'other-sa')).rejects.toThrow(/last active SUPERADMIN/i);
     expect(prisma.user.delete).not.toHaveBeenCalled();
   });
 
-  it('allows deleting a superadmin when others remain', async () => {
+  it('the ACTIVE-only count predicate is used (a SUSPENDED superadmin does not count)', async () => {
     const { service, prisma } = makeService();
-    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN' });
+    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN', status: 'ACTIVE' });
+    prisma.user.count.mockResolvedValue(1);
+    await expect(service.deleteUser(SUPERADMIN, 'other-sa')).rejects.toThrow(/last active SUPERADMIN/i);
+    expect(prisma.user.count).toHaveBeenCalledWith({
+      where: { role: 'SUPERADMIN', status: 'ACTIVE' },
+    });
+  });
+
+  it('allows deleting a superadmin when other ACTIVE superadmins remain', async () => {
+    const { service, prisma } = makeService();
+    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN', status: 'ACTIVE' });
     prisma.user.count.mockResolvedValue(2);
     await expect(service.deleteUser(SUPERADMIN, 'other-sa')).resolves.toBeDefined();
+    expect(prisma.user.delete).toHaveBeenCalledWith({ where: { id: 'other-sa' } });
+  });
+
+  it('deleting an already-INACTIVE superadmin does not trigger the count guard', async () => {
+    const { service, prisma } = makeService();
+    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN', status: 'SUSPENDED' });
+    await expect(service.deleteUser(SUPERADMIN, 'other-sa')).resolves.toBeDefined();
+    expect(prisma.user.count).not.toHaveBeenCalled();
     expect(prisma.user.delete).toHaveBeenCalledWith({ where: { id: 'other-sa' } });
   });
 
@@ -127,30 +145,30 @@ describe('AdminService — last-SUPERADMIN protection (deleteUser)', () => {
 });
 
 describe('AdminService — last-SUPERADMIN protection on demote/ban (platform lockout)', () => {
-  it('refuses to DEMOTE the last superadmin away from SUPERADMIN', async () => {
+  it('refuses to DEMOTE the last active superadmin away from SUPERADMIN', async () => {
     const { service, prisma } = makeService();
-    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN' });
+    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN', status: 'ACTIVE' });
     prisma.user.count.mockResolvedValue(1);
     await expect(service.updateUserRole(SUPERADMIN, 'other-sa', 'USER' as any)).rejects.toThrow(
-      /last SUPERADMIN/i,
+      /last active SUPERADMIN/i,
     );
     expect(prisma.user.update).not.toHaveBeenCalled();
   });
 
-  it('allows demoting a superadmin when others remain', async () => {
+  it('allows demoting a superadmin when other ACTIVE superadmins remain', async () => {
     const { service, prisma } = makeService();
-    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN' });
+    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN', status: 'ACTIVE' });
     prisma.user.count.mockResolvedValue(2);
     await expect(service.updateUserRole(SUPERADMIN, 'other-sa', 'ADMIN' as any)).resolves.toBeDefined();
     expect(prisma.user.update).toHaveBeenCalled();
   });
 
-  it('refuses to BAN/suspend the last superadmin', async () => {
+  it('refuses to BAN/suspend the last active superadmin', async () => {
     const { service, prisma } = makeService();
-    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN' });
+    prisma.user.findUnique.mockResolvedValue({ role: 'SUPERADMIN', status: 'ACTIVE' });
     prisma.user.count.mockResolvedValue(1);
     await expect(service.updateUserStatus(SUPERADMIN, 'other-sa', 'BANNED' as any)).rejects.toThrow(
-      /last SUPERADMIN/i,
+      /last active SUPERADMIN/i,
     );
     expect(prisma.user.update).not.toHaveBeenCalled();
   });

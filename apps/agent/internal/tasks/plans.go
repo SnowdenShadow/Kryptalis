@@ -35,12 +35,54 @@ func validDockerName(s string) bool {
 	return true
 }
 
+// validDBIdent matches the identifier charset for a DB username / database
+// name passed as a DISCRETE argv element to pg_dump/psql/mysqldump/mongodump
+// (-U <user>, -d <name>, --databases <name>). exec() already prevents shell
+// injection, but a value beginning with '-' could be reparsed as a CLI flag by
+// the target tool (e.g. a name of "--all-databases"). Enforce non-empty, no
+// leading '-', and a conservative allowlist (alphanumerics, underscore, dash,
+// dot, dollar — covers Postgres/MySQL/Mongo identifiers) with no whitespace or
+// control characters.
+func validDBIdent(s string) bool {
+	if s == "" || len(s) > 255 || s[0] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'):
+		case c == '_' || c == '.' || c == '-' || c == '$':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func validateDBSpec(db DatabaseSpec) error {
 	if !validDockerName(db.ID) {
 		return fmt.Errorf("database entry has invalid id %q", db.ID)
 	}
 	if !validDockerName(db.Container) {
 		return fmt.Errorf("database %q has invalid container name %q", db.ID, db.Container)
+	}
+	// Username / Name reach the dump/restore tools as discrete argv elements
+	// only for the SQL/Mongo engines. Redis-family auth is password-only (via
+	// REDISCLI_AUTH env) and uses neither, so don't require them there.
+	switch db.Type {
+	case "POSTGRESQL", "MYSQL", "MARIADB", "MONGODB":
+		// Username is passed on every SQL/Mongo dump+restore (-U/-u/--username),
+		// so it must always be a valid identifier (no leading '-' flag smuggle).
+		if !validDBIdent(db.Username) {
+			return fmt.Errorf("database %q has invalid username %q", db.ID, db.Username)
+		}
+		// Name is only an argv element on SOME paths (e.g. MySQL/Mongo restore
+		// don't use it — they replay USE statements / a full archive). Validate
+		// its CHARSET whenever present to block flag injection, but don't force
+		// presence, or we'd reject those legitimately name-less restore plans.
+		if db.Name != "" && !validDBIdent(db.Name) {
+			return fmt.Errorf("database %q has invalid name %q", db.ID, db.Name)
+		}
 	}
 	return nil
 }

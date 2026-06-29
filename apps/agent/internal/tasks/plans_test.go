@@ -260,6 +260,37 @@ func TestRestorePlanUnknownType(t *testing.T) {
 	}
 }
 
+func TestValidateDBSpecRejectsFlagSmuggling(t *testing.T) {
+	// Username / Name beginning with '-' could be reparsed as a CLI flag by
+	// pg_dump/psql/mysqldump (e.g. a name of "--all-databases").
+	bad := []DatabaseSpec{
+		{ID: "i", Type: "POSTGRESQL", Container: "pg", Username: "-rf", Name: "db"},
+		{ID: "i", Type: "POSTGRESQL", Container: "pg", Username: "admin", Name: "--all-databases"},
+		{ID: "i", Type: "MYSQL", Container: "my", Username: "ro ot", Name: "db"}, // whitespace
+		{ID: "i", Type: "MONGODB", Container: "mg", Username: "u;rm", Name: "db"}, // metachar
+	}
+	for _, db := range bad {
+		if err := validateDBSpec(db); err == nil {
+			t.Errorf("validateDBSpec accepted a flag/charset-smuggling spec: %+v", db)
+		}
+	}
+
+	// Valid identifiers (incl. the $ Postgres allows) must pass.
+	ok := []DatabaseSpec{
+		{ID: "i", Type: "POSTGRESQL", Container: "pg", Username: "admin", Name: "my_db.1"},
+		{ID: "i", Type: "MYSQL", Container: "my", Username: "root$1", Name: "shop"},
+		// MySQL/Mongo restore legitimately carry no Name — must still pass.
+		{ID: "i", Type: "MYSQL", Container: "my", Username: "root", Name: ""},
+		// Redis-family uses neither Username nor Name.
+		{ID: "i", Type: "REDIS", Container: "rd"},
+	}
+	for _, db := range ok {
+		if err := validateDBSpec(db); err != nil {
+			t.Errorf("validateDBSpec rejected a valid spec %+v: %v", db, err)
+		}
+	}
+}
+
 func TestVolumeArgvs(t *testing.T) {
 	wantExp := []string{"run", "--rm", "-v", "myvol:/data:ro", "busybox", "tar", "-czf", "-", "-C", "/data", "."}
 	if got := volumeExportArgv("myvol"); !reflect.DeepEqual(got, wantExp) {

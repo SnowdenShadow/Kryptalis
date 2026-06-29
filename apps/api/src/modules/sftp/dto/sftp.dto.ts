@@ -41,6 +41,9 @@ export class CreateSftpAccountDto {
   @IsString()
   @MinLength(8)
   @MaxLength(128)
+  // No CR/LF: the password is piped to chpasswd as a "user:password" record and
+  // a newline would inject a second record targeting another account.
+  @Matches(/^[^\r\n]+$/, { message: 'password must not contain newlines' })
   password?: string;
 
   @ApiProperty({ required: false, type: [String], description: 'SSH authorized_keys entries' })

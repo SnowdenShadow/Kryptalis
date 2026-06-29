@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  Users, Settings, Activity, ShieldAlert, Crown, Shield, Eye, Search,
+  Users, Settings, Activity, ShieldAlert, Crown, Shield, Eye, EyeOff, Search,
   Trash2, UserPlus, Ban, KeyRound, RefreshCw, AlertTriangle, Lock, LockOpen,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -136,8 +136,10 @@ export default function AdminPage() {
   const [pendingDeployMode, setPendingDeployMode] = useState<string | null>(null);
   const [resetPwUser, setResetPwUser] = useState<AdminUser | null>(null);
   const [resetPwValue, setResetPwValue] = useState('');
+  const [showResetPw, setShowResetPw] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [newUser, setNewUser] = useState({ name: '', email: '', password: '', role: 'USER' as Role });
+  const [showNewUserPw, setShowNewUserPw] = useState(false);
 
   const roleMutation = useMutation({
     mutationFn: ({ id, role }: { id: string; role: Role }) =>
@@ -711,13 +713,23 @@ export default function AdminPage() {
         </DialogHeader>
         <div className="space-y-2">
           <Label>{t('admin.newPw')}</Label>
-          <Input
-            type="text"
-            value={resetPwValue}
-            onChange={(e) => setResetPwValue(e.target.value)}
-            placeholder={t('admin.newPwPlaceholder')}
-            className="font-mono"
-          />
+          <div className="relative">
+            <Input
+              type={showResetPw ? 'text' : 'password'}
+              value={resetPwValue}
+              onChange={(e) => setResetPwValue(e.target.value)}
+              placeholder={t('admin.newPwPlaceholder')}
+              className="font-mono pr-9"
+            />
+            <button
+              type="button"
+              onClick={() => setShowResetPw((s) => !s)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
+              aria-label={showResetPw ? t('common.hide') : t('common.show')}
+            >
+              {showResetPw ? <EyeOff size={15} /> : <Eye size={15} />}
+            </button>
+          </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => { setResetPwUser(null); setResetPwValue(''); }}>{t('common.cancel')}</Button>
@@ -744,7 +756,22 @@ export default function AdminPage() {
             <Input type="email" value={newUser.email} onChange={(e) => setNewUser(u => ({ ...u, email: e.target.value }))} />
           </div>
           <div className="space-y-2"><Label>{t('auth.password')}</Label>
-            <Input type="text" className="font-mono" value={newUser.password} onChange={(e) => setNewUser(u => ({ ...u, password: e.target.value }))} />
+            <div className="relative">
+              <Input
+                type={showNewUserPw ? 'text' : 'password'}
+                className="font-mono pr-9"
+                value={newUser.password}
+                onChange={(e) => setNewUser(u => ({ ...u, password: e.target.value }))}
+              />
+              <button
+                type="button"
+                onClick={() => setShowNewUserPw((s) => !s)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
+                aria-label={showNewUserPw ? t('common.hide') : t('common.show')}
+              >
+                {showNewUserPw ? <EyeOff size={15} /> : <Eye size={15} />}
+              </button>
+            </div>
           </div>
           <div className="space-y-2"><Label>{t('common.role')}</Label>
             <Select value={newUser.role} onChange={(e) => setNewUser(u => ({ ...u, role: e.target.value as Role }))}>

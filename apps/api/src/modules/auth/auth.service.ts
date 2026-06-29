@@ -357,30 +357,40 @@ export class AuthService {
     if (!row || row.usedAt || row.expiresAt < new Date()) {
       throw new BadRequestException('Verification link is invalid or expired.');
     }
-    // Atomically flip the user to ACTIVE and consume the token. If the
-    // user is already ACTIVE we still mark the token used so it can't be
-    // replayed — but we don't downgrade status (e.g. BANNED stays BANNED).
-    await this.prisma.$transaction([
-      this.prisma.emailVerificationToken.update({
+    // Atomically flip the user to ACTIVE and consume the token. We must NOT
+    // trust the pre-read `row.user.status` snapshot to decide whether to
+    // promote: an admin could BAN/SUSPEND the account between the read above
+    // and this write, and an unconditional promote would silently revert the
+    // ban (the DB row would become ACTIVE and the per-request JWT guard would
+    // then grant access indefinitely). So we re-read inside the transaction
+    // and promote with a CONDITIONAL updateMany that only fires while the row
+    // is still PENDING_VERIFICATION — if a ban won the race, it matches zero
+    // rows and the ban stands. The token is consumed regardless so it can't be
+    // replayed.
+    const liveStatus = await this.prisma.$transaction(async (tx) => {
+      await tx.emailVerificationToken.update({
         where: { id: row.id },
         data: { usedAt: new Date() },
-      }),
-      ...(row.user.status === 'PENDING_VERIFICATION'
-        ? [this.prisma.user.update({
-            where: { id: row.userId },
-            data: { status: UserStatus.ACTIVE },
-          })]
-        : []),
-    ]);
+      });
+      await tx.user.updateMany({
+        where: { id: row.userId, status: UserStatus.PENDING_VERIFICATION },
+        data: { status: UserStatus.ACTIVE },
+      });
+      const live = await tx.user.findUnique({
+        where: { id: row.userId },
+        select: { status: true },
+      });
+      return live?.status ?? null;
+    });
 
-    if (row.user.status === 'BANNED' || row.user.status === 'SUSPENDED') {
+    if (liveStatus === 'BANNED' || liveStatus === 'SUSPENDED') {
       throw new ForbiddenException('Account is not active');
     }
     // A verified inbox is necessary but not sufficient: an account still
     // awaiting admin approval must NOT receive a token pair here, matching
-    // login()'s PENDING_APPROVAL gate. (The tx above only promotes
+    // login()'s PENDING_APPROVAL gate. (The promote above only moves
     // PENDING_VERIFICATION → ACTIVE, so a PENDING_APPROVAL row stays put.)
-    if (row.user.status === 'PENDING_APPROVAL') {
+    if (liveStatus === 'PENDING_APPROVAL') {
       throw new ForbiddenException(
         'Your account is awaiting administrator approval. You will be able to sign in once it has been approved.',
       );
@@ -925,8 +935,13 @@ export class AuthService {
   async forgotPassword(emailRaw: string) {
     const email = (emailRaw || '').trim().toLowerCase();
     const user = await this.prisma.user.findUnique({ where: { email } });
-    if (!user) {
-      // Same return — the rate limiter is the real defense against enumeration.
+    if (!user || user.status !== 'ACTIVE') {
+      // Same return whether or not the email exists / the account is active —
+      // the rate limiter is the real defense against enumeration. We do NOT
+      // mint a reset token for a non-ACTIVE account (BANNED/SUSPENDED/pending):
+      // it should not be possible to set a new password on an account that
+      // cannot log in, which would otherwise hand control to whoever holds the
+      // link if the account is later restored.
       return { message: 'If that email is registered, a reset link has been sent.' };
     }
 
@@ -967,21 +982,43 @@ export class AuthService {
       throw new BadRequestException('Reset link is invalid or expired.');
     }
 
+    // Never let a reset set a password on an account that cannot log in. A
+    // BANNED/SUSPENDED account (or one holding a pre-ban token) must not have
+    // its password changed: the new password would silently take effect the
+    // moment an admin restores the account, handing control to whoever holds
+    // the link. login() already rejects these statuses; mirror that here.
+    if (row.user.status === 'BANNED' || row.user.status === 'SUSPENDED') {
+      throw new ForbiddenException('Account is not active');
+    }
+
     // If the account has 2FA enabled, do NOT let an email-based reset
     // bypass it. The attacker who controls the inbox still has to prove
     // possession of the authenticator or a backup code. This closes the
     // 'inbox-takeover → full account' path.
+    //
+    // The TOTP/backup-code check is routed through the SAME per-account lockout
+    // login()/changePassword() use — otherwise an attacker holding a single
+    // valid reset token could grind every TOTP/backup code with no rate limit,
+    // defeating the very 2FA gate this block exists to enforce. We re-fetch the
+    // user for live lockout state (the included row.user is stale w.r.t.
+    // lockedUntil/failedLoginAttempts), honour lockedUntil BEFORE verifying,
+    // bump on each miss, and reset on success.
     if (row.user.twoFactorEnabled) {
       const code = twoFactor?.totpCode || twoFactor?.backupCode;
       if (!code) {
         throw new BadRequestException('Two-factor code required to reset password.');
       }
+      const liveUser = await this.prisma.user.findUnique({ where: { id: row.userId } });
+      if (!liveUser) throw new BadRequestException('Reset link is invalid or expired.');
+      const lockExpired = this.assertNotLocked(liveUser);
       const ok = await this.verifyTwoFactor(row.user.id, row.user.twoFactorSecret, code, {
         forBackup: !!twoFactor?.backupCode,
       });
       if (!ok) {
+        await this.bumpFailedAttempt(row.userId, { freshAfterLockExpiry: lockExpired });
         throw new UnauthorizedException('Invalid two-factor code.');
       }
+      await this.resetFailedAttempts(row.userId);
     }
 
     const hashed = await bcrypt.hash(newPassword, 12);
@@ -1063,7 +1100,11 @@ export class AuthService {
       // Backup codes are 80-bit hex grouped with dashes ("ab12c-de34f-...").
       // Routed through the SAME per-account lockout login() uses so a stolen
       // access token can't grind TOTP/backup codes here without limit.
-      const stripped = code.replace(/-/g, '');
+      // Strip BOTH dashes and spaces so a backup code typed with spaces still
+      // routes to the backup verifier (verifyBackupCode normalizes the same
+      // way). Stripping only dashes left a space-separated code looking like a
+      // non-hex string → misrouted to the TOTP path → always failed.
+      const stripped = code.replace(/[-\s]/g, '');
       const looksLikeBackup = /^[0-9a-f]{10,}$/i.test(stripped);
       const lockExpired = this.assertNotLocked(user);
       const valid = await this.verifyTwoFactor(userId, user.twoFactorSecret, code, {

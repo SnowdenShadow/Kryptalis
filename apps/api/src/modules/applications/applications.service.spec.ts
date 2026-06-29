@@ -131,7 +131,10 @@ function makeService() {
     transferDir: vi.fn((id: string) => `/tmp/transfers/${id}`),
   };
   const proxy = { regenerate: vi.fn().mockResolvedValue(undefined) };
-  const ops = { redeploy: vi.fn().mockResolvedValue({ id: 'dep-1' }) };
+  const ops = {
+    redeploy: vi.fn().mockResolvedValue({ id: 'dep-1' }),
+    ensureNoInflightDeployment: vi.fn().mockResolvedValue(undefined),
+  };
   // Only the deps moveServer touches are real stubs; the rest are inert.
   const service = new ApplicationsService(
     prisma as any,
@@ -188,6 +191,27 @@ describe('moveServer', () => {
       /no stored compose file/,
     );
     // No teardown, no placement flip, no redeploy happened.
+    expect(agent.enqueueAndWait).not.toHaveBeenCalled();
+    expect(ops.redeploy).not.toHaveBeenCalled();
+    expect(prisma.application.update).not.toHaveBeenCalled();
+  });
+
+  it('refuses to move while a deployment is in-flight, BEFORE any teardown', async () => {
+    const { service, prisma, agent, ops } = makeService();
+    prisma.application.findUnique.mockResolvedValue(gitApp());
+    prisma.server.findUnique.mockResolvedValue(ONLINE_TARGET);
+    mockResolveAppServer.mockResolvedValue({ id: 'old', host: '10.0.0.1', name: 'old-node' } as any);
+    mockIsAppLocal.mockReturnValue(false);
+    mockIsLocalHost.mockReturnValue(false);
+    ops.ensureNoInflightDeployment.mockRejectedValueOnce(
+      Object.assign(new Error('A deployment is already running'), { status: 409 }),
+    );
+
+    await expect(service.moveServer('u1', 'a1', 'new')).rejects.toThrow(
+      /deployment is already running/,
+    );
+    // Guard fired before teardown/placement/redeploy.
+    expect(ops.ensureNoInflightDeployment).toHaveBeenCalledWith('a1');
     expect(agent.enqueueAndWait).not.toHaveBeenCalled();
     expect(ops.redeploy).not.toHaveBeenCalled();
     expect(prisma.application.update).not.toHaveBeenCalled();
@@ -414,7 +438,10 @@ describe('moveServer', () => {
 describe('attachDatabase / detachDatabase', () => {
   function makeServiceWithDb() {
     const prisma = makePrisma();
-    const ops = { redeploy: vi.fn().mockResolvedValue({ id: 'dep-1' }) };
+    const ops = {
+    redeploy: vi.fn().mockResolvedValue({ id: 'dep-1' }),
+    ensureNoInflightDeployment: vi.fn().mockResolvedValue(undefined),
+  };
     const databases = {
       linkToApplication: vi.fn().mockResolvedValue({
         envVars: { DB_HOST: 'dockcontrol-db-shopdb', DB_PORT: '3306', DB_USER: 'shop', DB_PASSWORD: 'pw', DATABASE_URL: 'mysql://shop:pw@dockcontrol-db-shopdb:3306/shopdb' },

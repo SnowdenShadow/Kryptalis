@@ -748,7 +748,10 @@ export class MarketplaceService implements OnModuleInit {
       while ((m = re.exec(stdout)) !== null) used.add(parseInt(m[1], 10));
     } catch {}
     let p = base;
-    while (used.has(p)) p += 10;
+    while (used.has(p) && p <= 65535) p += 10;
+    if (p > 65535) {
+      throw new ConflictException(`No free host port available above ${base}.`);
+    }
     return p;
   }
 
