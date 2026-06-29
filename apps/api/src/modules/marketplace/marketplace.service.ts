@@ -239,10 +239,10 @@ export class MarketplaceService implements OnModuleInit {
     // Custom name from the unified deploy dialog wins. We still check for
     // name collisions inside the project — if the picked name is taken,
     // suffix as usual instead of failing.
-    let appName = (data.name && data.name.trim()) || app.name;
+    const baseName = (data.name && data.name.trim()) || app.name;
+    let appName = baseName;
     let isMultiInstall = false;
     if (!isWebmail) {
-      const baseName = (data.name && data.name.trim()) || app.name;
       let suffix = 2;
       let resolved = false;
       while (suffix < 100) {

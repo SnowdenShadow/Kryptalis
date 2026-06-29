@@ -50,6 +50,18 @@ import * as crypto from 'crypto';
 import { spawn } from 'child_process';
 
 /**
+ * Strip credentials from a build/deploy log line before it's persisted or shown
+ * — git clones embed tokens (http.extraheader, x-access-token, Authorization).
+ * Single source of truth, used by every deploy path's log().
+ */
+function redactSecrets(line: string): string {
+  return line
+    .replace(/(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9_\-+/.=]+/gi, '$1<redacted>')
+    .replace(/(http\.extraheader=)[^\s'"]+/g, '$1<redacted>')
+    .replace(/(x-access-token:)[^@\s]+/gi, '$1<redacted>');
+}
+
+/**
  * Deployment pipeline for applications: git-clone deploys, docker-image
  * deploys, raw compose / raw Dockerfile deploys, healthchecks, rollback
  * and terminal-outcome notifications. Split out of ApplicationsService.
@@ -128,6 +140,24 @@ export class ApplicationDeployService implements OnModuleInit {
    */
   private regenerateProxy(): void {
     void this.proxy.regenerate().catch(() => {});
+  }
+
+  /**
+   * Ensure the per-project docker network exists (idempotent): inspect, and
+   * create it if missing. Best-effort — a create race or transient failure is
+   * swallowed (the subsequent `compose up` surfaces a real network error).
+   * Extracted from the 5 deploy paths that each inlined this block verbatim.
+   */
+  private async ensureProjectNetwork(projectNet: string | null, log?: (line: string) => void): Promise<void> {
+    if (!projectNet) return;
+    try {
+      await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5_000 });
+    } catch {
+      log?.(`> docker network create ${projectNet}`);
+      try {
+        await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 });
+      } catch {}
+    }
   }
 
   /**
@@ -351,13 +381,7 @@ export class ApplicationDeployService implements OnModuleInit {
         select: { projectId: true },
       });
       const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
-      if (projectNet) {
-        try {
-          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5000 });
-        } catch {
-          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
-        }
-      }
+      await this.ensureProjectNetwork(projectNet);
 
       // REDEPLOY: bring the old stack down WITHOUT -v (the docroot is a host
       // bind mount, not a named volume, so it survives regardless — but be
@@ -548,17 +572,11 @@ export class ApplicationDeployService implements OnModuleInit {
     const appDir = resolveAppDir(slug, appId);
     const started = Date.now();
     const buildLogs: string[] = [];
-    // Scrubs git bearer tokens and basic-auth blobs from any log line before
-    // persisting. Defense in depth on top of the redacted log() in clone
-    // paths — any future codepath that calls log() with a stderr blob from
-    // git (e.g. clone failure echoing the auth header) is also protected.
-    const scrub = (line: string): string =>
-      line
-        .replace(/(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9_\-+/.=]+/gi, '$1<redacted>')
-        .replace(/(http\.extraheader=)[^\s'"]+/g, '$1<redacted>')
-        .replace(/(x-access-token:)[^@\s]+/gi, '$1<redacted>');
+    // redactSecrets scrubs git bearer tokens / basic-auth blobs from any log
+    // line before persisting (defense in depth on top of the redacted clone
+    // paths). Single module-level helper — see top of file.
     const log = (line: string) => {
-      buildLogs.push(scrub(line));
+      buildLogs.push(redactSecrets(line));
     };
 
     try {
@@ -576,13 +594,7 @@ export class ApplicationDeployService implements OnModuleInit {
         select: { projectId: true, project: { select: { server: { select: { host: true } } } } },
       });
       const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
-      if (projectNet) {
-        try {
-          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5000 });
-        } catch {
-          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
-        }
-      }
+      await this.ensureProjectNetwork(projectNet);
 
       // Fresh dir + minimal compose. If the user supplied a port, publish it
       // on host; otherwise Caddy proxies over the project network.
@@ -764,13 +776,7 @@ export class ApplicationDeployService implements OnModuleInit {
         select: { projectId: true },
       });
       const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
-      if (projectNet) {
-        try {
-          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5_000 });
-        } catch {
-          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
-        }
-      }
+      await this.ensureProjectNetwork(projectNet);
 
       if (fs.existsSync(appDir)) {
         // REDEPLOY path — `down` WITHOUT `-v` so user data (DB volumes,
@@ -1109,13 +1115,7 @@ export class ApplicationDeployService implements OnModuleInit {
         select: { projectId: true },
       });
       const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
-      if (projectNet) {
-        try {
-          await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5_000 });
-        } catch {
-          try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
-        }
-      }
+      await this.ensureProjectNetwork(projectNet);
 
       if (fs.existsSync(appDir)) {
         // REDEPLOY path — `down` WITHOUT `-v` so user data (DB volumes,
@@ -1266,13 +1266,8 @@ export class ApplicationDeployService implements OnModuleInit {
     const appDir = resolveAppDir(slug, appId);
     const started = Date.now();
     const buildLogs: string[] = [];
-    // Same scrub as runDockerImageDeploy — strips git bearer tokens and
-    // basic-auth blobs from any log line before persistence.
-    const scrub = (line: string): string =>
-      line
-        .replace(/(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9_\-+/.=]+/gi, '$1<redacted>')
-        .replace(/(http\.extraheader=)[^\s'"]+/g, '$1<redacted>')
-        .replace(/(x-access-token:)[^@\s]+/gi, '$1<redacted>');
+    // redactSecrets: same module-level scrubber the image path uses — strips
+    // git bearer tokens / basic-auth blobs from any log line before persistence.
     let flushPending = false;
     const flush = async () => {
       if (flushPending) return;
@@ -1286,7 +1281,7 @@ export class ApplicationDeployService implements OnModuleInit {
       flushPending = false;
     };
     const log = (s: string) => {
-      buildLogs.push(scrub(s));
+      buildLogs.push(redactSecrets(s));
       void flush();
     };
 
@@ -1370,14 +1365,7 @@ export class ApplicationDeployService implements OnModuleInit {
     }
 
     const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
-    if (projectNet) {
-      try {
-        await execFileAsync('docker', ['network', 'inspect', projectNet], { timeout: 5000 });
-      } catch {
-        log(`> docker network create ${projectNet}`);
-        try { await execFileAsync('docker', ['network', 'create', projectNet], { timeout: 10_000 }); } catch {}
-      }
-    }
+    await this.ensureProjectNetwork(projectNet, log);
 
     // Rollback snapshot of the previous appDir. The old "rollback" re-ran
     // `up -d` on the appDir ALREADY rewritten by the failed deploy — i.e. it

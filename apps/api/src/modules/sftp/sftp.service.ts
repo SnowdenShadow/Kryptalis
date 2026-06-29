@@ -1297,7 +1297,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     const binds: ChrootBind[] = [];
     for (const app of project.applications) {
       const source = await this.computeChrootSourceForApp(app);
-      binds.push({ dir: `${this.slugify(app.name)}-${app.id.slice(0, 12)}`, source });
+      binds.push({ dir: `${appSlugify(app.name)}-${app.id.slice(0, 12)}`, source });
     }
     // Defensive: dir names are slug-id12 and ids are unique, but a
     // duplicate mount-point would silently shadow an app — fail closed.
@@ -1320,7 +1320,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   private async computeChrootSourceForApp(
     app: { name: string; id: string; dockerImage: string | null; containerName: string | null; framework?: string | null },
   ): Promise<string> {
-    const slug = this.slugify(app.name);
+    const slug = appSlugify(app.name);
     const id12 = app.id.slice(0, 12);
 
     // Path inside the sftp container. docker-compose maps host
@@ -1450,16 +1450,6 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
   private generatePassword(): string {
     // 16 random bytes → 22 base64url chars (>128 bits of entropy).
     return crypto.randomBytes(16).toString('base64url').replace(/=+$/, '');
-  }
-
-  private slugify(name: string): string {
-    return name
-      .toLowerCase()
-      .normalize('NFKD')
-      .replace(/[̀-ͯ]/g, '')
-      .replace(/[^a-z0-9-]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 48) || 'app';
   }
 
   private async assertScopeAccess(

@@ -160,7 +160,11 @@ function EnvRow({
     !upper.startsWith('NEXT_PUBLIC_') &&
     /(^|_)(SECRET|TOKEN|PASSWORD|PWD|PRIVATE_KEY)(_|$)|_KEY$/.test(upper);
   const [show, setShow] = useState(!looksSecret);
-  useEffect(() => { if (looksSecret && row.value) setShow(false); }, [looksSecret, row.key]);
+  // Re-mask once a secret-looking key gains a value. row.value MUST be a dep:
+  // for a freshly-added row the user types the key first (value still empty →
+  // no mask), then the value — without row.value here the effect wouldn't
+  // re-run and the secret would stay in plaintext.
+  useEffect(() => { if (looksSecret && row.value) setShow(false); }, [looksSecret, row.key, row.value]);
   return (
     <div className="flex items-center gap-2">
       <Input

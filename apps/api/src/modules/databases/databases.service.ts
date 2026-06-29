@@ -244,8 +244,8 @@ export class DatabasesService {
 
     if (!isPlatformAdmin) {
       where.OR = [{ projectId: { in: projectIds } }];
-      // applicationId branch already covered via projectId once we backfill;
-      // but the schema allows app-only attachment, so include it explicitly:
+      // The schema allows app-only attachment (projectId may be null), so
+      // include the linked application's project explicitly.
       where.OR.push({ application: { projectId: { in: projectIds } } });
     }
 
@@ -678,9 +678,8 @@ export class DatabasesService {
           containerName,
           purgeVolumes: true,
         });
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error(`[databases] failed to enqueue remote REMOVE for "${db.name}":`, err);
+      } catch (err: any) {
+        this.logger.warn(`failed to enqueue remote REMOVE for "${db.name}": ${err?.message || err}`);
       }
     }
 
@@ -1075,11 +1074,10 @@ export class DatabasesService {
     try {
       await compose(['pull'], { cwd: dbDir, timeout: 120000 });
       await compose(['up', '-d'], { cwd: dbDir, timeout: 60000 });
-    } catch (err) {
+    } catch (err: any) {
       // Surface the failure in the API logs — the row exists but the
       // container didn't start; status polling will show 'not running'.
-      // eslint-disable-next-line no-console
-      console.error(`[databases] failed to launch container for "${name}":`, err);
+      this.logger.warn(`failed to launch container for "${name}": ${err?.message || err}`);
     }
   }
 
