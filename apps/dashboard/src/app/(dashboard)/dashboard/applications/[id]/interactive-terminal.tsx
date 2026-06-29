@@ -23,6 +23,10 @@ export function InteractiveTerminal({ appId }: { appId: string }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const termRef = useRef<XTerm | null>(null);
+  // Read t() via a ref inside the effect so a LOCALE change doesn't re-run the
+  // effect (which would tear down the live WebSocket/PTY session + scrollback).
+  const tRef = useRef(t);
+  tRef.current = t;
   const [status, setStatus] = useState<Status>('connecting');
   const [generation, setGeneration] = useState(0); // bump to reconnect
 
@@ -68,7 +72,7 @@ export function InteractiveTerminal({ appId }: { appId: string }) {
         try {
           const msg = JSON.parse(ev.data);
           if (msg.type === 'exit') {
-            term.writeln(`\r\n\x1b[90m— ${t('apps.term.sessionEnded')} —\x1b[0m`);
+            term.writeln(`\r\n\x1b[90m— ${tRef.current('apps.term.sessionEnded')} —\x1b[0m`);
             return;
           }
         } catch { /* not a control frame → fall through as data */ }
@@ -92,7 +96,7 @@ export function InteractiveTerminal({ appId }: { appId: string }) {
       termRef.current = null;
       wsRef.current = null;
     };
-  }, [appId, generation, t]);
+  }, [appId, generation]);
 
   const statusLabel =
     status === 'connected' ? t('apps.term.connected')

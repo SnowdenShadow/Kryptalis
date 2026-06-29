@@ -19,7 +19,8 @@ const MAX_SESSIONS_PER_USER = 4;
 const IDLE_TIMEOUT_MS = 30 * 60_000; // 30 min of no I/O closes the session
 // Backpressure: if a noisy process (`yes`, `cat /dev/urandom`) outruns a slow
 // client, the ws outbound buffer would grow unbounded → API OOM. Past this we
-// drop output rather than buffer it forever (a hard ceiling on memory/session).
+// PAUSE the source (flow control) and resume once the buffer drains — output is
+// deferred, never dropped. Bounds per-session memory to ~this ceiling.
 const WS_BUFFER_CEILING = 4 * 1024 * 1024; // 4 MiB
 
 @Injectable()
@@ -65,6 +66,7 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
   private async onConnection(ws: WebSocket, req: IncomingMessage) {
     let userId: string | null = null;
     let target: TerminalTarget | null = null;
+    let counted = false; // did we increment this user's session count?
     let closed = false;
     const safeClose = (code: number, reason: string) => {
       if (closed) return;
@@ -73,18 +75,35 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
       try { ws.close(); } catch {}
     };
 
+    // Register the close handler ONCE, up front. It only acts on state that was
+    // actually set (counted / target), so a connection rejected before the
+    // increment never decrements a slot it didn't take — otherwise rejected
+    // attempts could drive the counter negative and defeat the session cap.
+    ws.on('close', async () => {
+      if (counted && userId) {
+        const n = (this.sessionsByUser.get(userId) ?? 1) - 1;
+        if (n <= 0) this.sessionsByUser.delete(userId);
+        else this.sessionsByUser.set(userId, n);
+        await this.audit(userId, '', 'terminal-close').catch(() => {});
+      }
+      if (target && target.kind === 'remote') await target.cleanup().catch(() => {});
+    });
+
     try {
       const url = new URL(req.url || '', 'http://localhost');
       const token = url.searchParams.get('token') || '';
       const appId = url.searchParams.get('appId') || '';
 
       // ── Auth: verify the JWT (same secret/shape as HTTP) BEFORE anything. ──
-      let payload: { sub: string };
+      let payload: { sub?: string };
       try {
         payload = await this.jwt.verifyAsync(token, {
           secret: this.config.get<string>('JWT_SECRET')!,
         });
       } catch {
+        return safeClose(4001, 'invalid token');
+      }
+      if (!payload?.sub || typeof payload.sub !== 'string') {
         return safeClose(4001, 'invalid token');
       }
       userId = payload.sub;
@@ -110,6 +129,7 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
       const live = this.sessionsByUser.get(userId) ?? 0;
       if (live >= MAX_SESSIONS_PER_USER) return safeClose(4029, 'too many sessions');
       this.sessionsByUser.set(userId, live + 1);
+      counted = true; // from here, the close handler will decrement.
 
       await this.audit(userId, appId, 'terminal-open');
       target = await this.terminal.resolveTarget(appId, userId);
@@ -122,17 +142,6 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
     } catch (e: any) {
       this.logger.warn(`terminal session error: ${e?.message || e}`);
       safeClose(1011, 'internal error');
-    } finally {
-      // Decrement + cleanup once the socket truly closes.
-      ws.on('close', async () => {
-        if (userId) {
-          const n = (this.sessionsByUser.get(userId) ?? 1) - 1;
-          if (n <= 0) this.sessionsByUser.delete(userId);
-          else this.sessionsByUser.set(userId, n);
-          await this.audit(userId, '', 'terminal-close').catch(() => {});
-        }
-        if (target && target.kind === 'remote') await target.cleanup().catch(() => {});
-      });
     }
   }
 
@@ -154,20 +163,17 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
       { name: 'xterm-256color', cols: 80, rows: 24 },
     );
     let idle = this.armIdle(ws);
-    let paused = false;
+    const bp = this.backpressure(ws, () => term.pause(), () => term.resume());
     term.onData((d) => {
       try { ws.send(d); } catch {}
-      // Backpressure: pause the PTY when the ws buffer is congested, resume
-      // once it drains (polled cheaply on the next data tick).
-      if (!paused && ws.bufferedAmount > WS_BUFFER_CEILING) { paused = true; try { term.pause(); } catch {} }
-      else if (paused && ws.bufferedAmount < WS_BUFFER_CEILING / 2) { paused = false; try { term.resume(); } catch {} }
+      bp.onOutput();
     });
     term.onExit(({ exitCode }) => safeClose(exitCode ?? 0, 'shell exited'));
     ws.on('message', (raw) => {
       idle = this.kickIdle(ws, idle);
       this.onClientMessage(raw, (d) => term.write(d), (c, r) => term.resize(c, r));
     });
-    ws.on('close', () => { clearTimeout(idle); try { term.kill(); } catch {} });
+    ws.on('close', () => { clearTimeout(idle); bp.stop(); try { term.kill(); } catch {} });
   }
 
   // ── REMOTE: SSH-bridge to the agent's :2522 shell channel. ──
@@ -181,11 +187,10 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
     conn.on('ready', () => {
       conn.shell({ term: 'xterm-256color', cols: 80, rows: 24 }, (err, stream) => {
         if (err) return safeClose(1011, 'shell open failed');
-        let paused = false;
+        const bp = this.backpressure(ws, () => stream.pause(), () => stream.resume());
         const onOut = (d: Buffer) => {
           try { ws.send(d.toString('utf8')); } catch {}
-          if (!paused && ws.bufferedAmount > WS_BUFFER_CEILING) { paused = true; stream.pause(); }
-          else if (paused && ws.bufferedAmount < WS_BUFFER_CEILING / 2) { paused = false; stream.resume(); }
+          bp.onOutput();
         };
         stream.on('data', onOut);
         stream.stderr.on('data', onOut);
@@ -194,7 +199,7 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
           idle = this.kickIdle(ws, idle);
           this.onClientMessage(raw, (d) => stream.write(d), (c, r) => stream.setWindow(r, c, 0, 0));
         });
-        ws.on('close', () => { clearTimeout(idle); try { stream.end(); conn.end(); } catch {} });
+        ws.on('close', () => { clearTimeout(idle); bp.stop(); try { stream.end(); conn.end(); } catch {} });
       });
     });
     conn.on('error', (e) => safeClose(1011, `ssh: ${e.message}`));
@@ -232,6 +237,40 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
   private kickIdle(ws: WebSocket, t: NodeJS.Timeout): NodeJS.Timeout {
     clearTimeout(t);
     return this.armIdle(ws);
+  }
+
+  /**
+   * Flow control: pause the source when the ws send buffer is congested
+   * (`bufferedAmount` > ceiling), resume once it drains. The CRITICAL part is
+   * the resume — pausing the source stops its 'data' events, so the resume
+   * check can't live in the data handler (it would never fire again →
+   * permanent freeze). We drive it from an independent interval that runs ONLY
+   * while paused, then stops. `onOutput()` is called on each data tick to
+   * (re)evaluate the pause condition; `stop()` clears the timer on ws close.
+   */
+  private backpressure(ws: WebSocket, pause: () => void, resume: () => void) {
+    let paused = false;
+    let timer: NodeJS.Timeout | null = null;
+    const clear = () => { if (timer) { clearInterval(timer); timer = null; } };
+    return {
+      onOutput: () => {
+        if (!paused && ws.bufferedAmount > WS_BUFFER_CEILING) {
+          paused = true;
+          try { pause(); } catch {}
+          // Independent drain poller — the source is paused so no data tick
+          // will re-check; this is the only thing that can resume it.
+          timer = setInterval(() => {
+            if (ws.readyState !== ws.OPEN) { clear(); return; }
+            if (ws.bufferedAmount < WS_BUFFER_CEILING / 2) {
+              paused = false;
+              clear();
+              try { resume(); } catch {}
+            }
+          }, 200);
+        }
+      },
+      stop: clear,
+    };
   }
 
   private async audit(userId: string, appId: string, action: string) {

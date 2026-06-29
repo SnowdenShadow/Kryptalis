@@ -501,7 +501,7 @@ describe('install — compose rendering and per-instance naming', () => {
     );
   });
 
-  it('__RANDOM_PASSWORD__ placeholders: same value reused per placeholder, distinct across numbered ones, mirrored into .env', async () => {
+  it('__RANDOM_PASSWORD__ placeholders: same value reused per placeholder, distinct across numbered ones, baked into the compose (NOT leaked to .env as placeholder keys)', async () => {
     const { service } = makeService();
     await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
 
@@ -517,10 +517,12 @@ describe('install — compose rendering and per-instance naming', () => {
     expect(rootPass).not.toBe(appPass);
     expect(appPass.length).toBeGreaterThanOrEqual(24); // strong random
 
-    // Generated passwords also land in the .env file.
+    // The .env must NOT carry the placeholder TOKENS as keys (that planted a
+    // stray env var holding a real secret in every container). The passwords
+    // live baked into the compose; .env only holds real var names.
     const env = writtenFile('.env')!;
-    expect(env).toContain(`__RANDOM_PASSWORD__=${appPass}`);
-    expect(env).toContain(`__RANDOM_PASSWORD_2__=${rootPass}`);
+    expect(env).not.toContain('__RANDOM_PASSWORD__=');
+    expect(env).not.toContain('__RANDOM_PASSWORD_2__=');
   });
 
   it('user envVars are written to .env (newlines escaped)', async () => {

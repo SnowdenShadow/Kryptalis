@@ -317,8 +317,12 @@ export default function DatabasesPage() {
         </Button>
       </div>
 
-      {/* Search + project filter — search fills the row, filters on the right. */}
-      {databases.length > 0 && (
+      {/* Search + project filter — search fills the row, filters on the right.
+          Gated on whether filtering is even possible (projects exist) or active
+          (search/filter set), NOT on the result count — otherwise a project
+          filter that yields zero rows would HIDE its own 'Clear' button and
+          trap the user on an empty view with no way to reset. */}
+      {(databases.length > 0 || projects.length > 0 || !!search || !!filterProjectId) && (
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative flex-1 min-w-[200px]">
             <Database size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -736,7 +740,7 @@ export default function DatabasesPage() {
                       <code className="block break-all rounded bg-background/60 px-2 py-1.5 text-xs font-mono text-foreground">
                         {connVisible
                           ? db.connectionString
-                          : db.connectionString.replace(/\/\/.*@/, '//••••••••@')}
+                          : db.connectionString.replace(/\/\/[^@/]*@/, '//••••••••@')}
                       </code>
                     </div>
                   </div>

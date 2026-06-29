@@ -795,13 +795,23 @@ func (p *Poller) runExec(ctx context.Context, task Task) (map[string]interface{}
 		if err == nil {
 			return map[string]interface{}{"output": string(out), "exitCode": 0}, ""
 		}
-		txt := strings.ToLower(string(out) + " " + err.Error())
-		if strings.Contains(txt, "not found") || strings.Contains(txt, "no such file") || strings.Contains(txt, "executable file") {
-			continue
-		}
 		ec := 1
 		if ee, ok := err.(*exec.ExitError); ok {
 			ec = ee.ExitCode()
+		} else {
+			// Not an ExitError → docker itself couldn't run (daemon error,
+			// context cancel, …). Surface it; trying other shells won't help.
+			return map[string]interface{}{"output": string(out), "exitCode": 1}, ""
+		}
+		// `docker exec` reports 126 (found but not executable) / 127 (not found)
+		// ONLY when it cannot start the shell binary itself — that's the real
+		// "no shell" signal. Any OTHER exit code means the shell ran and the
+		// USER'S command exited with it (e.g. `cat missing` → 1, which also
+		// prints "No such file"): that is a legitimate result, NOT a missing
+		// shell, so we must return it verbatim instead of string-matching the
+		// command's own output (the previous bug).
+		if ec == 126 || ec == 127 {
+			continue // this shell path is absent — try the next candidate
 		}
 		return map[string]interface{}{"output": string(out), "exitCode": ec}, ""
 	}
@@ -844,7 +854,6 @@ func (p *Poller) runFileList(task Task) (map[string]interface{}, string) {
 	if errStr != "" {
 		return nil, errStr
 	}
-	_ = slug
 	dir := filepath.Join(base, safe)
 	entries, err := os.ReadDir(dir)
 	if err != nil {

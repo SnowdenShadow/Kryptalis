@@ -67,7 +67,7 @@ describe('createInflightDeployment — DB-race → friendly 409', () => {
 });
 
 describe('onModuleInit — orphaned-inflight reconcile', () => {
-  it('fails in-flight deployments older than the threshold so the unique index cannot wedge an app', async () => {
+  it('fails ALL in-flight deployments on boot (no age filter) so the unique index cannot wedge an app', async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 2 });
     const { svc } = makeService({ updateMany });
     // The guard returns early in NODE_ENV=test; force the reconcile path.
@@ -81,7 +81,9 @@ describe('onModuleInit — orphaned-inflight reconcile', () => {
     expect(updateMany).toHaveBeenCalledTimes(1);
     const arg = updateMany.mock.calls[0][0];
     expect(arg.where.status.in).toEqual(['PENDING', 'BUILDING', 'DEPLOYING']);
-    expect(arg.where.createdAt.lt).toBeInstanceOf(Date);
+    // NO createdAt filter — every in-flight row at boot is an orphan; a young
+    // one (crash <30 min ago) must be swept too, else redeploy wedges.
+    expect(arg.where.createdAt).toBeUndefined();
     expect(arg.data.status).toBe('FAILED');
   });
 

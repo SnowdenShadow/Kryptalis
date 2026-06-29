@@ -519,6 +519,16 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
           await this.applyAclToBindTargets(acc.username, binds, next.permission);
         }
       }
+      // Toggling shell must (un)mount the system bind dirs (/bin /lib /usr …)
+      // into the chroot — otherwise enabling shell gives a session whose chroot
+      // has no bash/linker (exec fails), and disabling leaves the RO binds
+      // mounted. prepareChrootLeafAndBind mounts them when allowShell=true and
+      // tears them down when false (it also re-mounts the data binds — safe,
+      // idempotent). Mirrors applyAccountToContainer.
+      if (patch.allowShell !== undefined) {
+        const binds = await this.resolveChrootBindsForAccount(acc).catch(() => null);
+        await this.prepareChrootLeafAndBind(acc.username, binds ?? [], next.allowShell);
+      }
       await this.reloadSshd();
     }
 
@@ -1203,14 +1213,6 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
    * access. The chroot leaf stays the sterile root-owned /home/<user>
    * either way.
    */
-  /** Apps placed on a remote server are served by THAT server's agent —
-   *  its embedded SFTP server (port 2522) — not by the platform's SFTP
-   *  container. resolveRemoteSftpServer() picks the routing. */
-  private isRemoteApp(app: { server?: { host: string | null } | null; project?: { server?: { host: string | null } | null } | null }): boolean {
-    const host = app.server?.host ?? app.project?.server?.host;
-    return !!host && !isLocalHost(host);
-  }
-
   /**
    * Resolve where an SFTP account's files actually live: null = the
    * platform host (local SFTP container path), otherwise the remote

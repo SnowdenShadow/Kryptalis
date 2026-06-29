@@ -204,6 +204,11 @@ vi.mock('fs', async () => {
       const k = resolveKey(keyOf(p), false);
       nodes.set(k, { type: 'file', content: Buffer.from(c), mode: 0o644, mtime: new Date() });
     },
+    readFileSync: (p: any) => {
+      const n = nodes.get(resolveKey(keyOf(p)));
+      if (!n) throw err('ENOENT', String(p));
+      return n.content ?? Buffer.alloc(0);
+    },
     createReadStream: (p: any, opts?: any) => {
       const key = opts?.fd != null ? fds.get(opts.fd)!.key : resolveKey(keyOf(p));
       const n = nodes.get(key);
@@ -1211,5 +1216,47 @@ describe('fixWebPermissions (remote app)', () => {
     agent.enqueueAndWait.mockResolvedValue({ status: 'COMPLETED', result: { dirs: 1, files: 1 } });
     await service.fixWebPermissions('u1', 'app', 'app1', '');
     expect(agent.enqueueAndWait.mock.calls[0][1]).toBe('FILE_FIXPERMS');
+  });
+});
+
+// ── compress secret-gating (the VIEWER exfiltration fix) ─────────────
+describe('compress secret-gating', () => {
+  it('LOCAL: non-admin selecting a .env file is refused (dotenv → ADMIN)', async () => {
+    const { service } = makeService({ userRole: 'USER' });
+    mkFile(`${APP_DIR}/.env`, 'DB_PASSWORD=secret');
+    // dotenv re-resolves at ADMIN: assertProjectAccess('ADMIN') must reject.
+    mockAssert.mockImplementation((async (_p: any, _u: any, _proj: any, role?: string) => {
+      if (role === 'ADMIN') throw new ForbiddenException('not admin');
+      return 'DEVELOPER';
+    }) as any);
+    await expect(service.compress('u1', 'app', 'app1', ['.env'], 'zip')).rejects.toThrow(ForbiddenException);
+  });
+
+  it('LOCAL: non-admin selecting .git is refused (sensitive dotfile → platform ADMIN)', async () => {
+    const { service } = makeService({ userRole: 'USER' });
+    mkFile(`${APP_DIR}/.git/config`, '[remote]');
+    await expect(service.compress('u1', 'app', 'app1', ['.git'], 'zip')).rejects.toThrow(ForbiddenException);
+  });
+
+  it('LOCAL: selecting a parent dir does NOT sweep .git/.env into the archive for a non-admin', async () => {
+    const { service } = makeService({ userRole: 'USER' });
+    mkFile(`${APP_DIR}/index.php`, '<?php');
+    mkFile(`${APP_DIR}/.env`, 'SECRET=1');
+    mkFile(`${APP_DIR}/.git/config`, '[remote]');
+    const { buffer } = await service.compress('u1', 'app', 'app1', [''], 'zip');
+    // Decode the produced zip and assert no sensitive paths leaked in.
+    const { unzipSync } = await import('fflate');
+    const names = Object.keys(unzipSync(new Uint8Array(buffer)));
+    expect(names.some((n) => n.includes('.env'))).toBe(false);
+    expect(names.some((n) => n.includes('.git'))).toBe(false);
+    expect(names.some((n) => n.includes('index.php'))).toBe(true);
+  });
+
+  it('LOCAL: a platform admin CAN compress .env (gating allows admin)', async () => {
+    const { service } = makeService({ userRole: 'ADMIN' });
+    mkFile(`${APP_DIR}/.env`, 'SECRET=1');
+    const { buffer } = await service.compress('u1', 'app', 'app1', ['.env'], 'zip');
+    const { unzipSync } = await import('fflate');
+    expect(Object.keys(unzipSync(new Uint8Array(buffer)))).toContain('.env');
   });
 });

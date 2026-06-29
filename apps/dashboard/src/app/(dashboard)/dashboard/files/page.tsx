@@ -419,8 +419,11 @@ export default function FilesPage() {
         { path: currentPath },
       ),
     onSuccess: (res) => {
+      // dirs/files are -1 in container/docker-fs mode (count unknown) and real
+      // counts locally. Show the count only when we actually have one (> 0);
+      // otherwise (0 = nothing changed, or -2 = unknown) show the plain message.
       const n = (res?.dirs ?? 0) + (res?.files ?? 0);
-      const base = n >= 0 ? t('files.toastFixedPerms', { n }) : t('files.toastFixedPermsDone');
+      const base = n > 0 ? t('files.toastFixedPerms', { n }) : t('files.toastFixedPermsDone');
       // Tell the user whether ownership was set (the part that unblocks writes)
       // or only the mode bits (agent/host not privileged enough to chown).
       if (res?.owner) {

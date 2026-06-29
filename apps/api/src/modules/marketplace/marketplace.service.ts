@@ -506,11 +506,15 @@ export class MarketplaceService implements OnModuleInit {
     // app + bundled DB end up with matching credentials. Different
     // numbered placeholders (__RANDOM_PASSWORD_2__) get DIFFERENT values.
     //
-    // We stash the generated passwords on the .env file too — that way
-    // the auto-import DB rows (databases.service.ts) pick them up via
-    // their normal env parsing and the user sees the right creds in
-    // /dashboard/databases. The .env file lives inside the appDir, never
-    // committed anywhere outside the host.
+    // The substituted compose IS the source of truth: each placeholder is an
+    // inline literal (e.g. `DB_PASSWORD: __RANDOM_PASSWORD__`) or a default
+    // (`${VAR:-__RANDOM_PASSWORD__}`), so substituting here bakes the real
+    // password directly into the compose. We do NOT merge these into the .env:
+    // the keys would be the literal placeholder tokens (`__RANDOM_PASSWORD__`),
+    // which no template declares as a variable — they'd just plant a stray env
+    // var holding a real secret into every container. The auto-import DB rows
+    // read their creds from the compose `environment:` block by real var name,
+    // not from these tokens.
     const randomPasswords: Record<string, string> = {};
     const placeholderRe = /__RANDOM_PASSWORD(_\d+)?__/g;
     composeContent = composeContent.replace(placeholderRe, (match) => {
@@ -521,12 +525,6 @@ export class MarketplaceService implements OnModuleInit {
       }
       return randomPasswords[match];
     });
-    // Merge generated passwords into the env override so they also land
-    // in the .env file (the templates that read `${VAR:-default}` will
-    // pick the .env value over the placeholder fallback). Keeps the
-    // randomization visible to both the compose substitution above AND
-    // the runtime container env at the same time.
-    Object.assign(envOverride, randomPasswords);
 
     // Effective env snapshot → persisted (encrypted) on the Application row
     // so the dashboard's "Variables d'environnement" tab shows what the
@@ -927,6 +925,9 @@ export class MarketplaceService implements OnModuleInit {
       // Same remote-dispatch story as template installs: ship the rendered
       // compose to the agent; the DEPLOY completion handler flips status.
       // Slug = remoteAppSlug(name, id) so remove()/lifecycle find the dir.
+      // Persist the compose (mirrors install()) so a later remote redeploy can
+      // re-ship it directly instead of the slower readRemoteComposeFile backfill.
+      await this.apps.update(application.id, { dockerComposeFile: composeContent });
       const task = await this.agent.enqueueTask(data.serverId, 'DEPLOY', {
         slug: remoteAppSlug(application.name, application.id),
         appName: application.name,

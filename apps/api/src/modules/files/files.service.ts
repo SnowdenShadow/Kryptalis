@@ -2058,6 +2058,18 @@ export class FilesService {
       collected.push({ path: relInArchive, data });
     };
 
+    // Secret gating, identical to readFile/downloadFile: a dotenv file requires
+    // project ADMIN, and any sensitive-dotfile component (.git/.ssh/.docker/…)
+    // requires platform ADMIN. compress() READS full file CONTENT into the
+    // archive, so without this a VIEWER could exfiltrate secrets by selecting
+    // (or containing) .env/.git/.ssh. Applied per selected path in every mode.
+    const gateSecret = async (relPath: string) => {
+      if (isDotenvName(path.basename(relPath))) {
+        await this.resolvePath(userId, scope, scopeId, relPath, 'ADMIN');
+      }
+      await this.assertSensitiveOrAdmin(userId, relPath);
+    };
+
     const remote = await this.resolveRemoteFsTarget(scope, scopeId);
     if (remote) {
       // Validate each selected path before handing them to the agent.
@@ -2065,6 +2077,7 @@ export class FilesService {
       for (const p of paths) {
         const r = await this.resolvePath(userId, scope, scopeId, p, 'VIEWER');
         this.assertNotManaged(r.relPath);
+        await gateSecret(r.relPath);
         rels.push(r.relPath);
       }
       // The agent builds the archive server-side and returns it base64 in the
@@ -2085,7 +2098,7 @@ export class FilesService {
       }
       const buffer = Buffer.from(r.archive, 'base64');
       await this.audit(userId, scope, scopeId, 'compress', rels.join(','));
-      return { buffer, filename: this.compressFilename(scope, scopeId, format) };
+      return { buffer, filename: this.compressFilename(format) };
     }
 
     // ── DOCKER-FS ──
@@ -2095,11 +2108,12 @@ export class FilesService {
         for (const p of paths) {
           const r = await this.resolvePath(userId, scope, scopeId, p, 'VIEWER');
           this.assertNotManaged(r.relPath);
+          await gateSecret(r.relPath);
           await this.collectDockerEntries(target, r.relPath, addFile);
         }
         const buffer = encodeArchive(format, collected);
         await this.audit(userId, scope, scopeId, 'compress', paths.join(','));
-        return { buffer, filename: this.compressFilename(scope, scopeId, format) };
+        return { buffer, filename: this.compressFilename(format) };
       }
     }
 
@@ -2107,15 +2121,16 @@ export class FilesService {
     for (const p of paths) {
       const r = await this.resolvePath(userId, scope, scopeId, p, 'VIEWER');
       this.assertNotManaged(r.relPath);
+      await gateSecret(r.relPath);
       this.collectLocalEntries(r.rootDir, r.absPath, r.relPath, addFile);
     }
     const buffer = encodeArchive(format, collected);
     await this.audit(userId, scope, scopeId, 'compress', paths.join(','));
-    return { buffer, filename: this.compressFilename(scope, scopeId, format) };
+    return { buffer, filename: this.compressFilename(format) };
   }
 
-  /** Filename for a compressed download: <scopeId>-<date>.<ext>. */
-  private compressFilename(scope: string, scopeId: string, format: CompressFormat): string {
+  /** Filename for a compressed download: archive-<date>.<ext>. */
+  private compressFilename(format: CompressFormat): string {
     const ext = format === 'zip' ? 'zip' : 'tar.gz';
     const stamp = new Date().toISOString().slice(0, 10);
     return `archive-${stamp}.${ext}`;
@@ -2127,7 +2142,21 @@ export class FilesService {
     absPath: string,
     relPath: string,
     add: (rel: string, data: Buffer) => void,
+    isRoot = true,
   ): void {
+    // Never SWEEP a secret into the archive via a selected PARENT dir. Only
+    // skip DESCENDANTS here (isRoot=false) — the explicitly-selected top path
+    // was already authorized by gateSecret (an ADMIN may legitimately compress
+    // a .env they selected directly). Children of a non-secret dir are not
+    // separately gated, so we drop sensitive/dotenv/managed ones during the walk.
+    if (
+      !isRoot &&
+      (this.pathTraversesSensitive(relPath) ||
+        isDotenvName(path.basename(relPath)) ||
+        this.isManaged(path.basename(relPath)))
+    ) {
+      return;
+    }
     const st = fs.lstatSync(absPath);
     if (st.isSymbolicLink()) {
       throw new ForbiddenException(`Refusing to compress a symlink: ${relPath}`);
@@ -2139,7 +2168,7 @@ export class FilesService {
     }
     if (st.isDirectory()) {
       for (const name of fs.readdirSync(absPath)) {
-        this.collectLocalEntries(rootDir, path.join(absPath, name), `${relPath}/${name}`, add);
+        this.collectLocalEntries(rootDir, path.join(absPath, name), `${relPath}/${name}`, add, false);
       }
     }
     // anything else (device/fifo) is silently skipped.
@@ -2150,7 +2179,19 @@ export class FilesService {
     target: DockerFsTarget,
     relPath: string,
     add: (rel: string, data: Buffer) => void,
+    isRoot = true,
   ): Promise<void> {
+    // Skip secret DESCENDANTS swept in via a selected parent dir (the top
+    // selection was already gated by gateSecret): sensitive dotfiles, dotenv,
+    // managed files. Parity with collectLocalEntries.
+    if (
+      !isRoot &&
+      (this.pathTraversesSensitive(relPath) ||
+        isDotenvName(path.basename(relPath)) ||
+        this.isManaged(path.basename(relPath)))
+    ) {
+      return;
+    }
     const st = await dockerFs.stat(target, relPath);
     if (!st.exists) throw new NotFoundException(`Not found: ${relPath}`);
     if (st.isFile) {
@@ -2166,7 +2207,7 @@ export class FilesService {
     if (st.isDir) {
       const entries = await dockerFs.listDir(target, relPath);
       for (const e of entries) {
-        await this.collectDockerEntries(target, `${relPath}/${e.name}`, add);
+        await this.collectDockerEntries(target, `${relPath}/${e.name}`, add, false);
       }
     }
   }

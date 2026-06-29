@@ -46,10 +46,6 @@ import * as yaml from 'js-yaml';
  * logs, in-container exec, compose/Dockerfile file editing, and the
  * docker-ps status sync. Split out of ApplicationsService.
  */
-// An in-flight deployment row this much older than the API process can only be
-// an ORPHAN — deploy workers run in-process, so a row still PENDING/BUILDING/
-// DEPLOYING at boot belongs to a previous (killed) process, never a live one.
-const ORPHAN_INFLIGHT_THRESHOLD_MS = 30 * 60 * 1000;
 
 @Injectable()
 export class ApplicationOpsService implements OnModuleInit {
@@ -67,20 +63,18 @@ export class ApplicationOpsService implements OnModuleInit {
 
   async onModuleInit(): Promise<void> {
     // Reconcile orphaned in-flight deployments left by an ungraceful restart.
-    // Deploy workers run IN-PROCESS, so any row still PENDING/BUILDING/DEPLOYING
-    // at boot is dead — its process is gone. Without this, the partial unique
-    // index `deployments_app_inflight_unique` would treat that orphan as a live
-    // deployment forever and reject every future redeploy of the app with a
-    // ConflictException — a permanent dead-end (the old best-effort guard had a
-    // 30-min escape window the DB index intentionally lacks). Fail them on boot
-    // so the app can be redeployed. Best-effort: never block startup.
+    // Deploy workers run IN-PROCESS, so EVERY row still PENDING/BUILDING/DEPLOYING
+    // at boot is dead — its process is gone. We sweep them ALL regardless of age:
+    // the partial unique index `deployments_app_inflight_unique` blocks a new
+    // in-flight row for the app irrespective of age, so a young orphan (crash <30
+    // min ago) would otherwise wedge redeploys until it aged out — a time-boxed
+    // dead-end. Clearing all of them on boot removes that window entirely.
+    // Best-effort: never block startup.
     if (process.env.NODE_ENV === 'test') return;
     try {
-      const cutoff = new Date(Date.now() - ORPHAN_INFLIGHT_THRESHOLD_MS);
       const swept = await this.prisma.deployment.updateMany({
         where: {
           status: { in: ['PENDING', 'BUILDING', 'DEPLOYING'] as any },
-          createdAt: { lt: cutoff },
         },
         data: { status: 'FAILED', finishedAt: new Date(), deployLogs: 'Orphaned by API restart' },
       });

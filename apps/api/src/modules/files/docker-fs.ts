@@ -568,7 +568,10 @@ export async function uploadFile(
  * zero blocks that terminate the archive.
  */
 export function makeTarHeader(name: string, size: number): Buffer {
-  if (name.length > 100) throw new Error('Filename too long for tar');
+  // Byte length, not char count: a name ≤100 chars but >100 UTF-8 bytes would
+  // otherwise pass here and be truncated mid-byte by the 100-byte field write
+  // below (matches zip-extract.ts's tarHeader guard).
+  if (Buffer.byteLength(name, 'utf-8') > 100) throw new Error('Filename too long for tar');
   if (!Number.isSafeInteger(size) || size < 0) throw new Error('Invalid tar entry size');
   const header = Buffer.alloc(512);
   header.write(name, 0, 100, 'utf-8');
