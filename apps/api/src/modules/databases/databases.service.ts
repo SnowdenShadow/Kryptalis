@@ -275,8 +275,17 @@ export class DatabasesService {
       // Expose the DECRYPTED password to API consumers (the dashboard shows it,
       // same as the connection string). The raw row stores it AES-GCM encrypted
       // (`v1.…`) — never leak that envelope to the client.
+      //
+      // Override `host` with the EXTERNAL address the connection string already
+      // uses (server IP for a remote DB, else localhost). The raw db.host
+      // column is a hardcoded 'localhost' default (or a container name for
+      // auto-imported DBs) and is meaningless as a user-facing external host —
+      // showing it made a remote DB read "Host: localhost" while its connection
+      // string carried the real server IP. inNetwork was computed ABOVE from
+      // the raw db.host, so this override doesn't affect container resolution.
       return {
         ...db, password: this.dbPassword(db), status, connectionString,
+        host: this.connHost((db as any).server),
         inNetwork: { host: inNetwork.host, port: inNetwork.port, url: inNetwork.url },
       };
     }));
@@ -300,9 +309,11 @@ export class DatabasesService {
       password: db.password, autoImported: (db as any).autoImported, host: db.host,
     });
     // Decrypted password for the client (matches connectionString); the stored
-    // row keeps the AES-GCM envelope.
+    // row keeps the AES-GCM envelope. `host` overridden with the external
+    // address the connection string uses (see findAll for the rationale).
     return {
       ...db, password: this.dbPassword(db), status, connectionString,
+      host: this.connHost((db as any).server),
       inNetwork: { host: inNetwork.host, port: inNetwork.port, url: inNetwork.url },
     };
   }

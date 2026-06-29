@@ -515,6 +515,10 @@ describe('RBAC scoping', () => {
     const [remote, local] = await service.findAll('u1', {});
     expect(remote.connectionString).toBe('postgresql://u:pw@203.0.113.9:5450/pgdb');
     expect(local.connectionString).toBe('redis://:rp@localhost:6400');
+    // The displayed Host field must MATCH the connection string — a remote DB
+    // shows the server IP (not the raw db.host 'localhost' default).
+    expect(remote.host).toBe('203.0.113.9');
+    expect(local.host).toBe('localhost');
     // server.host comes back on the row itself — include, not a per-row query
     expect(prisma.database.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -534,6 +538,7 @@ describe('RBAC scoping', () => {
 
     const res = await service.findOne('u1', 'db1');
     expect(res.connectionString).toBe('postgresql://u:pw@203.0.113.9:5450/pgdb');
+    expect(res.host).toBe('203.0.113.9'); // displayed Host matches the string
   });
 
   it('findOne: 404 on unknown id', async () => {
