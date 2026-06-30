@@ -127,7 +127,7 @@ describe('ProjectTransferService — export', () => {
     svc = makeService(prisma, enc);
     const realPlaintext = 'sup3r-s3cret-db-p@ss';
     const ciphertext = enc.encrypt(realPlaintext);
-    expect(ciphertext).toMatch(/^v1\./); // sanity: it really is encrypted at rest
+    expect(ciphertext).toMatch(/^v[12]\./); // sanity: it really is encrypted at rest
 
     prisma.project.findUnique.mockResolvedValue({
       ...sampleProject,
@@ -151,7 +151,7 @@ describe('ProjectTransferService — export', () => {
       PASS,
     ).toString();
     expect(unwrapped).toBe(realPlaintext);
-    expect(unwrapped).not.toMatch(/^v1\./);
+    expect(unwrapped).not.toMatch(/^v[12]\./);
   });
 });
 

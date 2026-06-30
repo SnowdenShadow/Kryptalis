@@ -368,7 +368,7 @@ describe('startTwoFactorSetup', () => {
     expect(write.where).toEqual({ id: 'u1' });
     // Not stored in plaintext…
     expect(write.data.twoFactorSecret).not.toBe('MOCK2FASECRET234567');
-    expect(write.data.twoFactorSecret).toMatch(/^v1\./);
+    expect(write.data.twoFactorSecret).toMatch(/^v[12]\./);
     // …but decrypts back to the generated secret.
     expect(encryption.decrypt(write.data.twoFactorSecret)).toBe('MOCK2FASECRET234567');
   });
