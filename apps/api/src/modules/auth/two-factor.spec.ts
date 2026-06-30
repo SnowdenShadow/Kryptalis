@@ -91,6 +91,8 @@ function makePrisma() {
       createMany: vi.fn().mockResolvedValue({ count: 10 }),
     },
     systemSetting: { findUnique: vi.fn().mockResolvedValue(null) },
+    // bumpFailedAttempt is now a single atomic raw UPDATE (M-3).
+    $executeRawUnsafe: vi.fn().mockResolvedValue(1),
     $transaction: vi.fn(async (ops: any) =>
       Array.isArray(ops) ? Promise.all(ops) : ops(prisma),
     ),
@@ -237,12 +239,9 @@ describe('login — backup codes', () => {
         backupCode: '00000-00000-00000-00000',
       } as any),
     ).rejects.toThrow(UnauthorizedException);
-    expect(prisma.user.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 'u1' },
-        data: { failedLoginAttempts: { increment: 1 } },
-      }),
-    );
+    expect(prisma.$executeRawUnsafe).toHaveBeenCalledTimes(1);
+    expect(prisma.$executeRawUnsafe.mock.calls[0][0]).toMatch(/"failedLoginAttempts"/);
+    expect(prisma.$executeRawUnsafe.mock.calls[0][1]).toBe('u1');
   });
 
   it('empty backup code after normalization → rejected without bcrypt comparisons', async () => {
@@ -315,37 +314,33 @@ describe('login — lockout expiry and TOTP-grinding', () => {
         lockedUntil: new Date(Date.now() - 1000), // expired lock
       }),
     );
-    prisma.user.update.mockResolvedValueOnce({ failedLoginAttempts: 1 });
 
     await expect(
       svc.login({ email: 'alice@example.com', password: 'wrong-pass' } as any),
     ).rejects.toThrow('Invalid credentials');
 
-    // Fresh counter (=1, not increment to 6) + expired lock cleared, and
-    // therefore NO second write re-arming lockedUntil.
-    expect(prisma.user.update).toHaveBeenCalledTimes(1);
-    expect(prisma.user.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: 'u1' },
-        data: { failedLoginAttempts: 1, lockedUntil: null },
-      }),
-    );
+    // freshAfterLockExpiry path: a SINGLE raw UPDATE that resets the counter to
+    // 1 and clears the expired lock — no second statement re-arming lockedUntil.
+    expect(prisma.$executeRawUnsafe).toHaveBeenCalledTimes(1);
+    const sql = prisma.$executeRawUnsafe.mock.calls[0][0] as string;
+    expect(sql).toMatch(/"failedLoginAttempts"\s*=\s*1/);
+    expect(sql).toMatch(/"lockedUntil"\s*=\s*NULL/i);
+    expect(prisma.user.update).not.toHaveBeenCalled();
   });
 
-  it('grinding TOTP codes locks the account at the 5th failure (same counter as passwords)', async () => {
+  it('grinding TOTP codes locks the account atomically (same counter as passwords)', async () => {
     prisma.user.findUnique.mockResolvedValue(twoFaUser());
     mockVerify.mockReturnValue(false);
-    // bumpFailedAttempt: the increment write reports the threshold reached.
-    prisma.user.update.mockResolvedValueOnce({ failedLoginAttempts: 5 });
 
     await expect(
       svc.login({ email: 'alice@example.com', password: PASSWORD, totpCode: '999999' } as any),
     ).rejects.toThrow('Invalid two-factor code');
 
-    expect(prisma.user.update).toHaveBeenCalledTimes(2);
-    const lockWrite = prisma.user.update.mock.calls[1][0];
-    expect(lockWrite.data.lockedUntil).toBeInstanceOf(Date);
-    expect(lockWrite.data.lockedUntil.getTime()).toBeGreaterThan(Date.now());
+    // One atomic UPDATE carries both the increment and the threshold-driven lock.
+    expect(prisma.$executeRawUnsafe).toHaveBeenCalledTimes(1);
+    const sql = prisma.$executeRawUnsafe.mock.calls[0][0] as string;
+    expect(sql).toMatch(/CASE/i);
+    expect(sql).toMatch(/interval '1 minute'/);
   });
 
   it('TOTP path decrypts the stored secret and hands it to the verifier', async () => {
@@ -564,9 +559,8 @@ describe('resetPassword — 2FA gate', () => {
     ).rejects.toThrow('Invalid two-factor code.');
     // The reset path now bumps the failed-attempt counter like every other
     // 2FA-gated path (previously it had no lockout → unbounded grinding).
-    expect(prisma.user.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { failedLoginAttempts: { increment: 1 } } }),
-    );
+    expect(prisma.$executeRawUnsafe).toHaveBeenCalledTimes(1);
+    expect(prisma.$executeRawUnsafe.mock.calls[0][0]).toMatch(/"failedLoginAttempts"/);
   });
 
   it('a locked account cannot grind the reset 2FA (assertNotLocked fires first)', async () => {

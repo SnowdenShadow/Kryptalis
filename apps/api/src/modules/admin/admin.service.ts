@@ -13,6 +13,7 @@ import { Role, UserStatus } from '@prisma/client';
 import { SystemConfigService } from '../system/system-config.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
+import { checkPasswordStrength } from '../auth/password-policy';
 
 const AUDIT_LOG_RETENTION_DAYS = 365;
 const AUDIT_LOG_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly
@@ -354,7 +355,13 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
   }
 
   async resetUserPassword(actor: { id: string; role: Role }, userId: string, newPassword: string) {
-    if (newPassword.length < 8) throw new BadRequestException('Password too short (min 8)');
+    // M-6: enforce the SAME strength policy as every self-service path
+    // (register / changePassword / resetPassword). The DTO's @MinLength(8) was
+    // a weaker bar than the platform's 12-char + 3-class policy — an admin
+    // could set (or be socially-engineered into setting) an 8-char password
+    // that no other write path would accept.
+    const strength = checkPasswordStrength(newPassword);
+    if (!strength.ok) throw new BadRequestException(strength.reason);
     const target = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { role: true },

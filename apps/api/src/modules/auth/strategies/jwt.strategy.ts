@@ -46,6 +46,28 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       }
       throw new ForbiddenException('Account is not active.');
     }
+    // H-2: make access tokens revocable. The 15-min access JWT used to remain
+    // valid after "log out everywhere", a single-session revoke, a password
+    // change, or an admin password reset — those flows only touched the
+    // `sessions` table, which the strategy never consulted. Now, when the token
+    // carries a `sid`, the backing session must still exist and not be REVOKED.
+    //   - REVOKED  → logout / revokeSession / revokeOtherSessions / changePassword
+    //                / resetPassword all set this; reject immediately.
+    //   - missing  → admin resetUserPassword deleteMany's the rows; reject.
+    //   - ACTIVE / PENDING / ROTATED → accept. ROTATED is the benign case where
+    //                the user just refreshed: the prior access token stays valid
+    //                until its own short expiry, which is the intended behavior.
+    // Tokens minted before this change have no `sid` and are grandfathered in
+    // (they expire within JWT_EXPIRATION anyway).
+    if (payload.sid) {
+      const session = await this.prisma.session.findUnique({
+        where: { id: payload.sid },
+        select: { status: true },
+      });
+      if (!session || session.status === 'REVOKED') {
+        throw new UnauthorizedException('Session has been revoked. Please log in again.');
+      }
+    }
     // sessionId (sid) is surfaced on req.user so the sessions list/revoke
     // endpoints can compute isCurrent and protect the caller's own row.
     return { id: user.id, email: user.email, role: user.role, name: user.name, sessionId: payload.sid };

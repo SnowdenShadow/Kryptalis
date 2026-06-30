@@ -25,6 +25,7 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { passwordResetExpiry, isResetTokenUsable } from './password-reset';
 import { resolveDefaultRole } from './registration-policy';
+import { checkPasswordStrength } from './password-policy';
 
 /**
  * Auth service with the hard-earned 2024 baselines:
@@ -877,19 +878,38 @@ export class AuthService {
   private async bumpFailedAttempt(userId: string, opts: { freshAfterLockExpiry?: boolean } = {}) {
     const THRESHOLD = 5;
     const LOCK_MINUTES = 15;
-    const u = await this.prisma.user.update({
-      where: { id: userId },
-      data: opts.freshAfterLockExpiry
-        ? { failedLoginAttempts: 1, lockedUntil: null }
-        : { failedLoginAttempts: { increment: 1 } },
-      select: { failedLoginAttempts: true },
-    });
-    if (u.failedLoginAttempts >= THRESHOLD) {
-      await this.prisma.user.update({
-        where: { id: userId },
-        data: { lockedUntil: new Date(Date.now() + LOCK_MINUTES * 60_000) },
-      });
+    // Atomic increment-and-lock in ONE statement (M-3). The previous two-step
+    // (read-increment, then conditionally write lockedUntil) let parallel
+    // failed attempts each observe a pre-threshold count and slip more than
+    // THRESHOLD guesses through before the lock landed. Doing the increment and
+    // the threshold decision in a single UPDATE makes the row lock serialize
+    // them: the Nth concurrent miss that crosses the threshold sets lockedUntil
+    // atomically with its own increment.
+    //
+    // freshAfterLockExpiry: the caller saw an EXPIRED lock, so restart the
+    // counter at 1 (and the threshold can't be reached on a single attempt,
+    // so lockedUntil clears).
+    const lockSql = `now() + (${LOCK_MINUTES} * interval '1 minute')`;
+    if (opts.freshAfterLockExpiry) {
+      await this.prisma.$executeRawUnsafe(
+        `UPDATE "users"
+            SET "failedLoginAttempts" = 1,
+                "lockedUntil" = NULL
+          WHERE "id" = $1`,
+        userId,
+      );
+      return;
     }
+    await this.prisma.$executeRawUnsafe(
+      `UPDATE "users"
+          SET "failedLoginAttempts" = "failedLoginAttempts" + 1,
+              "lockedUntil" = CASE
+                WHEN "failedLoginAttempts" + 1 >= ${THRESHOLD} THEN ${lockSql}
+                ELSE "lockedUntil"
+              END
+        WHERE "id" = $1`,
+      userId,
+    );
   }
 
   async getMe(userId: string) {
@@ -1259,29 +1279,9 @@ export class AuthService {
    * them. Policy: ≥12 chars AND at least 3 of {lower, upper, digit, symbol}.
    */
   private isStrongEnough(pw: string): { ok: boolean; reason?: string } {
-    if (!pw || typeof pw !== 'string') {
-      return { ok: false, reason: 'Password is required.' };
-    }
-    if (pw.length < 12) {
-      return { ok: false, reason: 'Password must be at least 12 characters long.' };
-    }
-    if (pw.length > 128) {
-      return { ok: false, reason: 'Password must be at most 128 characters long.' };
-    }
-    const classes = [
-      /[a-z]/.test(pw),
-      /[A-Z]/.test(pw),
-      /[0-9]/.test(pw),
-      /[^A-Za-z0-9]/.test(pw),
-    ].filter(Boolean).length;
-    if (classes < 3) {
-      return {
-        ok: false,
-        reason:
-          'Password must contain at least 3 of: lowercase letter, uppercase letter, digit, symbol.',
-      };
-    }
-    return { ok: true };
+    // Delegates to the single shared policy (password-policy.ts) so the admin
+    // reset path and every self-service path enforce identical strength.
+    return checkPasswordStrength(pw);
   }
 
   private parseTtl(ttl: string): number {
