@@ -20,6 +20,7 @@ import { SystemConfigService } from '../system/system-config.service';
 import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { screenUrlLiteral, screenResolvedHost } from '../../common/net/ssrf-guard';
 import { CreateBackupDto } from './dto/create-backup.dto';
 import { SetProjectStorageDto } from './dto/project-storage.dto';
 import { previousOccurrence, scheduledRunName } from './backup-schedule.util';
@@ -552,7 +553,48 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
           : `Whole-server remote storage isn't configured — set the S3/R2/B2 bucket in Admin → System Config (missing: ${missing.join(', ')}).`,
       );
     }
+    // SSRF screen before every dereference (defends a stored endpoint + DNS
+    // rebinding between write and use). (M-1)
+    await this.assertS3EndpointSafe(cfg.endpoint);
     return { ...this.s3ClientFromConfig(cfg), config: cfg };
+  }
+
+  /**
+   * SSRF screen for a user-supplied S3 endpoint (M-1). A project ADMIN sets the
+   * endpoint URL and the API dereferences it server-side (List/Put/Get) — so an
+   * unscreened endpoint is a blind SSRF into internal services or the cloud
+   * metadata IP (169.254.169.254). Runs the SAME ruleset the notification
+   * webhooks use, at write time AND before every dereference (defends stored
+   * configs + DNS rebinding).
+   *
+   * Self-hosted MinIO on a private LAN is a legitimate use-case, so operators
+   * can opt out of the private-range block with ALLOW_PRIVATE_S3_ENDPOINTS=true.
+   * The scheme/loopback/metadata screen still applies even then is NOT bypassed
+   * for the metadata address — only RFC1918/CGNAT private ranges are allowed
+   * through, never loopback or link-local (169.254/16).
+   */
+  private async assertS3EndpointSafe(endpoint: string | undefined | null): Promise<void> {
+    const raw = (endpoint || '').trim();
+    if (!raw) return; // missing-config is handled separately with a clear 400
+    const allowPrivate =
+      (process.env.ALLOW_PRIVATE_S3_ENDPOINTS || 'false').toLowerCase() === 'true';
+    // Always enforce scheme + loopback/link-local/metadata, even when private
+    // LAN endpoints are allowed.
+    const literal = screenUrlLiteral(raw, { allowedSchemes: ['http:', 'https:'] });
+    if (literal) {
+      // When the operator opted into private endpoints, permit ONLY the RFC1918
+      // private ranges (10/8, 172.16/12, 192.168/16) — keep blocking loopback
+      // and 169.254/16 (the metadata range) regardless.
+      if (allowPrivate && /private\/loopback\/link-local address (10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(literal)) {
+        // allowed by opt-out
+      } else {
+        throw new BadRequestException(`S3 endpoint rejected: ${literal}`);
+      }
+    }
+    if (!allowPrivate) {
+      const resolved = await screenResolvedHost(raw, { allowedSchemes: ['http:', 'https:'] });
+      if (resolved) throw new BadRequestException(`S3 endpoint rejected: ${resolved}`);
+    }
   }
 
   /** Build an S3 client from an EXPLICIT config (e.g. a backup's pinned one). */
@@ -587,6 +629,8 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     if (backup.storageConfigEnc) {
       const cfg = this.decodeStorageConfig(backup.storageConfigEnc);
       if (cfg && missingS3ConfigKeys(cfg).length === 0) {
+        // Screen the pinned endpoint too — it was user-supplied when stored. (M-1)
+        await this.assertS3EndpointSafe(cfg.endpoint);
         return this.s3ClientFromConfig(cfg);
       }
     }
@@ -1412,6 +1456,10 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   /** Create/update a project's remote-storage config (ADMIN of the project). */
   async setProjectStorage(userId: string, projectId: string, dto: SetProjectStorageDto) {
     await assertProjectAccess(this.prisma, userId, projectId, 'ADMIN');
+
+    // SSRF screen at write time so a bad endpoint is rejected before it's ever
+    // stored or dereferenced (M-1).
+    await this.assertS3EndpointSafe(dto.endpoint);
 
     const existing = await this.prisma.projectBackupStorage.findUnique({ where: { projectId } });
     // Secret is optional on update — keep the existing one when omitted.

@@ -1037,7 +1037,12 @@ export class MarketplaceService implements OnModuleInit {
     // user-supplied envVars → written as .env (picked up by docker compose at
     // runtime). ALWAYS written, even empty: every template declares
     // `env_file: - .env`, and compose hard-fails on a missing env file.
+    // Defense-in-depth behind the DTO's SafeEnvVarsConstraint (M-2): a key with
+    // a newline/`=`/control char could inject extra .env lines, so skip any key
+    // that isn't a plain shell-style identifier. Values are newline-escaped.
+    const SAFE_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_.]*$/;
     const envContent = Object.entries(envOverride)
+      .filter(([k]) => SAFE_ENV_KEY_RE.test(k))
       .map(([k, v]) => `${k}=${String(v).replace(/\n/g, '\\n')}`)
       .join('\n') + '\n';
     fs.writeFileSync(path.join(appDir, '.env'), envContent);

@@ -69,6 +69,12 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
     const cleaned: Record<string, any> = {};
     const removed: string[] = [];
     for (const [k, v] of Object.entries(updates)) {
+      // M-4: reject any key outside the writable allowlist up front — covers
+      // both the set and the delete (null) branches, so neither can touch an
+      // arbitrary config key. setMany() re-checks as defense-in-depth.
+      if (!SystemConfigService.isWritableKey(k)) {
+        throw new BadRequestException(`Unknown config key "${k}".`);
+      }
       if (v === null) {
         removed.push(k);
         continue;

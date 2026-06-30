@@ -43,6 +43,7 @@ import {
   removeCollidingContainers,
   findComposePath,
 } from './applications.helpers';
+import { assertCloneHostResolvable } from '../git-providers/git-providers.service';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
@@ -1432,6 +1433,11 @@ export class ApplicationDeployService implements OnModuleInit {
         cloneArgs.unshift('-c', `http.extraheader=${opts.cloneHeader}`);
       }
       cloneArgs.push(gitUrl, appDir);
+      // DNS-rebinding screen (M-7): resolve the clone host right before we
+      // inject the credential and connect. A public name that rebinds to a
+      // private/metadata IP between create-time validation and this clone is
+      // rejected here. Provider-pinned hosts resolve public and pass.
+      await assertCloneHostResolvable(gitUrl);
       // Never echo the cloneArgs verbatim — the http.extraheader contains
       // the git provider's bearer token. Log a redacted form.
       const redactedArgs = cloneArgs.map((a) =>

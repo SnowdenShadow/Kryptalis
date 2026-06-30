@@ -1,5 +1,6 @@
-import { IsString, IsOptional, IsObject, IsInt, Matches, MaxLength, Min, Max } from 'class-validator';
+import { IsString, IsOptional, IsObject, IsInt, Matches, MaxLength, Min, Max, Validate } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { SafeEnvVarsConstraint } from './install-custom.dto';
 
 export class InstallAppDto {
   @ApiProperty()
@@ -55,6 +56,11 @@ export class InstallAppDto {
   @ApiProperty({ required: false })
   @IsOptional()
   @IsObject()
+  // M-2: validate env-var KEYS. The install path writes these to the per-instance
+  // .env; a key containing a newline could inject extra KEY=VALUE lines (override
+  // ${VAR:-default} substitutions the template relies on, e.g. a DB password).
+  // Same guard the custom-image install (InstallCustomDto) already applies.
+  @Validate(SafeEnvVarsConstraint)
   envVars?: Record<string, string>;
 
   @ApiProperty({

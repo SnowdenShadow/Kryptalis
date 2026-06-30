@@ -60,6 +60,49 @@ export class SystemConfigService implements OnModuleInit {
     'public_dashboard_url',
   ]);
 
+  // M-4: the EXHAUSTIVE allowlist of operator-writable config keys. setMany()
+  // (the admin bulk-config endpoint) previously wrote whatever keys the client
+  // posted, so a compromised/confused admin — or a CSRF against one — could
+  // seed arbitrary keys that other modules read via get(), or silently flip a
+  // typo'd secret into a plaintext row. Writes to any key not in this set are
+  // rejected. Per-user/runtime markers (onboarding_completed_*, bootstrapped,
+  // *_notified) are written by their own code paths via set()/upsert with fixed
+  // keys, NOT by the admin bulk endpoint, so they are intentionally absent.
+  private static readonly WRITABLE_KEYS: ReadonlySet<string> = new Set([
+    // registration / platform
+    'registration_enabled',
+    'require_admin_approval',
+    'default_user_role',
+    'platform_name',
+    'maintenance_mode',
+    'deployment_mode',
+    'system_domain',
+    'metric_retention_days',
+    // public URLs
+    'public_api_url',
+    'public_dashboard_url',
+    // SMTP
+    'smtp_host',
+    'smtp_port',
+    'smtp_user',
+    'smtp_pass',
+    'smtp_from',
+    // whole-server S3 backup storage
+    's3_endpoint',
+    's3_bucket',
+    's3_region',
+    's3_access_key',
+    's3_secret_key',
+    // backup encryption + webhook secret
+    'backup_encryption_key',
+    'github_webhook_secret',
+  ]);
+
+  /** True when `key` may be written through the admin config surface (M-4). */
+  static isWritableKey(key: string): boolean {
+    return SystemConfigService.WRITABLE_KEYS.has(key);
+  }
+
   constructor(
     private prisma: PrismaService,
     private encryption: EncryptionService,
@@ -74,6 +117,13 @@ export class SystemConfigService implements OnModuleInit {
    * the bad value. Empty values are allowed (they revert to env/default).
    */
   private validateKey(key: string, value: any): void {
+    // M-4: reject any key outside the writable allowlist BEFORE it can be
+    // persisted. This runs for both set() and setMany() (the bulk admin
+    // endpoint), closing the "write arbitrary config key" gap. The check is on
+    // the key itself, so it applies even to a null/empty (delete) value.
+    if (!SystemConfigService.WRITABLE_KEYS.has(key)) {
+      throw new BadRequestException(`Unknown config key "${key}".`);
+    }
     if (value === null || value === undefined || value === '') return;
     if (key === 'backup_encryption_key') {
       const s = typeof value === 'string' ? value : String(value);

@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, BadRequestException } from '@nestjs/comm
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { CreateGitProviderDto } from './dto/create-git-provider.dto';
+import { screenUrlLiteral, screenResolvedHost } from '../../common/net/ssrf-guard';
 
 export interface Repo {
   name: string;
@@ -32,19 +33,14 @@ const PROVIDER_HOSTS: Record<string, string[]> = {
  * pin against — we still refuse private/loopback literals.
  */
 export function isPrivateOrLoopbackHost(hostname: string): boolean {
+  // Delegate to the shared SSRF guard (common/net/ssrf-guard.ts) so the git PAT
+  // path benefits from the same coverage the webhook screen has: IPv4 smuggled
+  // inside IPv6 (::ffff:127.0.0.1), CGNAT 100.64/10, 0.0.0.0/8, and WHATWG-URL
+  // normalization of decimal/octal/hex IPv4. (M-7) screenUrlLiteral wants a
+  // full URL, so wrap the host (bracket IPv6 literals).
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
-  if (h === 'localhost' || h === '::1' || h === '0.0.0.0') return true;
-  // IPv4 literal ranges: loopback, link-local, RFC1918.
-  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m) {
-    const [a, b] = [Number(m[1]), Number(m[2])];
-    if (a === 127) return true; // 127.0.0.0/8 loopback
-    if (a === 10) return true; // 10.0.0.0/8
-    if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local
-    if (a === 192 && b === 168) return true; // 192.168.0.0/16
-    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-  }
-  return false;
+  const hostForUrl = h.includes(':') ? `[${h}]` : h;
+  return screenUrlLiteral(`https://${hostForUrl}`) !== null;
 }
 
 /**
@@ -76,6 +72,22 @@ export function assertCloneHostAllowed(provider: string | null | undefined, gitU
   const allowed = provider ? PROVIDER_HOSTS[provider] : undefined;
   if (allowed && !allowed.includes(hostname)) {
     throw new BadRequestException('Git URL host does not match the selected provider');
+  }
+}
+
+/**
+ * DNS-rebinding screen for a clone host (M-7). assertCloneHostAllowed() screens
+ * the URL literal; this resolves the hostname and rejects if ANY A/AAAA points
+ * at a private/loopback/metadata address. Call right before a clone that injects
+ * a credential, so a public name that (re)binds to an internal IP between
+ * validation and clone can't exfiltrate the token or SSRF an internal service.
+ * Provider-pinned hosts (github.com etc.) resolve public and pass; the value is
+ * for the one-shot PAT / anonymous path where the host is fully user-chosen.
+ */
+export async function assertCloneHostResolvable(gitUrl: string): Promise<void> {
+  const violation = await screenResolvedHost(gitUrl, { allowedSchemes: ['https:'] });
+  if (violation) {
+    throw new BadRequestException(`Git URL host is not allowed (${violation})`);
   }
 }
 
