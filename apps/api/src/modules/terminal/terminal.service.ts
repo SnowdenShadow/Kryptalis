@@ -16,6 +16,7 @@ export type TerminalTarget =
   | { kind: 'local'; containerName: string }
   | {
       kind: 'remote';
+      serverId: string; // for SSH host-key pinning (H-4)
       host: string;
       port: number;
       username: string;
@@ -90,6 +91,7 @@ export class TerminalService {
 
     return {
       kind: 'remote',
+      serverId: server.id,
       host: server.host,
       port: 2522,
       username,

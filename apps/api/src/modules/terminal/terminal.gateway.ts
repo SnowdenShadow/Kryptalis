@@ -8,6 +8,26 @@ import { assertProjectAccess } from '../../common/rbac/project-access';
 import { TerminalService, type TerminalTarget } from './terminal.service';
 import * as pty from 'node-pty';
 import { Client as SshClient } from 'ssh2';
+import { createHash } from 'crypto';
+
+/** SHA-256 fingerprint (base64) of an SSH host key blob — the pin value. */
+export function createSha256Fp(key: Buffer): string {
+  return createHash('sha256').update(key).digest('base64');
+}
+
+/**
+ * TOFU host-key decision (H-4), extracted for testing. Given the pinned
+ * fingerprint (or null on first use) and the presented one, returns whether to
+ * accept the connection and whether this is a first-use that should be stored.
+ */
+export function decideHostKey(
+  pinned: string | null,
+  presented: string,
+): { accept: boolean; store: boolean } {
+  if (!pinned) return { accept: true, store: true }; // first use → pin it
+  if (pinned === presented) return { accept: true, store: false };
+  return { accept: false, store: false }; // mismatch → refuse (possible MITM)
+}
 
 // Wire protocol (JSON text frames, client→server):
 //   { type: 'auth', token: '<jwt>' }        FIRST frame — authenticates the
@@ -170,7 +190,7 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
         if (target.kind === 'local') {
           this.bridgeLocal(ws, target, safeClose);
         } else {
-          this.bridgeRemote(ws, target, safeClose);
+          await this.bridgeRemote(ws, target, safeClose);
         }
       } catch (e: any) {
         this.logger.warn(`terminal session error: ${e?.message || e}`);
@@ -213,11 +233,17 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
   }
 
   // ── REMOTE: SSH-bridge to the agent's :2522 shell channel. ──
-  private bridgeRemote(
+  private async bridgeRemote(
     ws: WebSocket,
     target: Extract<TerminalTarget, { kind: 'remote' }>,
     safeClose: (c: number, r: string) => void,
   ) {
+    // H-4: load the pinned host-key fingerprint (if any) BEFORE connecting, so
+    // the synchronous hostVerifier can compare against it.
+    const pinnedHostKey = await this.prisma.server
+      .findUnique({ where: { id: target.serverId }, select: { sshHostKey: true } })
+      .then((s) => s?.sshHostKey ?? null)
+      .catch(() => null);
     const conn = new SshClient();
     let idle = this.armIdle(ws);
     conn.on('ready', () => {
@@ -245,10 +271,31 @@ export class TerminalGateway implements OnModuleInit, OnModuleDestroy {
       username: target.username,
       privateKey: target.privateKey,
       readyTimeout: 15_000,
-      // Pin nothing extra — the agent host key is TOFU here; the link rides the
-      // same trusted network as every other agent task (poll/deploy).
-      algorithms: undefined,
+      // H-4: trust-on-first-use host-key pinning. The first successful connect
+      // records the agent's host-key fingerprint on the Server row; every later
+      // connect rejects a key that doesn't match (MITM on the API↔agent path).
+      // hostVerifier returns false → ssh2 aborts the handshake.
+      hostVerifier: (key: Buffer) => {
+        // Synchronous verifier: decide against the fingerprint captured at
+        // session start (pinnedHostKey). A mismatch fails closed.
+        const fp = createSha256Fp(key);
+        const { accept, store } = decideHostKey(pinnedHostKey, fp);
+        if (store) this.persistHostKey(target.serverId, fp); // first-use pin
+        if (!accept) {
+          this.logger.error(
+            `SSH host-key MISMATCH for server ${target.serverId}: pinned ${(pinnedHostKey || '').slice(0, 16)}… got ${fp.slice(0, 16)}… — refusing (possible MITM).`,
+          );
+        }
+        return accept;
+      },
     });
+  }
+
+  /** Persist a first-seen agent host-key fingerprint (TOFU). Best-effort. */
+  private persistHostKey(serverId: string, fp: string): void {
+    this.prisma.server
+      .update({ where: { id: serverId }, data: { sshHostKey: fp } })
+      .catch((e) => this.logger.warn(`failed to pin host key for ${serverId}: ${e?.message || e}`));
   }
 
   /** Parse one client frame into a data-write or a resize. Ignores garbage. */
