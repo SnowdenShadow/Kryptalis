@@ -81,6 +81,24 @@ if ! run git fetch --depth=1 origin "$BRANCH"; then
   exit 1
 fi
 
+# Optional supply-chain hardening: refuse to deploy an unsigned / untrusted tip.
+# This update path is root-equivalent (it holds the host docker socket), so a
+# compromise of the tracked branch is fleet-wide RCE. With
+# DOCKCONTROL_VERIFY_SIGNATURE=1 we require the incoming commit to carry a valid
+# GPG signature from a key in the updater's keyring (import your release key into
+# the container/host gpg before enabling). Off by default so existing installs
+# that don't sign their commits keep working.
+if [ "${DOCKCONTROL_VERIFY_SIGNATURE:-0}" = "1" ]; then
+  log "→ verifying commit signature on origin/$BRANCH"
+  command -v gpg >/dev/null 2>&1 || apk add --no-cache gnupg >>"$LOG_FILE" 2>&1 || true
+  if ! run git verify-commit "origin/$BRANCH"; then
+    log "ERR: commit signature verification failed for origin/$BRANCH — refusing to update."
+    log "     (import a trusted signer key, or unset DOCKCONTROL_VERIFY_SIGNATURE to skip.)"
+    exit 1
+  fi
+  log "  signature OK"
+fi
+
 log "→ resetting to origin/$BRANCH"
 if ! run git reset --hard "origin/$BRANCH"; then
   log "ERR: git reset failed"
