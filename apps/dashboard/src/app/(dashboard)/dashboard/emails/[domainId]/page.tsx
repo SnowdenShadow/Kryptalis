@@ -20,6 +20,7 @@ import { Select } from '@/components/ui/select';
 import { Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { api } from '@/lib/api';
 import { useTranslation } from '@/lib/i18n';
+import { useDeployTargets, usePublicSettings } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 
 type Tab = 'overview' | 'mailboxes' | 'aliases' | 'security' | 'dns' | 'webmail';
@@ -217,12 +218,17 @@ export default function EmailDomainPage() {
     if (domain && !wmNewDomain) setWmNewDomain(`webmail.${domain.domain}`);
   }, [domain, wmNewDomain]);
 
-  // Registered servers — used to let the operator choose WHERE the mail stack
-  // runs (primary host by default). Only surfaced when >1 option exists.
-  const { data: servers = [] } = useQuery<{ id: string; name: string; host: string; status: string }[]>({
-    queryKey: ['servers'],
-    queryFn: () => api.get('/servers'),
+  // Deploy-target servers — same canonical pattern as apps/databases: only
+  // offer a server picker in MULTI mode with ≥2 online servers, and use the
+  // non-admin /servers/mine list so a DEVELOPER can choose too. In LOCAL mode
+  // there's nothing to pick, so the selector never renders.
+  const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string }>({ staleTime: 60_000 });
+  const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
+  const { data: servers = [] } = useDeployTargets<{ id: string; name: string; host: string; status: string }[]>({
+    enabled: isMultiMode,
   });
+  const onlineServers = servers.filter((s) => s.status === 'ONLINE');
+  const showServerPicker = isMultiMode && onlineServers.length > 1;
   // '' = primary host (default). A non-empty value is a remote server id.
   const [mailServerId, setMailServerId] = useState('');
 
@@ -439,10 +445,11 @@ export default function EmailDomainPage() {
         <div className="flex items-center gap-2 flex-wrap">
           {!dnsHints?.mailServer ? (
             <>
-              {/* Server picker — only when remote servers exist. Default =
+              {/* Server picker — MULTI mode with ≥2 online servers only
+                  (canonical pattern, same as apps/databases). Default =
                   primary host. The mail.<domain> DNS must point at the chosen
                   server's IP (the help text explains this). */}
-              {servers.filter((s) => s.status === 'ONLINE').length > 1 && (
+              {showServerPicker && (
                 <div className="flex flex-col gap-1">
                   <Select
                     value={mailServerId}
@@ -450,11 +457,9 @@ export default function EmailDomainPage() {
                     className="h-9 text-sm"
                   >
                     <option value="">{t('emails.serverPrimary')}</option>
-                    {servers
-                      .filter((s) => s.status === 'ONLINE')
-                      .map((s) => (
-                        <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
-                      ))}
+                    {onlineServers.map((s) => (
+                      <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+                    ))}
                   </Select>
                   {mailServerId && (
                     <span className="text-[11px] text-amber-400 max-w-xs">
@@ -1522,6 +1527,15 @@ export default function EmailDomainPage() {
                 onChange={(e) => setWmHostPort(e.target.value)} className="font-mono" />
               <p className="text-[11px] text-muted-foreground">{t('emails.webmailPortHint')}</p>
             </div>
+          )}
+
+          {/* In MULTI mode, explain WHY there's no server picker: the webmail is
+              ALWAYS co-located with the mail server (it connects over the
+              internal docker network), so it follows the mail server's host. */}
+          {isMultiMode && (
+            <p className="text-[11px] text-muted-foreground border-t border-border pt-2">
+              {t('emails.webmailServerNote', { server: mailServerHost || t('emails.serverPrimary') })}
+            </p>
           )}
         </div>
         <DialogFooter>

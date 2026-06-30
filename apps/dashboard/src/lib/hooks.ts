@@ -44,13 +44,34 @@ export function useApplications<T = Array<{ id: string; name: string; projectId:
   });
 }
 
-/** Server list — GET /servers. Cache key: ['servers']. */
+/**
+ * FULL server list — GET /servers (ADMIN only). Cache key: ['servers'].
+ * Use for admin/infrastructure views. For DEPLOY-target pickers (where a
+ * non-admin DEVELOPER must also choose a server), use useDeployTargets instead.
+ */
 export function useServers<T = Array<{ id: string; name: string; host: string; status: string }>>(
   options?: RefQueryOptions<T>,
 ): UseQueryResult<T> {
   return useQuery<T, Error, T>({
     queryKey: ['servers'],
     queryFn: () => api.get<T>('/servers'),
+    ...options,
+  });
+}
+
+/**
+ * Deploy-target server list — GET /servers/mine. Sanitized (no tokens/secrets)
+ * and accessible to NON-admins: returns the servers reachable through the
+ * caller's project memberships. This is what every deploy-time server picker
+ * (apps, databases, mail) should use, so a DEVELOPER can pick a server too.
+ * Cache key: ['deploy-targets'].
+ */
+export function useDeployTargets<T = Array<{ id: string; name: string; host: string; status: string }>>(
+  options?: RefQueryOptions<T>,
+): UseQueryResult<T> {
+  return useQuery<T, Error, T>({
+    queryKey: ['deploy-targets'],
+    queryFn: () => api.get<T>('/servers/mine'),
     ...options,
   });
 }

@@ -17,7 +17,7 @@ import {
   Dialog, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
 import { api } from '@/lib/api';
-import { useProjects, useServers, usePublicSettings } from '@/lib/hooks';
+import { useProjects, useDeployTargets, usePublicSettings } from '@/lib/hooks';
 import { toastError } from '@/lib/toast-error';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
@@ -195,7 +195,9 @@ export function QuickDeployDialog({
     staleTime: 60_000,
   });
   const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
-  const { data: servers = [] } = useServers<{ id: string; name: string; host: string; status: string }[]>({
+  // Deploy-target list (/servers/mine) — works for non-admin DEVELOPERs too,
+  // unlike the admin-only /servers used by infrastructure views.
+  const { data: servers = [] } = useDeployTargets<{ id: string; name: string; host: string; status: string }[]>({
     enabled: open && isMultiMode,
   });
 

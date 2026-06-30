@@ -44,7 +44,7 @@ import {
 } from '@/components/ui/dialog';
 import type { DatabaseResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
-import { useProjects, useApplications, useServers, usePublicSettings } from '@/lib/hooks';
+import { useProjects, useApplications, useDeployTargets, usePublicSettings } from '@/lib/hooks';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 
@@ -140,7 +140,8 @@ export default function DatabasesPage() {
     staleTime: 60_000,
   });
   const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
-  const { data: servers = [] } = useServers({ enabled: isMultiMode });
+  // /servers/mine — accessible to non-admin DEVELOPERs (unlike admin-only /servers).
+  const { data: servers = [] } = useDeployTargets({ enabled: isMultiMode });
 
   const { data: databases = [], isLoading } = useQuery<DatabaseItem[]>({
     queryKey: ['databases', filterProjectId],
