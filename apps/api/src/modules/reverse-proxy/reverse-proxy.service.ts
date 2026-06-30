@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import { PrismaService } from '../../prisma/prisma.service';
 import { PROXY_DIR } from '../../common/paths';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
+import { SystemConfigService } from '../system/system-config.service';
 
 const execFileAsync = promisify(execFile);
 const CONTAINER_NAME = 'dockcontrol-caddy';
@@ -116,7 +117,10 @@ export class ReverseProxyService implements OnApplicationBootstrap, OnModuleDest
   private regenInFlight: Promise<RegenerateResult> | null = null;
   private regenQueued = false;
 
-  constructor(private prisma: PrismaService) {
+  constructor(
+    private prisma: PrismaService,
+    private systemConfig: SystemConfigService,
+  ) {
     if (!fs.existsSync(PROXY_DIR)) fs.mkdirSync(PROXY_DIR, { recursive: true });
   }
 
@@ -335,7 +339,14 @@ ${email ? `  email ${email}\n` : ''}}
     // EVERY domain owned by a project — even those not yet linked to an app.
     // Reserved domains still get a Caddy block so Let's Encrypt provisions the cert
     // in advance (the user gets a green padlock the moment they wire it to an app).
+    // H-3: when ownership verification is enforced, an unverified domain must
+    // NOT be rendered into Caddy (no routing, no cert issuance) — that's what
+    // stops cross-tenant pre-emption from yielding a real cert under a victim's
+    // name. With verification off (default), verifiedAt was stamped at create
+    // time so this filter is a no-op.
+    const requireVerification = this.systemConfig.getBool('require_domain_verification');
     const allDomains = await this.prisma.domain.findMany({
+      where: requireVerification ? { verifiedAt: { not: null } } : undefined,
       include: {
         application: {
           select: {

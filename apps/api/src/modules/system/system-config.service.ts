@@ -78,6 +78,8 @@ export class SystemConfigService implements OnModuleInit {
     'deployment_mode',
     'system_domain',
     'metric_retention_days',
+    // H-3: enforce domain-ownership verification before routing/cert/mail.
+    'require_domain_verification',
     // public URLs
     'public_api_url',
     'public_dashboard_url',

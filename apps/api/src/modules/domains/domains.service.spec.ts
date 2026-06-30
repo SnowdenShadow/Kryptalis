@@ -57,13 +57,17 @@ function makeService() {
     attach: vi.fn().mockResolvedValue(undefined),
     detachAll: vi.fn().mockResolvedValue(undefined),
   };
+  // H-3: verification defaults OFF in tests (getBool → false) so create()
+  // auto-verifies and existing assertions (proxy.regenerate called) hold.
+  const systemConfig = { getBool: vi.fn().mockReturnValue(false) };
   const service = new DomainsService(
     prisma as any,
     proxy as any,
     mailServer as any,
     domainAttach as any,
+    systemConfig as any,
   );
-  return { service, prisma, proxy, mailServer, domainAttach };
+  return { service, prisma, proxy, mailServer, domainAttach, systemConfig };
 }
 
 const DOMAIN = {
@@ -145,7 +149,7 @@ describe('create', () => {
   it('reclaims an ORPHANED row (project deleted → projectId null) instead of erroring', async () => {
     const { service, prisma } = makeService();
     prisma.domain.findUnique.mockResolvedValue({ ...DOMAIN, projectId: null });
-    prisma.domain.create.mockResolvedValue({ id: 'd-new' });
+    prisma.domain.create.mockImplementation((a: any) => Promise.resolve({ id: "d-new", ...a.data }));
 
     await service.create('u1', { domain: 'example.com', projectId: 'p1' } as any);
 
@@ -173,7 +177,7 @@ describe('create', () => {
   it('derives the project from the linked application', async () => {
     const { service, prisma } = makeService();
     prisma.application.findUnique.mockResolvedValue({ projectId: 'p-app' });
-    prisma.domain.create.mockResolvedValue({ id: 'd1' });
+    prisma.domain.create.mockImplementation((a: any) => Promise.resolve({ id: "d1", ...a.data }));
 
     await service.create('u1', { domain: 'example.com', applicationId: 'a1' } as any);
 
@@ -203,7 +207,7 @@ describe('create', () => {
 
   it('strips autoSsl from the persisted data and triggers Caddy regen', async () => {
     const { service, prisma, proxy } = makeService();
-    prisma.domain.create.mockResolvedValue({ id: 'd1' });
+    prisma.domain.create.mockImplementation((a: any) => Promise.resolve({ id: "d1", ...a.data }));
 
     await service.create('u1', {
       domain: 'example.com', projectId: 'p1', autoSsl: true,
@@ -235,7 +239,7 @@ describe('create', () => {
   it('port + applicationId → port binding via DomainAttachService, clean-URL slot left empty', async () => {
     const { service, prisma, domainAttach, proxy } = makeService();
     prisma.application.findUnique.mockResolvedValue({ projectId: 'p1' });
-    prisma.domain.create.mockResolvedValue({ id: 'd-new' });
+    prisma.domain.create.mockImplementation((a: any) => Promise.resolve({ id: "d-new", ...a.data }));
 
     await service.create('u1', {
       domain: 'example.com', projectId: 'p1', applicationId: 'a1', port: 8443,
@@ -267,6 +271,51 @@ describe('create', () => {
       domain: 'example.com', projectId: 'p1', port: 8443,
     });
     expect(await validate(ok)).toHaveLength(0);
+  });
+});
+
+// ── H-3: domain ownership verification ───────────────────────────────
+describe('domain verification (H-3)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockAssert.mockResolvedValue(undefined as any);
+  });
+
+  it('with verification OFF: create auto-verifies and renders Caddy (back-compat)', async () => {
+    const { service, prisma, proxy, systemConfig } = makeService();
+    systemConfig.getBool.mockReturnValue(false);
+    prisma.domain.create.mockImplementation((a: any) => Promise.resolve({ id: 'd1', ...a.data }));
+
+    await service.create('u1', { domain: 'example.com', projectId: 'p1' } as any);
+
+    const data = prisma.domain.create.mock.calls[0][0].data;
+    expect(data.verifiedAt).toBeInstanceOf(Date);
+    expect(data.verificationToken).toBeTruthy();
+    expect(proxy.regenerate).toHaveBeenCalledTimes(1);
+  });
+
+  it('with verification ON: create leaves verifiedAt null and does NOT render Caddy', async () => {
+    const { service, prisma, proxy, systemConfig } = makeService();
+    systemConfig.getBool.mockReturnValue(true);
+    prisma.domain.create.mockImplementation((a: any) => Promise.resolve({ id: 'd1', ...a.data }));
+
+    await service.create('u1', { domain: 'victim.com', projectId: 'p1' } as any);
+
+    const data = prisma.domain.create.mock.calls[0][0].data;
+    expect(data.verifiedAt).toBeNull();
+    expect(data.verificationToken).toBeTruthy();
+    // Unverified → must not reach the Caddyfile.
+    expect(proxy.regenerate).not.toHaveBeenCalled();
+  });
+
+  it('verifyDomain is a no-op success when already verified', async () => {
+    const { service, prisma } = makeService();
+    prisma.domain.findUnique.mockResolvedValue({
+      id: 'd1', domain: 'example.com', projectId: 'p1',
+      verifiedAt: new Date(), verificationToken: 'tok', application: null,
+    });
+    const res = await service.verifyDomain('u1', 'd1');
+    expect(res).toEqual({ verified: true, alreadyVerified: true });
   });
 });
 

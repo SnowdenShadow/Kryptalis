@@ -160,14 +160,17 @@ function makeService() {
     enqueueAndWait: vi.fn().mockResolvedValue({ status: 'COMPLETED', result: {} }),
     enqueueTask: vi.fn().mockResolvedValue({ id: 't1' }),
   };
+  // H-3: domain verification defaults OFF in tests (getBool → false).
+  const systemConfig = { getBool: vi.fn().mockReturnValue(false) };
   const service = new MailServerService(
     prisma as any,
     proxy as any,
     encryption as any,
     marketplace as any,
     agent as any,
+    systemConfig as any,
   );
-  return { service, prisma, proxy, encryption, marketplace, agent };
+  return { service, prisma, proxy, encryption, marketplace, agent, systemConfig };
 }
 
 const DOMAIN = { id: 'dom1', domain: 'example.com', projectId: 'p1', application: null };

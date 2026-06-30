@@ -66,6 +66,20 @@ export class DomainsController {
     return this.svc.transfer(userId, id, dto.targetProjectId);
   }
 
+  @Get(':id/verification')
+  @ApiOperation({ summary: 'Get the DNS TXT record proving ownership of this domain' })
+  getVerification(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.getVerificationInstructions(userId, id);
+  }
+
+  @Post(':id/verify')
+  // DNS lookups hit external resolvers — keep a tenant from hammering verify.
+  @Throttle({ default: { ttl: 60_000, limit: 10 } })
+  @ApiOperation({ summary: 'Check the published TXT record and mark the domain verified' })
+  verify(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.verifyDomain(userId, id);
+  }
+
   @Get(':id/health')
   @ApiOperation({ summary: 'Live DNS health check (A / CNAME / mail flag)' })
   getDnsHealth(@CurrentUser('id') userId: string, @Param('id') id: string) {
