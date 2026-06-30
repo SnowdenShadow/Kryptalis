@@ -545,6 +545,10 @@ describe('repoFullNameFromUrl', () => {
     ['https://gitlab.com/group/sub/repo.git', 'group/sub/repo'],
     ['https://bitbucket.org/workspace/repo', 'workspace/repo'],
     ['https://github.com/acme/site/', 'acme/site'],
+    // Regression: trailing slash AFTER .git (common copy-paste shape) must still
+    // strip both, not yield `acme/site.git`.
+    ['https://github.com/acme/site.git/', 'acme/site'],
+    ['https://gitlab.com/group/sub/repo.git/', 'group/sub/repo'],
   ])('parses %s → %s', (url, expected) => {
     expect(repoFullNameFromUrl(url)).toBe(expected);
   });
@@ -625,6 +629,59 @@ describe('listBranches', () => {
       BadRequestException,
     );
   });
+
+  it('GitHub: paginates past 100 branches (no silent truncation)', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITHUB', token: 'enc:t',
+    });
+    const page1 = Array.from({ length: 100 }, (_, i) => ({ name: `b${i}` }));
+    const page2 = [{ name: 'b100' }, { name: 'b101' }];
+    // Match the `&page=N` param exactly — note the URL also carries `per_page=100`,
+    // so a bare `page=1` substring would also match `per_page=100`.
+    routes.push({
+      match: (u) => u.includes('/branches') && u.includes('&page=1'),
+      res: () => json(page1),
+    });
+    routes.push({
+      match: (u) => u.includes('/branches') && u.includes('&page=2'),
+      res: () => json(page2),
+    });
+    routes.push({
+      match: (u) => /api\.github\.com\/repos\/me\/app$/.test(u),
+      res: () => json({ default_branch: 'b0' }),
+    });
+
+    const res = await service.listBranches('gp1', 'u1', 'me/app');
+    expect(res).toHaveLength(102);
+    expect(res[0]).toEqual({ name: 'b0', isDefault: true });
+    expect(res[101]).toEqual({ name: 'b101', isDefault: false });
+  });
+
+  it('Bitbucket: follows the `next` URL until exhausted', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'BITBUCKET', token: 'enc:bb',
+    });
+    routes.push({
+      match: (u) => u.includes('/refs/branches') && !u.includes('page=2'),
+      res: () => json({ values: [{ name: 'main' }], next: 'https://api.bitbucket.org/2.0/repositories/me/app/refs/branches?page=2' }),
+    });
+    routes.push({
+      match: (u) => u.includes('/refs/branches') && u.includes('page=2'),
+      res: () => json({ values: [{ name: 'dev' }] }),
+    });
+    routes.push({
+      match: (u) => /repositories\/me\/app$/.test(u),
+      res: () => json({ mainbranch: { name: 'main' } }),
+    });
+
+    const res = await service.listBranches('gp1', 'u1', 'me/app');
+    expect(res).toEqual([
+      { name: 'main', isDefault: true },
+      { name: 'dev', isDefault: false },
+    ]);
+  });
 });
 
 // ── registerWebhook ──────────────────────────────────────────────────
@@ -666,19 +723,27 @@ describe('registerWebhook', () => {
     });
   });
 
-  it('GitHub: idempotent — skips POST when a hook already points at our URL', async () => {
+  it('GitHub: idempotent — PATCHes the existing hook (re-syncs secret) instead of POSTing a duplicate', async () => {
     const { service, prisma } = makeProvidersService();
     prisma.gitProvider.findFirst.mockResolvedValue({
       id: 'gp1', provider: 'GITHUB', token: 'enc:t',
     });
+    // existing-hooks GET returns a hook at our URL with an id to PATCH
     routes.push({
-      match: (u, init) => u.includes('/hooks') && (!init || init.method !== 'POST'),
-      res: () => json([{ config: { url: URL } }]),
+      match: (u, init) => u.includes('/hooks') && (!init || init.method === undefined),
+      res: () => json([{ id: 42, config: { url: URL } }]),
+    });
+    routes.push({
+      match: (u, init) => u.includes('/hooks/42') && init?.method === 'PATCH',
+      res: () => json({ id: 42 }),
     });
 
-    const res = await service.registerWebhook('gp1', 'u1', 'me/app', URL, 'sec');
+    const res = await service.registerWebhook('gp1', 'u1', 'me/app', URL, 'newsecret');
     expect(res).toEqual({ created: false, alreadyExists: true });
+    // No duplicate POST; the secret is re-synced via PATCH.
     expect(fetchMock.mock.calls.some(([, i]: any[]) => i?.method === 'POST')).toBe(false);
+    const patch = fetchMock.mock.calls.find(([, i]: any[]) => i?.method === 'PATCH')!;
+    expect(JSON.parse((patch[1] as any).body).config.secret).toBe('newsecret');
   });
 
   it('GitLab: POSTs with token + push_events', async () => {

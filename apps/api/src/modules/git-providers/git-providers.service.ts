@@ -36,7 +36,15 @@ export function repoFullNameFromUrl(gitUrl: string | null | undefined): string {
   } catch {
     throw new BadRequestException('Invalid Git URL');
   }
-  const full = url.pathname.replace(/^\/+/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+  // Strip trailing slashes BEFORE the .git suffix: a copy-pasted clone URL like
+  // `…/site.git/` ends in `/`, so removing `.git$` first would miss it and leave
+  // `site.git`. Order: leading slashes → trailing slashes → .git → trailing
+  // slashes again (in case `.git/` exposed a new trailing slash, e.g. `repo/.git/`).
+  const full = url.pathname
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/i, '')
+    .replace(/\/+$/, '');
   if (!full || !full.includes('/')) {
     throw new BadRequestException('Cannot derive owner/repo from the git URL');
   }
@@ -352,40 +360,61 @@ export class GitProvidersService {
     const gp = await this.prisma.gitProvider.findFirst({ where: { id, userId } });
     if (!gp) throw new NotFoundException('Provider not found');
     const token = this.getToken(gp);
+    // Cap the page walk so a repo with thousands of branches can't hang the
+    // request (10 pages × 100 = 1000 branches, far past any picker's usefulness).
+    const MAX_PAGES = 10;
     try {
       if (gp.provider === 'GITHUB') {
-        const res = await fetch(
-          `https://api.github.com/repos/${repoFullName}/branches?per_page=100`,
-          {
-            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
-            signal: AbortSignal.timeout(10_000),
-          },
-        );
-        if (!res.ok) throw new Error(`GitHub API: ${res.status}`);
-        const data: any[] = await res.json();
+        const names: string[] = [];
+        for (let page = 1; page <= MAX_PAGES; page++) {
+          const res = await fetch(
+            `https://api.github.com/repos/${repoFullName}/branches?per_page=100&page=${page}`,
+            {
+              headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+              signal: AbortSignal.timeout(10_000),
+            },
+          );
+          if (!res.ok) throw new Error(`GitHub API: ${res.status}`);
+          const data: any[] = await res.json();
+          for (const b of data) names.push(b.name);
+          if (data.length < 100) break; // last page
+        }
         // GitHub's branch list doesn't flag the default; fetch it once to mark it.
         const def = await this.fetchDefaultBranch(gp.provider, repoFullName, token);
-        return data.map((b) => ({ name: b.name, isDefault: b.name === def }));
+        return names.map((name) => ({ name, isDefault: name === def }));
       }
       if (gp.provider === 'GITLAB') {
         const projectPath = encodeURIComponent(repoFullName);
-        const res = await fetch(
-          `https://gitlab.com/api/v4/projects/${projectPath}/repository/branches?per_page=100`,
-          { headers: { 'PRIVATE-TOKEN': token }, signal: AbortSignal.timeout(10_000) },
-        );
-        if (!res.ok) throw new Error(`GitLab API: ${res.status}`);
-        const data: any[] = await res.json();
-        return data.map((b) => ({ name: b.name, isDefault: !!b.default }));
+        const out: Branch[] = [];
+        for (let page = 1; page <= MAX_PAGES; page++) {
+          const res = await fetch(
+            `https://gitlab.com/api/v4/projects/${projectPath}/repository/branches?per_page=100&page=${page}`,
+            { headers: { 'PRIVATE-TOKEN': token }, signal: AbortSignal.timeout(10_000) },
+          );
+          if (!res.ok) throw new Error(`GitLab API: ${res.status}`);
+          const data: any[] = await res.json();
+          for (const b of data) out.push({ name: b.name, isDefault: !!b.default });
+          if (data.length < 100) break;
+        }
+        return out;
       }
       if (gp.provider === 'BITBUCKET') {
-        const res = await fetch(
-          `https://api.bitbucket.org/2.0/repositories/${repoFullName}/refs/branches?pagelen=100`,
-          { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) },
-        );
-        if (!res.ok) throw new Error(`Bitbucket API: ${res.status}`);
-        const data: any = await res.json();
+        const names: string[] = [];
+        // Bitbucket paginates via an absolute `next` URL rather than a page param.
+        let next: string | null =
+          `https://api.bitbucket.org/2.0/repositories/${repoFullName}/refs/branches?pagelen=100`;
+        for (let page = 0; page < MAX_PAGES && next; page++) {
+          const res = await fetch(next, {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (!res.ok) throw new Error(`Bitbucket API: ${res.status}`);
+          const data: any = await res.json();
+          for (const b of data.values || []) names.push(b.name);
+          next = typeof data.next === 'string' ? data.next : null;
+        }
         const def = await this.fetchDefaultBranch(gp.provider, repoFullName, token);
-        return (data.values || []).map((b: any) => ({ name: b.name, isDefault: b.name === def }));
+        return names.map((name) => ({ name, isDefault: name === def }));
       }
     } catch (err: any) {
       throw new BadRequestException(err.message || 'Failed to fetch branches');
@@ -424,10 +453,10 @@ export class GitProvidersService {
    * Create a push webhook on the provider so a `git push` auto-triggers a
    * redeploy — no manual copy-paste of the URL/secret into the provider UI.
    *
-   * Idempotent WITHOUT a migration: we first GET the existing hooks and, if one
-   * already points at our `url`, we leave it (the secret is rotated via the
-   * dedicated rotate path, and providers don't return the stored secret to
-   * compare anyway). Otherwise we POST a new hook subscribed to push events.
+   * Idempotent WITHOUT a migration: we first GET the existing hooks. If one
+   * already points at our `url`, we UPDATE it with the current secret (so a
+   * rotated secret stays in sync between platform and provider rather than
+   * silently drifting); otherwise we POST a new hook subscribed to push events.
    *
    * The `secret` is the SAME value the receiver verifies (HMAC for
    * GitHub/Bitbucket, shared token for GitLab). Token scope matters: GitHub
@@ -454,19 +483,26 @@ export class GitProvidersService {
           headers,
           signal: AbortSignal.timeout(10_000),
         });
+        const config = { url, content_type: 'json', secret, insecure_ssl: '0' };
         if (existing.ok) {
           const hooks: any[] = await existing.json();
-          if (hooks.some((h) => h?.config?.url === url)) return { created: false, alreadyExists: true };
+          const mine = hooks.find((h) => h?.config?.url === url);
+          if (mine) {
+            // Re-sync the secret (e.g. after a rotate) instead of leaving it stale.
+            const upd = await fetch(`${base}/${mine.id}`, {
+              method: 'PATCH',
+              headers: { ...headers, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ active: true, events: ['push'], config }),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (!upd.ok) throw new Error(await this.hookError(upd, 'GitHub'));
+            return { created: false, alreadyExists: true };
+          }
         }
         const res = await fetch(base, {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: 'web',
-            active: true,
-            events: ['push'],
-            config: { url, content_type: 'json', secret, insecure_ssl: '0' },
-          }),
+          body: JSON.stringify({ name: 'web', active: true, events: ['push'], config }),
           signal: AbortSignal.timeout(10_000),
         });
         if (!res.ok) throw new Error(await this.hookError(res, 'GitHub'));
@@ -477,23 +513,34 @@ export class GitProvidersService {
         const projectPath = encodeURIComponent(repoFullName);
         const base = `https://gitlab.com/api/v4/projects/${projectPath}/hooks`;
         const headers = { 'PRIVATE-TOKEN': token };
+        const body = {
+          url,
+          token: secret,
+          push_events: true,
+          enable_ssl_verification: true,
+        };
         const existing = await fetch(`${base}?per_page=100`, {
           headers,
           signal: AbortSignal.timeout(10_000),
         });
         if (existing.ok) {
           const hooks: any[] = await existing.json();
-          if (hooks.some((h) => h?.url === url)) return { created: false, alreadyExists: true };
+          const mine = hooks.find((h) => h?.url === url);
+          if (mine) {
+            const upd = await fetch(`${base}/${mine.id}`, {
+              method: 'PUT',
+              headers: { ...headers, 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (!upd.ok) throw new Error(await this.hookError(upd, 'GitLab'));
+            return { created: false, alreadyExists: true };
+          }
         }
         const res = await fetch(base, {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url,
-            token: secret,
-            push_events: true,
-            enable_ssl_verification: true,
-          }),
+          body: JSON.stringify(body),
           signal: AbortSignal.timeout(10_000),
         });
         if (!res.ok) throw new Error(await this.hookError(res, 'GitLab'));
@@ -503,26 +550,35 @@ export class GitProvidersService {
       if (gp.provider === 'BITBUCKET') {
         const base = `https://api.bitbucket.org/2.0/repositories/${repoFullName}/hooks`;
         const headers = { Authorization: `Bearer ${token}` };
+        const body = {
+          description: 'Kryptalis auto-deploy',
+          url,
+          active: true,
+          events: ['repo:push'],
+          secret,
+        };
         const existing = await fetch(`${base}?pagelen=100`, {
           headers,
           signal: AbortSignal.timeout(10_000),
         });
         if (existing.ok) {
           const data: any = await existing.json();
-          if ((data.values || []).some((h: any) => h?.url === url)) {
+          const mine = (data.values || []).find((h: any) => h?.url === url);
+          if (mine?.uuid) {
+            const upd = await fetch(`${base}/${encodeURIComponent(mine.uuid)}`, {
+              method: 'PUT',
+              headers: { ...headers, 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (!upd.ok) throw new Error(await this.hookError(upd, 'Bitbucket'));
             return { created: false, alreadyExists: true };
           }
         }
         const res = await fetch(base, {
           method: 'POST',
           headers: { ...headers, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            description: 'Kryptalis auto-deploy',
-            url,
-            active: true,
-            events: ['repo:push'],
-            secret,
-          }),
+          body: JSON.stringify(body),
           signal: AbortSignal.timeout(10_000),
         });
         if (!res.ok) throw new Error(await this.hookError(res, 'Bitbucket'));

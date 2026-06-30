@@ -663,7 +663,7 @@ describe('getBranches', () => {
     );
   });
 
-  it('lists branches via the provider and returns the current branch', async () => {
+  it('lists branches via the provider', async () => {
     const { service, prisma, gitProviders } = makeWebhookService();
     prisma.application.findUnique.mockResolvedValue(
       gitApp({ gitProviderId: 'gp1', gitBranch: 'main', gitUrl: 'https://github.com/me/x.git' }),
@@ -671,7 +671,6 @@ describe('getBranches', () => {
     const res = await service.getBranches('u1', 'a1');
     expect(gitProviders.listBranches).toHaveBeenCalledWith('gp1', 'u1', 'me/x');
     expect(res).toEqual({
-      current: 'main',
       branches: [{ name: 'main', isDefault: true }],
     });
   });

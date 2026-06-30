@@ -1334,9 +1334,6 @@ export class ApplicationsService implements OnModuleInit {
       // GitHub/GitLab webhook config.
       secret: app.webhookSecret ? this.encryption.decrypt(app.webhookSecret) : null,
       autoDeploy: app.autoDeploy,
-      // Surface whether a provider is linked so the UI can offer 1-click
-      // auto-registration (vs the manual copy-paste fallback).
-      gitProviderLinked: !!app.gitProviderId,
       contentType: 'application/json',
     };
   }
@@ -1370,7 +1367,7 @@ export class ApplicationsService implements OnModuleInit {
       userId,
       repoFullName,
     );
-    return { current: app.gitBranch ?? null, branches };
+    return { branches };
   }
 
   /**

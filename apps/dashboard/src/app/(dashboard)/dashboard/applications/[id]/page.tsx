@@ -575,7 +575,7 @@ export default function ApplicationDetailPage() {
   });
 
   // --- Webhook ---
-  const { data: webhook, refetch: refetchWebhook } = useQuery<{ url: string; secret: string; autoDeploy: boolean; gitProviderLinked: boolean; contentType: string }>({
+  const { data: webhook, refetch: refetchWebhook } = useQuery<{ url: string; secret: string; autoDeploy: boolean; contentType: string }>({
     queryKey: ['app-webhook', id],
     queryFn: () => api.get(`/applications/${id}/webhook`),
     enabled: activeTab === 'settings',
@@ -604,16 +604,31 @@ export default function ApplicationDetailPage() {
 
   // --- Branch picker (real branches from the linked provider) ---
   const hasProvider = !!app?.gitProviderId;
-  const { data: branchData } = useQuery<{ current: string | null; branches: { name: string; isDefault: boolean }[] }>({
+  const { data: branchData } = useQuery<{ branches: { name: string; isDefault: boolean }[] }>({
     queryKey: ['app-branches', id],
     queryFn: () => api.get(`/applications/${id}/branches`),
     enabled: activeTab === 'settings' && hasProvider,
     retry: false,
   });
   const [branchDraft, setBranchDraft] = useState<string>('');
+  // Seed the picker so the shown option and the controlled value always agree:
+  // prefer the configured branch; if it's unset (or not in the fetched list),
+  // fall back to the provider's default branch, then the first branch. Without
+  // this, a null gitBranch leaves branchDraft '' while the <select> visually
+  // shows the first option — a mismatch that also keeps Save disabled.
   useEffect(() => {
-    if (app?.gitBranch) setBranchDraft(app.gitBranch);
-  }, [app?.gitBranch]);
+    const branches = branchData?.branches;
+    const inList = (name: string | null | undefined) =>
+      !!name && !!branches?.some((b) => b.name === name);
+    if (inList(app?.gitBranch)) {
+      setBranchDraft(app!.gitBranch!);
+    } else if (branches?.length) {
+      setBranchDraft((branches.find((b) => b.isDefault) ?? branches[0]).name);
+    } else if (app?.gitBranch) {
+      // No provider list (free-text fallback) — mirror the stored branch.
+      setBranchDraft(app.gitBranch);
+    }
+  }, [app?.gitBranch, branchData]);
   const branchMutation = useMutation({
     mutationFn: (gitBranch: string) => api.patch(`/applications/${id}`, { gitBranch }),
     onSuccess: () => {
@@ -1819,8 +1834,9 @@ export default function ApplicationDetailPage() {
                   </Button>
                 </div>
 
-                {/* Manual setup fallback (always available; the only path when no
-                    provider is linked). */}
+                {/* Shown under the 1-click box when a provider is linked, pointing
+                    users to the manual URL/secret below. The URL/secret fields
+                    themselves are always rendered (the only path with no provider). */}
                 {hasProvider && (
                   <p className="text-xs text-muted-foreground">{t('apps.webhookManualHint')}</p>
                 )}
