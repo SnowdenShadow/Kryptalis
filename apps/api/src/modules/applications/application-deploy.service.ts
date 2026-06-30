@@ -1341,7 +1341,32 @@ export class ApplicationDeployService implements OnModuleInit {
         );
         const r: any = task.result || {};
         if (r.logs) log(r.logs);
-        if (task.status === 'FAILED') throw new Error(task.error || 'agent deploy failed');
+        if (task.status === 'FAILED') {
+          // The agent rolls a FAILED git redeploy back to the previous
+          // version's appDir + stack (poller.go restorePrevDeploy). When it
+          // reports rolledBack:true the app is STILL SERVING the previous
+          // version, so the app stays RUNNING and the deployment is recorded
+          // as ROLLED_BACK rather than a hard ERROR/FAILED. The next heartbeat
+          // reconciles the live container status either way.
+          if (r.rolledBack) {
+            log('↺ remote deploy failed — agent rolled back to the previous version');
+            await this.apps.setStatus(appId, AppStatus.RUNNING);
+            this.regenerateProxy();
+            await this.prisma.deployment.update({
+              where: { id: deploymentId },
+              data: {
+                status: 'ROLLED_BACK' as any,
+                buildLogs: buildLogs.join('\n').slice(0, 50_000),
+                deployLogs: (task.error || 'agent deploy failed').slice(0, 10_000),
+                duration: Date.now() - started,
+                finishedAt: new Date(),
+              },
+            });
+            this.notifyDeploymentOutcome(deploymentId, name, 'failed', task.error || 'agent deploy failed (rolled back)');
+            return;
+          }
+          throw new Error(task.error || 'agent deploy failed');
+        }
         await this.apps.setStatus(appId, AppStatus.RUNNING);
         this.regenerateProxy();
         await this.prisma.deployment.update({

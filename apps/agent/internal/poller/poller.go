@@ -537,160 +537,234 @@ func (p *Poller) runDeploy(ctx context.Context, task Task) (map[string]interface
 	}
 
 	gitUrl, _ := task.Payload["gitUrl"].(string)
-	if gitUrl != "" {
-		branch, _ := task.Payload["branch"].(string)
-		if branch == "" {
-			branch = "main"
-		}
-		// gitRef: deploy a SPECIFIC commit instead of the branch tip (manual
-		// rollback). Needs a full clone — a shallow one only carries the tip.
-		gitRef, _ := task.Payload["gitRef"].(string)
-		// fresh clone — wipe any previous content
-		_ = os.RemoveAll(dir)
-		_ = os.MkdirAll(dir, 0755)
-		cloneArgs := []string{"clone"}
-		if gitRef == "" {
-			cloneArgs = append(cloneArgs, "--depth", "1")
-		}
-		cloneArgs = append(cloneArgs, "--branch", branch)
-		if header, ok := task.Payload["cloneHeader"].(string); ok && header != "" {
-			cloneArgs = append([]string{"-c", "http.extraheader=" + header}, cloneArgs...)
-		}
-		cloneArgs = append(cloneArgs, gitUrl, dir)
-		if err := runIn(".", "git", cloneArgs...); err != nil {
-			return map[string]interface{}{"logs": logs.String()}, err.Error()
-		}
-		if gitRef != "" {
-			// Detached checkout of the rollback target. Refuse garbage refs:
-			// only full/abbreviated hex SHAs are accepted (no branch names —
-			// the API already resolved the deployment's commitSha).
-			if !isHexRef(gitRef) {
-				return map[string]interface{}{"logs": logs.String()}, "invalid gitRef (expected a commit SHA): " + gitRef
-			}
-			if err := runIn(dir, "git", "checkout", "--detach", gitRef); err != nil {
-				return map[string]interface{}{"logs": logs.String()}, "gitRef checkout failed: " + err.Error()
-			}
-		}
-		// scrub any token persisted via extraheader
-		_ = runIn(dir, "git", "remote", "set-url", "origin", gitUrl)
-		_ = runIn(dir, "git", "config", "--unset", "http.extraheader")
-	}
 
-	if composeText, ok := task.Payload["compose"].(string); ok && composeText != "" {
-		if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(composeText), 0644); err != nil {
-			return nil, err.Error()
-		}
-	}
-	if composeOverride, ok := task.Payload["composeOverride"].(string); ok && composeOverride != "" {
-		if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(composeOverride), 0644); err != nil {
-			return nil, err.Error()
-		}
-	}
-	if dockerfileOverride, ok := task.Payload["dockerfileOverride"].(string); ok && dockerfileOverride != "" {
-		if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfileOverride), 0644); err != nil {
-			return map[string]interface{}{"logs": logs.String()}, "writing Dockerfile override: " + err.Error()
-		}
-	}
-
-	// sideFiles: companion files some compose templates bind-mount (e.g.
-	// PrestaShop's Apache proxy conf) and Dockerfile-only build contexts.
-	// Written before compose up so the mount targets / build inputs exist.
-	// Keys are paths relative to the app dir; traversal is rejected.
-	if sideFiles, ok := task.Payload["sideFiles"].(map[string]interface{}); ok {
-		for name, raw := range sideFiles {
-			content, ok := raw.(string)
-			if !ok {
-				continue
-			}
-			safe := filepath.Clean(name)
-			if safe == "." || strings.HasPrefix(safe, "..") || filepath.IsAbs(safe) {
-				return map[string]interface{}{"logs": logs.String()}, "sideFiles path traversal rejected: " + name
-			}
-			full := filepath.Join(dir, safe)
-			if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
-				return map[string]interface{}{"logs": logs.String()}, "creating sideFiles dir: " + err.Error()
-			}
-			if err := os.WriteFile(full, []byte(content), 0644); err != nil {
-				return map[string]interface{}{"logs": logs.String()}, "writing side file " + safe + ": " + err.Error()
-			}
-		}
-	}
-
-	// .env is ALWAYS written, even empty — marketplace templates declare
-	// `env_file: - .env` and docker compose hard-fails on a missing file.
-	{
-		envVars, _ := task.Payload["envVars"].(map[string]interface{})
-		if envVars == nil {
-			envVars = map[string]interface{}{}
-		}
-		if gitUrl != "" {
-			// Source build (git clone) — mirror the API's local-deploy logic:
-			// merge the repo's .env* files (lowest priority) under the user's
-			// envVars, then write the result to EVERY env file Next/Vite/CRA
-			// read at build time. Writing only .env is not enough: Next.js
-			// gives .env.production and .env.local committed in the repo
-			// priority OVER .env, so user-set NEXT_PUBLIC_* values were
-			// silently losing to stale repo values.
-			merged := mergeRepoEnv(dir, envVars)
-			for _, name := range []string{".env", ".env.local", ".env.production"} {
-				if err := writeEnvFile(filepath.Join(dir, name), merged); err != nil {
-					return map[string]interface{}{"logs": logs.String()}, "writing " + name + ": " + err.Error()
-				}
-			}
-		} else if err := writeEnvFile(filepath.Join(dir, ".env"), envVars); err != nil {
-			return map[string]interface{}{"logs": logs.String()}, "writing .env: " + err.Error()
-		}
-	}
-
-	// Shared dockcontrol-apps bridge — every marketplace/compose template
-	// declares it as `external: true`, so it must exist BEFORE compose up
-	// or the deploy fails with "network dockcontrol-apps ... could not be
-	// found". On the platform host the API creates it; on agent servers
-	// we are the only one who can. Idempotent: inspect, then create.
-	if err := exec.CommandContext(ctx, "docker", "network", "inspect", "dockcontrol-apps").Run(); err != nil {
-		fmt.Fprintf(logs, "> docker network create dockcontrol-apps\n")
-		_ = runIn(".", "docker", "network", "create", "dockcontrol-apps")
-	}
-
-	// Project network — apps in the same DockControl project share a docker
-	// network so they can reach each other by container name.
+	// Rollback snapshot of the previous appDir — git path only. Mirrors the
+	// API's local-deploy contract (application-deploy.service.ts): a git deploy
+	// fully rewrites appDir from a fresh clone, so instead of destroying the
+	// old dir (the previous `os.RemoveAll(dir)`, which left a failed clone/build
+	// with NO way back), we move it aside with an atomic rename. The running
+	// containers don't need their config dir — they keep serving while the new
+	// version clones and builds next to them; the compose project name is the
+	// dir basename, which stays `dir`, so the new `up` adopts/replaces the old
+	// containers. On ANY failure (clone, build, up, or post-up healthcheck) we
+	// swap the snapshot back and bring the previous stack up again, so a broken
+	// push never leaves the app down.
 	//
-	// We do two things:
-	//   1. create the network if it doesn't exist (idempotent, `inspect` then
-	//      `create`). Errors here are non-fatal — if the user's compose file
-	//      doesn't reference the network at all, network creation just isn't
-	//      needed.
-	//   2. write a docker-compose.override.yml that wires every service in the
-	//      stack onto that shared external network. Docker Compose merges this
-	//      override on top of docker-compose.yml automatically. This is far
-	//      simpler (and more robust) than parsing the user's YAML in Go — it
-	//      composes cleanly with whatever they already have.
-	if projectNet, ok := task.Payload["projectNetwork"].(string); ok && projectNet != "" {
-		if err := exec.CommandContext(ctx, "docker", "network", "inspect", projectNet).Run(); err != nil {
-			fmt.Fprintf(logs, "> docker network create %s\n", projectNet)
-			_ = runIn(".", "docker", "network", "create", projectNet)
-		}
-		if err := writeProjectNetworkOverride(dir, projectNet); err != nil {
-			fmt.Fprintf(logs, "> warn: could not write compose override: %v\n", err)
-		}
-	}
-
-	// capture commit (best-effort)
+	// LIMITATION (same as the API): only the CONFIG (appDir: compose, source,
+	// Dockerfile, .env) is snapshotted. Docker volumes/databases live outside
+	// appDir and survive a redeploy untouched — they are not rolled back.
+	//
+	// Non-git deploys (compose/image/dockerfile/php) overwrite in place as
+	// before and are NOT snapshotted: their appDir may hold user data (e.g. a
+	// PHP site's bind-mounted public/) that must never be moved aside.
+	prevDir := dir + ".prev"
+	hasPrevSnapshot := false
 	commitSha := ""
 	commitMsg := ""
-	if shaOut, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output(); err == nil {
-		commitSha = strings.TrimSpace(string(shaOut))
-	}
-	if msgOut, err := exec.CommandContext(ctx, "git", "-C", dir, "log", "-1", "--pretty=%B").Output(); err == nil {
-		commitMsg = strings.TrimSpace(string(msgOut))
+
+	// build runs the full deploy sequence. It returns an error string ("" on
+	// success); the caller turns a non-empty result into a rollback (git path)
+	// before reporting the task as FAILED.
+	build := func() string {
+		if gitUrl != "" {
+			branch, _ := task.Payload["branch"].(string)
+			if branch == "" {
+				branch = "main"
+			}
+			// gitRef: deploy a SPECIFIC commit instead of the branch tip (manual
+			// rollback). Needs a full clone — a shallow one only carries the tip.
+			gitRef, _ := task.Payload["gitRef"].(string)
+			// Snapshot the previous appDir aside instead of destroying it, so a
+			// failed clone/build can be rolled back. Atomic rename (same FS),
+			// costs no disk/time even with a huge node_modules.
+			snapped, snapErr := snapshotAppDir(dir, prevDir)
+			if snapErr != nil {
+				// rename failed (cross-device, locked file) — degrade to the
+				// historical wipe; rollback simply won't be available.
+				fmt.Fprintf(logs, "> warn: could not snapshot previous deploy (%v); proceeding without rollback\n", snapErr)
+				_ = os.RemoveAll(dir)
+			}
+			hasPrevSnapshot = snapped
+			_ = os.MkdirAll(dir, 0755)
+			cloneArgs := []string{"clone"}
+			if gitRef == "" {
+				cloneArgs = append(cloneArgs, "--depth", "1")
+			}
+			cloneArgs = append(cloneArgs, "--branch", branch)
+			if header, ok := task.Payload["cloneHeader"].(string); ok && header != "" {
+				cloneArgs = append([]string{"-c", "http.extraheader=" + header}, cloneArgs...)
+			}
+			cloneArgs = append(cloneArgs, gitUrl, dir)
+			if err := runIn(".", "git", cloneArgs...); err != nil {
+				return err.Error()
+			}
+			if gitRef != "" {
+				// Detached checkout of the rollback target. Refuse garbage refs:
+				// only full/abbreviated hex SHAs are accepted (no branch names —
+				// the API already resolved the deployment's commitSha).
+				if !isHexRef(gitRef) {
+					return "invalid gitRef (expected a commit SHA): " + gitRef
+				}
+				if err := runIn(dir, "git", "checkout", "--detach", gitRef); err != nil {
+					return "gitRef checkout failed: " + err.Error()
+				}
+			}
+			// scrub any token persisted via extraheader
+			_ = runIn(dir, "git", "remote", "set-url", "origin", gitUrl)
+			_ = runIn(dir, "git", "config", "--unset", "http.extraheader")
+		}
+
+		if composeText, ok := task.Payload["compose"].(string); ok && composeText != "" {
+			if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(composeText), 0644); err != nil {
+				return err.Error()
+			}
+		}
+		if composeOverride, ok := task.Payload["composeOverride"].(string); ok && composeOverride != "" {
+			if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(composeOverride), 0644); err != nil {
+				return err.Error()
+			}
+		}
+		if dockerfileOverride, ok := task.Payload["dockerfileOverride"].(string); ok && dockerfileOverride != "" {
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfileOverride), 0644); err != nil {
+				return "writing Dockerfile override: " + err.Error()
+			}
+		}
+
+		// sideFiles: companion files some compose templates bind-mount (e.g.
+		// PrestaShop's Apache proxy conf) and Dockerfile-only build contexts.
+		// Written before compose up so the mount targets / build inputs exist.
+		// Keys are paths relative to the app dir; traversal is rejected.
+		if sideFiles, ok := task.Payload["sideFiles"].(map[string]interface{}); ok {
+			for name, raw := range sideFiles {
+				content, ok := raw.(string)
+				if !ok {
+					continue
+				}
+				safe := filepath.Clean(name)
+				if safe == "." || strings.HasPrefix(safe, "..") || filepath.IsAbs(safe) {
+					return "sideFiles path traversal rejected: " + name
+				}
+				full := filepath.Join(dir, safe)
+				if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+					return "creating sideFiles dir: " + err.Error()
+				}
+				if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+					return "writing side file " + safe + ": " + err.Error()
+				}
+			}
+		}
+
+		// .env is ALWAYS written, even empty — marketplace templates declare
+		// `env_file: - .env` and docker compose hard-fails on a missing file.
+		{
+			envVars, _ := task.Payload["envVars"].(map[string]interface{})
+			if envVars == nil {
+				envVars = map[string]interface{}{}
+			}
+			if gitUrl != "" {
+				// Source build (git clone) — mirror the API's local-deploy logic:
+				// merge the repo's .env* files (lowest priority) under the user's
+				// envVars, then write the result to EVERY env file Next/Vite/CRA
+				// read at build time. Writing only .env is not enough: Next.js
+				// gives .env.production and .env.local committed in the repo
+				// priority OVER .env, so user-set NEXT_PUBLIC_* values were
+				// silently losing to stale repo values.
+				merged := mergeRepoEnv(dir, envVars)
+				for _, name := range []string{".env", ".env.local", ".env.production"} {
+					if err := writeEnvFile(filepath.Join(dir, name), merged); err != nil {
+						return "writing " + name + ": " + err.Error()
+					}
+				}
+			} else if err := writeEnvFile(filepath.Join(dir, ".env"), envVars); err != nil {
+				return "writing .env: " + err.Error()
+			}
+		}
+
+		// Shared dockcontrol-apps bridge — every marketplace/compose template
+		// declares it as `external: true`, so it must exist BEFORE compose up
+		// or the deploy fails with "network dockcontrol-apps ... could not be
+		// found". On the platform host the API creates it; on agent servers
+		// we are the only one who can. Idempotent: inspect, then create.
+		if err := exec.CommandContext(ctx, "docker", "network", "inspect", "dockcontrol-apps").Run(); err != nil {
+			fmt.Fprintf(logs, "> docker network create dockcontrol-apps\n")
+			_ = runIn(".", "docker", "network", "create", "dockcontrol-apps")
+		}
+
+		// Project network — apps in the same DockControl project share a docker
+		// network so they can reach each other by container name.
+		//
+		// We do two things:
+		//   1. create the network if it doesn't exist (idempotent, `inspect` then
+		//      `create`). Errors here are non-fatal — if the user's compose file
+		//      doesn't reference the network at all, network creation just isn't
+		//      needed.
+		//   2. write a docker-compose.override.yml that wires every service in the
+		//      stack onto that shared external network. Docker Compose merges this
+		//      override on top of docker-compose.yml automatically. This is far
+		//      simpler (and more robust) than parsing the user's YAML in Go — it
+		//      composes cleanly with whatever they already have.
+		if projectNet, ok := task.Payload["projectNetwork"].(string); ok && projectNet != "" {
+			if err := exec.CommandContext(ctx, "docker", "network", "inspect", projectNet).Run(); err != nil {
+				fmt.Fprintf(logs, "> docker network create %s\n", projectNet)
+				_ = runIn(".", "docker", "network", "create", projectNet)
+			}
+			if err := writeProjectNetworkOverride(dir, projectNet); err != nil {
+				fmt.Fprintf(logs, "> warn: could not write compose override: %v\n", err)
+			}
+		}
+
+		// capture commit (best-effort)
+		if shaOut, err := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "HEAD").Output(); err == nil {
+			commitSha = strings.TrimSpace(string(shaOut))
+		}
+		if msgOut, err := exec.CommandContext(ctx, "git", "-C", dir, "log", "-1", "--pretty=%B").Output(); err == nil {
+			commitMsg = strings.TrimSpace(string(msgOut))
+		}
+
+		if err := runIn(dir, "docker", "compose", "pull"); err != nil {
+			// Non-fatal (image may be built locally) but worth surfacing in logs.
+			fmt.Fprintf(logs, "> warn: compose pull failed: %v\n", err)
+		}
+		if err := runIn(dir, "docker", "compose", "up", "-d", "--build", "--remove-orphans"); err != nil {
+			return err.Error()
+		}
+		return ""
 	}
 
-	if err := runIn(dir, "docker", "compose", "pull"); err != nil {
-		// Non-fatal (image may be built locally) but worth surfacing in logs.
-		fmt.Fprintf(logs, "> warn: compose pull failed: %v\n", err)
+	deployErr := build()
+
+	// Post-up healthcheck — only when we hold a rollback snapshot (i.e. a git
+	// REDEPLOY over a previous version). `compose up -d` exits 0 the instant
+	// containers are created, so a crash-looping new build looks "deployed";
+	// the healthcheck catches it and routes to rollback. We don't run it on a
+	// first deploy (nothing to roll back to) or on non-git deploys (unchanged
+	// behavior — a one-shot service that exits 0 must not be treated as failed).
+	if deployErr == "" && hasPrevSnapshot {
+		if !waitForComposeHealthy(ctx, dir, 30*time.Second) {
+			deployErr = "healthcheck failed — new version did not reach a running state within 30s"
+			fmt.Fprintf(logs, "> %s\n", deployErr)
+		}
 	}
-	if err := runIn(dir, "docker", "compose", "up", "-d", "--build", "--remove-orphans"); err != nil {
-		return map[string]interface{}{"logs": tail(logs.String(), 8000)}, err.Error()
+
+	if deployErr != "" {
+		if hasPrevSnapshot {
+			// Swap the previous appDir back and bring the old stack up again.
+			// Report the deploy as FAILED regardless (the requested version did
+			// NOT deploy) — but the app keeps serving the previous version, and
+			// the next heartbeat resyncs its RUNNING status from the live
+			// containers.
+			rolledBack := p.restorePrevDeploy(ctx, dir, prevDir, logs)
+			return map[string]interface{}{
+				"logs":       tail(logs.String(), 8000),
+				"rolledBack": rolledBack,
+			}, deployErr
+		}
+		return map[string]interface{}{"logs": tail(logs.String(), 8000)}, deployErr
+	}
+
+	// Deploy succeeded — the snapshot is no longer needed.
+	if hasPrevSnapshot {
+		_ = os.RemoveAll(prevDir)
 	}
 	return map[string]interface{}{
 		"status":        "deployed",
@@ -698,6 +772,147 @@ func (p *Poller) runDeploy(ctx context.Context, task Task) (map[string]interface
 		"commitSha":     commitSha,
 		"commitMessage": commitMsg,
 	}, ""
+}
+
+// snapshotAppDir moves an existing appDir aside to prevDir (atomic rename) so a
+// failed deploy can be rolled back. Returns true when a snapshot was taken. A
+// stale prevDir from an earlier crashed deploy is removed first. If the rename
+// fails (cross-device, locked), the caller is told no snapshot exists and is
+// expected to degrade to a plain wipe.
+func snapshotAppDir(dir, prevDir string) (bool, error) {
+	fi, err := os.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		return false, nil // nothing to snapshot (first deploy)
+	}
+	_ = os.RemoveAll(prevDir)
+	if err := os.Rename(dir, prevDir); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// swapBackSnapshot restores a snapshot taken by snapshotAppDir: the (broken)
+// current dir is removed and prevDir is renamed back into its place. Filesystem
+// only — bringing the restored stack back up is the caller's job.
+func swapBackSnapshot(dir, prevDir string) error {
+	_ = os.RemoveAll(dir)
+	return os.Rename(prevDir, dir)
+}
+
+// restorePrevDeploy rolls a failed git deploy back to the snapshot: it swaps the
+// previous appDir back into place and brings the old compose stack up again.
+// Returns true when the previous version is healthy again. Mirrors the rollback
+// in the API's local deploy path (application-deploy.service.ts). The compose
+// project name is the dir basename (unchanged across the swap), so `up`
+// reconciles the containers back to the previous config.
+func (p *Poller) restorePrevDeploy(ctx context.Context, dir, prevDir string, logs *bytes.Buffer) bool {
+	fmt.Fprintf(logs, "> rollback: restoring previous deployment\n")
+	// Restore the snapshot FIRST — otherwise `up` would just relaunch the
+	// broken config the failed deploy wrote.
+	if err := swapBackSnapshot(dir, prevDir); err != nil {
+		fmt.Fprintf(logs, "> rollback: failed to restore previous app directory: %v\n", err)
+		return false
+	}
+	c := exec.CommandContext(ctx, "docker", "compose", "up", "-d", "--remove-orphans")
+	c.Dir = dir
+	c.Stdout = logs
+	c.Stderr = logs
+	if err := c.Run(); err != nil {
+		fmt.Fprintf(logs, "> rollback: previous stack failed to start: %v\n", err)
+		return false
+	}
+	ok := waitForComposeHealthy(ctx, dir, 20*time.Second)
+	if ok {
+		fmt.Fprintf(logs, "> rollback successful — previous version is running\n")
+	} else {
+		fmt.Fprintf(logs, "> rollback healthcheck failed\n")
+	}
+	return ok
+}
+
+// composeState is the slice of `docker compose ps --format json` we care about
+// for healthchecking.
+type composeState struct {
+	State  string `json:"State"`
+	Health string `json:"Health"`
+}
+
+// parseComposeStates decodes `docker compose ps --format json` output, which is
+// either NDJSON (one object per line, newer compose) or a single JSON array
+// (older compose). Mirrors the API's waitForHealthy tolerance of both shapes.
+func parseComposeStates(out string) []composeState {
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil
+	}
+	var states []composeState
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var s composeState
+		if err := json.Unmarshal([]byte(line), &s); err == nil && (s.State != "" || s.Health != "") {
+			states = append(states, s)
+		}
+	}
+	if len(states) > 0 {
+		return states
+	}
+	// Fallback: a single JSON array (or object) rather than NDJSON.
+	var arr []composeState
+	if err := json.Unmarshal([]byte(out), &arr); err == nil {
+		return arr
+	}
+	return nil
+}
+
+// evalComposeHealth reduces a set of service states to (allUp, anyDead).
+// allUp: every service is running and not starting/unhealthy → the stack is
+// healthy. anyDead: at least one service exited/dead/oomkilled → fail fast, no
+// point waiting for the rest. An empty set is neither (not yet observable).
+func evalComposeHealth(states []composeState) (allUp bool, anyDead bool) {
+	if len(states) == 0 {
+		return false, false
+	}
+	allUp = true
+	for _, s := range states {
+		st := strings.ToLower(s.State)
+		h := strings.ToLower(s.Health)
+		if h == "starting" || h == "unhealthy" || st != "running" {
+			allUp = false
+		}
+		if st == "exited" || st == "dead" || st == "oomkilled" {
+			anyDead = true
+		}
+	}
+	return allUp, anyDead
+}
+
+// waitForComposeHealthy polls `docker compose ps` until every service is running
+// (and not unhealthy/starting) or the deadline passes. A service that
+// exits/dies fails fast. Mirrors the API's waitForHealthy.
+func waitForComposeHealthy(ctx context.Context, dir string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		c := exec.CommandContext(ctx, "docker", "compose", "ps", "--format", "json")
+		c.Dir = dir
+		if out, err := c.Output(); err == nil {
+			allUp, anyDead := evalComposeHealth(parseComposeStates(string(out)))
+			if allUp {
+				return true
+			}
+			if anyDead {
+				return false
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return false
 }
 
 // resolveTaskDir picks the compose dir for lifecycle ops. New deploys use a

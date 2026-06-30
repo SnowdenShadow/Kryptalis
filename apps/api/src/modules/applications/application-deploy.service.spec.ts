@@ -1241,6 +1241,26 @@ describe('runDeploy — remote server delegation', () => {
     expect(data.status).toBe('FAILED');
     expect(data.deployLogs).toContain('agent boom');
   });
+
+  it('agent FAILED but rolledBack → app stays RUNNING, deployment ROLLED_BACK', async () => {
+    // The agent restored the previous version's appDir + stack (poller.go
+    // restorePrevDeploy) and reported rolledBack:true. The app is still
+    // serving, so the deploy is recorded as ROLLED_BACK rather than a hard
+    // ERROR — mirroring the local deploy path's rollback contract.
+    const { service, prisma, agent } = makeRemote();
+    agent.enqueueAndWait.mockResolvedValue({
+      status: 'FAILED',
+      error: 'new build crash-looped',
+      result: { rolledBack: true, logs: 'rollback successful' },
+    });
+
+    await service.runDeploy('dep1', APP_ID, APP_NAME, GIT_URL, 'main', {});
+
+    expect(lastAppStatus(prisma)).toBe('RUNNING');
+    const data = lastDeploymentData(prisma);
+    expect(data.status).toBe('ROLLED_BACK');
+    expect(data.deployLogs).toContain('new build crash-looped');
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════
