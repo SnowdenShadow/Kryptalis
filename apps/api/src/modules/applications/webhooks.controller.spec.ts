@@ -155,4 +155,41 @@ describe('ApplicationWebhooksController.receive — inflight 409 → benign skip
       ),
     ).rejects.toThrow('clone failed');
   });
+
+  it('a Gitea/Forgejo push (raw-hex x-gitea-signature) verifies and triggers a redeploy', async () => {
+    const { controller, apps, req } = makeController(async () => ({ deploymentId: 'd1' }));
+    // Gitea/Forgejo: hex HMAC-SHA256 over the raw body, NO "sha256=" prefix.
+    const giteaSig = crypto.createHmac('sha256', SECRET).update(raw).digest('hex');
+    const res = await controller.receive(
+      'app1', body, req,
+      undefined, // ghSig
+      undefined, // glToken
+      undefined, // bbEvent
+      undefined, // ghLegacy
+      undefined, // bbSig
+      undefined, // ghDelivery
+      undefined, // glDelivery
+      undefined, // bbDelivery
+      giteaSig,  // x-gitea-signature
+      undefined, // forgejoSig
+      `deliv-${Math.random()}`, // x-gitea-delivery
+    );
+    expect(res).toEqual({ triggered: true });
+    expect(apps.redeploy).toHaveBeenCalledTimes(1);
+  });
+
+  it('a bad x-gitea-signature is rejected (fail-closed)', async () => {
+    const { controller, apps, req } = makeController(async () => ({ deploymentId: 'd1' }));
+    const res = await controller.receive(
+      'app1', body, req,
+      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined,
+      'deadbeef', // wrong signature
+      undefined,
+      `deliv-${Math.random()}`,
+    ).catch((e) => e);
+    expect(res).toBeInstanceOf(Error);
+    expect(String(res.message)).toMatch(/Invalid signature/);
+    expect(apps.redeploy).not.toHaveBeenCalled();
+  });
 });

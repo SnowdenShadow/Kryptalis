@@ -109,6 +109,13 @@ export class ApplicationWebhooksController {
     @Headers('x-github-delivery') ghDelivery?: string,
     @Headers('x-gitlab-event-uuid') glDelivery?: string,
     @Headers('x-request-uuid') bbDelivery?: string,
+    // Gitea/Forgejo: HMAC-SHA256 over the raw body, hex-encoded with NO
+    // "sha256=" prefix. Both projects share the wire format (Forgejo forked
+    // Gitea), and the ref is refs/heads/<branch> like GitHub — so the only new
+    // piece is the signature header. X-Gitea-Delivery dedups replays.
+    @Headers('x-gitea-signature') giteaSig?: string,
+    @Headers('x-forgejo-signature') forgejoSig?: string,
+    @Headers('x-gitea-delivery') giteaDelivery?: string,
   ) {
     // ── Signature verification FIRST (fail-closed, no existence oracle) ──
     // We must not reveal whether the app exists or how it's configured to an
@@ -143,6 +150,10 @@ export class ApplicationWebhooksController {
       } else if (bbSig) {
         const h = crypto.createHmac('sha256', secret).update(raw).digest('hex');
         verified = timingSafeStrEq(h, bbSig) || timingSafeStrEq(`sha256=${h}`, bbSig);
+      } else if (giteaSig || forgejoSig) {
+        // Gitea/Forgejo: raw hex HMAC-SHA256, no prefix.
+        const h = crypto.createHmac('sha256', secret).update(raw).digest('hex');
+        verified = timingSafeStrEq(h, (giteaSig ?? forgejoSig)!);
       } else if (ghLegacy) {
         const h = crypto.createHmac('sha1', secret).update(raw).digest('hex');
         verified = timingSafeStrEq(`sha1=${h}`, ghLegacy);
@@ -161,7 +172,7 @@ export class ApplicationWebhooksController {
 
     // ── Replay protection ──────────────────────────────────────────────
     // Scope the provider delivery id by app so two apps can't collide.
-    const deliveryHeader = ghDelivery ?? glDelivery ?? bbDelivery;
+    const deliveryHeader = ghDelivery ?? glDelivery ?? bbDelivery ?? giteaDelivery;
     if (deliveryHeader && isReplay(`${id}:${deliveryHeader}`)) {
       return { skipped: true, reason: 'duplicate delivery' };
     }

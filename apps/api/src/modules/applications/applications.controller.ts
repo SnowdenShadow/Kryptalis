@@ -236,6 +236,18 @@ export class ApplicationsController {
     return this.svc.getWebhook(userId, id);
   }
 
+  @Get(':id/branches')
+  @ApiOperation({ summary: 'List repo branches via the linked git provider' })
+  branches(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.getBranches(userId, id);
+  }
+
+  @Post(':id/webhook/install')
+  @ApiOperation({ summary: '1-click: register the push webhook on the provider + enable auto-deploy' })
+  installWebhook(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.installWebhook(userId, id);
+  }
+
   @Post(':id/webhook/rotate')
   @ApiOperation({ summary: 'Rotate webhook secret' })
   rotateWebhook(@CurrentUser('id') userId: string, @Param('id') id: string) {

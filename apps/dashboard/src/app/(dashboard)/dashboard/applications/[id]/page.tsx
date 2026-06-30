@@ -575,7 +575,7 @@ export default function ApplicationDetailPage() {
   });
 
   // --- Webhook ---
-  const { data: webhook, refetch: refetchWebhook } = useQuery<{ url: string; secret: string; autoDeploy: boolean; contentType: string }>({
+  const { data: webhook, refetch: refetchWebhook } = useQuery<{ url: string; secret: string; autoDeploy: boolean; gitProviderLinked: boolean; contentType: string }>({
     queryKey: ['app-webhook', id],
     queryFn: () => api.get(`/applications/${id}/webhook`),
     enabled: activeTab === 'settings',
@@ -590,7 +590,39 @@ export default function ApplicationDetailPage() {
     onSuccess: () => { refetchWebhook(); queryClient.invalidateQueries({ queryKey: ['application', id] }); },
     onError: (err: Error) => toast.error(err.message),
   });
+  // 1-click: register the push webhook on the provider + enable auto-deploy.
+  const installWebhookMutation = useMutation({
+    mutationFn: () => api.post<{ installed: boolean; alreadyExisted: boolean }>(`/applications/${id}/webhook/install`),
+    onSuccess: (res) => {
+      toast.success(res?.alreadyExisted ? t('toast.webhookAlready') : t('toast.webhookInstalled'));
+      refetchWebhook();
+      queryClient.invalidateQueries({ queryKey: ['application', id] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
   const [showSecret, setShowSecret] = useState(false);
+
+  // --- Branch picker (real branches from the linked provider) ---
+  const hasProvider = !!app?.gitProviderId;
+  const { data: branchData } = useQuery<{ current: string | null; branches: { name: string; isDefault: boolean }[] }>({
+    queryKey: ['app-branches', id],
+    queryFn: () => api.get(`/applications/${id}/branches`),
+    enabled: activeTab === 'settings' && hasProvider,
+    retry: false,
+  });
+  const [branchDraft, setBranchDraft] = useState<string>('');
+  useEffect(() => {
+    if (app?.gitBranch) setBranchDraft(app.gitBranch);
+  }, [app?.gitBranch]);
+  const branchMutation = useMutation({
+    mutationFn: (gitBranch: string) => api.patch(`/applications/${id}`, { gitBranch }),
+    onSuccess: () => {
+      toast.success(t('toast.branchUpdated'));
+      queryClient.invalidateQueries({ queryKey: ['application', id] });
+      refetchWebhook();
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
 
   // --- Redeploy ---
   const redeployMutation = useMutation({
@@ -1705,6 +1737,62 @@ export default function ApplicationDetailPage() {
                 <CardDescription>{t('apps.webhookDesc')}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
+                {/* Deploy branch — real dropdown when a provider is linked, free
+                    text otherwise. A push to this branch is what triggers a deploy. */}
+                <div className="space-y-2">
+                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">{t('apps.deployBranch')}</Label>
+                  <div className="flex gap-2">
+                    {hasProvider && branchData?.branches?.length ? (
+                      <Select
+                        value={branchDraft}
+                        onChange={(e) => setBranchDraft(e.target.value)}
+                        disabled={branchMutation.isPending}
+                      >
+                        {branchData.branches.map((b) => (
+                          <option key={b.name} value={b.name}>
+                            {b.name}{b.isDefault ? ` (${t('apps.branchDefault')})` : ''}
+                          </option>
+                        ))}
+                      </Select>
+                    ) : (
+                      <Input
+                        value={branchDraft}
+                        onChange={(e) => setBranchDraft(e.target.value)}
+                        placeholder="main"
+                        disabled={branchMutation.isPending}
+                        className="font-mono text-xs"
+                      />
+                    )}
+                    <Button
+                      size="sm"
+                      disabled={branchMutation.isPending || !branchDraft.trim() || branchDraft.trim() === (app.gitBranch || '')}
+                      onClick={() => branchMutation.mutate(branchDraft.trim())}
+                    >
+                      {branchMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />} {t('apps.branchSave')}
+                    </Button>
+                  </div>
+                  {!hasProvider && (
+                    <p className="text-xs text-muted-foreground">{t('apps.branchNoProviderHint')}</p>
+                  )}
+                </div>
+
+                {/* 1-click auto-register on the provider (only when one is linked). */}
+                {hasProvider && (
+                  <div className="flex items-center justify-between rounded-md border border-primary/40 bg-primary/5 p-3">
+                    <div className="pr-3">
+                      <p className="font-medium text-sm">{t('apps.installWebhookTitle')}</p>
+                      <p className="text-xs text-muted-foreground">{t('apps.installWebhookDesc')}</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      onClick={() => installWebhookMutation.mutate()}
+                      disabled={installWebhookMutation.isPending}
+                    >
+                      {installWebhookMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <Rocket size={12} />} {t('apps.installWebhookBtn')}
+                    </Button>
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between rounded-md border border-border p-3">
                   <div>
                     <p className="font-medium text-sm">{t('apps.autoDeploy')}</p>
@@ -1730,6 +1818,12 @@ export default function ApplicationDetailPage() {
                     {webhook?.autoDeploy ? t('apps.enabled') : t('apps.disabled')}
                   </Button>
                 </div>
+
+                {/* Manual setup fallback (always available; the only path when no
+                    provider is linked). */}
+                {hasProvider && (
+                  <p className="text-xs text-muted-foreground">{t('apps.webhookManualHint')}</p>
+                )}
 
                 <div className="space-y-2">
                   <Label className="text-xs uppercase tracking-wider text-muted-foreground">{t('apps.webhookUrl')}</Label>

@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 
-import { GitProvidersService } from './git-providers.service';
+import { GitProvidersService, repoFullNameFromUrl } from './git-providers.service';
 import { GitOAuthService } from './git-oauth.service';
 
 // ── fetch mock — no network ever ─────────────────────────────────────
@@ -533,5 +533,190 @@ describe('fetchFile', () => {
 
     const res = await service.fetchFile('gp1', 'u1', 'me/app', 'main', 'Dockerfile');
     expect(res).toEqual({ content: '', exists: false });
+  });
+});
+
+// ── repoFullNameFromUrl ──────────────────────────────────────────────
+
+describe('repoFullNameFromUrl', () => {
+  it.each([
+    ['https://github.com/acme/site.git', 'acme/site'],
+    ['https://github.com/acme/site', 'acme/site'],
+    ['https://gitlab.com/group/sub/repo.git', 'group/sub/repo'],
+    ['https://bitbucket.org/workspace/repo', 'workspace/repo'],
+    ['https://github.com/acme/site/', 'acme/site'],
+  ])('parses %s → %s', (url, expected) => {
+    expect(repoFullNameFromUrl(url)).toBe(expected);
+  });
+
+  it('throws on a missing URL', () => {
+    expect(() => repoFullNameFromUrl(null)).toThrow(BadRequestException);
+  });
+
+  it('throws when no owner/repo can be derived', () => {
+    expect(() => repoFullNameFromUrl('https://github.com/justowner')).toThrow(
+      BadRequestException,
+    );
+  });
+
+  it('throws on a non-URL string', () => {
+    expect(() => repoFullNameFromUrl('not a url')).toThrow(BadRequestException);
+  });
+});
+
+// ── listBranches ─────────────────────────────────────────────────────
+
+describe('listBranches', () => {
+  it("404s on another user's provider before any network call", async () => {
+    const { service } = makeProvidersService();
+    await expect(service.listBranches('gp1', 'u2', 'me/app')).rejects.toThrow(
+      NotFoundException,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('GitHub: lists branches and flags the default from the repo metadata', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITHUB', token: 'enc:t',
+    });
+    onUrl('/branches', [{ name: 'main' }, { name: 'dev' }]);
+    // repo metadata lookup for the default branch (must not match /branches)
+    routes.push({
+      match: (u) => /api\.github\.com\/repos\/me\/app$/.test(u),
+      res: () => json({ default_branch: 'dev' }),
+    });
+
+    const res = await service.listBranches('gp1', 'u1', 'me/app');
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers.Authorization).toBe('Bearer t');
+    expect(res).toEqual([
+      { name: 'main', isDefault: false },
+      { name: 'dev', isDefault: true },
+    ]);
+  });
+
+  it('GitLab: maps the inline `default` flag (no extra metadata call)', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITLAB', token: 'enc:gl',
+    });
+    onUrl('/repository/branches', [
+      { name: 'main', default: true },
+      { name: 'feature', default: false },
+    ]);
+
+    const res = await service.listBranches('gp1', 'u1', 'group/app');
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers['PRIVATE-TOKEN']).toBe('gl');
+    expect(res).toEqual([
+      { name: 'main', isDefault: true },
+      { name: 'feature', isDefault: false },
+    ]);
+  });
+
+  it('wraps an upstream failure in a 400', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITHUB', token: 'enc:t',
+    });
+    onUrl('/branches', {}, false);
+    await expect(service.listBranches('gp1', 'u1', 'me/app')).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+});
+
+// ── registerWebhook ──────────────────────────────────────────────────
+
+describe('registerWebhook', () => {
+  const URL = 'https://kryptalis.example.com/api/webhooks/applications/app1';
+
+  it("404s on another user's provider before any network call", async () => {
+    const { service } = makeProvidersService();
+    await expect(
+      service.registerWebhook('gp1', 'u2', 'me/app', URL, 'sec'),
+    ).rejects.toThrow(NotFoundException);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('GitHub: POSTs a push hook with the secret in config when none exists', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITHUB', token: 'enc:t',
+    });
+    // existing-hooks GET returns empty, POST succeeds
+    routes.push({
+      match: (u, init) => u.includes('/hooks') && (!init || init.method !== 'POST'),
+      res: () => json([]),
+    });
+    routes.push({
+      match: (u, init) => u.includes('/hooks') && init?.method === 'POST',
+      res: () => json({ id: 1 }, true, 201),
+    });
+
+    const res = await service.registerWebhook('gp1', 'u1', 'me/app', URL, 'sec');
+    expect(res).toEqual({ created: true, alreadyExists: false });
+    const post = fetchMock.mock.calls.find(([, i]: any[]) => i?.method === 'POST')!;
+    const body = JSON.parse((post[1] as any).body);
+    expect(body).toMatchObject({
+      name: 'web',
+      events: ['push'],
+      config: { url: URL, content_type: 'json', secret: 'sec' },
+    });
+  });
+
+  it('GitHub: idempotent — skips POST when a hook already points at our URL', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITHUB', token: 'enc:t',
+    });
+    routes.push({
+      match: (u, init) => u.includes('/hooks') && (!init || init.method !== 'POST'),
+      res: () => json([{ config: { url: URL } }]),
+    });
+
+    const res = await service.registerWebhook('gp1', 'u1', 'me/app', URL, 'sec');
+    expect(res).toEqual({ created: false, alreadyExists: true });
+    expect(fetchMock.mock.calls.some(([, i]: any[]) => i?.method === 'POST')).toBe(false);
+  });
+
+  it('GitLab: POSTs with token + push_events', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITLAB', token: 'enc:gl',
+    });
+    routes.push({
+      match: (u, init) => u.includes('/hooks') && (!init || init.method !== 'POST'),
+      res: () => json([]),
+    });
+    routes.push({
+      match: (u, init) => u.includes('/hooks') && init?.method === 'POST',
+      res: () => json({ id: 2 }, true, 201),
+    });
+
+    await service.registerWebhook('gp1', 'u1', 'group/app', URL, 'sec');
+    const post = fetchMock.mock.calls.find(([, i]: any[]) => i?.method === 'POST')!;
+    const body = JSON.parse((post[1] as any).body);
+    expect(body).toMatchObject({ url: URL, token: 'sec', push_events: true });
+  });
+
+  it('surfaces a readable 403 (token missing webhook permission)', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITHUB', token: 'enc:t',
+    });
+    routes.push({
+      match: (u, init) => u.includes('/hooks') && (!init || init.method !== 'POST'),
+      res: () => json([]),
+    });
+    routes.push({
+      match: (u, init) => u.includes('/hooks') && init?.method === 'POST',
+      res: () => json({ message: 'Forbidden' }, false, 403),
+    });
+
+    await expect(
+      service.registerWebhook('gp1', 'u1', 'me/app', URL, 'sec'),
+    ).rejects.toThrow(/missing the permission/);
   });
 });

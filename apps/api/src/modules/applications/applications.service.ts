@@ -41,7 +41,12 @@ import {
   isAppLocal,
 } from './applications.helpers';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
-import { assertCloneHostAllowed } from '../git-providers/git-providers.service';
+import {
+  assertCloneHostAllowed,
+  isPrivateOrLoopbackHost,
+  repoFullNameFromUrl,
+  GitProvidersService,
+} from '../git-providers/git-providers.service';
 import { appVolumePrefix } from '../agent/volume-naming.util';
 import { spawn } from 'child_process';
 import * as path from 'path';
@@ -79,6 +84,7 @@ export class ApplicationsService implements OnModuleInit {
     private env: ApplicationEnvService,
     private sftp: SftpService,
     private apps: ApplicationRepository,
+    private gitProviders: GitProvidersService,
   ) {}
 
   // Register the linked-app refresher so DatabasesService can refresh + redeploy
@@ -1310,15 +1316,27 @@ export class ApplicationsService implements OnModuleInit {
 
   // ── webhooks ──────────────────────────────────────────────────────
 
+  /**
+   * Public base URL the provider must POST push events to. Returns '' when
+   * PUBLIC_API_URL/API_URL is unset (dev). The webhook receiver lives at
+   * /api/webhooks/applications/:id.
+   */
+  private buildWebhookUrl(id: string): string {
+    const base = process.env.PUBLIC_API_URL || process.env.API_URL || '';
+    return `${base.replace(/\/$/, '')}/api/webhooks/applications/${id}`;
+  }
+
   async getWebhook(userId: string, id: string) {
     const app = await this.assertOwnership(userId, id);
-    const base = process.env.PUBLIC_API_URL || process.env.API_URL || '';
     return {
-      url: `${base.replace(/\/$/, '')}/api/webhooks/applications/${id}`,
+      url: this.buildWebhookUrl(id),
       // Decrypted on the way out so the user can copy it into their
       // GitHub/GitLab webhook config.
       secret: app.webhookSecret ? this.encryption.decrypt(app.webhookSecret) : null,
       autoDeploy: app.autoDeploy,
+      // Surface whether a provider is linked so the UI can offer 1-click
+      // auto-registration (vs the manual copy-paste fallback).
+      gitProviderLinked: !!app.gitProviderId,
       contentType: 'application/json',
     };
   }
@@ -1331,6 +1349,94 @@ export class ApplicationsService implements OnModuleInit {
       data: { webhookSecret: this.encryption.encrypt(secret) },
     });
     return { secret };
+  }
+
+  /**
+   * List the branches of the app's repo via its linked git provider, so the
+   * UI can offer a real branch picker. Requires a linked provider (the branch
+   * list comes from the provider API); apps with only a public/anonymous git
+   * URL have no token to call the API with.
+   */
+  async getBranches(userId: string, id: string) {
+    const app = await this.assertOwnership(userId, id);
+    if (!app.gitProviderId) {
+      throw new BadRequestException(
+        'Link a git provider to this app to list its branches.',
+      );
+    }
+    const repoFullName = repoFullNameFromUrl(app.gitUrl);
+    const branches = await this.gitProviders.listBranches(
+      app.gitProviderId,
+      userId,
+      repoFullName,
+    );
+    return { current: app.gitBranch ?? null, branches };
+  }
+
+  /**
+   * 1-click auto-deploy: register a push webhook on the provider AND turn on
+   * autoDeploy — no manual copy-paste of the URL/secret into the provider UI.
+   * Requires a linked provider + git URL, and a public PUBLIC_API_URL the
+   * provider can actually reach (a webhook pointing at localhost is useless,
+   * so we fail loudly instead of registering a dead hook).
+   */
+  async installWebhook(userId: string, id: string) {
+    const app = await this.assertOwnership(userId, id, 'DEVELOPER');
+    if (!app.gitProviderId || !app.gitUrl) {
+      throw new BadRequestException(
+        'This app must be linked to a git provider to auto-install its webhook.',
+      );
+    }
+    const url = this.buildWebhookUrl(id);
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      throw new BadRequestException(
+        'PUBLIC_API_URL is not set — the platform does not know its own public URL, so the provider would have nowhere to send push events.',
+      );
+    }
+    // A webhook the provider can't reach is worse than none: it silently never
+    // fires. Refuse loopback/private literals up front with a clear message.
+    if (isPrivateOrLoopbackHost(parsed.hostname)) {
+      throw new BadRequestException(
+        'PUBLIC_API_URL points at a private/localhost address the git provider cannot reach. Set it to the platform\'s public URL first.',
+      );
+    }
+
+    // Reuse the existing secret when present so re-running install (or rotating
+    // later) doesn't desync; generate one on first install.
+    let secret: string;
+    if (app.webhookSecret) {
+      secret = this.encryption.decrypt(app.webhookSecret);
+    } else {
+      secret = crypto.randomBytes(24).toString('hex');
+      await this.prisma.application.update({
+        where: { id },
+        data: { webhookSecret: this.encryption.encrypt(secret) },
+      });
+    }
+
+    const repoFullName = repoFullNameFromUrl(app.gitUrl);
+    const result = await this.gitProviders.registerWebhook(
+      app.gitProviderId,
+      userId,
+      repoFullName,
+      url,
+      secret,
+    );
+
+    await this.prisma.application.update({
+      where: { id },
+      data: { autoDeploy: true },
+    });
+
+    return {
+      installed: true,
+      alreadyExisted: result.alreadyExists,
+      autoDeploy: true,
+      url,
+    };
   }
 
   async setAutoDeploy(userId: string, id: string, enabled: boolean) {

@@ -149,6 +149,7 @@ function makeService() {
     {} as any, // env
     { deprovisionForApplication: vi.fn().mockResolvedValue(undefined) } as any, // sftp
     new ApplicationRepository(prisma as any), // real repo over mock prisma
+    { listBranches: vi.fn(), registerWebhook: vi.fn() } as any, // gitProviders
   );
   return { service, prisma, agent, proxy, ops };
 }
@@ -468,6 +469,7 @@ describe('attachDatabase / detachDatabase', () => {
       env as any,
       { deprovisionForApplication: vi.fn().mockResolvedValue(undefined) } as any, // sftp
       new ApplicationRepository(prisma as any), // real repo over mock prisma
+      { listBranches: vi.fn(), registerWebhook: vi.fn() } as any, // gitProviders
     );
     return { service, prisma, ops, databases, env };
   }
@@ -617,5 +619,133 @@ describe('gitUrl validation on create()/update()', () => {
       service.update('u1', 'a1', { gitUrl: 'file:///srv/secret-repo' } as any),
     ).rejects.toThrow(/https/i);
     expect(prisma.application.update).not.toHaveBeenCalled();
+  });
+});
+
+// ── branch picker + 1-click webhook install ──────────────────────────────
+
+function makeWebhookService() {
+  const prisma = makePrisma();
+  const encryption = {
+    encrypt: vi.fn((s: string) => `enc:${s}`),
+    decrypt: vi.fn((s: string) => (s.startsWith('enc:') ? s.slice(4) : s)),
+  };
+  const gitProviders = {
+    listBranches: vi.fn().mockResolvedValue([{ name: 'main', isDefault: true }]),
+    registerWebhook: vi.fn().mockResolvedValue({ created: true, alreadyExists: false }),
+  };
+  const service = new ApplicationsService(
+    prisma as any,
+    { regenerate: vi.fn() } as any,
+    {} as any,
+    {} as any,
+    encryption as any,
+    {} as any,
+    {} as any,
+    { redeploy: vi.fn() } as any,
+    {} as any,
+    {} as any,
+    { deprovisionForApplication: vi.fn() } as any,
+    new ApplicationRepository(prisma as any),
+    gitProviders as any,
+  );
+  return { service, prisma, encryption, gitProviders };
+}
+
+describe('getBranches', () => {
+  it('requires a linked provider', async () => {
+    const { service, prisma } = makeWebhookService();
+    prisma.application.findUnique.mockResolvedValue(
+      gitApp({ gitProviderId: null }),
+    );
+    await expect(service.getBranches('u1', 'a1')).rejects.toThrow(
+      /Link a git provider/i,
+    );
+  });
+
+  it('lists branches via the provider and returns the current branch', async () => {
+    const { service, prisma, gitProviders } = makeWebhookService();
+    prisma.application.findUnique.mockResolvedValue(
+      gitApp({ gitProviderId: 'gp1', gitBranch: 'main', gitUrl: 'https://github.com/me/x.git' }),
+    );
+    const res = await service.getBranches('u1', 'a1');
+    expect(gitProviders.listBranches).toHaveBeenCalledWith('gp1', 'u1', 'me/x');
+    expect(res).toEqual({
+      current: 'main',
+      branches: [{ name: 'main', isDefault: true }],
+    });
+  });
+});
+
+describe('installWebhook', () => {
+  const PUBLIC = 'https://kryptalis.example.com';
+
+  beforeEach(() => {
+    process.env.PUBLIC_API_URL = PUBLIC;
+  });
+
+  it('refuses when no provider is linked', async () => {
+    const { service, prisma } = makeWebhookService();
+    prisma.application.findUnique.mockResolvedValue(gitApp({ gitProviderId: null }));
+    await expect(service.installWebhook('u1', 'a1')).rejects.toThrow(
+      /linked to a git provider/i,
+    );
+  });
+
+  it('refuses when PUBLIC_API_URL is unset', async () => {
+    delete process.env.PUBLIC_API_URL;
+    delete process.env.API_URL;
+    const { service, prisma } = makeWebhookService();
+    prisma.application.findUnique.mockResolvedValue(
+      gitApp({ gitProviderId: 'gp1', webhookSecret: 'enc:s' }),
+    );
+    await expect(service.installWebhook('u1', 'a1')).rejects.toThrow(
+      /PUBLIC_API_URL/i,
+    );
+  });
+
+  it('refuses a private/localhost PUBLIC_API_URL the provider cannot reach', async () => {
+    process.env.PUBLIC_API_URL = 'http://localhost:4000';
+    const { service, prisma } = makeWebhookService();
+    prisma.application.findUnique.mockResolvedValue(
+      gitApp({ gitProviderId: 'gp1', webhookSecret: 'enc:s' }),
+    );
+    await expect(service.installWebhook('u1', 'a1')).rejects.toThrow(
+      /private\/localhost|cannot reach/i,
+    );
+  });
+
+  it('registers the hook with the existing secret and turns on autoDeploy', async () => {
+    const { service, prisma, gitProviders, encryption } = makeWebhookService();
+    prisma.application.findUnique.mockResolvedValue(
+      gitApp({ gitProviderId: 'gp1', webhookSecret: 'enc:storedsecret', gitUrl: 'https://github.com/me/x.git' }),
+    );
+    const res = await service.installWebhook('u1', 'a1');
+    expect(encryption.decrypt).toHaveBeenCalledWith('enc:storedsecret');
+    expect(gitProviders.registerWebhook).toHaveBeenCalledWith(
+      'gp1', 'u1', 'me/x',
+      `${PUBLIC}/api/webhooks/applications/a1`,
+      'storedsecret',
+    );
+    // autoDeploy flipped on
+    expect(prisma.application.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'a1' }, data: { autoDeploy: true } }),
+    );
+    expect(res).toMatchObject({ installed: true, autoDeploy: true });
+  });
+
+  it('generates + persists a secret on first install (none stored yet)', async () => {
+    const { service, prisma, gitProviders, encryption } = makeWebhookService();
+    prisma.application.findUnique.mockResolvedValue(
+      gitApp({ gitProviderId: 'gp1', webhookSecret: null, gitUrl: 'https://github.com/me/x.git' }),
+    );
+    await service.installWebhook('u1', 'a1');
+    // A fresh secret was encrypted + written before registering the hook.
+    expect(encryption.encrypt).toHaveBeenCalled();
+    const wroteSecret = prisma.application.update.mock.calls.some(
+      ([arg]: any[]) => arg.data?.webhookSecret,
+    );
+    expect(wroteSecret).toBe(true);
+    expect(gitProviders.registerWebhook).toHaveBeenCalled();
   });
 });

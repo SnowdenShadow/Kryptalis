@@ -15,6 +15,34 @@ export interface Repo {
   language?: string;
 }
 
+export interface Branch {
+  name: string;
+  isDefault: boolean;
+}
+
+/**
+ * Derive the provider-API repo identifier (`owner/repo`, `group/sub/repo`,
+ * `workspace/repo`) from a stored HTTPS clone URL. The Application stores the
+ * full clone URL (e.g. https://github.com/acme/site.git) but every provider
+ * REST call keys off the path-with-namespace, so we strip the leading slash
+ * and a trailing `.git`. Throws BadRequestException on a non-URL / empty path
+ * so callers surface a clear error instead of building a bogus API URL.
+ */
+export function repoFullNameFromUrl(gitUrl: string | null | undefined): string {
+  if (!gitUrl) throw new BadRequestException('Application has no git URL');
+  let url: URL;
+  try {
+    url = new URL(gitUrl);
+  } catch {
+    throw new BadRequestException('Invalid Git URL');
+  }
+  const full = url.pathname.replace(/^\/+/, '').replace(/\.git$/i, '').replace(/\/+$/, '');
+  if (!full || !full.includes('/')) {
+    throw new BadRequestException('Cannot derive owner/repo from the git URL');
+  }
+  return full;
+}
+
 /**
  * Canonical SaaS clone hosts per provider. A GitProvider row has NO
  * host/baseUrl column (see schema), so self-hosted GitLab/GitHub Enterprise
@@ -312,6 +340,214 @@ export class GitProvidersService {
       throw new BadRequestException(err.message || 'Failed to fetch repos');
     }
     return [];
+  }
+
+  /**
+   * List the branches of a repo via the provider API. Same dispatch shape as
+   * {@link listRepos}. Used by the branch picker so the user chooses a real
+   * branch instead of free-typing one that doesn't exist. Returns the default
+   * branch first-class via `isDefault` so the UI can pre-select it.
+   */
+  async listBranches(id: string, userId: string, repoFullName: string): Promise<Branch[]> {
+    const gp = await this.prisma.gitProvider.findFirst({ where: { id, userId } });
+    if (!gp) throw new NotFoundException('Provider not found');
+    const token = this.getToken(gp);
+    try {
+      if (gp.provider === 'GITHUB') {
+        const res = await fetch(
+          `https://api.github.com/repos/${repoFullName}/branches?per_page=100`,
+          {
+            headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+            signal: AbortSignal.timeout(10_000),
+          },
+        );
+        if (!res.ok) throw new Error(`GitHub API: ${res.status}`);
+        const data: any[] = await res.json();
+        // GitHub's branch list doesn't flag the default; fetch it once to mark it.
+        const def = await this.fetchDefaultBranch(gp.provider, repoFullName, token);
+        return data.map((b) => ({ name: b.name, isDefault: b.name === def }));
+      }
+      if (gp.provider === 'GITLAB') {
+        const projectPath = encodeURIComponent(repoFullName);
+        const res = await fetch(
+          `https://gitlab.com/api/v4/projects/${projectPath}/repository/branches?per_page=100`,
+          { headers: { 'PRIVATE-TOKEN': token }, signal: AbortSignal.timeout(10_000) },
+        );
+        if (!res.ok) throw new Error(`GitLab API: ${res.status}`);
+        const data: any[] = await res.json();
+        return data.map((b) => ({ name: b.name, isDefault: !!b.default }));
+      }
+      if (gp.provider === 'BITBUCKET') {
+        const res = await fetch(
+          `https://api.bitbucket.org/2.0/repositories/${repoFullName}/refs/branches?pagelen=100`,
+          { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) },
+        );
+        if (!res.ok) throw new Error(`Bitbucket API: ${res.status}`);
+        const data: any = await res.json();
+        const def = await this.fetchDefaultBranch(gp.provider, repoFullName, token);
+        return (data.values || []).map((b: any) => ({ name: b.name, isDefault: b.name === def }));
+      }
+    } catch (err: any) {
+      throw new BadRequestException(err.message || 'Failed to fetch branches');
+    }
+    return [];
+  }
+
+  /** Best-effort default-branch lookup (GitHub/Bitbucket don't flag it inline). */
+  private async fetchDefaultBranch(
+    provider: string,
+    repoFullName: string,
+    token: string,
+  ): Promise<string | null> {
+    try {
+      if (provider === 'GITHUB') {
+        const res = await fetch(`https://api.github.com/repos/${repoFullName}`, {
+          headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) return null;
+        return (await res.json())?.default_branch ?? null;
+      }
+      if (provider === 'BITBUCKET') {
+        const res = await fetch(`https://api.bitbucket.org/2.0/repositories/${repoFullName}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) return null;
+        return (await res.json())?.mainbranch?.name ?? null;
+      }
+    } catch {}
+    return null;
+  }
+
+  /**
+   * Create a push webhook on the provider so a `git push` auto-triggers a
+   * redeploy — no manual copy-paste of the URL/secret into the provider UI.
+   *
+   * Idempotent WITHOUT a migration: we first GET the existing hooks and, if one
+   * already points at our `url`, we leave it (the secret is rotated via the
+   * dedicated rotate path, and providers don't return the stored secret to
+   * compare anyway). Otherwise we POST a new hook subscribed to push events.
+   *
+   * The `secret` is the SAME value the receiver verifies (HMAC for
+   * GitHub/Bitbucket, shared token for GitLab). Token scope matters: GitHub
+   * needs `admin:repo_hook` (covered by the `repo` scope we request), GitLab
+   * needs `api`, Bitbucket needs `webhook`. A scope/permission failure surfaces
+   * as a readable BadRequestException.
+   */
+  async registerWebhook(
+    id: string,
+    userId: string,
+    repoFullName: string,
+    url: string,
+    secret: string,
+  ): Promise<{ created: boolean; alreadyExists: boolean }> {
+    const gp = await this.prisma.gitProvider.findFirst({ where: { id, userId } });
+    if (!gp) throw new NotFoundException('Provider not found');
+    const token = this.getToken(gp);
+
+    try {
+      if (gp.provider === 'GITHUB') {
+        const base = `https://api.github.com/repos/${repoFullName}/hooks`;
+        const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' };
+        const existing = await fetch(`${base}?per_page=100`, {
+          headers,
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (existing.ok) {
+          const hooks: any[] = await existing.json();
+          if (hooks.some((h) => h?.config?.url === url)) return { created: false, alreadyExists: true };
+        }
+        const res = await fetch(base, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: 'web',
+            active: true,
+            events: ['push'],
+            config: { url, content_type: 'json', secret, insecure_ssl: '0' },
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) throw new Error(await this.hookError(res, 'GitHub'));
+        return { created: true, alreadyExists: false };
+      }
+
+      if (gp.provider === 'GITLAB') {
+        const projectPath = encodeURIComponent(repoFullName);
+        const base = `https://gitlab.com/api/v4/projects/${projectPath}/hooks`;
+        const headers = { 'PRIVATE-TOKEN': token };
+        const existing = await fetch(`${base}?per_page=100`, {
+          headers,
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (existing.ok) {
+          const hooks: any[] = await existing.json();
+          if (hooks.some((h) => h?.url === url)) return { created: false, alreadyExists: true };
+        }
+        const res = await fetch(base, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url,
+            token: secret,
+            push_events: true,
+            enable_ssl_verification: true,
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) throw new Error(await this.hookError(res, 'GitLab'));
+        return { created: true, alreadyExists: false };
+      }
+
+      if (gp.provider === 'BITBUCKET') {
+        const base = `https://api.bitbucket.org/2.0/repositories/${repoFullName}/hooks`;
+        const headers = { Authorization: `Bearer ${token}` };
+        const existing = await fetch(`${base}?pagelen=100`, {
+          headers,
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (existing.ok) {
+          const data: any = await existing.json();
+          if ((data.values || []).some((h: any) => h?.url === url)) {
+            return { created: false, alreadyExists: true };
+          }
+        }
+        const res = await fetch(base, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            description: 'Kryptalis auto-deploy',
+            url,
+            active: true,
+            events: ['repo:push'],
+            secret,
+          }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) throw new Error(await this.hookError(res, 'Bitbucket'));
+        return { created: true, alreadyExists: false };
+      }
+    } catch (err: any) {
+      if (err instanceof NotFoundException || err instanceof BadRequestException) throw err;
+      throw new BadRequestException(err?.message || 'Failed to register webhook');
+    }
+    throw new BadRequestException(`Webhook auto-registration not supported for ${gp.provider}`);
+  }
+
+  /** Build a readable error from a failed hook API response. */
+  private async hookError(res: Response, provider: string): Promise<string> {
+    let detail = '';
+    try {
+      detail = (await res.text()).slice(0, 300);
+    } catch {}
+    if (res.status === 401 || res.status === 403) {
+      return `${provider} rejected the webhook (${res.status}). The connected token is missing the permission to manage webhooks.`;
+    }
+    if (res.status === 404) {
+      return `${provider} returned 404 — the repo wasn't found or the token can't access it.`;
+    }
+    return `${provider} webhook API error ${res.status}${detail ? `: ${detail}` : ''}`;
   }
 
   private async fetchUserInfo(provider: string, token: string): Promise<{ username: string; avatarUrl: string } | null> {
