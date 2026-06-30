@@ -183,14 +183,14 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     // /auth segment.
     const url = this.buildDashboardUrl(`/reset-password?token=${encodeURIComponent(token)}`);
 
-    // Dev-mode token surfacing — replaces the old console.warn in
-    // AuthService. Gated on NODE_ENV so production logs never leak the
-    // raw reset token. This still runs even when SMTP is unconfigured
-    // so a developer running locally can complete the flow.
-    if (process.env.NODE_ENV !== 'production') {
+    // Dev-mode token surfacing — replaces the old console.warn in AuthService.
+    // Requires an EXPLICIT opt-in (DEBUG_AUTH_TOKENS=true) on top of a
+    // non-production NODE_ENV, so a prod install that forgot to set NODE_ENV
+    // (which defaults to 'development') can't silently leak live reset tokens.
+    if (process.env.NODE_ENV !== 'production' && process.env.DEBUG_AUTH_TOKENS === 'true') {
       this.logger.warn(
         `[dev] password reset token for ${email}: ${token} ` +
-          `(URL: ${url}) — gated to NODE_ENV !== production`,
+          `(URL: ${url}) — gated on DEBUG_AUTH_TOKENS=true + non-production`,
       );
     }
 

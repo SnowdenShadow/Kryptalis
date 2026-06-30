@@ -9,10 +9,10 @@ import {
 } from './auth-cookie';
 
 describe('refreshCookieOptions', () => {
-  it('is httpOnly, lax, scoped to /api/auth', () => {
+  it('is httpOnly, strict, scoped to /api/auth', () => {
     const opts = refreshCookieOptions(false);
     expect(opts.httpOnly).toBe(true);
-    expect(opts.sameSite).toBe('lax');
+    expect(opts.sameSite).toBe('strict');
     expect(opts.path).toBe('/api/auth');
   });
 

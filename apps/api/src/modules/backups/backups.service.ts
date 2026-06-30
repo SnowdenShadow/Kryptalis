@@ -184,7 +184,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     private agent: AgentService,
     private schedulerLeader: SchedulerLeaderService,
   ) {
-    if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+    // 0700: backup archives hold tenant secrets/dumps — keep the dir private.
+    if (!fs.existsSync(BACKUPS_DIR)) fs.mkdirSync(BACKUPS_DIR, { recursive: true, mode: 0o700 });
+    else fs.promises.chmod(BACKUPS_DIR, 0o700).catch(() => undefined);
   }
 
   onModuleInit() {
@@ -991,6 +993,10 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
         timeout: 1_800_000,
         maxBuffer: 8 * 1024 * 1024,
       });
+      // LOW: tighten the archive to 0600. It holds tenant DB dumps + volume
+      // tars; when BACKUP_ENCRYPTION_KEY is unset the contents are plaintext,
+      // so don't leave it group/world-readable on a shared host.
+      await fs.promises.chmod(archivePath, 0o600).catch(() => undefined);
 
       await this.finalizeBackupArchive(backup, archivePath, filename);
     } catch (err) {

@@ -331,11 +331,11 @@ export class AuthService {
     // sent-but-unrecorded verification mail behind.
     if (!txResult.bootstrap && txResult.pendingVerification) {
       const { email, name, rawToken } = txResult.pendingVerification;
-      if (process.env.NODE_ENV !== 'production') {
+      if (this.devTokenLoggingEnabled()) {
         // eslint-disable-next-line no-console
         console.warn(
           '[dev] email verification token for ' + email + ': ' + rawToken +
-          ' (this log is GATED to NODE_ENV !== production)',
+          ' (GATED on DEBUG_AUTH_TOKENS=true + non-production)',
         );
       }
       try {
@@ -423,11 +423,11 @@ export class AuthService {
       data: { userId: user.id, tokenHash, expiresAt },
     });
 
-    if (process.env.NODE_ENV !== 'production') {
+    if (this.devTokenLoggingEnabled()) {
       // eslint-disable-next-line no-console
       console.warn(
         '[dev] email verification token for ' + user.email + ': ' + rawToken +
-        ' (this log is GATED to NODE_ENV !== production)',
+        ' (GATED on DEBUG_AUTH_TOKENS=true + non-production)',
       );
     }
     try {
@@ -766,11 +766,11 @@ export class AuthService {
           await this.prisma.emailVerificationToken.create({
             data: { userId, tokenHash, expiresAt },
           });
-          if (process.env.NODE_ENV !== 'production') {
+          if (this.devTokenLoggingEnabled()) {
             // eslint-disable-next-line no-console
             console.warn(
               '[dev] email verification token for ' + newEmail + ': ' + rawToken +
-              ' (this log is GATED to NODE_ENV !== production)',
+              ' (GATED on DEBUG_AUTH_TOKENS=true + non-production)',
             );
           }
           try {
@@ -1282,6 +1282,20 @@ export class AuthService {
     // Delegates to the single shared policy (password-policy.ts) so the admin
     // reset path and every self-service path enforce identical strength.
     return checkPasswordStrength(pw);
+  }
+
+  /**
+   * Whether to log raw verification/reset tokens to the console. Requires an
+   * EXPLICIT opt-in (DEBUG_AUTH_TOKENS=true) AND a non-production NODE_ENV.
+   * Previously gated on `NODE_ENV !== 'production'` alone — but NODE_ENV
+   * defaults to 'development', so an operator who forgot to set NODE_ENV in
+   * prod would silently leak live tokens to logs. Fail closed by default.
+   */
+  private devTokenLoggingEnabled(): boolean {
+    return (
+      process.env.NODE_ENV !== 'production' &&
+      process.env.DEBUG_AUTH_TOKENS === 'true'
+    );
   }
 
   private parseTtl(ttl: string): number {
