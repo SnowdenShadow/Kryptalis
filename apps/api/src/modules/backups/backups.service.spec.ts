@@ -34,6 +34,7 @@ vi.mock('fs', () => {
     copyFile: vi.fn().mockResolvedValue(undefined),
     stat: vi.fn().mockResolvedValue({ size: 123 }),
     open: vi.fn(),
+    chmod: vi.fn().mockResolvedValue(undefined),
   };
   const fsMock = {
     existsSync: vi.fn().mockReturnValue(true),

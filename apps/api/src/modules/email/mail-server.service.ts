@@ -19,6 +19,7 @@ import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MarketplaceService } from '../marketplace/marketplace.service';
 import { AgentService } from '../agent/agent.service';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
+import { SystemConfigService } from '../system/system-config.service';
 import { DATA_DIR, MAIL_DIR } from '../../common/paths';
 
 const execFileAsync = promisify(execFile);
@@ -44,6 +45,7 @@ export class MailServerService implements OnApplicationBootstrap {
     private encryption: EncryptionService,
     private marketplace: MarketplaceService,
     private agent: AgentService,
+    private systemConfig: SystemConfigService,
   ) {
     if (!fs.existsSync(MAIL_DIR)) fs.mkdirSync(MAIL_DIR, { recursive: true });
   }
@@ -631,6 +633,16 @@ export class MailServerService implements OnApplicationBootstrap {
 
   async deploy(userId: string, domainId: string, targetServerId?: string) {
     const domain = await this.assertDomainAccess(userId, domainId, 'ADMIN');
+
+    // H-3: refuse to stand up a mail stack (DKIM keys, mail.<apex> cert, SPF/
+    // DMARC) for a domain whose ownership hasn't been proven, when verification
+    // is enforced — otherwise a tenant could brand mail as a domain they don't
+    // own. No-op when verification is off (verifiedAt was set at create time).
+    if (this.systemConfig.getBool('require_domain_verification') && !(domain as any).verifiedAt) {
+      throw new BadRequestException(
+        `"${domain.domain}" is not verified. Prove ownership (publish the DNS TXT record from the domain's "Verify" panel) before deploying a mail server.`,
+      );
+    }
 
     // A mail server MUST belong to a project. New domains already require a
     // projectId, but legacy / app-only domains (or an orphaned domain) can have

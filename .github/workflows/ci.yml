@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege GITHUB_TOKEN: this workflow only reads the repo (build/test/
+# lint) and uploads an artifact — it never writes repo contents, comments, or
+# packages. Pinning to read-only here means a compromised dependency running
+# during install/build can't use the token to push or open PRs. Jobs that need
+# more would override at the job level (none do).
+permissions:
+  contents: read
+
 jobs:
   node:
     name: Node (API + Dashboard)

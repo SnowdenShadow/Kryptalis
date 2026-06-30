@@ -17,6 +17,12 @@ import {
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
 import { DomainAttachService } from './domain-attach.service';
+import { SystemConfigService } from '../system/system-config.service';
+import {
+  newVerificationToken,
+  verificationRecord,
+  checkDomainVerification,
+} from './domain-verification';
 
 @Injectable()
 export class DomainsService {
@@ -26,7 +32,15 @@ export class DomainsService {
     @Inject(forwardRef(() => MailServerService))
     private mailServer: MailServerService,
     private domainAttach: DomainAttachService,
+    private systemConfig: SystemConfigService,
   ) {}
+
+  /** Whether domain-ownership proof is enforced (H-3). Default OFF so existing
+   *  single-operator installs are unaffected; multi-tenant operators turn it on
+   *  via Admin → Settings (require_domain_verification). */
+  private verificationRequired(): boolean {
+    return this.systemConfig.getBool('require_domain_verification');
+  }
 
   async create(userId: string, dto: CreateDomainDto) {
     // The PLATFORM domain (system_domain) serves the dashboard itself —
@@ -89,11 +103,18 @@ export class DomainsService {
     // Port-pinned create: the app is reachable at http://<domain>:<port>
     // (DomainPortBinding) instead of taking the clean-URL :443 slot.
     const usePortBinding = !!port && !!applicationId;
+    // H-3: mint a verification token. When verification is NOT required, stamp
+    // verifiedAt now so behavior is identical to before. When required, leave
+    // it null — the domain is created but won't be rendered into Caddy or host
+    // mail until verifyDomain() confirms the TXT record.
+    const requireVerification = this.verificationRequired();
     const created = await this.prisma.domain.create({
       data: {
         ...data,
         projectId,
         applicationId: usePortBinding ? null : applicationId || null,
+        verificationToken: newVerificationToken(),
+        verifiedAt: requireVerification ? null : new Date(),
       },
     });
     if (usePortBinding) {
@@ -105,8 +126,60 @@ export class DomainsService {
         port: port!,
       });
     }
-    this.proxy.regenerate().catch(() => {});
+    // Only (re)render Caddy when the domain is usable. An unverified domain
+    // (verification required, not yet proven) must not reach the Caddyfile.
+    if (created.verifiedAt) {
+      this.proxy.regenerate().catch(() => {});
+    }
     return created;
+  }
+
+  /**
+   * Return the DNS TXT record the owner must publish to verify this domain
+   * (H-3). Available to any project member who can see the domain.
+   */
+  async getVerificationInstructions(userId: string, id: string) {
+    const domain = await this.assertDomainAccess(userId, id, 'VIEWER');
+    let token = domain.verificationToken;
+    if (!token) {
+      // Back-filled/legacy rows may have no token — mint one on demand.
+      token = newVerificationToken();
+      await this.prisma.domain.update({ where: { id }, data: { verificationToken: token } });
+    }
+    const record = verificationRecord(domain.domain, token);
+    return {
+      verified: !!domain.verifiedAt,
+      required: this.verificationRequired(),
+      record: { type: 'TXT', name: record.name, value: record.value },
+    };
+  }
+
+  /**
+   * Check the published TXT record and, on success, stamp verifiedAt + render
+   * Caddy so the domain starts routing (H-3). Idempotent — re-verifying an
+   * already-verified domain is a no-op success.
+   */
+  async verifyDomain(userId: string, id: string) {
+    const domain = await this.assertDomainAccess(userId, id, 'DEVELOPER');
+    if (domain.verifiedAt) {
+      return { verified: true, alreadyVerified: true };
+    }
+    if (!domain.verificationToken) {
+      throw new BadRequestException(
+        'No verification token for this domain — fetch the TXT record first.',
+      );
+    }
+    const ok = await checkDomainVerification(domain.domain, domain.verificationToken);
+    if (!ok) {
+      const record = verificationRecord(domain.domain, domain.verificationToken);
+      throw new BadRequestException(
+        `TXT record not found yet. Publish: ${record.name} TXT "${record.value}" (DNS can take a few minutes to propagate).`,
+      );
+    }
+    await this.prisma.domain.update({ where: { id }, data: { verifiedAt: new Date() } });
+    // Now that it's proven, render it into Caddy (and let cert issuance run).
+    this.proxy.regenerate().catch(() => {});
+    return { verified: true };
   }
 
   async findAll(userId: string) {

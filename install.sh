@@ -424,6 +424,20 @@ printf '  Open the dashboard and create the first account.\n'
 printf '  The first user to register becomes SUPERADMIN automatically.\n'
 printf '\033[1;32m%s\033[0m\n' "$RULE"
 
+# ─── security posture warning ───────────────────────────────────────
+# By default the API (:4000) and dashboard (:3000) bind 0.0.0.0 over PLAIN
+# HTTP so a brand-new install is reachable by IP before a domain/TLS exists.
+# That means credentials + JWTs cross the network unencrypted and the ports
+# are world-reachable on an unfirewalled host. Tell the operator how to close
+# this once a domain is wired (Caddy fronts both, binds drop to loopback).
+printf '\n\033[1;33m⚠ Security: :3000 and :4000 are exposed on ALL interfaces over plain HTTP.\033[0m\n'
+printf '  Until you put a domain + TLS in front, anyone who can reach this host\n'
+printf '  can read traffic (passwords, tokens) in cleartext. Once Caddy fronts it:\n'
+printf '    • set a domain in Admin → Settings (issues TLS automatically), then\n'
+printf '    • add to %s/.env:  API_BIND=127.0.0.1  DASHBOARD_BIND=127.0.0.1\n' "$INSTALL_DIR"
+printf '    • docker compose up -d   (now only Caddy is public)\n'
+printf '  And restrict the host firewall to 80/443 (+22) where possible.\n'
+
 cat <<EOF
 
 Useful commands:

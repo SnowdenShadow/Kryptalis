@@ -76,6 +76,13 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
   // container — visible to the API through the .dockcontrol bind mount.
   private readonly LOG_FILE = '/app/.dockcontrol/update.log';
 
+  // Image for the one-off updater container. Pinned to a specific Docker CLI
+  // version tag instead of the floating `docker:cli` so a re-pull can't fetch
+  // arbitrarily-changed bytes for a container that holds the host docker
+  // socket. Override with DOCKCONTROL_UPDATER_IMAGE (e.g. to a @sha256 digest).
+  private readonly UPDATER_IMAGE =
+    process.env.DOCKCONTROL_UPDATER_IMAGE || 'docker:27-cli';
+
   // Marker file the API touches before spawning update.sh, and clears
   // when it sees a clean post-update state. Survives API restart so we
   // know an update was in progress and recover correctly.
@@ -498,7 +505,7 @@ export class SystemUpdatesService implements OnModuleInit, OnModuleDestroy {
       '-w', installDir,
       '-e', `DOCKCONTROL_DIR=${installDir}`,
       '-e', `DOCKCONTROL_BRANCH=${this.state.branch}`,
-      'docker:cli',
+      this.UPDATER_IMAGE,
       'sh', '-c',
       // Wrapper records update.sh's exit code to the result file BEFORE
       // clearing the marker, then removes the marker so the lock releases no

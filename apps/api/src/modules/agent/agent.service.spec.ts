@@ -278,3 +278,53 @@ describe('terminal payload scrub', () => {
     });
   });
 });
+
+// ── C-2: server-side redaction of git credentials in task results ──────────
+// A DEPLOY task's logs can carry `http.extraheader=Authorization: Basic <tok>`
+// when the reporting agent is an OLD binary that didn't redact at source. The
+// API must scrub it before persisting so it never lands in agent_tasks.result
+// (admin-readable). Mirrors application-deploy.service.ts redactSecrets().
+describe('taskResult git-credential redaction', () => {
+  function deployRow(overrides: Record<string, unknown> = {}) {
+    return { id: 't1', serverId: 's1', status: 'RUNNING', type: 'DEPLOY', payload: { slug: 'app' }, ...overrides };
+  }
+
+  it('redacts an Authorization/extraheader token from result.logs before storing', async () => {
+    const { service, prisma } = makeService();
+    allowAgent(prisma);
+    prisma.agentTask.findUnique.mockResolvedValue(deployRow());
+
+    const TOKEN = 'dXNlcjpzM2NyZXQtdG9rZW4=';
+    await service.taskResult('t1', 's1', 'tok', 'COMPLETED', {
+      logs: `> git -c http.extraheader=Authorization: Basic ${TOKEN} clone --depth 1 https://github.com/me/x.git\nCloning...\n`,
+    });
+
+    // The first update writes status + result.
+    const resultCall = prisma.agentTask.update.mock.calls.find(
+      (c: any[]) => c[0]?.data?.result !== undefined,
+    );
+    expect(resultCall).toBeDefined();
+    const stored = JSON.stringify(resultCall![0].data.result);
+    expect(stored).not.toContain(TOKEN);
+    expect(stored).toContain('<redacted>');
+    // Non-secret log content survives.
+    expect(stored).toContain('Cloning');
+  });
+
+  it('redacts a credential echoed in the error string', async () => {
+    const { service, prisma } = makeService();
+    allowAgent(prisma);
+    prisma.agentTask.findUnique.mockResolvedValue(deployRow());
+
+    await service.taskResult(
+      't1', 's1', 'tok', 'FAILED', undefined,
+      'fatal: clone failed (Authorization: Bearer abc.def.ghi)',
+    );
+
+    const failCall = prisma.agentTask.update.mock.calls.find(
+      (c: any[]) => c[0]?.data?.error !== undefined,
+    );
+    expect(failCall![0].data.error).not.toContain('abc.def.ghi');
+    expect(failCall![0].data.error).toContain('<redacted>');
+  });
+});

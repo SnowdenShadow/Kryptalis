@@ -10,14 +10,20 @@ import { JwtStrategy } from './jwt.strategy';
  *  - the LIVE role/email is returned (so RolesGuard can't be bypassed by a
  *    stale token whose `role` was higher than the DB now says).
  */
-function makeStrategy(dbUser: any) {
+function makeStrategy(dbUser: any, session: any = { status: 'ACTIVE' }) {
   const prisma = {
     user: { findUnique: vi.fn().mockResolvedValue(dbUser) },
+    // Default: the backing session is ACTIVE so status-only tests are unaffected.
+    session: { findUnique: vi.fn().mockResolvedValue(session) },
   };
   const config = { get: vi.fn().mockReturnValue('a'.repeat(32)) };
   const strategy = new JwtStrategy(config as any, prisma as any);
   return { strategy, prisma };
 }
+
+const ACTIVE_USER = {
+  id: 'u1', email: 'x@y.z', role: 'ADMIN', name: 'Jo', status: 'ACTIVE',
+};
 
 const PAYLOAD = { sub: 'u1', email: 'stale@old.example', role: 'ADMIN', sid: 'sess1' };
 
@@ -70,5 +76,33 @@ describe('JwtStrategy.validate', () => {
       id: 'u1', email: 'x@y.z', role: 'ADMIN', name: 'Jo', status: 'ACTIVE',
     });
     await expect(strategy.validate(PAYLOAD)).resolves.toMatchObject({ id: 'u1', role: 'ADMIN' });
+  });
+
+  // ── H-2: access tokens are revocable via session state ──────────────────
+  it('rejects when the backing session is REVOKED (logout / revoke / password change)', async () => {
+    const { strategy } = makeStrategy(ACTIVE_USER, { status: 'REVOKED' });
+    await expect(strategy.validate(PAYLOAD)).rejects.toThrow(/revoked/i);
+  });
+
+  it('rejects when the backing session no longer exists (admin reset deleteMany)', async () => {
+    const { strategy } = makeStrategy(ACTIVE_USER, null);
+    await expect(strategy.validate(PAYLOAD)).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('accepts a ROTATED session — the just-refreshed token stays valid until expiry', async () => {
+    const { strategy } = makeStrategy(ACTIVE_USER, { status: 'ROTATED' });
+    await expect(strategy.validate(PAYLOAD)).resolves.toMatchObject({ id: 'u1' });
+  });
+
+  it('accepts a PENDING successor session', async () => {
+    const { strategy } = makeStrategy(ACTIVE_USER, { status: 'PENDING' });
+    await expect(strategy.validate(PAYLOAD)).resolves.toMatchObject({ id: 'u1' });
+  });
+
+  it('grandfathers a legacy token with no sid (never queries sessions)', async () => {
+    const { strategy, prisma } = makeStrategy(ACTIVE_USER);
+    const { sid, ...noSid } = PAYLOAD;
+    await expect(strategy.validate(noSid as any)).resolves.toMatchObject({ id: 'u1' });
+    expect(prisma.session.findUnique).not.toHaveBeenCalled();
   });
 });

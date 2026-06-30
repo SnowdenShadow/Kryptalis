@@ -192,6 +192,13 @@ model Server {
   cpuCores     Int?
   agentVersion String?
   lastSeenAt   DateTime?
+  // Pinned SSH host key of the agent's embedded server (:2522), captured
+  // trust-on-first-use the first time the API opens a remote terminal/SFTP
+  // bridge. Stored as the base64 of the host key's SHA-256 (the ssh2 hashed
+  // host key). On every later connect the presented key is compared against
+  // this; a mismatch aborts the connection (defends against MITM on the
+  // API↔agent path). NULL until the first successful bridge. (H-4)
+  sshHostKey   String?
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
 
@@ -486,6 +493,16 @@ model Domain {
   status        DomainStatus @default(PENDING)
   sslStatus     SSLStatus    @default(PENDING)
   sslExpiresAt  DateTime?
+  // Domain-ownership verification (H-3). verificationToken is a random secret
+  // the owner must publish as a DNS TXT record (dockcontrol-verify=<token>);
+  // verifiedAt is stamped once we confirm it. When require_domain_verification
+  // is on, an unverified domain is NOT rendered into Caddy and cannot host a
+  // mail stack — closing cross-tenant domain pre-emption / cert+routing hijack.
+  // For backward-compat (single-operator installs), create() auto-stamps
+  // verifiedAt when verification is NOT required, so existing flows are
+  // unaffected.
+  verificationToken String?
+  verifiedAt        DateTime?
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 

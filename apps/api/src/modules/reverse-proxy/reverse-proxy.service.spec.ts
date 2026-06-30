@@ -61,8 +61,10 @@ function makePrisma(domains: any[] = []) {
 
 function makeService(domains: any[] = []) {
   const prisma = makePrisma(domains);
-  const service = new ReverseProxyService(prisma as any);
-  return { service, prisma };
+  // H-3: verification OFF in tests → renders all domains as before.
+  const systemConfig = { getBool: vi.fn().mockReturnValue(false) };
+  const service = new ReverseProxyService(prisma as any, systemConfig as any);
+  return { service, prisma, systemConfig };
 }
 
 /** A Domain row as regenerate()'s findMany include shape returns it. */

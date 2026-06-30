@@ -54,6 +54,10 @@ import { CronModule } from './modules/cron/cron.module';
         JWT_EXPIRATION: Joi.string().empty('').default('15m'),
         JWT_REFRESH_EXPIRATION: Joi.string().empty('').default('7d'),
         ENCRYPTION_KEY: Joi.string().min(32).required(),
+        // M-5: optional override for the per-install KDF salt (≥16 bytes hex).
+        // Normally auto-generated + persisted under DATA_DIR; set this only to
+        // pin the salt out-of-band (e.g. identical across a replica set).
+        ENCRYPTION_SALT_HEX: Joi.string().hex().min(32).allow('').optional(),
         // All these env vars are now ADMIN-MANAGED through the Admin UI's
         // System Config tab. docker-compose passes them as empty strings
         // (`${SMTP_HOST:-}`) when not set, which Joi normally rejects even

@@ -1,10 +1,10 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AlertRule } from '@prisma/client';
-import * as dns from 'dns';
 import { PrismaService } from '../../prisma/prisma.service';
 import { SystemConfigService } from '../system/system-config.service';
 import { renderEmail, escapeHtml } from './email-templates';
+import { screenUrlLiteral, screenResolvedHost } from '../../common/net/ssrf-guard';
 
 /**
  * Shape of User.notificationPrefs (Json column) — written by
@@ -183,14 +183,14 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
     // /auth segment.
     const url = this.buildDashboardUrl(`/reset-password?token=${encodeURIComponent(token)}`);
 
-    // Dev-mode token surfacing — replaces the old console.warn in
-    // AuthService. Gated on NODE_ENV so production logs never leak the
-    // raw reset token. This still runs even when SMTP is unconfigured
-    // so a developer running locally can complete the flow.
-    if (process.env.NODE_ENV !== 'production') {
+    // Dev-mode token surfacing — replaces the old console.warn in AuthService.
+    // Requires an EXPLICIT opt-in (DEBUG_AUTH_TOKENS=true) on top of a
+    // non-production NODE_ENV, so a prod install that forgot to set NODE_ENV
+    // (which defaults to 'development') can't silently leak live reset tokens.
+    if (process.env.NODE_ENV !== 'production' && process.env.DEBUG_AUTH_TOKENS === 'true') {
       this.logger.warn(
         `[dev] password reset token for ${email}: ${token} ` +
-          `(URL: ${url}) — gated to NODE_ENV !== production`,
+          `(URL: ${url}) — gated on DEBUG_AUTH_TOKENS=true + non-production`,
       );
     }
 
@@ -927,117 +927,17 @@ export class NotificationsService implements OnModuleInit, OnModuleDestroy {
    * (create/update alert rule) using the exact same ruleset as dispatch.
    */
   validateWebhookUrl(raw: string): string | null {
-    let url: URL;
-    try {
-      url = new URL(raw);
-    } catch {
-      return 'not a valid URL';
-    }
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      return `unsupported scheme "${url.protocol}" (only http/https)`;
-    }
-    // Strip IPv6 brackets / trailing dot for the literal checks below.
-    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-    if (host === 'localhost' || host.endsWith('.localhost')) {
-      return 'loopback host is not allowed';
-    }
-    // IPv4 literal → block loopback/private/link-local ranges.
-    const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (v4) {
-      const [a, b] = [Number(v4[1]), Number(v4[2])];
-      if (
-        a === 127 || // 127.0.0.0/8 loopback
-        a === 10 || // 10.0.0.0/8 private
-        (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12 private
-        (a === 192 && b === 168) || // 192.168.0.0/16 private
-        (a === 169 && b === 254) || // 169.254.0.0/16 link-local incl. metadata 169.254.169.254
-        a === 0 // 0.0.0.0/8 "this host"
-      ) {
-        return `private/loopback/link-local address ${host} is not allowed`;
-      }
-      return null;
-    }
-    // IPv6 literal → default-DENY, then allow only addresses that are clearly
-    // public. Blocking by enumerated range alone is unsafe because an IPv4
-    // address can be smuggled inside IPv6 (::ffff:127.0.0.1 IPv4-mapped,
-    // ::a.b.c.d compat, 64:ff9b::a.b.c.d NAT64), so we extract any embedded
-    // IPv4 and run it through the v4 private-range screen.
-    if (host.includes(':')) {
-      if (host === '::1' || host === '::') return 'loopback address is not allowed';
-      if (/^f[cd][0-9a-f]{2}:/.test(host)) return 'unique-local address (fc00::/7) is not allowed';
-      if (/^fe[89ab][0-9a-f]:/.test(host)) return 'link-local address (fe80::/10) is not allowed';
-      // Embedded IPv4 — ::ffff:1.2.3.4 (dotted), ::ffff:0102:0304 (hex), and
-      // the NAT64 64:ff9b::/96 prefix. Pull out the trailing IPv4, whether
-      // written dotted or as the last two hextets, and re-screen it.
-      const embeddedV4 = this.extractEmbeddedV4(host);
-      if (embeddedV4) {
-        const v4err = this.validateWebhookUrl(`http://${embeddedV4}`);
-        // Re-screen returns the v4 range error (or null if the embedded
-        // address is genuinely public).
-        if (v4err) return `embedded IPv4 ${embeddedV4}: ${v4err}`;
-        return null;
-      }
-      // Any IPv6 literal we can't positively classify as public is rejected.
-      // (Global-unicast 2000::/3 alert targets are vanishingly rare; the safe
-      // default for a stored, server-dereferenced URL is deny.)
-      return 'IPv6 literal hosts are not allowed for webhooks';
-    }
-    return null;
+    // Delegates to the shared SSRF guard (common/net/ssrf-guard.ts) so the
+    // webhook, S3-backup, and git-PAT call sites all enforce one ruleset.
+    return screenUrlLiteral(raw);
   }
 
   /**
-   * Closes the DNS-rebinding hole in validateWebhookUrl(): a public hostname
-   * (which passes the literal screen) can resolve to a private IP — either
-   * because the operator pointed it there, or via a rebind attack that flips
-   * the record between write-time validation and dispatch. So at DISPATCH we
-   * resolve the host and run EVERY returned address back through the same
-   * literal ruleset. Returns a violation string, or null when every resolved
-   * address is public (or the host was itself a literal already screened).
+   * DNS-rebinding screen at dispatch — resolve the host and re-screen every
+   * address. Thin wrapper over the shared guard.
    */
   private async screenResolvedHost(raw: string): Promise<string | null> {
-    let url: URL;
-    try { url = new URL(raw); } catch { return 'not a valid URL'; }
-    const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-    // IP literals were already fully screened by validateWebhookUrl().
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':')) return null;
-    let addrs: dns.LookupAddress[];
-    try {
-      addrs = await dns.promises.lookup(host, { all: true });
-    } catch {
-      // Unresolvable host — let the fetch fail naturally rather than guess.
-      return null;
-    }
-    for (const { address } of addrs) {
-      const v = this.validateWebhookUrl(`http://${address.includes(':') ? `[${address}]` : address}`);
-      if (v) return `resolves to ${address}: ${v}`;
-    }
-    return null;
-  }
-
-  /**
-   * Extract a dotted-quad IPv4 embedded in an IPv6 literal, covering the
-   * IPv4-mapped (::ffff:a.b.c.d), IPv4-compatible (::a.b.c.d), and NAT64
-   * (64:ff9b::a.b.c.d) forms — including the all-hex spelling where the last
-   * 32 bits are written as two hextets (::ffff:7f00:0001). Returns the dotted
-   * string, or null when there is no embedded IPv4 to screen.
-   */
-  private extractEmbeddedV4(host: string): string | null {
-    // Already-dotted tail, e.g. ::ffff:127.0.0.1 or 64:ff9b::10.0.0.1
-    const dotted = host.match(/:((?:\d{1,3}\.){3}\d{1,3})$/);
-    if (dotted) return dotted[1];
-    // Hex tail for the IPv4-mapped/compat prefixes: last two hextets are the
-    // 32-bit IPv4 (::ffff:7f00:1 → 127.0.0.1, ::ffff:0:7f00:1, etc.).
-    const mapped = host.match(/^(?:0{0,4}:){0,5}:?ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-    const compat = host.match(/^(?:0{0,4}:){1,6}([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
-    const hx = mapped || compat;
-    if (hx) {
-      const hi = parseInt(hx[1], 16);
-      const lo = parseInt(hx[2], 16);
-      if (Number.isFinite(hi) && Number.isFinite(lo) && hi <= 0xffff && lo <= 0xffff) {
-        return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
-      }
-    }
-    return null;
+    return screenResolvedHost(raw);
   }
 
   private async postWebhook(url: string, payload: Record<string, unknown>): Promise<void> {

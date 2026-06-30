@@ -473,6 +473,29 @@ func isValidEnvKey(k string) bool {
 	return true
 }
 
+// redactGitArgs masks any git credential carried in an argv before it is echoed
+// into the deploy log. The clone injects the token as a single argument of the
+// form `http.extraheader=Authorization: Basic <b64>` (via `-c`), so we redact
+// from `extraheader=` onward; we also blank a bare `Authorization:` header arg
+// defensively. Everything else passes through untouched so the command stays
+// readable in the logs.
+func redactGitArgs(args []string) []string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		switch {
+		case strings.Contains(a, "http.extraheader="):
+			out[i] = a[:strings.Index(a, "http.extraheader=")] + "http.extraheader=<redacted>"
+		case strings.HasPrefix(a, "extraheader="):
+			out[i] = "extraheader=<redacted>"
+		case strings.HasPrefix(strings.ToLower(a), "authorization:"):
+			out[i] = "Authorization: <redacted>"
+		default:
+			out[i] = a
+		}
+	}
+	return out
+}
+
 // runDeploy: clones the repo (if gitUrl given) and brings the compose stack up.
 // Falls back to writing a pre-rendered compose when the API supplies one.
 func (p *Poller) runDeploy(ctx context.Context, task Task) (map[string]interface{}, string) {
@@ -497,7 +520,19 @@ func (p *Poller) runDeploy(ctx context.Context, task Task) (map[string]interface
 		c.Dir = cwd
 		c.Stdout = logs
 		c.Stderr = logs
-		fmt.Fprintf(logs, "> %s %s\n", prog, strings.Join(args, " "))
+		// Pin git to https only (defense-in-depth behind the API's URL
+		// validation): with GIT_ALLOW_PROTOCOL=https git refuses file://,
+		// ext::, ssh://, git://, http://, … so a smuggled scheme can't read a
+		// local repo or run an ext:: helper on the host. (H-1)
+		if prog == "git" {
+			c.Env = append(os.Environ(), "GIT_ALLOW_PROTOCOL=https")
+		}
+		// Redact before echoing the command: a private-repo clone carries the
+		// git credential as `-c http.extraheader=Authorization: Basic <token>`.
+		// These logs are returned in the task result and stored/shown to admins,
+		// so the raw token must never reach the buffer. Mirrors the API-side
+		// redactSecrets() (application-deploy.service.ts).
+		fmt.Fprintf(logs, "> %s %s\n", prog, strings.Join(redactGitArgs(args), " "))
 		return c.Run()
 	}
 

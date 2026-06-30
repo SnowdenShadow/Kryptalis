@@ -507,3 +507,115 @@ describe('attachDatabase / detachDatabase', () => {
     expect(ops.redeploy).toHaveBeenCalledWith('u1', 'a1');
   });
 });
+
+// ── create(): host-escape compose screen (C-1) ─────────────────────────────
+// A project DEVELOPER must not be able to deploy a container that escapes to
+// host root. create() must reject a user compose carrying privileged/cap_add/
+// host-namespace/host bind-mount BEFORE any DB write or deploy dispatch.
+describe('create() compose host-escape screen', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const DOCKER_SOCK_COMPOSE =
+    'services:\n  evil:\n    image: alpine\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n';
+  const PRIVILEGED_COMPOSE = 'services:\n  evil:\n    image: alpine\n    privileged: true\n';
+
+  it('rejects composeContent that mounts the docker socket', async () => {
+    const { service, prisma } = makeService();
+    await expect(
+      service.create('u1', { name: 'x', projectId: 'p1', composeContent: DOCKER_SOCK_COMPOSE } as any),
+    ).rejects.toThrow(BadRequestException);
+    // Fail-closed BEFORE any persistence.
+    expect(prisma.application.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a composeOverride with privileged: true (git first-deploy path)', async () => {
+    const { service } = makeService();
+    await expect(
+      service.create('u1', {
+        name: 'x',
+        projectId: 'p1',
+        gitUrl: 'https://github.com/me/x.git',
+        composeOverride: PRIVILEGED_COMPOSE,
+      } as any),
+    ).rejects.toThrow(/host-escape|privileged/i);
+  });
+
+  it('does NOT block the screen on the internal host-access-consent bypass', async () => {
+    const { service } = makeService();
+    // The project-transfer apply path passes allowHostAccessCompose after its
+    // own explicit-consent gate. The compose screen must let it through — any
+    // later throw (DB stubs are inert here) is NOT the compose-safety 400.
+    let err: any;
+    try {
+      await service.create(
+        'u1',
+        { name: 'x', projectId: 'p1', composeContent: DOCKER_SOCK_COMPOSE } as any,
+        { allowHostAccessCompose: true },
+      );
+    } catch (e) {
+      err = e;
+    }
+    // If it threw, it must NOT be the host-escape rejection.
+    if (err) expect(String(err.message)).not.toMatch(/host-escape primitives/i);
+  });
+});
+
+// ── gitUrl SSRF / file:// validation (H-1) ─────────────────────────────────
+// A project DEVELOPER must not be able to point gitUrl at an internal address
+// (SSRF) or a local path (file:// → read a repo off the API host). The screen
+// must run on the public-repo create path AND on update() — both reach
+// `git clone <gitUrl>`.
+describe('gitUrl validation on create()/update()', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('create() rejects an SSRF gitUrl on the anonymous public-repo path (no provider/token)', async () => {
+    const { service } = makeService();
+    await expect(
+      service.create('u1', {
+        name: 'x', projectId: 'p1', gitUrl: 'https://169.254.169.254/latest/meta-data/',
+      } as any),
+    ).rejects.toThrow(/not allowed|host/i);
+  });
+
+  it('create() rejects a non-https scheme (file://) before any clone', async () => {
+    const { service } = makeService();
+    await expect(
+      service.create('u1', { name: 'x', projectId: 'p1', gitUrl: 'file:///etc/passwd' } as any),
+    ).rejects.toThrow(/https/i);
+  });
+
+  it('create() allows a normal public https repo', async () => {
+    const { service } = makeService();
+    let err: any;
+    try {
+      await service.create('u1', {
+        name: 'x', projectId: 'p1', gitUrl: 'https://github.com/me/public.git',
+      } as any);
+    } catch (e) { err = e; }
+    // It may fail later on inert DB stubs, but NOT on the gitUrl screen.
+    if (err) {
+      expect(String(err.message)).not.toMatch(/https|host is not allowed/i);
+    }
+  });
+
+  it('update() rejects changing gitUrl to an internal address', async () => {
+    const { service, prisma } = makeService();
+    prisma.application.findUnique.mockResolvedValue(
+      gitApp({ gitProviderId: null, gitUrl: 'https://github.com/me/x.git' }),
+    );
+    await expect(
+      service.update('u1', 'a1', { gitUrl: 'https://127.0.0.1/x.git' } as any),
+    ).rejects.toThrow(/not allowed|host/i);
+    // Rejected before the DB write.
+    expect(prisma.application.update).not.toHaveBeenCalled();
+  });
+
+  it('update() rejects a file:// gitUrl', async () => {
+    const { service, prisma } = makeService();
+    prisma.application.findUnique.mockResolvedValue(gitApp({ gitProviderId: null }));
+    await expect(
+      service.update('u1', 'a1', { gitUrl: 'file:///srv/secret-repo' } as any),
+    ).rejects.toThrow(/https/i);
+    expect(prisma.application.update).not.toHaveBeenCalled();
+  });
+});

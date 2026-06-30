@@ -9,10 +9,12 @@ import {
   Res,
   UseGuards,
   BadRequestException,
+  type OnModuleDestroy,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import * as fs from 'fs';
+import { randomBytes } from 'crypto';
 import { AuthGuard } from '@nestjs/passport';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ProjectTransferService } from './project-transfer.service';
@@ -31,14 +33,40 @@ import { ApplyImportDto } from './dto/apply-import.dto';
 @ApiBearerAuth()
 @UseGuards(AuthGuard('jwt'))
 @Controller()
-export class ProjectTransferController {
+export class ProjectTransferController implements OnModuleDestroy {
   // In-memory one-shot download tokens → archive path. Cleared after download.
-  private downloads = new Map<string, { path: string; filename: string; userId: string }>();
+  // Each entry carries an expiry; a sweeper unlinks the staged archive when the
+  // token is never redeemed (LOW: previously orphaned export archives leaked on
+  // disk indefinitely and tokens used Math.random()).
+  private downloads = new Map<string, { path: string; filename: string; userId: string; expiresAt: number }>();
+  /** A prepared export is valid for this long before its archive is reaped. */
+  private static readonly DOWNLOAD_TTL_MS = 15 * 60_000;
+  private sweepTimer: NodeJS.Timeout | null = null;
 
-  constructor(private readonly svc: ProjectTransferService) {}
+  constructor(private readonly svc: ProjectTransferService) {
+    // Periodic sweep of expired/abandoned export archives.
+    this.sweepTimer = setInterval(() => this.sweepExpired(), 5 * 60_000);
+    if (this.sweepTimer.unref) this.sweepTimer.unref();
+  }
 
+  /** 256-bit random, URL-safe token (was Date.now()+Math.random()). */
   private token(): string {
-    return `dl_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e9).toString(36)}`;
+    return `dl_${randomBytes(24).toString('base64url')}`;
+  }
+
+  onModuleDestroy(): void {
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+  }
+
+  /** Unlink archives whose download token expired without being redeemed. */
+  private sweepExpired(): void {
+    const now = Date.now();
+    for (const [tok, entry] of this.downloads) {
+      if (entry.expiresAt <= now) {
+        this.downloads.delete(tok);
+        fs.promises.unlink(entry.path).catch(() => undefined);
+      }
+    }
   }
 
   @Post('projects/:id/export')
@@ -54,7 +82,12 @@ export class ProjectTransferController {
       passphrase: dto.passphrase,
     });
     const tok = this.token();
-    this.downloads.set(tok, { path: archivePath, filename, userId });
+    this.downloads.set(tok, {
+      path: archivePath,
+      filename,
+      userId,
+      expiresAt: Date.now() + ProjectTransferController.DOWNLOAD_TTL_MS,
+    });
     return { downloadToken: tok, filename };
   }
 
@@ -66,7 +99,11 @@ export class ProjectTransferController {
     @Res() res: Response,
   ) {
     const entry = this.downloads.get(tok);
-    if (!entry || entry.userId !== userId) {
+    if (!entry || entry.userId !== userId || entry.expiresAt <= Date.now()) {
+      if (entry && entry.expiresAt <= Date.now()) {
+        this.downloads.delete(tok);
+        fs.promises.unlink(entry.path).catch(() => undefined);
+      }
       throw new BadRequestException('Download not found or expired.');
     }
     this.downloads.delete(tok);

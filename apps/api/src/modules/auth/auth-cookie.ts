@@ -7,11 +7,11 @@ import type { CookieOptions, Request } from 'express';
  *
  * The cookie is the PRIMARY refresh-token channel for the dashboard:
  * httpOnly so an XSS can't read it, path-scoped to /api/auth so it only
- * travels to the auth endpoints, SameSite=Lax which still works for the
- * dashboard↔API cross-port fetches (same registrable domain) when the
- * client sends credentials:'include'. The JSON body keeps echoing the
- * refresh token for older clients — the dashboard simply no longer
- * stores it.
+ * travels to the auth endpoints, SameSite=Strict (the refresh/logout
+ * endpoints are POSTs the dashboard issues same-site, never a cross-site
+ * navigation — Strict gives the tightest CSRF posture and Lax bought us
+ * nothing here). The JSON body keeps echoing the refresh token for older
+ * clients — the dashboard simply no longer stores it.
  */
 export const REFRESH_COOKIE_NAME = 'dockcontrol_rt';
 
@@ -32,7 +32,7 @@ export function refreshCookieOptions(
 ): CookieOptions {
   return {
     httpOnly: true,
-    sameSite: 'lax',
+    sameSite: 'strict',
     // Scoped to the auth endpoints only — the cookie never rides along on
     // ordinary API traffic, shrinking both CSRF surface and header bytes.
     path: '/api/auth',

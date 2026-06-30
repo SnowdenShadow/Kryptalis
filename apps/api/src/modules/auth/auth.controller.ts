@@ -22,6 +22,8 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
+import { EmailOnlyDto } from './dto/email-only.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import {
   REFRESH_COOKIE_NAME,
@@ -178,7 +180,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { ttl: 60 * 60_000, limit: 3 } })
   @ApiOperation({ summary: 'Re-send verification email (always returns generic success)' })
-  resendVerification(@Body() body: { email: string }) {
+  resendVerification(@Body() body: EmailOnlyDto) {
     return this.authService.resendVerification(body.email);
   }
 
@@ -186,7 +188,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { ttl: 60_000, limit: 3 } })
   @ApiOperation({ summary: 'Request a password reset link by email' })
-  forgotPassword(@Body() body: { email: string }) {
+  forgotPassword(@Body() body: EmailOnlyDto) {
     return this.authService.forgotPassword(body.email);
   }
 
@@ -194,9 +196,7 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   @Throttle({ default: { ttl: 60_000, limit: 5 } })
   @ApiOperation({ summary: 'Reset password using a one-time token' })
-  resetPassword(
-    @Body() body: { token: string; newPassword: string; totpCode?: string; backupCode?: string },
-  ) {
+  resetPassword(@Body() body: ResetPasswordDto) {
     return this.authService.resetPassword(body.token, body.newPassword, {
       totpCode: body.totpCode,
       backupCode: body.backupCode,
