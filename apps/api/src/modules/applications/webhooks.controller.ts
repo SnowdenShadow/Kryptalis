@@ -7,6 +7,7 @@ import {
   Headers,
   ForbiddenException,
   ConflictException,
+  Logger,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
@@ -89,6 +90,8 @@ export function isReplay(deliveryId: string | undefined): boolean {
 @ApiTags('Webhooks')
 @Controller('webhooks/applications')
 export class ApplicationWebhooksController {
+  private readonly logger = new Logger('Webhook');
+
   constructor(
     private prisma: PrismaService,
     private apps: ApplicationsService,
@@ -124,6 +127,24 @@ export class ApplicationWebhooksController {
     // probed via the response (NotFound vs Forbidden vs skipped). The
     // autoDeploy-disabled skip is intentionally deferred until AFTER the
     // signature checks out so it can't be used as an oracle either.
+    // Which signature header arrived tells us the provider without leaking the
+    // secret. Logged so an operator can see a delivery actually reached us
+    // (vs "the provider never called" — a very different problem to chase).
+    const sigKind = ghSig
+      ? 'github'
+      : glToken
+        ? 'gitlab'
+        : bbSig
+          ? 'bitbucket'
+          : giteaSig
+            ? 'gitea'
+            : forgejoSig
+              ? 'forgejo'
+              : ghLegacy
+                ? 'github-legacy'
+                : 'none';
+    this.logger.log(`delivery received for app=${id} provider=${sigKind}`);
+
     const app = await this.prisma.application.findUnique({
       where: { id },
       include: { project: { select: { userId: true } } },
@@ -165,6 +186,18 @@ export class ApplicationWebhooksController {
       // signature". bbEvent alone is NOT proof of authenticity — an attacker
       // could otherwise trigger redeploys by posting an empty payload. Always
       // fail-closed.
+      // Disambiguate the cause in the LOG (not the response — the response must
+      // stay a uniform 403 so existence/config can't be probed): the two real
+      // operator mistakes are "app not found / no secret stored" vs "secret
+      // mismatch between provider and platform".
+      const why = !app
+        ? 'app not found'
+        : !app.webhookSecret
+          ? 'no webhook secret stored on app'
+          : sigKind === 'none'
+            ? 'no known signature header on request'
+            : 'signature mismatch (secret differs between provider and platform)';
+      this.logger.warn(`rejected delivery for app=${id}: ${why}`);
       throw new ForbiddenException('Invalid signature');
     }
 
@@ -174,11 +207,15 @@ export class ApplicationWebhooksController {
     // Scope the provider delivery id by app so two apps can't collide.
     const deliveryHeader = ghDelivery ?? glDelivery ?? bbDelivery ?? giteaDelivery;
     if (deliveryHeader && isReplay(`${id}:${deliveryHeader}`)) {
+      this.logger.log(`app=${id}: skipped — duplicate delivery ${deliveryHeader}`);
       return { skipped: true, reason: 'duplicate delivery' };
     }
 
     // autoDeploy skip only AFTER signature verification (not an oracle).
-    if (!app!.autoDeploy) return { skipped: true, reason: 'autoDeploy disabled' };
+    if (!app!.autoDeploy) {
+      this.logger.log(`app=${id}: skipped — autoDeploy disabled`);
+      return { skipped: true, reason: 'autoDeploy disabled' };
+    }
 
     // Optional branch filter — only redeploy if push targets the configured
     // branch. Extract the branch per-provider (GitHub/GitLab from refs/heads,
@@ -187,12 +224,16 @@ export class ApplicationWebhooksController {
     if (app!.gitBranch) {
       const branch = extractPushBranch(body);
       if (branch !== app!.gitBranch) {
+        this.logger.log(
+          `app=${id}: skipped — branch mismatch (pushed=${branch ?? 'none'}, configured=${app!.gitBranch})`,
+        );
         return { skipped: true, reason: `branch mismatch (${branch ?? 'none'})` };
       }
     }
 
     // bbEvent kept just to log/skip non-push events
     if (bbEvent && !bbEvent.startsWith('repo:push')) {
+      this.logger.log(`app=${id}: skipped — event ${bbEvent}`);
       return { skipped: true, reason: `event ${bbEvent}` };
     }
 
@@ -206,10 +247,13 @@ export class ApplicationWebhooksController {
       await this.apps.redeploy(app!.project.userId, id);
     } catch (err) {
       if (err instanceof ConflictException) {
+        this.logger.log(`app=${id}: skipped — deploy already in progress`);
         return { skipped: true, reason: 'deploy already in progress' };
       }
+      this.logger.error(`app=${id}: redeploy failed — ${(err as Error).message}`);
       throw err;
     }
+    this.logger.log(`app=${id}: redeploy triggered by push`);
     return { triggered: true };
   }
 }
