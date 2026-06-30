@@ -985,7 +985,16 @@ export class ProjectTransferService {
           }
 
           try {
-            const created = await this.applications.create(userId, dto);
+            // create() always re-screens user compose for host-escape
+            // primitives. This app already passed the explicit-consent gate
+            // above (requiresHostAccess ⇒ allowHostAccess was true), so a
+            // host-access app the operator chose to trust (e.g. Portainer) must
+            // be allowed through the screen here — otherwise create() would
+            // reject the very app the consent was for. Non-host-access apps
+            // pass `false` and are still screened normally.
+            const created = await this.applications.create(userId, dto, {
+              allowHostAccessCompose: app.requiresHostAccess === true,
+            });
             appNameToId[app.name] = (created as any).id;
             // A PHP site's docroot (public/) is a host bind mount, not a docker
             // volume, so the SFTP-uploaded files don't travel in the archive —

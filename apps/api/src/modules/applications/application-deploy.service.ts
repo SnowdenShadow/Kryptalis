@@ -50,6 +50,16 @@ import * as crypto from 'crypto';
 import { spawn } from 'child_process';
 
 /**
+ * Process env for every `git` invocation that touches a remote, hardened to
+ * https only. `GIT_ALLOW_PROTOCOL` is git's own allowlist of transports; with
+ * just `https` set, git refuses file://, ext::, ssh://, git://, http://, etc.
+ * This is defense-in-depth behind assertCloneHostAllowed — even if a malicious
+ * scheme ever slipped past URL validation, git itself blocks it (no local-repo
+ * read, no ext:: command execution). (H-1)
+ */
+const GIT_HTTPS_ONLY_ENV = { ...process.env, GIT_ALLOW_PROTOCOL: 'https' };
+
+/**
  * Strip credentials from a build/deploy log line before it's persisted or shown
  * — git clones embed tokens (http.extraheader, x-access-token, Authorization).
  * Single source of truth, used by every deploy path's log().
@@ -1428,7 +1438,10 @@ export class ApplicationDeployService implements OnModuleInit {
         a.startsWith('http.extraheader=') ? 'http.extraheader=<redacted>' : a,
       );
       log(`> git ${redactedArgs.join(' ')}`);
-      await execFileAsync('git', cloneArgs, { timeout: 180_000 });
+      // Defense-in-depth behind the URL validation: pin git to https only so a
+      // file://, ext::, ssh:// or other smuggled scheme is refused by git
+      // itself even if it ever slipped past assertCloneHostAllowed. (H-1)
+      await execFileAsync('git', cloneArgs, { timeout: 180_000, env: GIT_HTTPS_ONLY_ENV });
 
       if (opts.gitRef) {
         log(`> git checkout --detach ${opts.gitRef}`);

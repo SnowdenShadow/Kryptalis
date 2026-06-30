@@ -37,6 +37,7 @@ import {
   APPS_DIR,
 } from './applications.helpers';
 import { assertCloneHostAllowed } from '../git-providers/git-providers.service';
+import { assertComposeSafe } from '../../common/compose/compose-safety';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
@@ -228,11 +229,21 @@ export class ApplicationOpsService implements OnModuleInit {
     gitProviderId: string | null;
     gitUrl: string | null;
   }): Promise<string | undefined> {
-    if (!app.gitProviderId) return undefined;
+    if (!app.gitProviderId) {
+      // No provider token to inject — but a provider-less app still gets its
+      // gitUrl cloned on redeploy. Screen it for SSRF/file:// here too, so the
+      // public-repo path is no weaker than the provider path. (H-1)
+      if (app.gitUrl) assertCloneHostAllowed(null, app.gitUrl);
+      return undefined;
+    }
     const gp = await this.prisma.gitProvider.findUnique({
       where: { id: app.gitProviderId },
     });
-    if (!gp) return undefined;
+    if (!gp) {
+      // Provider row vanished; we'll clone anonymously — still screen the URL.
+      if (app.gitUrl) assertCloneHostAllowed(null, app.gitUrl);
+      return undefined;
+    }
     // CRITICAL: enforce HTTPS + provider-host match before injecting the
     // decrypted token into the clone. The redeploy/webhook path looks up the
     // provider by id with no user scope, so without this a member could have
@@ -725,6 +736,11 @@ export class ApplicationOpsService implements OnModuleInit {
     try { yaml.load(content); } catch (e: any) {
       throw new BadRequestException(`Invalid YAML: ${e?.message || e}`);
     }
+    // Same host-escape screen as create()/import — the compose editor is just
+    // another way for a tenant to submit a stack that's about to be run with
+    // `docker compose up`. Reject privileged/cap_add/host-namespace/host
+    // bind-mount (incl. the docker socket) before it ever lands on disk.
+    assertComposeSafe(content);
     const appDir = resolveAppDir(slugify(app.name), id);
     if (!fs.existsSync(appDir)) fs.mkdirSync(appDir, { recursive: true });
     const target = findComposePath(appDir) || path.join(appDir, 'docker-compose.yml');

@@ -45,6 +45,24 @@ const TRANSFER_MAX_BYTES = (() => {
 })();
 
 /**
+ * Strip git credentials from agent-reported text before it is persisted.
+ *
+ * A private-repo DEPLOY embeds the token as `http.extraheader=Authorization:
+ * Basic <b64>` in the cloned command, which the agent echoes into its deploy
+ * logs (returned in the task result). New agents redact this at the source
+ * (poller.go redactGitArgs), but an OLD agent binary talking to a freshly
+ * upgraded API would not — so the API re-applies the same screen server-side
+ * as defense-in-depth before the result/error ever lands in agent_tasks.
+ * Mirrors application-deploy.service.ts redactSecrets().
+ */
+function redactAgentSecrets(text: string): string {
+  return text
+    .replace(/(Authorization:\s*(?:Basic|Bearer)\s+)[A-Za-z0-9_\-+/.=]+/gi, '$1<redacted>')
+    .replace(/(http\.extraheader=)[^\s'"]+/gi, '$1<redacted>')
+    .replace(/(x-access-token:)[^@\s]+/gi, '$1<redacted>');
+}
+
+/**
  * Agent service. Two security invariants enforced here:
  *
  * 1. **Agent tokens are stored as sha256 hashes**, never plaintext. A DB
@@ -528,17 +546,22 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Cap stored result size to defend against agent flooding the DB with
-    // multi-MB JSON blobs.
+    // multi-MB JSON blobs, AND redact any git credential the agent echoed into
+    // its deploy logs (defense-in-depth behind poller.go's own redaction —
+    // covers old agent binaries). Redaction runs on the serialized form so it
+    // reaches `logs` wherever it sits in the result shape.
     let safeResult: any = result;
     try {
-      const serialized = JSON.stringify(result ?? null);
-      if (serialized.length > 500_000) {
-        safeResult = { truncated: true, head: serialized.slice(0, 500_000) };
+      const redacted = redactAgentSecrets(JSON.stringify(result ?? null));
+      if (redacted.length > 500_000) {
+        safeResult = { truncated: true, head: redacted.slice(0, 500_000) };
+      } else {
+        safeResult = JSON.parse(redacted);
       }
     } catch {
       safeResult = { error: 'unserializable agent result' };
     }
-    const safeError = error ? String(error).slice(0, 50_000) : null;
+    const safeError = error ? redactAgentSecrets(String(error)).slice(0, 50_000) : null;
 
     await this.prisma.agentTask.update({
       where: { id: taskId },

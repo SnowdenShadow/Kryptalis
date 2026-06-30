@@ -15,6 +15,7 @@ import {
   assertProjectAccess,
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
+import { assertComposeSafe } from '../../common/compose/compose-safety';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { AgentService } from '../agent/agent.service';
 import { DatabasesService } from '../databases/databases.service';
@@ -114,7 +115,22 @@ export class ApplicationsService implements OnModuleInit {
 
   // ── create / deploy ────────────────────────────────────────────────
 
-  async create(userId: string, dto: CreateApplicationDto) {
+  /**
+   * @param internalOpts NOT reachable from the HTTP boundary — the controller
+   *   calls `create(userId, dto)` with no third arg, so for any tenant request
+   *   `allowHostAccessCompose` is always undefined and the host-escape compose
+   *   screen below always runs. The ONLY caller that may set it is
+   *   project-transfer's apply path, AFTER its own explicit-consent gate
+   *   (`allowHostAccess`) — that flow knowingly recreates a host-access app
+   *   (e.g. Portainer mounting the docker socket) the operator chose to trust.
+   *   Passing it as a method arg (not a DTO field) makes it impossible for a
+   *   crafted request body to flip it, even by accident in a future refactor.
+   */
+  async create(
+    userId: string,
+    dto: CreateApplicationDto,
+    internalOpts?: { allowHostAccessCompose?: boolean },
+  ) {
     await this.assertProjectOwnership(userId, dto.projectId);
 
     const {
@@ -213,22 +229,28 @@ export class ApplicationsService implements OnModuleInit {
       );
     }
 
-    // CRITICAL: before a decrypted provider token (or one-shot PAT) is ever
-    // injected into `git clone <gitUrl>`, enforce HTTPS + a host that matches
-    // the selected provider. Without this a member could set gitUrl to
-    // evil.example.com and exfiltrate the victim's token (token exfil + SSRF).
-    // Run during pre-write validation so a bad URL leaves no orphan rows.
-    if (dto.gitUrl && gitProviderId) {
-      const gp = await this.prisma.gitProvider.findFirst({
-        where: { id: gitProviderId, userId },
-        select: { provider: true },
-      });
-      if (!gp) throw new ForbiddenException('Git provider not yours');
-      assertCloneHostAllowed(gp.provider, dto.gitUrl);
-    } else if (dto.gitUrl && gitToken) {
-      // One-shot PAT: no provider host to pin against, but still require
-      // HTTPS and reject private/loopback literals.
-      assertCloneHostAllowed(null, dto.gitUrl);
+    // CRITICAL: enforce HTTPS + an allowed host on EVERY gitUrl before it ever
+    // reaches `git clone`. Even a public-repo deploy (no provider, no token)
+    // must be screened — otherwise a member could set gitUrl to
+    // http://169.254.169.254/... (blind SSRF via git's smart-HTTP probe) or
+    // file:///etc/... (clone a local repo off the API host, then read it back
+    // through the compose/Dockerfile editor). With a provider/token the same
+    // check also stops token exfiltration to an attacker host. Run during
+    // pre-write validation so a bad URL leaves no orphan rows.
+    if (dto.gitUrl) {
+      if (gitProviderId) {
+        const gp = await this.prisma.gitProvider.findFirst({
+          where: { id: gitProviderId, userId },
+          select: { provider: true },
+        });
+        if (!gp) throw new ForbiddenException('Git provider not yours');
+        assertCloneHostAllowed(gp.provider, dto.gitUrl);
+      } else {
+        // One-shot PAT or anonymous public repo: no provider host to pin
+        // against, but still require HTTPS and reject private/loopback/SSRF
+        // targets and non-https schemes (file://, ext::, ssh://, …).
+        assertCloneHostAllowed(null, dto.gitUrl);
+      }
     }
 
     // Compose YAML must parse — defense against typos and YAML injection.
@@ -241,6 +263,19 @@ export class ApplicationsService implements OnModuleInit {
       } catch (err: any) {
         throw new BadRequestException(`Invalid docker-compose.yml: ${err?.message || 'parse error'}`);
       }
+    }
+    // CRITICAL host-trust boundary: a parses-and-has-services check does NOT
+    // stop `privileged: true`, `cap_add`, `pid: host`, a `/var/run/docker.sock`
+    // or `/:/host` bind-mount, etc. Without this screen a project DEVELOPER
+    // (the minimum role to create an app) could deploy a container that escapes
+    // to host root. Screen BOTH the raw stack (`composeContent`) and the
+    // first-deploy git override (`composeOverride`) — both are user-supplied.
+    // The ONLY bypass is project-transfer's apply path after its explicit
+    // host-access consent gate (see internalOpts doc above); it is unreachable
+    // from the HTTP controller.
+    if (!internalOpts?.allowHostAccessCompose) {
+      assertComposeSafe(composeContent);
+      assertComposeSafe(composeOverride);
     }
     if (dockerfileContent && !/^\s*FROM\s+\S+/im.test(dockerfileContent)) {
       throw new BadRequestException('Dockerfile must contain a FROM instruction.');
@@ -603,6 +638,23 @@ export class ApplicationsService implements OnModuleInit {
 
   async update(userId: string, id: string, dto: UpdateApplicationDto) {
     const existing = await this.assertOwnership(userId, id, 'DEVELOPER');
+    // CRITICAL (H-1): a changed gitUrl is cloned on the next redeploy. Validate
+    // it at write time so an attacker can't store http://169.254.169.254/...
+    // (SSRF) or file:///etc/... (local-repo read) — the same screen create()
+    // applies. Pin against the app's linked provider when it has one; otherwise
+    // require HTTPS + non-private host. assertOwnership already enforces the
+    // caller is at least DEVELOPER on the project.
+    if (dto.gitUrl !== undefined && dto.gitUrl) {
+      let providerType: string | null = null;
+      if (existing.gitProviderId) {
+        const gp = await this.prisma.gitProvider.findUnique({
+          where: { id: existing.gitProviderId },
+          select: { provider: true },
+        });
+        providerType = gp?.provider ?? null;
+      }
+      assertCloneHostAllowed(providerType, dto.gitUrl);
+    }
     // Empty string on displayName means "revert to canonical name".
     const data: any = { ...dto };
     if (dto.displayName !== undefined && dto.displayName.trim() === '') {
