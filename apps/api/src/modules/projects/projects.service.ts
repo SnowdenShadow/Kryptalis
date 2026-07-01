@@ -267,8 +267,8 @@ export class ProjectsService implements OnModuleInit {
    *   4. Deploy on the target through the REAL deploy path — ops.redeploy()
    *      for every app kind (git/image/compose ship the full stack), a proper
    *      compose-carrying DEPLOY for each DB. Never a bare {applicationId}.
-   *   5. ONLY on success: flip project.serverId + every database.serverId,
-   *      then regenerate Caddy.
+   *   5. ONLY on success: flip every application.serverId + database.serverId
+   *      (a project has no serverId of its own), then regenerate Caddy.
    *
    * On ANY deploy failure we do NOT flip (the project still points at the
    * source), RESTART the source stack so the user is left running where they
@@ -465,8 +465,9 @@ export class ProjectsService implements OnModuleInit {
         await this.reassignCollidingPort(app, targetServerId, warnings);
         // Re-point placement to the target BEFORE deploying so resolveAppServer
         // inside ops.redeploy ships the stack to the new host. This is NOT the
-        // success flip — project.serverId still points at the source, so a
-        // deploy failure stays recoverable on the old server.
+        // success flip — the database.serverId rows still point at the source
+        // (flipped only after every deploy succeeds), so a deploy failure stays
+        // recoverable on the old server.
         await this.prisma.application.update({
           where: { id: app.id },
           data: { serverId: targetServerId },
