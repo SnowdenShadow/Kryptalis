@@ -92,24 +92,27 @@ export async function seedServer(db: PGlite): Promise<string> {
   return sid;
 }
 
-/** Insert a project (needs a server + owner) and return its id. */
-export async function seedProject(db: PGlite, serverId: string, userId: string): Promise<string> {
+/**
+ * Insert a project (needs just an owner — a project has no server) and return
+ * its id. The old signature took a serverId; callers pass it to seedApp now.
+ */
+export async function seedProject(db: PGlite, userId: string): Promise<string> {
   const pid = id('prj');
   await db.query(
-    `INSERT INTO "projects" ("id","name","serverId","userId","updatedAt")
-     VALUES ($1,$2,$3,$4, ${NOW})`,
-    [pid, 'proj', serverId, userId],
+    `INSERT INTO "projects" ("id","name","userId","updatedAt")
+     VALUES ($1,$2,$3, ${NOW})`,
+    [pid, 'proj', userId],
   );
   return pid;
 }
 
-/** Insert an application under a project and return its id. */
-export async function seedApp(db: PGlite, projectId: string): Promise<string> {
+/** Insert an application under a project (serverId is required) and return its id. */
+export async function seedApp(db: PGlite, projectId: string, serverId: string): Promise<string> {
   const aid = id('app');
   await db.query(
-    `INSERT INTO "applications" ("id","name","projectId","updatedAt")
-     VALUES ($1,$2,$3, ${NOW})`,
-    [aid, 'app', projectId],
+    `INSERT INTO "applications" ("id","name","projectId","serverId","updatedAt")
+     VALUES ($1,$2,$3,$4, ${NOW})`,
+    [aid, 'app', projectId, serverId],
   );
   return aid;
 }

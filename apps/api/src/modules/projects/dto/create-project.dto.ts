@@ -10,8 +10,4 @@ export class CreateProjectDto {
   @IsOptional()
   @IsString()
   description?: string;
-
-  @ApiProperty({ example: 'clxyz...' })
-  @IsString()
-  serverId: string;
 }

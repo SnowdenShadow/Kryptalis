@@ -50,6 +50,19 @@ describe('migration harness', () => {
     );
     expect(rows.map((r) => r.column_name)).toContain('baseUrl');
   });
+
+  it('projects has NO serverId column (a project is server-agnostic) and app.serverId is NOT NULL', async () => {
+    db = await freshDb();
+    const proj = await db.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns WHERE table_name='projects'`,
+    );
+    expect(proj.rows.map((r) => r.column_name)).not.toContain('serverId');
+    const app = await db.query<{ column_name: string; is_nullable: string }>(
+      `SELECT column_name, is_nullable FROM information_schema.columns
+       WHERE table_name='applications' AND column_name='serverId'`,
+    );
+    expect(app.rows[0]?.is_nullable).toBe('NO');
+  });
 });
 
 describe('FK ON DELETE CASCADE', () => {
@@ -57,8 +70,8 @@ describe('FK ON DELETE CASCADE', () => {
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a = await seedApp(db, p, s);
     await seedDeployment(db, a, u, 'RUNNING');
 
     expect(await count(db, 'applications')).toBe(1);
@@ -71,18 +84,21 @@ describe('FK ON DELETE CASCADE', () => {
     expect(await count(db, 'deployments')).toBe(0);
   });
 
-  it('deleting a server cascades to its projects (and on down the tree)', async () => {
+  it('deleting a server that still hosts an app is REFUSED (Restrict, not cascade)', async () => {
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    await seedApp(db, p);
+    const p = await seedProject(db, u);
+    await seedApp(db, p, s);
 
-    await db.query(`DELETE FROM "servers" WHERE id=$1`, [s]);
-
-    // projects.serverId → CASCADE, which cascades to applications.
-    expect(await count(db, 'projects')).toBe(0);
-    expect(await count(db, 'applications')).toBe(0);
+    // applications.serverId → RESTRICT: the server can't be deleted while an app
+    // references it (there's no project server to fall back to). The project
+    // itself is server-agnostic and is unaffected.
+    await expect(
+      db.query(`DELETE FROM "servers" WHERE id=$1`, [s]),
+    ).rejects.toThrow();
+    expect(await count(db, 'applications')).toBe(1);
+    expect(await count(db, 'projects')).toBe(1);
   });
 
   it('deleting a user cascades to their sessions', async () => {
@@ -105,8 +121,8 @@ describe('FK ON DELETE SET NULL', () => {
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a = await seedApp(db, p, s);
     const dbId = id('db');
     await db.query(
       `INSERT INTO "databases"
@@ -130,8 +146,8 @@ describe('FK ON DELETE SET NULL', () => {
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a = await seedApp(db, p, s);
     const dom = id('dom');
     await db.query(
       `INSERT INTO "domains" ("id","domain","projectId","applicationId","updatedAt")
@@ -158,8 +174,8 @@ describe('FK ON DELETE RESTRICT (audit-trail preservation)', () => {
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a = await seedApp(db, p, s);
     // A SECOND user triggers the deploy, so deleting them is blocked by RESTRICT
     // (deleting the owner would instead cascade the whole tree first).
     const trigger = await seedUser(db, { email: 'trigger@example.com' });
@@ -177,8 +193,8 @@ describe('partial unique index: one in-flight deployment per app (TOCTOU close)'
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a = await seedApp(db, p, s);
 
     await seedDeployment(db, a, u, 'BUILDING');
     // A near-simultaneous second redeploy: must be rejected by the partial
@@ -192,8 +208,8 @@ describe('partial unique index: one in-flight deployment per app (TOCTOU close)'
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a = await seedApp(db, p, s);
 
     const first = await seedDeployment(db, a, u, 'BUILDING');
     // Terminal → no longer in-flight, frees the slot.
@@ -207,8 +223,8 @@ describe('partial unique index: one in-flight deployment per app (TOCTOU close)'
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a = await seedApp(db, p, s);
 
     await seedDeployment(db, a, u, 'RUNNING');
     await seedDeployment(db, a, u, 'FAILED');
@@ -221,9 +237,9 @@ describe('partial unique index: one in-flight deployment per app (TOCTOU close)'
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a1 = await seedApp(db, p);
-    const a2 = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a1 = await seedApp(db, p, s);
+    const a2 = await seedApp(db, p, s);
 
     // Each app may hold its own in-flight deploy simultaneously.
     await expect(seedDeployment(db, a1, u, 'BUILDING')).resolves.toBeTruthy();
@@ -243,7 +259,7 @@ describe('unique constraints', () => {
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
+    const p = await seedProject(db, u);
     const insertDomain = () =>
       db.query(
         `INSERT INTO "domains" ("id","domain","projectId","updatedAt") VALUES ($1,$2,$3, ${NOW})`,
@@ -257,7 +273,7 @@ describe('unique constraints', () => {
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
+    const p = await seedProject(db, u);
     const member = await seedUser(db, { email: 'm@example.com' });
     const addMember = () =>
       db.query(
@@ -280,8 +296,8 @@ describe('known NULL-distinct unique quirk on (applicationId, serviceName)', () 
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a = await seedApp(db, p, s);
 
     const insertDb = (name: string) =>
       db.query(
@@ -300,8 +316,8 @@ describe('known NULL-distinct unique quirk on (applicationId, serviceName)', () 
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a = await seedApp(db, p, s);
 
     const insertDb = (name: string) =>
       db.query(
@@ -338,8 +354,8 @@ describe('column defaults applied by the database', () => {
     db = await freshDb();
     const u = await seedUser(db);
     const s = await seedServer(db);
-    const p = await seedProject(db, s, u);
-    const a = await seedApp(db, p);
+    const p = await seedProject(db, u);
+    const a = await seedApp(db, p, s);
     const did = id('dep');
     await db.query(
       `INSERT INTO "deployments" ("id","applicationId","triggeredById") VALUES ($1,$2,$3)`,

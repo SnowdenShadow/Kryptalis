@@ -344,15 +344,15 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       where: {
         OR: [
           { application: { serverId } },
-          { application: { serverId: null, project: { serverId } } },
-          { project: { serverId } },
+          // Project-scoped accounts resolve to a server if ANY app in the
+          // project runs there (a project spans machines; it has no server).
+          { project: { applications: { some: { serverId } } } },
         ],
       },
       include: {
         application: { select: { id: true, name: true, containerName: true } },
         project: {
           select: {
-            serverId: true,
             applications: { select: { id: true, name: true, serverId: true } },
           },
         },
@@ -366,8 +366,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
       } else if (acc.project) {
         for (const app of acc.project.applications) {
           // Only this server's apps — a project may span machines.
-          const appServer = app.serverId ?? acc.project.serverId;
-          if (appServer !== serverId) continue;
+          if (app.serverId !== serverId) continue;
           roots[`${appSlugify(app.name)}-${app.id.slice(0, 12)}`] =
             `/opt/dockcontrol/apps/${remoteAppSlug(app.name, app.id)}`;
         }
@@ -1236,17 +1235,15 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
         where: { id: scopeId },
         select: {
           server: { select: { id: true, host: true } },
-          project: { select: { server: { select: { id: true, host: true } } } },
         },
       });
       if (!app) throw new NotFoundException('Application not found');
-      const server = app.server ?? app.project?.server;
+      const server = app.server;
       return server && !isLocalHost(server.host) ? (server as { id: string; host: string }) : null;
     }
     const project = await this.prisma.project.findUnique({
       where: { id: scopeId },
       select: {
-        server: { select: { id: true, host: true } },
         applications: { select: { server: { select: { id: true, host: true } } } },
       },
     });
@@ -1254,7 +1251,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     const hosts = new Set<string>();
     const resolved: Array<{ id: string; host: string }> = [];
     for (const a of project.applications) {
-      const server = (a.server ?? project.server) as { id: string; host: string } | null;
+      const server = a.server as { id: string; host: string } | null;
       const key = server && !isLocalHost(server.host) ? server.id : 'local';
       if (!hosts.has(key)) {
         hosts.add(key);

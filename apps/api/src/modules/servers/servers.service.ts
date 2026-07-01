@@ -186,19 +186,21 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
       select: {
         project: {
           select: {
-            serverId: true,
-            // Per-app placement: apps can run on servers other than the
-            // project default — surface those too.
+            // A project has no server — the reachable machines are wherever the
+            // member's apps and databases run (both carry their own serverId).
             applications: { select: { serverId: true } },
+            databases: { select: { serverId: true } },
           },
         },
       },
     });
     const idSet = new Set<string>();
     for (const m of memberships) {
-      if (m.project.serverId) idSet.add(m.project.serverId);
       for (const a of m.project.applications ?? []) {
         if (a.serverId) idSet.add(a.serverId);
+      }
+      for (const d of m.project.databases ?? []) {
+        if (d.serverId) idSet.add(d.serverId);
       }
     }
     const ids = Array.from(idSet);
@@ -456,7 +458,9 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
   async findOne(id: string) {
     const server = await this.prisma.server.findUnique({
       where: { id },
-      include: { projects: true },
+      // A project has no server anymore; a server hosts applications and
+      // databases directly (each carries its own serverId).
+      include: { applications: true, databases: true },
     });
     if (!server) throw new NotFoundException('Server not found');
     return server;
@@ -469,6 +473,19 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
 
   async remove(id: string) {
     await this.findOne(id);
+    // A project has no server anymore — apps and databases carry their own
+    // serverId (FK onDelete: Restrict). Deleting a server that still hosts
+    // any would either be blocked by the DB or orphan live infra, so refuse
+    // up front with a clear message telling the operator what to move first.
+    const [appCount, dbCount] = await Promise.all([
+      this.prisma.application.count({ where: { serverId: id } }),
+      this.prisma.database.count({ where: { serverId: id } }),
+    ]);
+    if (appCount > 0 || dbCount > 0) {
+      throw new BadRequestException(
+        `Server still hosts ${appCount} app(s)/${dbCount} database(s) — move or remove them first.`,
+      );
+    }
     await this.prisma.server.delete({ where: { id } });
     return { message: 'Server deleted' };
   }
@@ -606,19 +623,25 @@ export class ServersService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Delete a server. Refuses if any project still uses it (the operator must
-   * move/delete the projects first) — unless `force` is passed.
+   * Delete a server. A project has no server anymore — apps and databases
+   * carry their own serverId with an onDelete: Restrict FK. So we refuse the
+   * delete while the server still hosts any (the operator must move/remove
+   * them first). `force` cannot override the FK, so it no longer cascades:
+   * there is nothing left to cascade once apps/DBs are gone.
    */
   async removeChecked(id: string, force = false) {
     const server = await this.prisma.server.findUnique({ where: { id } });
     if (!server) throw new NotFoundException('Server not found');
-    const projectCount = await this.prisma.project.count({ where: { serverId: id } });
-    if (projectCount > 0 && !force) {
+    const [appCount, dbCount] = await Promise.all([
+      this.prisma.application.count({ where: { serverId: id } }),
+      this.prisma.database.count({ where: { serverId: id } }),
+    ]);
+    if (appCount > 0 || dbCount > 0) {
       throw new BadRequestException(
-        `Server has ${projectCount} project(s). Move them or pass force=true to delete with all projects.`,
+        `Server still hosts ${appCount} app(s)/${dbCount} database(s) — move or remove them first.`,
       );
     }
     await this.prisma.server.delete({ where: { id } });
-    return { message: 'Server deleted', cascadedProjects: projectCount };
+    return { message: 'Server deleted' };
   }
 }

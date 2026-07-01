@@ -174,19 +174,21 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
       select: {
         project: {
           select: {
-            serverId: true,
-            // Per-app placement: an app can run on a different server than
-            // its project — members get read access to those servers too.
+            // A project has no server of its own — its accessible servers are
+            // the union of the servers its apps and databases are placed on.
             applications: { select: { serverId: true } },
+            databases: { select: { serverId: true } },
           },
         },
       },
     });
     const ids = new Set<string>();
     for (const m of memberships) {
-      if (m.project.serverId) ids.add(m.project.serverId);
       for (const a of m.project.applications ?? []) {
         if (a.serverId) ids.add(a.serverId);
+      }
+      for (const d of m.project.databases ?? []) {
+        if (d.serverId) ids.add(d.serverId);
       }
     }
     return Array.from(ids);

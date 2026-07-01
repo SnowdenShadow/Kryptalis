@@ -493,10 +493,8 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
     const apps = await this.prisma.application.findMany({
       where: {
         status: { in: ['RUNNING', 'STOPPED', 'ERROR'] },
-        OR: [
-          { serverId },
-          { serverId: null, project: { serverId } },
-        ],
+        // Apps now always carry their own serverId (no project-level fallback).
+        serverId,
       },
       select: { id: true, status: true, containerName: true },
     });

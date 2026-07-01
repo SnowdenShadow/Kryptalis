@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
@@ -513,9 +513,8 @@ export function findComposePath(dir: string): string | null {
 // ── shared cross-service helpers ─────────────────────────────────────────
 
 /**
- * Resolve the server an app runs on: the app's OWN serverId when set
- * (per-app placement — apps in one project can live on different machines),
- * else the project's server (the default placement). Caches nothing —
+ * Resolve the server an app runs on. Every app carries its OWN serverId now
+ * (a project has no server), so this is a direct lookup. Caches nothing —
  * calls are cheap and we want fresh status.
  */
 export async function resolveAppServer(prisma: PrismaService, appId: string) {
@@ -523,15 +522,49 @@ export async function resolveAppServer(prisma: PrismaService, appId: string) {
     where: { id: appId },
     select: {
       server: { select: { id: true, host: true } },
-      project: { select: { server: { select: { id: true, host: true } } } },
     },
   });
-  return app?.server ?? app?.project?.server ?? null;
+  return app?.server ?? null;
 }
 
 export function isAppLocal(server: { host: string } | null): boolean {
   if (!server) return true;
   return isLocalHost(server.host);
+}
+
+/**
+ * Resolve the serverId to place a new app/database on. A project has no default
+ * server anymore, so every app/DB names its own machine:
+ *   - explicit `requestedId` → validate it exists + is ONLINE, use it.
+ *   - none given + exactly ONE server on the platform (LOCAL install) → auto-use it.
+ *   - none given + multiple servers (MULTI) → error asking the user to pick.
+ * Centralized so app create, DB create and marketplace install share one rule.
+ */
+export async function resolveCreateServerId(
+  prisma: PrismaService,
+  requestedId?: string | null,
+): Promise<string> {
+  if (requestedId) {
+    const target = await prisma.server.findUnique({ where: { id: requestedId } });
+    if (!target) throw new NotFoundException('Server not found');
+    if (target.status !== 'ONLINE') {
+      throw new BadRequestException(
+        `Server "${target.name}" is ${target.status} — choose an ONLINE server`,
+      );
+    }
+    return target.id;
+  }
+  const servers = await prisma.server.findMany({
+    select: { id: true, status: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (servers.length === 0) {
+    throw new BadRequestException('No server provisioned yet');
+  }
+  if (servers.length === 1) {
+    return servers[0].id; // LOCAL install: the single machine, chosen automatically.
+  }
+  throw new BadRequestException('serverId is required — pick a server for this deployment');
 }
 
 // ── access control (RBAC via ProjectMember) ───────────────────────

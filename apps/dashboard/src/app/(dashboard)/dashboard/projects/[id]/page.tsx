@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  ArrowLeft, Trash2, Server, Rocket, Plus, ExternalLink, Store,
+  ArrowLeft, Trash2, Rocket, Plus, ExternalLink, Store,
   FolderKanban, Activity, Users, Shield, Crown, UserPlus, Loader2,
   ArrowRightLeft, AlertTriangle, Network, Database, Copy, Check, Info,
   HardDrive, Download,
@@ -96,7 +96,6 @@ export default function ProjectDetailPage() {
   const [showDelete, setShowDelete] = useState(false);
   const [showMigrate, setShowMigrate] = useState(false);
   const [migrateTargetId, setMigrateTargetId] = useState('');
-  const [migrateIncludePinned, setMigrateIncludePinned] = useState(false);
   const [showExport, setShowExport] = useState(false);
   const [exportIncludeData, setExportIncludeData] = useState(false);
   const [exportIncludeImages, setExportIncludeImages] = useState(false);
@@ -125,6 +124,9 @@ export default function ProjectDetailPage() {
   const { data: servers = [] } = useServers<{ id: string; name: string; host: string; status: string }[]>({
     enabled: isMulti,
   });
+  // A project no longer pins a server, so any ONLINE server is a valid
+  // migration target (the migrate op moves every app to the chosen one).
+  const onlineServers = servers.filter((s) => s.status === 'ONLINE');
 
   const {
     data: project,
@@ -215,7 +217,7 @@ export default function ProjectDetailPage() {
 
   const migrateMutation = useMutation({
     mutationFn: (targetServerId: string) =>
-      api.post(`/projects/${id}/migrate`, { targetServerId, includePinned: migrateIncludePinned }) as Promise<{ status: string; message: string; queued: string[]; warnings: string[] }>,
+      api.post(`/projects/${id}/migrate`, { targetServerId }) as Promise<{ status: string; message: string; queued: string[]; warnings: string[] }>,
     onSuccess: (data) => {
       // The backend now reports an honest status: 'ok' only when nothing
       // degraded, 'partial' when a transfer/teardown/deploy was imperfect,
@@ -234,7 +236,6 @@ export default function ProjectDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
       setShowMigrate(false);
       setMigrateTargetId('');
-      setMigrateIncludePinned(false);
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -435,9 +436,6 @@ export default function ProjectDetailPage() {
           <div className="flex items-center gap-3 flex-wrap">
             <FolderKanban size={22} className="text-primary" />
             <h1 className="text-2xl font-bold truncate">{project.name}</h1>
-            {project.server && (
-              <Badge variant="outline" className="gap-1"><Server size={10} /> {project.server.name}</Badge>
-            )}
             {myRole && <RoleBadge role={myRole} />}
           </div>
           {project.description && <p className="text-sm text-muted-foreground mt-1">{project.description}</p>}
@@ -495,24 +493,21 @@ export default function ProjectDetailPage() {
             <CardContent>
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="rounded-lg border border-border p-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">{t('projects.serverLabel')}</p>
-                      <p className="font-semibold truncate">{project.server?.name ?? t('projects.unknown')}</p>
-                      {project.server?.host && <p className="text-xs text-muted-foreground font-mono truncate">{project.server.host}</p>}
-                    </div>
-                    {isMulti && has(myRole, 'ADMIN') && servers.filter(s => s.id !== project.serverId && s.status === 'ONLINE').length > 0 && (
-                      <Button size="sm" variant="outline" onClick={() => setShowMigrate(true)} title={t('projects.moveServerTitle')}>
-                        <ArrowRightLeft size={12} />
-                      </Button>
-                    )}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-border p-3">
                   <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">{t('common.created')}</p>
                   <p className="font-semibold">{timeAgo(project.createdAt)}</p>
                   <p className="text-xs text-muted-foreground">{new Date(project.createdAt).toLocaleDateString()}</p>
                 </div>
+                {isMulti && has(myRole, 'ADMIN') && onlineServers.length > 0 && (
+                  <div className="rounded-lg border border-border p-3 flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">{t('projects.moveServerTitle')}</p>
+                      <p className="text-xs text-muted-foreground">{t('projects.migrateDataNote')}</p>
+                    </div>
+                    <Button size="sm" variant="outline" onClick={() => setShowMigrate(true)} title={t('projects.moveServerTitle')}>
+                      <ArrowRightLeft size={12} />
+                    </Button>
+                  </div>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -869,10 +864,6 @@ export default function ProjectDetailPage() {
                   <p className="font-semibold">{project.description || t('projects.noDescription')}</p>
                 </div>
                 <div className="rounded-lg border border-border p-3">
-                  <p className="text-xs font-medium text-muted-foreground uppercase mb-1">{t('projects.serverLabel')}</p>
-                  <p className="font-semibold">{project.server?.name}</p>
-                </div>
-                <div className="rounded-lg border border-border p-3">
                   <p className="text-xs font-medium text-muted-foreground uppercase mb-1">{t('common.created')}</p>
                   <p className="font-semibold">{new Date(project.createdAt).toLocaleDateString()}</p>
                 </div>
@@ -1005,7 +996,7 @@ export default function ProjectDetailPage() {
         </DialogFooter>
       </Dialog>
 
-      {/* Migrate Dialog */}
+      {/* Migrate Dialog — move every app in the project to another server */}
       <Dialog open={showMigrate} onClose={() => { setShowMigrate(false); setMigrateTargetId(''); }}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -1013,14 +1004,12 @@ export default function ProjectDetailPage() {
           </DialogTitle>
           <DialogDescription>
             {(() => {
-              const parts = t('projects.moveServerDesc', { name: '__N__', server: '__S__' }).split(/__N__|__S__/);
+              const parts = t('projects.moveServerDesc', { name: '__N__' }).split('__N__');
               return (
                 <>
                   {parts[0]}
                   <span className="font-mono">{project.name}</span>
                   {parts[1] || ''}
-                  <span className="font-semibold">{project.server?.name}</span>
-                  {parts[2] || ''}
                 </>
               );
             })()}
@@ -1040,32 +1029,17 @@ export default function ProjectDetailPage() {
             <Label className="text-xs">{t('projects.targetServer')}</Label>
             <Select value={migrateTargetId} onChange={(e) => setMigrateTargetId(e.target.value)}>
               <option value="">{t('projects.selectServerOption')}</option>
-              {servers
-                .filter(s => s.id !== project.serverId && s.status === 'ONLINE')
-                .map(s => (
-                  <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
-                ))}
+              {onlineServers.map(s => (
+                <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
+              ))}
             </Select>
           </div>
-
-          <label className="flex items-start gap-2 text-xs cursor-pointer">
-            <input
-              type="checkbox"
-              className="mt-0.5"
-              checked={migrateIncludePinned}
-              onChange={(e) => setMigrateIncludePinned(e.target.checked)}
-            />
-            <span>
-              <span className="font-medium">{t('projects.migrateIncludePinned')}</span>
-              <span className="text-muted-foreground block">{t('projects.migrateIncludePinnedDesc')}</span>
-            </span>
-          </label>
 
           <p className="text-xs text-muted-foreground">{t('projects.migrateDataNote')}</p>
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => { setShowMigrate(false); setMigrateTargetId(''); setMigrateIncludePinned(false); }}>{t('common.cancel')}</Button>
+          <Button variant="outline" onClick={() => { setShowMigrate(false); setMigrateTargetId(''); }}>{t('common.cancel')}</Button>
           <Button
             disabled={!migrateTargetId || migrateMutation.isPending}
             onClick={() => migrateMutation.mutate(migrateTargetId)}

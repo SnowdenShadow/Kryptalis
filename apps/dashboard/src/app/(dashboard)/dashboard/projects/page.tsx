@@ -7,7 +7,6 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Plus,
   FolderKanban,
-  Server,
   Calendar,
   Trash2,
   AppWindow,
@@ -136,15 +135,6 @@ export default function ProjectsPage() {
   // --- List ---
   const { data: projects = [], isLoading } = useProjects<Project[]>();
 
-  // --- Local server (auto-select for new project in LOCAL mode) ---
-  // Use the sanitized -public endpoint so non-admin USERs can still create
-  // projects. The admin endpoint /servers/local returns agent tokens and is
-  // gated to ADMIN/SUPERADMIN; we don't need any of that here.
-  const { data: localServer } = useQuery<LocalServer>({
-    queryKey: ['servers', 'local-public'],
-    queryFn: () => api.get('/servers/local-public'),
-  });
-
   // --- Deployment mode (LOCAL or MULTI) + servers list (only fetched in MULTI mode)
   const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string }>();
   const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
@@ -161,18 +151,15 @@ export default function ProjectsPage() {
   const [createForm, setCreateForm] = useState({
     name: '',
     description: '',
-    serverId: '',
   });
 
-  // Reset form when dialog opens, pre-fill server in MULTI if there's only one online
+  // Reset form when dialog opens. A project is now just a name + optional
+  // description — servers are picked per app/DB, not per project.
   useEffect(() => {
     if (showCreate) {
-      const defaultServer = isMultiMode
-        ? (onlineServers.length === 1 ? onlineServers[0].id : '')
-        : (localServer?.id ?? '');
-      setCreateForm({ name: '', description: '', serverId: defaultServer });
+      setCreateForm({ name: '', description: '' });
     }
-  }, [showCreate, isMultiMode, onlineServers.length, localServer?.id]);
+  }, [showCreate]);
 
   // --- Delete confirmation ---
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
@@ -263,7 +250,7 @@ export default function ProjectsPage() {
 
   // --- Mutations ---
   const createMutation = useMutation({
-    mutationFn: (body: { name: string; description?: string; serverId: string }) =>
+    mutationFn: (body: { name: string; description?: string }) =>
       api.post<Project>('/projects', body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['projects'] });
@@ -290,15 +277,10 @@ export default function ProjectsPage() {
   // --- Handlers ---
   function handleCreateSubmit(e: FormEvent) {
     e.preventDefault();
-    const serverId = isMultiMode ? createForm.serverId : localServer?.id;
-    if (!serverId) {
-      toast.error(t(isMultiMode ? 'toast.pickServerFirst' : 'toast.noLocalServer'));
-      return;
-    }
+    if (!createForm.name.trim()) return;
     createMutation.mutate({
       name: createForm.name,
       ...(createForm.description ? { description: createForm.description } : {}),
-      serverId,
     });
   }
 
@@ -439,11 +421,6 @@ export default function ProjectsPage() {
                             <span className="flex items-center gap-1"><Globe size={11} /> {t(totalDomains === 1 ? 'projects.domainSingle' : 'projects.domainPlural', { n: totalDomains })}</span>
                           )}
                         </div>
-                        {project.server && (
-                          <Badge variant="outline" className="text-[10px] gap-1">
-                            <Server size={10} /> {project.server.name}
-                          </Badge>
-                        )}
                       </div>
                     </div>
                   </CardContent>
@@ -487,68 +464,13 @@ export default function ProjectsPage() {
             />
           </div>
 
-          {/* Server selector — auto in LOCAL mode, dropdown in MULTI */}
-          {isMultiMode ? (
-            <div className="space-y-2">
-              <Label htmlFor="proj-server">{t('projects.serverRequired')}</Label>
-              {!isAdmin ? (
-                <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/5 p-3 text-xs">
-                  <Server size={14} className="text-orange-500 shrink-0 mt-0.5" />
-                  <p className="text-muted-foreground">
-                    {t('projects.serverAdminRequired')}
-                  </p>
-                </div>
-              ) : onlineServers.length === 0 ? (
-                <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/5 p-3 text-xs">
-                  <Server size={14} className="text-orange-500 shrink-0 mt-0.5" />
-                  <p className="text-muted-foreground">
-                    {t('projects.noOnlineServerBefore')}{' '}
-                    <a href="/dashboard/servers" className="text-primary hover:underline">{t('projects.noOnlineServerLink')}</a>.
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <Select
-                    id="proj-server"
-                    value={createForm.serverId}
-                    onChange={(e) => setCreateForm(f => ({ ...f, serverId: e.target.value }))}
-                    required
-                  >
-                    <option value="">{t('projects.selectServer')}</option>
-                    {onlineServers.map(s => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} ({s.host})
-                      </option>
-                    ))}
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    {t('projects.serverDeployHint')}
-                  </p>
-                </>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <Label>{t('projects.serverLabel')}</Label>
-              <div className="flex items-center gap-2 rounded-md border border-input bg-muted/50 px-3 py-2 text-sm">
-                <Server size={14} className="text-muted-foreground" />
-                <span>{localServer?.name ?? t('common.loading')}</span>
-                <span className="text-xs text-muted-foreground ml-auto">{t('projects.localModeHint')}</span>
-              </div>
-            </div>
-          )}
-
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setShowCreate(false)}>
               {t('common.cancel')}
             </Button>
             <Button
               type="submit"
-              disabled={
-                createMutation.isPending ||
-                !createForm.name.trim() ||
-                (isMultiMode ? !createForm.serverId : !localServer)
-              }
+              disabled={createMutation.isPending || !createForm.name.trim()}
             >
               {createMutation.isPending && <Loader2 size={14} className="animate-spin" />}
               {createMutation.isPending ? t('common.creating') : t('common.create')}

@@ -602,7 +602,7 @@ export class ApplicationDeployService implements OnModuleInit {
       // discovery story as a normal compose deploy.
       const appRow = await this.prisma.application.findUnique({
         where: { id: appId },
-        select: { projectId: true, project: { select: { server: { select: { host: true } } } } },
+        select: { projectId: true },
       });
       const projectNet = appRow ? projectNetworkName(appRow.projectId) : null;
       await this.ensureProjectNetwork(projectNet);
@@ -920,11 +920,11 @@ export class ApplicationDeployService implements OnModuleInit {
       try {
         const appRowForImport = await this.prisma.application.findUnique({
           where: { id: appId },
-          // serverId: per-app placement wins — the DB sidecar runs in the
-          // app's compose stack, i.e. on the app's RESOLVED server.
-          select: { projectId: true, serverId: true, project: { select: { serverId: true } } },
+          // The DB sidecar runs in the app's compose stack, i.e. on the app's
+          // (required) server.
+          select: { projectId: true, serverId: true },
         });
-        const dbServerId = appRowForImport?.serverId ?? appRowForImport?.project?.serverId;
+        const dbServerId = appRowForImport?.serverId;
         if (appRowForImport && dbServerId) {
           await this.databases.importFromAppCompose({
             applicationId: appId,

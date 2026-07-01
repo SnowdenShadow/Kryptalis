@@ -354,10 +354,9 @@ ${email ? `  email ${email}\n` : ''}}
             containerName: true, containerPort: true,
             // Server host — when the app runs on a REMOTE server, Caddy
             // (this host) can't reach it by container name; it must proxy
-            // to <server.host>:<published host port> over the wire.
-            // app.server (per-app placement) wins over the project default.
+            // to <server.host>:<published host port> over the wire. Each app
+            // carries its own required serverId (per-app placement).
             server: { select: { host: true } },
-            project: { select: { server: { select: { host: true } } } },
           },
         },
         portBindings: {
@@ -366,7 +365,6 @@ ${email ? `  email ${email}\n` : ''}}
               select: {
                 id: true, name: true, containerName: true, containerPort: true, port: true,
                 server: { select: { host: true } },
-                project: { select: { server: { select: { host: true } } } },
               },
             },
           },
@@ -437,7 +435,6 @@ ${email ? `  email ${email}\n` : ''}}
         containerName?: string | null;
         containerPort?: number | null;
         server?: { host: string | null } | null;
-        project?: { server?: { host: string | null } | null } | null;
       },
       hostPort: number,
     ): string | null => {
@@ -447,8 +444,8 @@ ${email ? `  email ${email}\n` : ''}}
       // remote deploy publishes hostPort:containerPort, so the port is
       // reachable from this box). TLS hint keys off the CONTAINER port —
       // that's the listener's protocol regardless of the published number.
-      // app.server = per-app placement; falls back to the project default.
-      const serverHost = app.server?.host ?? app.project?.server?.host;
+      // app.server = per-app placement (each app carries its own serverId).
+      const serverHost = app.server?.host;
       const isRemote = !!serverHost && !isLocalHost(serverHost);
       // Defense-in-depth: serverHost is interpolated raw into the upstream
       // address. A malformed/hostile Server.host (whitespace, '{', '}',
@@ -546,7 +543,7 @@ ${email ? `  email ${email}\n` : ''}}
       // proxy over the wire instead of redirecting into the void.
       const bindingIsRemote = (b: (typeof portBindings)[number]) => {
         const a: any = b.application;
-        const h = a?.server?.host ?? a?.project?.server?.host;
+        const h = a?.server?.host;
         return !!h && !isLocalHost(h);
       };
 

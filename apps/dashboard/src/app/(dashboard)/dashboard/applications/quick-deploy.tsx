@@ -43,7 +43,7 @@ import { cn } from '@/lib/utils';
 type Mode = 'git' | 'docker' | 'compose' | 'dockerfile' | 'marketplace';
 type GitSource = 'provider' | 'url';
 
-interface Project { id: string; name: string; serverId?: string; server?: { id: string; name: string } }
+interface Project { id: string; name: string }
 interface GitProvider { id: string; provider: string; username?: string }
 interface Repo {
   fullName: string;
@@ -160,7 +160,8 @@ export function QuickDeployDialog({
   const [envRows, setEnvRows] = useState<EnvRow[]>([]);
 
   // ── Per-app server placement (MULTI mode) ───────────────────────
-  // '' = inherit the project's default server.
+  // Required in MULTI (projects no longer pin a default server); '' means
+  // "not yet chosen" and blocks deploy.
   const [serverChoice, setServerChoice] = useState('');
 
   // ── Post-install generated credentials ─────────────────────────
@@ -189,7 +190,7 @@ export function QuickDeployDialog({
     enabled: open && mode === 'marketplace',
   });
 
-  // MULTI mode → offer a per-app server picker (default: project's server).
+  // MULTI mode → require a per-app server pick (projects no longer pin one).
   const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string }>({
     enabled: open,
     staleTime: 60_000,
@@ -230,6 +231,15 @@ export function QuickDeployDialog({
     if (providers.length === 1 && !providerId) setProviderId(providers[0].id);
     if (projects.length === 1 && !projectId) setProjectId(projects[0].id);
   }, [open, providers, projects, providerId, projectId]);
+
+  // MULTI mode requires a server. When there's exactly one, the picker stays
+  // hidden (nothing to choose) so auto-select it — otherwise deploy would be
+  // permanently blocked with no UI to satisfy the requirement.
+  useEffect(() => {
+    if (!open || !isMultiMode || serverChoice) return;
+    const online = servers.filter((s) => s.status === 'ONLINE');
+    if (online.length === 1) setServerChoice(online[0].id);
+  }, [open, isMultiMode, servers, serverChoice]);
 
   // Default git source: provider if connected, else URL.
   useEffect(() => {
@@ -403,8 +413,13 @@ export function QuickDeployDialog({
     envRows.some((r) => r.key === k && r.value.trim() !== ''),
   );
 
+  // In MULTI a server is required (projects no longer carry a default). When
+  // exactly one server exists we auto-pick it (picker stays hidden), so this
+  // only actually gates the >1 case where the user must choose.
+  const serverValid = !isMultiMode || !!serverChoice;
+
   const canDeploy =
-    !!mode && sourceValid && !!projectId && !!name && hostPortValid && domainValid && envValid;
+    !!mode && sourceValid && !!projectId && !!name && hostPortValid && domainValid && envValid && serverValid;
 
   // ── Mutation ────────────────────────────────────────────────────
   const deployMutation = useMutation({
@@ -752,18 +767,12 @@ export function QuickDeployDialog({
           </div>
         )}
 
-        {/* ── Server placement (MULTI mode) ───────────────────── */}
+        {/* ── Server placement (MULTI mode) — required ────────── */}
         {sourceValid && projectId && isMultiMode && servers.length > 1 && (
           <div className="space-y-2">
-            <Label className="text-sm">{t('quickDeploy.serverLabel') || 'Server'}</Label>
+            <Label className="text-sm">{t('quickDeploy.serverLabel') || 'Server'} *</Label>
             <Select value={serverChoice} onChange={(e) => setServerChoice(e.target.value)}>
-              <option value="">
-                {(() => {
-                  const proj = projects.find((p) => p.id === projectId);
-                  const defaultName = proj?.server?.name;
-                  return (t('quickDeploy.serverDefault') || 'Project default') + (defaultName ? ` (${defaultName})` : '');
-                })()}
-              </option>
+              <option value="">{t('quickDeploy.serverPick') || 'Select a server'}</option>
               {servers.filter((s) => s.status === 'ONLINE').map((s) => (
                 <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
               ))}

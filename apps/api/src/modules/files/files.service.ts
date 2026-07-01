@@ -214,7 +214,6 @@ export class FilesService {
               select: {
                 id: true, name: true, framework: true, status: true, containerName: true, dockerImage: true,
                 server: { select: { host: true } },
-                project: { select: { server: { select: { host: true } } } },
               },
             },
             databases: {
@@ -237,7 +236,6 @@ export class FilesService {
           select: {
             id: true, name: true, framework: true, status: true, containerName: true, dockerImage: true,
             server: { select: { host: true } },
-            project: { select: { server: { select: { host: true } } } },
           },
         },
         databases: {
@@ -257,7 +255,7 @@ export class FilesService {
       role: p.role,
       applications: p.applications
         .map((a) => {
-          const serverHost = (a as any).server?.host ?? (a as any).project?.server?.host;
+          const serverHost = (a as any).server?.host;
           const isRemote = !!serverHost && !isLocalHost(serverHost);
           const hostHasFiles = !isRemote && fs.existsSync(this.appRootDir(a.id, this.slugify(a.name)));
           const hasContainer = !!(a as any).containerName;
@@ -269,7 +267,7 @@ export class FilesService {
           const shellLess = /portainer/.test(imageHint);
           // Strip the nested relations from the response (UI doesn't need
           // them and they leak server hosts to project members).
-          const { server: _s, project: _p, ...rest } = a as any;
+          const { server: _s, ...rest } = a as any;
           return {
             ...rest,
             // Remote apps are browsed through the agent (FILE_LIST) — the
@@ -761,10 +759,9 @@ export class FilesService {
       select: {
         name: true,
         server: { select: { id: true, host: true } },
-        project: { select: { server: { select: { id: true, host: true } } } },
       },
     });
-    const server = app?.server ?? app?.project?.server;
+    const server = app?.server;
     if (!app || !server || isLocalHost(server.host)) return null;
     return {
       serverId: server.id,
@@ -2326,7 +2323,6 @@ export class FilesService {
           select: {
             id: true, name: true,
             server: { select: { id: true, host: true } },
-            project: { select: { server: { select: { id: true, host: true } } } },
           },
         },
         databases: { select: { id: true } },
@@ -2340,7 +2336,7 @@ export class FilesService {
     const localApps: Array<{ id: string; name: string }> = [];
     const remoteByServer = new Map<string, Array<{ id: string; name: string }>>();
     for (const a of project.applications) {
-      const server = (a as any).server ?? (a as any).project?.server;
+      const server = (a as any).server;
       if (server && !isLocalHost(server.host)) {
         const arr = remoteByServer.get(server.id) ?? [];
         arr.push({ id: a.id, name: a.name });

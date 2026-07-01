@@ -243,18 +243,22 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       select: {
         project: {
           select: {
-            serverId: true,
-            // Per-app placement: include servers where the member's apps run.
+            // A project has no server — derive the visible machines from where
+            // the member's apps and databases actually run (both carry their
+            // own REQUIRED serverId).
             applications: { select: { serverId: true } },
+            databases: { select: { serverId: true } },
           },
         },
       },
     });
     const ids = new Set<string>();
     for (const m of memberships) {
-      if (m.project.serverId) ids.add(m.project.serverId);
       for (const a of m.project.applications ?? []) {
         if (a.serverId) ids.add(a.serverId);
+      }
+      for (const d of m.project.databases ?? []) {
+        if (d.serverId) ids.add(d.serverId);
       }
     }
     return Array.from(ids);
@@ -875,7 +879,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
    */
   private async listAppVolumes(serverId: string, projectId?: string | null): Promise<string[]> {
     const apps = await this.prisma.application.findMany({
-      where: projectId ? { projectId } : { project: { serverId } },
+      // Project-scoped backup → that project's apps; server-wide backup →
+      // every app placed on this server (apps carry their own serverId).
+      where: projectId ? { projectId } : { serverId },
       select: { id: true, name: true },
     });
     if (apps.length === 0) return [];
@@ -914,7 +920,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
   private async exportApplications(stagingDir: string, serverId: string, projectId?: string | null): Promise<void> {
     const apps = await this.prisma.application.findMany({
-      where: projectId ? { projectId } : { project: { serverId } },
+      // Project-scoped backup → that project's apps; server-wide backup →
+      // every app placed on this server (apps carry their own serverId).
+      where: projectId ? { projectId } : { serverId },
       include: {
         domains: true,
         project: { select: { id: true, name: true } },
@@ -1159,7 +1167,9 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   private async remoteBackupVolumes(serverId: string, projectId?: string | null): Promise<string[]> {
     const [apps, dbs] = await Promise.all([
       this.prisma.application.findMany({
-        where: projectId ? { projectId } : { project: { serverId } },
+        // Project-scoped → that project's apps; server-wide → every app on this
+        // server (apps carry their own serverId, a project has none).
+        where: projectId ? { projectId } : { serverId },
         select: { id: true, name: true },
       }),
       this.prisma.database.findMany({
@@ -1529,18 +1539,18 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
 
     const admin = await this.isAdmin(userId);
 
-    // Project-scoped backup: the project must exist, live ON this server, and
-    // the caller must have at least DEVELOPER access to it.
+    // Project-scoped backup: the project must exist and the caller must have at
+    // least DEVELOPER access to it. A project has no server anymore, so there's
+    // no project-on-this-server check — a project-scoped backup can target any
+    // online server that hosts the project's apps/DBs; the access check on
+    // dto.serverId above already gates which servers the caller may pick.
     let projectId: string | null = null;
     if (dto.projectId) {
       const project = await this.prisma.project.findUnique({
         where: { id: dto.projectId },
-        select: { id: true, serverId: true },
+        select: { id: true },
       });
       if (!project) throw new NotFoundException('Project not found.');
-      if (project.serverId !== dto.serverId) {
-        throw new BadRequestException('That project is not on the selected server.');
-      }
       await assertProjectAccess(this.prisma, userId, dto.projectId, 'DEVELOPER');
       projectId = project.id;
     } else if (!admin) {

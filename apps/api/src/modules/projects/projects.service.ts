@@ -66,39 +66,16 @@ export class ProjectsService implements OnModuleInit {
   }
 
   async create(userId: string, dto: CreateProjectDto) {
-    const mode = await this.admin.getDeploymentMode();
-    let serverId = dto.serverId;
-    if (mode === 'LOCAL') {
-      // In LOCAL mode there is only one server — the local one. Use it
-      // regardless of what the client sent (silently override).
-      const local = await this.prisma.server.findFirst({
-        orderBy: { createdAt: 'asc' },
-      });
-      if (!local) {
-        throw new BadRequestException('No local server provisioned yet');
-      }
-      serverId = local.id;
-    } else {
-      // MULTI mode: a serverId is required and must point at an ONLINE server.
-      if (!serverId) {
-        throw new BadRequestException('serverId is required in MULTI mode — pick a server in the wizard');
-      }
-      const server = await this.prisma.server.findUnique({ where: { id: serverId } });
-      if (!server) throw new NotFoundException('Server not found');
-      if (server.status !== 'ONLINE') {
-        throw new BadRequestException(`Server "${server.name}" is ${server.status} — choose an ONLINE server`);
-      }
-    }
+    // A project is a purely logical grouping — it has no server. The machine is
+    // chosen per app/database at their own create time (auto in LOCAL mode).
     const project = await this.prisma.project.create({
       data: {
         ...dto,
-        serverId,
         userId,
         members: {
           create: { userId, role: 'OWNER' },
         },
       },
-      include: { server: { select: { id: true, name: true, host: true } } },
     });
     return project;
   }
@@ -109,7 +86,6 @@ export class ProjectsService implements OnModuleInit {
     return this.prisma.project.findMany({
       where: { id: { in: ids } },
       include: {
-        server: { select: { id: true, name: true, host: true } },
         applications: {
           select: {
             id: true,
@@ -130,7 +106,6 @@ export class ProjectsService implements OnModuleInit {
     const project = await this.prisma.project.findUnique({
       where: { id },
       include: {
-        server: { select: { id: true, name: true, host: true } },
         applications: {
           include: {
             domains: { select: { id: true, domain: true, sslStatus: true } },
@@ -147,7 +122,6 @@ export class ProjectsService implements OnModuleInit {
     return this.prisma.project.update({
       where: { id },
       data: dto,
-      include: { server: { select: { id: true, name: true, host: true } } },
     });
   }
 
@@ -186,17 +160,18 @@ export class ProjectsService implements OnModuleInit {
     const project = await this.prisma.project.findUnique({
       where: { id },
       include: {
-        server: { select: { id: true, host: true } },
         // Per-app teardown is delegated to applications.remove() (which
         // resolves each app's own server), so we only need id + name here.
-        applications: { select: { id: true, name: true } },
+        applications: { select: { id: true, name: true, server: { select: { host: true } } } },
         databases: { select: { id: true, name: true, autoImported: true } },
         domains: { select: { id: true, domain: true } },
       },
     });
     if (!project) throw new NotFoundException('Project not found');
 
-    const isLocal = isLocalHost(project.server?.host);
+    // A project has no server; the dedicated docker network only exists on the
+    // API host when at least one of its apps runs locally.
+    const isLocal = project.applications.some((a) => isLocalHost(a.server?.host));
 
     // ── Applications ────────────────────────────────────────────────
     // Delegate to ApplicationsService.remove() — the single source of truth
@@ -308,35 +283,21 @@ export class ProjectsService implements OnModuleInit {
     projectId: string,
     userId: string,
     targetServerId: string,
-    includePinned = false,
   ) {
     await assertProjectAccess(this.prisma, userId, projectId, 'OWNER');
 
     const projectFull = await this.prisma.project.findUnique({
       where: { id: projectId },
       include: {
-        server: { select: { id: true, host: true, name: true } },
         applications: { select: { id: true, name: true, status: true, serverId: true, hostPort: true } },
         databases: {
-          select: { id: true, name: true, type: true, username: true, password: true, port: true, autoImported: true },
+          select: { id: true, name: true, type: true, username: true, password: true, port: true, autoImported: true, serverId: true },
         },
         domains: { select: { id: true } },
       },
     });
     if (!projectFull) throw new NotFoundException('Project not found');
-
-    // Per-app placement: apps EXPLICITLY pinned to another server normally
-    // stay where the user put them. includePinned relocates them too (and we
-    // clear their serverId on success so they inherit the project default).
-    const pinnedApps = projectFull.applications.filter((a) => a.serverId && a.serverId !== projectFull.serverId);
-    const migratingApps = includePinned
-      ? projectFull.applications
-      : projectFull.applications.filter((a) => !a.serverId || a.serverId === projectFull.serverId);
-    const project = { ...projectFull, applications: migratingApps };
-
-    if (project.serverId === targetServerId) {
-      throw new BadRequestException('Project is already on this server');
-    }
+    const project = projectFull;
 
     const target = await this.prisma.server.findUnique({ where: { id: targetServerId } });
     if (!target) throw new NotFoundException('Target server not found');
@@ -344,8 +305,31 @@ export class ProjectsService implements OnModuleInit {
       throw new BadRequestException(`Target server "${target.name}" is ${target.status} — must be ONLINE`);
     }
 
-    const oldServerId = project.serverId;
-    const sourceLocal = isLocalHost(project.server?.host);
+    // A project has no server — every app/DB carries its own. "Migrate the
+    // project" moves them ALL to the target. The volume-transfer machinery is
+    // single-source, so require the project's infra to share ONE source server
+    // (the normal case); apps deliberately split across servers must be moved
+    // one at a time via the per-app move.
+    const sourceIds = new Set<string>([
+      ...project.applications.map((a) => a.serverId),
+      ...project.databases.filter((d) => !d.autoImported).map((d) => d.serverId),
+    ]);
+    sourceIds.delete(targetServerId); // already-on-target items need no move
+    if (sourceIds.size === 0) {
+      throw new BadRequestException('Project is already on this server');
+    }
+    if (sourceIds.size > 1) {
+      throw new BadRequestException(
+        'This project\'s apps/databases span multiple servers — move them individually instead.',
+      );
+    }
+    const oldServerId = [...sourceIds][0];
+    const sourceServer = await this.prisma.server.findUnique({
+      where: { id: oldServerId },
+      select: { id: true, host: true, name: true },
+    });
+
+    const sourceLocal = isLocalHost(sourceServer?.host);
     const targetLocal = isLocalHost(target.host);
 
     const warnings: string[] = [];
@@ -469,7 +453,7 @@ export class ProjectsService implements OnModuleInit {
     // this request returns, so deploying now would race an empty volume. Defer
     // the deploys to that handler and report the move as in-flight.
     if (remoteToLocal && volumes.length > 0 && !degraded) {
-      return this.deferRemoteToLocal(userId, projectId, project, target, oldServerId, targetServerId, volumes, warnings, pinnedApps, includePinned);
+      return this.deferRemoteToLocal(userId, projectId, project, target, oldServerId, targetServerId, volumes, warnings);
     }
 
     // ── 4. Deploy on the target via the REAL deploy path ──────────────
@@ -523,29 +507,18 @@ export class ProjectsService implements OnModuleInit {
 
     // ── 5. Flip-after-success, or ROLLBACK ────────────────────────────
     if (deployFailed) {
-      // Do NOT flip. Revert any per-app placement we changed and restart the
-      // source stack so the user is left running where they started.
+      // Do NOT flip the DB placements. Revert any per-app placement we changed
+      // and restart the source stack so the user is left where they started.
       await this.rollbackToSource(userId, project, oldServerId, warnings);
-      const msg = `Project migration FAILED — left running on ${project.server?.name || oldServerId}. ` +
+      const msg = `Project migration FAILED — left running on ${sourceServer?.name || oldServerId}. ` +
         `Source volumes are KEPT for recovery. See warnings.`;
       this.appendMailWarning(project, warnings);
-      this.appendPinnedWarning(pinnedApps, includePinned, warnings);
       return { status: 'failed', message: msg, queued, warnings, flipped: false };
     }
 
-    // Success: flip project.serverId + every database.serverId so
-    // resolveDbServer / connHost follow the move, then regenerate Caddy.
-    await this.prisma.project.update({
-      where: { id: projectId },
-      data: { serverId: targetServerId },
-    });
-    if (includePinned && pinnedApps.length > 0) {
-      // Relocated pinned apps inherit the project default now.
-      await this.prisma.application.updateMany({
-        where: { id: { in: pinnedApps.map((a) => a.id) } },
-        data: { serverId: null },
-      });
-    }
+    // Success: flip every database.serverId so resolveDbServer / connHost
+    // follow the move (the apps were already re-pointed before their deploy),
+    // then regenerate Caddy.
     await this.prisma.database.updateMany({
       where: { projectId, serverId: oldServerId },
       data: { serverId: targetServerId },
@@ -553,7 +526,7 @@ export class ProjectsService implements OnModuleInit {
     this.proxy.regenerate().catch(() => {});
 
     const status = degraded ? 'partial' : 'ok';
-    const base = `Project migrated from ${project.server?.name || oldServerId} → ${target.name}.`;
+    const base = `Project apps migrated from ${sourceServer?.name || oldServerId} → ${target.name}.`;
     const volNote = volumes.length > 0
       ? ' Docker volumes were transferred; source volumes are preserved on the old server for recovery.'
       : ' No Docker volumes were present to transfer.';
@@ -562,7 +535,6 @@ export class ProjectsService implements OnModuleInit {
       : `${base}${volNote}`;
 
     this.appendMailWarning(project, warnings);
-    this.appendPinnedWarning(pinnedApps, includePinned, warnings);
     return { status, message, queued, warnings, flipped: true };
   }
 
@@ -583,8 +555,6 @@ export class ProjectsService implements OnModuleInit {
     targetServerId: string,
     volumes: string[],
     warnings: string[],
-    pinnedApps: Array<{ id: string; name: string }>,
-    includePinned: boolean,
   ) {
     const deploys: Array<{ serverId: string; type: 'DEPLOY'; payload: any }> = [];
     for (const app of project.applications) {
@@ -620,7 +590,6 @@ export class ProjectsService implements OnModuleInit {
       // touched and redeploys/STARTs on the source).
       await this.rollbackToSource(userId, project, oldServerId, warnings).catch(() => {});
       this.appendMailWarning(project, warnings);
-      this.appendPinnedWarning(pinnedApps, includePinned, warnings);
       return {
         status: 'failed' as const,
         message: `Migration to ${target.name} could not start (volume export failed to enqueue). The project stays on its original server — restarting it there. Source volumes are intact.`,
@@ -632,14 +601,7 @@ export class ProjectsService implements OnModuleInit {
 
     // Export enqueued — the deferred deploys ride its completion chain, so
     // flipping placement is now safe and the source volumes are preserved
-    // for recovery (purgeVolumes:false).
-    await this.prisma.project.update({ where: { id: projectId }, data: { serverId: targetServerId } });
-    if (includePinned && pinnedApps.length > 0) {
-      await this.prisma.application.updateMany({
-        where: { id: { in: pinnedApps.map((a) => a.id) } },
-        data: { serverId: null },
-      });
-    }
+    // for recovery (purgeVolumes:false). Re-point every app + DB to the target.
     for (const app of project.applications) {
       await this.prisma.application.update({ where: { id: app.id }, data: { serverId: targetServerId } });
     }
@@ -650,7 +612,6 @@ export class ProjectsService implements OnModuleInit {
     this.proxy.regenerate().catch(() => {});
 
     this.appendMailWarning(project, warnings);
-    this.appendPinnedWarning(pinnedApps, includePinned, warnings);
     return {
       status: 'ok' as const,
       message: `Project migrated to ${target.name}. Volumes are transferring; apps and databases deploy on the target once the data arrives. Source volumes are preserved for recovery.`,
@@ -759,7 +720,7 @@ export class ProjectsService implements OnModuleInit {
   ): Promise<void> {
     if (app.hostPort == null) return;
     const others = await this.prisma.application.findMany({
-      where: { id: { not: app.id }, hostPort: { not: null }, project: { serverId: targetServerId } },
+      where: { id: { not: app.id }, hostPort: { not: null }, serverId: targetServerId },
       select: { hostPort: true },
     });
     const used = new Set<number>(others.map((o) => o.hostPort!).filter((n) => !!n));
@@ -818,18 +779,6 @@ export class ProjectsService implements OnModuleInit {
     const n = project.domains?.length ?? 0;
     if (n > 0) {
       warnings.push(`${n} mailbox(es) for these domains remain on the platform host (mail is not relocated).`);
-    }
-  }
-
-  private appendPinnedWarning(
-    pinnedApps: Array<{ name: string }>,
-    includePinned: boolean,
-    warnings: string[],
-  ): void {
-    if (!includePinned && pinnedApps.length > 0) {
-      warnings.push(
-        `${pinnedApps.length} app(s) pinned to other servers were not migrated (their placement is explicit): ${pinnedApps.map((a) => a.name).join(', ')}`,
-      );
     }
   }
 

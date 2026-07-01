@@ -23,6 +23,7 @@ import {
   resolveAppDir,
   attachProjectNetwork,
   projectNetworkName,
+  resolveCreateServerId,
 } from '../applications/applications.helpers';
 import {
   assertProjectAccess,
@@ -57,20 +58,17 @@ export class DatabasesService {
   }
 
   /**
-   * Resolve the server a database runs on: the DB row's OWN serverId first
-   * (per-DB placement — set at create time, default = project server), then
-   * the project / parent-app fallbacks for legacy rows.
+   * Resolve the server a database runs on. Every DB carries its OWN serverId
+   * (required at create), so this is a direct lookup — no project fallback.
    */
   private async resolveDbServer(dbId: string) {
     const db = await this.prisma.database.findUnique({
       where: { id: dbId },
       select: {
         server: { select: { id: true, host: true } },
-        project: { select: { server: { select: { id: true, host: true } } } },
-        application: { select: { project: { select: { server: { select: { id: true, host: true } } } } } },
       },
     });
-    return db?.server ?? db?.project?.server ?? db?.application?.project?.server ?? null;
+    return db?.server ?? null;
   }
 
   private isDbLocal(server: { host: string } | null): boolean {
@@ -144,25 +142,28 @@ export class DatabasesService {
     }
     await assertProjectAccess(this.prisma, userId, projectId, 'DEVELOPER');
 
-    // Per-DB server placement, same model as apps: default = the project's
-    // server; an explicit dto.serverId is honored after validating the
-    // server EXISTS and is ONLINE. This is not a cross-tenant vector:
-    // servers are platform-level resources (admin-managed fleet), there is
-    // no per-tenant server ownership to violate — the project-membership
-    // check above already gates who can provision into this project.
     const parentProject = await this.prisma.project.findUnique({
       where: { id: projectId },
-      select: { serverId: true },
+      select: { id: true },
     });
     if (!parentProject) throw new NotFoundException('Project not found');
-    let effectiveServerId = parentProject.serverId;
-    if (dto.serverId && dto.serverId !== parentProject.serverId) {
-      const target = await this.prisma.server.findUnique({ where: { id: dto.serverId } });
-      if (!target) throw new NotFoundException('Server not found');
-      if (target.status !== 'ONLINE') {
-        throw new BadRequestException(`Server "${target.name}" is ${target.status} — choose an ONLINE server`);
-      }
-      effectiveServerId = target.id;
+    // Per-DB server placement (a project has no server). Precedence:
+    //   - explicit dto.serverId → validated ONLINE.
+    //   - else co-locate with the parent application's server when one is given.
+    //   - else the single machine (LOCAL) / error asking to pick (MULTI).
+    let effectiveServerId: string;
+    if (dto.serverId) {
+      effectiveServerId = await resolveCreateServerId(this.prisma, dto.serverId);
+    } else if (dto.applicationId) {
+      const parentApp = await this.prisma.application.findUnique({
+        where: { id: dto.applicationId },
+        select: { serverId: true },
+      });
+      effectiveServerId = parentApp?.serverId
+        ? await resolveCreateServerId(this.prisma, parentApp.serverId)
+        : await resolveCreateServerId(this.prisma, null);
+    } else {
+      effectiveServerId = await resolveCreateServerId(this.prisma, null);
     }
 
     // Database name is project-scoped now — two tenants can both have
@@ -946,11 +947,10 @@ export class DatabasesService {
       select: {
         projectId: true,
         server: { select: { host: true } },
-        project: { select: { server: { select: { host: true } } } },
       },
     });
     if (!app) throw new NotFoundException('Application not found');
-    const appHost = app.server?.host ?? app.project?.server?.host ?? null;
+    const appHost = app.server?.host ?? null;
     const dbServer = await this.resolveDbServer(dbId);
     const dbHost = dbServer?.host ?? null;
     const sameHost =

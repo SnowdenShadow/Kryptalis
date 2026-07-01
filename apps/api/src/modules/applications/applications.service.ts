@@ -38,6 +38,7 @@ import {
   dockerCompose,
   RESERVED_HOST_PORTS,
   resolveAppServer,
+  resolveCreateServerId,
   isAppLocal,
 } from './applications.helpers';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
@@ -173,22 +174,9 @@ export class ApplicationsService implements OnModuleInit {
       preset: dtoPhpPreset,
     });
 
-    // Per-app server placement (MULTI mode). Stored only when it differs
-    // from the project default — NULL serverId means "inherit", so moving
-    // the project later carries inherit-apps along automatically.
-    let appServerId: string | null = null;
-    if (dtoServerId) {
-      const target = await this.prisma.server.findUnique({ where: { id: dtoServerId } });
-      if (!target) throw new NotFoundException('Server not found');
-      if (target.status !== 'ONLINE') {
-        throw new BadRequestException(`Server "${target.name}" is ${target.status} — choose an ONLINE server`);
-      }
-      const proj = await this.prisma.project.findUnique({
-        where: { id: dto.projectId },
-        select: { serverId: true },
-      });
-      if (proj && proj.serverId !== dtoServerId) appServerId = dtoServerId;
-    }
+    // Per-app server placement — REQUIRED now (a project has no default server).
+    // Explicit choice in MULTI; auto-resolved to the single machine in LOCAL.
+    const appServerId: string = await resolveCreateServerId(this.prisma, dtoServerId);
 
     // ── PRE-WRITE VALIDATION ───────────────────────────────────────
     // Every validation rule runs BEFORE any DB mutation. A failure
@@ -303,14 +291,12 @@ export class ApplicationsService implements OnModuleInit {
           `Port ${dtoHostPort} is reserved by DockControl (dashboard/api/proxy/db). Pick another.`,
         );
       }
-      const project = await this.prisma.project.findUnique({
-        where: { id: dbData.projectId },
-        select: { serverId: true },
-      });
+      // Collisions are per-server: only apps on the SAME machine can clash on a
+      // host port. Scope to the app's resolved server (appServerId).
       const otherUsed = await this.prisma.application.findFirst({
         where: {
           hostPort: dtoHostPort,
-          project: { serverId: project?.serverId },
+          serverId: appServerId,
         },
         select: { id: true, name: true },
       });
@@ -366,14 +352,11 @@ export class ApplicationsService implements OnModuleInit {
     // (advanced wizard path). Done BEFORE the transaction.
     const portToCheck = (firstMappedHost as number | undefined) ?? dbData.port;
     if (portToCheck && typeof portToCheck === 'number') {
-      const targetProject = await this.prisma.project.findUnique({
-        where: { id: dbData.projectId },
-        select: { serverId: true },
-      });
+      // Per-server collision scope (see host-port check above).
       const otherUsed = await this.prisma.application.findFirst({
         where: {
           port: portToCheck,
-          project: { serverId: targetProject?.serverId },
+          serverId: appServerId,
         },
         select: { id: true, name: true, projectId: true },
       });
@@ -600,7 +583,7 @@ export class ApplicationsService implements OnModuleInit {
         // wins over the project default; the dashboard checks app.server
         // first via appServerHostname().
         server: { select: { id: true, name: true, host: true } },
-        project: { select: { id: true, name: true, server: { select: { host: true } } } },
+        project: { select: { id: true, name: true } },
         // Both the clean-URL domain (apps.domains) AND port-pinned bindings
         // (apps.portBindings) are surfaced — the dashboard shows one URL per
         // entry. An app that owns Domain.applicationId AND has port bindings
@@ -627,7 +610,7 @@ export class ApplicationsService implements OnModuleInit {
       where: { id },
       include: {
         server: { select: { id: true, name: true, host: true } },
-        project: { include: { server: { select: { id: true, name: true, host: true } } } },
+        project: { select: { id: true, name: true } },
         domains: { select: { id: true, domain: true, sslStatus: true, status: true } },
         portBindings: {
           select: {
@@ -1058,20 +1041,13 @@ export class ApplicationsService implements OnModuleInit {
     // Reassign a free one (and persist) before the redeploy resolves it.
     let portNote = '';
     if (app.hostPort != null) {
-      // An app physically runs on the target server either when its OWN
-      // serverId points there, OR when it inherits placement from its project
-      // default (serverId NULL + project.serverId === target). The old query
-      // only matched the explicit case, so when the target IS a project
-      // default, every project-inherited neighbour was invisible to the
-      // collision check and the moved app could grab a port already in use.
+      // Every app names its own server, so neighbours on the target are simply
+      // those whose serverId points there.
       const neighbours = await this.prisma.application.findMany({
         where: {
           id: { not: id },
           hostPort: { not: null },
-          OR: [
-            { serverId: targetServerId },
-            { serverId: null, project: { serverId: targetServerId } },
-          ],
+          serverId: targetServerId,
         },
         select: { hostPort: true },
       });
@@ -1090,16 +1066,11 @@ export class ApplicationsService implements OnModuleInit {
       }
     }
 
-    // Flip placement: NULL = inherit when the target IS the project default.
-    const proj = await this.prisma.project.findUnique({
-      where: { id: app.projectId },
-      select: { serverId: true },
-    });
-    const inheritOnTarget = proj?.serverId === targetServerId;
+    // Flip placement: the app always names its server explicitly now.
     await this.prisma.application.update({
       where: { id },
       data: {
-        serverId: inheritOnTarget ? null : targetServerId,
+        serverId: targetServerId,
         status: 'DEPLOYING',
       },
     });
@@ -1123,13 +1094,10 @@ export class ApplicationsService implements OnModuleInit {
         : null;
       const sourceName = srcServer?.name || srcServerId || 'the original server';
       if (srcServerId) {
-        const proj2 = await this.prisma.project
-          .findUnique({ where: { id: app.projectId }, select: { serverId: true } })
-          .catch(() => null);
         await this.prisma.application.update({
           where: { id },
           data: {
-            serverId: proj2?.serverId === srcServerId ? null : srcServerId,
+            serverId: srcServerId,
             status: 'DEPLOYING',
           },
         }).catch(() => {});

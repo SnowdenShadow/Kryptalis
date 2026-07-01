@@ -4,7 +4,7 @@ import { assertProjectAccess } from '../../common/rbac/project-access';
 import { APPS_DIR } from '../../common/paths';
 import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate, domainPinEnv } from './templates';
 import { checkVolumeSafety, checkEnvVarsSafety } from './dto/install-custom.dto';
-import { projectNetworkName, listComposeContainerNames, remoteAppSlug } from '../applications/applications.helpers';
+import { projectNetworkName, listComposeContainerNames, remoteAppSlug, resolveCreateServerId } from '../applications/applications.helpers';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { DomainAttachService } from '../domains/domain-attach.service';
 import { DatabasesService } from '../databases/databases.service';
@@ -189,30 +189,22 @@ export class MarketplaceService implements OnModuleInit {
     }
     await assertProjectAccess(this.prisma, userId, data.projectId, 'DEVELOPER');
 
-    // Per-app server placement: an explicit serverId wins (apps in one
-    // project CAN live on different machines); default = project's server.
+    // Per-app server placement — REQUIRED. A project has no server, so every
+    // app names its own machine: an explicit serverId wins; otherwise the
+    // single LOCAL server is auto-resolved (MULTI-server → the helper 400s
+    // asking the caller to pick).
     const project = await this.prisma.project.findUnique({
       where: { id: data.projectId },
-      select: { serverId: true, server: { select: { host: true } } },
+      select: { id: true },
     });
     if (!project) throw new NotFoundException('Project not found.');
-    let serverHost = project.server?.host ?? null;
-    // appServerId is persisted on the Application row ONLY when it differs
-    // from the project default (NULL = inherit).
-    let appServerId: string | null = null;
-    if (data.serverId && data.serverId !== project.serverId) {
-      const target = await this.prisma.server.findUnique({ where: { id: data.serverId } });
-      if (!target) throw new NotFoundException('Server not found.');
-      if (target.status !== 'ONLINE') {
-        throw new BadRequestException(`Server "${target.name}" is ${target.status} — choose an ONLINE server.`);
-      }
-      appServerId = target.id;
-      serverHost = target.host;
-    } else {
-      data.serverId = project.serverId;
-    }
-    const effectiveServerId = appServerId ?? project.serverId;
-    data.serverId = effectiveServerId;
+    const appServerId = await resolveCreateServerId(this.prisma, data.serverId);
+    data.serverId = appServerId;
+    const server = await this.prisma.server.findUnique({
+      where: { id: appServerId },
+      select: { host: true },
+    });
+    const serverHost = server?.host ?? null;
     // Remote target → the compose stack must run on that server, not on the
     // platform host. runDockerCompose() below shells out to the LOCAL docker
     // daemon, so for remote servers we dispatch the rendered compose to the
@@ -784,23 +776,19 @@ export class MarketplaceService implements OnModuleInit {
     await assertProjectAccess(this.prisma, userId, data.projectId, 'DEVELOPER');
     const project = await this.prisma.project.findUnique({
       where: { id: data.projectId },
-      select: { serverId: true, server: { select: { host: true } } },
+      select: { id: true },
     });
     if (!project) throw new NotFoundException('Project not found.');
-    // Per-app placement, same rules as install(): explicit serverId wins,
-    // NULL on the row = inherit the project default.
-    let serverHost = project.server?.host ?? null;
-    let appServerId: string | null = null;
-    if (data.serverId && data.serverId !== project.serverId) {
-      const target = await this.prisma.server.findUnique({ where: { id: data.serverId } });
-      if (!target) throw new NotFoundException('Server not found.');
-      if (target.status !== 'ONLINE') {
-        throw new BadRequestException(`Server "${target.name}" is ${target.status} — choose an ONLINE server.`);
-      }
-      appServerId = target.id;
-      serverHost = target.host;
-    }
-    data.serverId = appServerId ?? project.serverId;
+    // Per-app placement, same rules as install(): explicit serverId wins;
+    // otherwise the single LOCAL server is auto-resolved. The app row carries
+    // its own REQUIRED serverId — a project has no server to inherit.
+    const appServerId = await resolveCreateServerId(this.prisma, data.serverId);
+    data.serverId = appServerId;
+    const server = await this.prisma.server.findUnique({
+      where: { id: appServerId },
+      select: { host: true },
+    });
+    const serverHost = server?.host ?? null;
     const isRemoteServer = !isLocalHost(serverHost);
     if (!data.name?.trim()) throw new BadRequestException('Name required');
     if (!data.image?.trim()) throw new BadRequestException('Image required');
@@ -1089,10 +1077,11 @@ export class MarketplaceService implements OnModuleInit {
       try {
         const appRow = await this.prisma.application.findUnique({
           where: { id: applicationId },
-          // serverId: per-app placement wins over the project default.
-          select: { projectId: true, serverId: true, project: { select: { serverId: true } } },
+          // serverId is REQUIRED on the app row — the DB sidecar lands on the
+          // same machine as its parent app.
+          select: { projectId: true, serverId: true },
         });
-        const dbServerId = appRow?.serverId ?? appRow?.project?.serverId;
+        const dbServerId = appRow?.serverId;
         if (appRow && dbServerId) {
           await this.databases.importFromAppCompose({
             applicationId,

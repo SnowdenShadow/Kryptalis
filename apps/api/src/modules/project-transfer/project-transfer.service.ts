@@ -771,11 +771,17 @@ export class ProjectTransferService {
       // remote-SOURCE export.)
       let dataRestorable = true;
       try {
-        const targetServer = await this.prisma.server.findUnique({
-          where: { id: project.serverId },
-          select: { host: true },
-        });
-        if (targetServer) dataRestorable = isLocalHost(targetServer.host);
+        // A project no longer has its own serverId — resolve the transfer's
+        // target from the deploy option the project's apps will be created on.
+        // When no explicit target is given, apps deploy to the platform host,
+        // so leave dataRestorable=true (local restore path applies).
+        if (opts.targetServerId) {
+          const targetServer = await this.prisma.server.findUnique({
+            where: { id: opts.targetServerId },
+            select: { host: true },
+          });
+          if (targetServer) dataRestorable = isLocalHost(targetServer.host);
+        }
       } catch {
         // Couldn't resolve the server — assume local (the platform host) and
         // let the restore run; a genuinely remote target would simply no-op the

@@ -76,11 +76,8 @@ export class ProjectsController {
     @Param('id') id: string,
     @CurrentUser('id') userId: string,
     @Body('targetServerId') targetServerId: string,
-    // Opt-in: also relocate apps explicitly pinned to a different server
-    // (default false — pinned apps stay where the user put them).
-    @Body('includePinned') includePinned?: boolean,
   ) {
-    return this.projectsService.migrate(id, userId, targetServerId, includePinned);
+    return this.projectsService.migrate(id, userId, targetServerId);
   }
 
   @Get(':id/mesh')

@@ -45,13 +45,18 @@ export class ApplicationNetworkService {
     await assertProjectAccess(this.prisma, userId, projectId, 'DEVELOPER');
     const project = await this.prisma.project.findUnique({
       where: { id: projectId },
-      select: { serverId: true },
+      select: { id: true },
     });
     if (!project) throw new NotFoundException('Project not found');
+    // A project no longer has a server — each app carries its own serverId and
+    // can live on any host. Reserve every host port already used by an app in
+    // this project so the suggested port never collides regardless of which
+    // server the new app lands on. (A host port is only shared within a single
+    // host, so this over-reserves across servers, which is always safe.)
     const taken = await this.prisma.application.findMany({
       where: {
         hostPort: { not: null },
-        project: { serverId: project.serverId },
+        projectId,
       },
       select: { hostPort: true },
     });
@@ -105,12 +110,12 @@ export class ApplicationNetworkService {
     // single host, so apps on other servers can reuse the same number.
     const thisApp = await this.prisma.application.findUnique({
       where: { id },
-      select: { project: { select: { serverId: true } } },
+      select: { serverId: true },
     });
     const otherApps = await this.prisma.application.findMany({
       where: {
         id: { not: id },
-        project: { serverId: thisApp?.project?.serverId },
+        serverId: thisApp?.serverId,
       },
       select: { name: true, port: true, portMapping: true },
     });

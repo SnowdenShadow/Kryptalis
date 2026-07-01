@@ -62,12 +62,11 @@ export class TerminalService {
       select: {
         id: true, name: true, containerName: true, framework: true, phpWebServer: true,
         server: { select: { id: true, host: true } },
-        project: { select: { server: { select: { id: true, host: true } } } },
       },
     });
     if (!app) throw new NotFoundException('Application not found');
     const containerName = this.containerNameFor(app);
-    const server = app.server ?? app.project?.server;
+    const server = app.server;
 
     if (!server || isLocalHost(server.host)) {
       return { kind: 'local', containerName };

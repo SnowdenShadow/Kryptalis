@@ -809,12 +809,18 @@ export class MailServerService implements OnApplicationBootstrap {
       // code path is taken (no agent round-trip to ourselves).
       return isLocalHost(srv.host) ? null : srv.id;
     }
-    // Inherit the project default server, if any.
+    // A project no longer has its own default server — derive one from its
+    // applications' placements. Use the first distinct app server as the
+    // project's effective default (apps in a project are normally co-located).
     const project = await this.prisma.project.findUnique({
       where: { id: projectId },
-      select: { server: { select: { id: true, host: true, status: true, name: true } } },
+      select: {
+        applications: {
+          select: { server: { select: { id: true, host: true, status: true, name: true } } },
+        },
+      },
     });
-    const dft = project?.server;
+    const dft = project?.applications.find((a) => a.server)?.server ?? null;
     if (dft && !isLocalHost(dft.host)) {
       if (dft.status !== 'ONLINE') {
         throw new BadRequestException(
@@ -1857,7 +1863,7 @@ ${namedVolumes}`;
         name: { in: WEBMAIL_NAMES },
         domains: { some: { id: server.domain.id } },
       },
-      select: { id: true, name: true, serverId: true, project: { select: { serverId: true } } },
+      select: { id: true, name: true, serverId: true },
     });
     if (apps.length === 0) return;
 
@@ -1874,7 +1880,7 @@ ${namedVolumes}`;
         const appSlugDir = `${slug}-${app.id.slice(0, 12)}`;
         // The webmail runs on its own server (co-located with the mail server).
         // Resolve it so we read/write its compose + recreate on the right host.
-        const appServerId = app.serverId ?? app.project?.serverId ?? null;
+        const appServerId = app.serverId ?? null;
         const appHost = await this.resolveMailHost({ serverId: appServerId });
 
         const composePath = this.isRemoteMail(appHost)

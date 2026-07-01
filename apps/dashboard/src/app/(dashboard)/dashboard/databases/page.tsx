@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, type MouseEvent } from 'react';
+import { useState, useEffect, type MouseEvent } from 'react';
 import Link from 'next/link';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
@@ -116,7 +116,8 @@ export default function DatabasesPage() {
   const [password, setPassword] = useState('');
   const [projectId, setProjectId] = useState('');
   const [applicationId, setApplicationId] = useState('');
-  // '' = inherit the project's default server (per-DB placement, MULTI mode)
+  // Per-DB server placement (MULTI mode). Required now that projects no longer
+  // pin a default server; '' means "not yet chosen" and blocks create.
   const [serverChoice, setServerChoice] = useState('');
 
   // Filter state
@@ -134,14 +135,23 @@ export default function DatabasesPage() {
     ? allApps.filter((a) => a.projectId === projectId)
     : [];
 
-  // MULTI mode → per-DB server picker; default = the project's server
-  // (the API resolves that when serverId is omitted).
+  // MULTI mode → per-DB server picker; a server MUST be chosen (projects no
+  // longer carry a default the API could fall back to).
   const { data: publicSettings } = usePublicSettings<{ deployment_mode?: string }>({
     staleTime: 60_000,
   });
   const isMultiMode = publicSettings?.deployment_mode === 'MULTI';
   // /servers/mine — accessible to non-admin DEVELOPERs (unlike admin-only /servers).
   const { data: servers = [] } = useDeployTargets({ enabled: isMultiMode });
+
+  // When the dialog is open in MULTI with exactly one ONLINE server, the
+  // picker stays hidden (nothing to choose) — auto-select it so create isn't
+  // permanently blocked with no UI to satisfy the requirement.
+  useEffect(() => {
+    if (!showCreateDialog || !isMultiMode || serverChoice) return;
+    const online = servers.filter((s) => s.status === 'ONLINE');
+    if (online.length === 1) setServerChoice(online[0].id);
+  }, [showCreateDialog, isMultiMode, servers, serverChoice]);
 
   const { data: databases = [], isLoading } = useQuery<DatabaseItem[]>({
     queryKey: ['databases', filterProjectId],
@@ -194,11 +204,12 @@ export default function DatabasesPage() {
   function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     if (!name.trim() || !projectId) return;
+    // In MULTI a server is required — projects no longer provide a fallback.
+    if (isMultiMode && !serverChoice) return;
     createMutation.mutate({
       name: name.trim(),
       type,
       projectId,
-      // omitted = the API places the DB on the project's server
       ...(serverChoice ? { serverId: serverChoice } : {}),
       ...(applicationId ? { applicationId } : {}),
       ...(username.trim() ? { username: username.trim() } : {}),
@@ -854,13 +865,14 @@ export default function DatabasesPage() {
 
           {isMultiMode && servers.length > 1 && (
             <div className="space-y-2">
-              <Label htmlFor="db-server">{t('databases.serverLabel')}</Label>
+              <Label htmlFor="db-server">{t('databases.serverLabel')} *</Label>
               <Select
                 id="db-server"
                 value={serverChoice}
                 onChange={(e) => setServerChoice(e.target.value)}
+                required
               >
-                <option value="">{t('databases.serverDefault')}</option>
+                <option value="">{t('databases.serverPick')}</option>
                 {servers.filter((s) => s.status === 'ONLINE').map((s) => (
                   <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
                 ))}
@@ -876,7 +888,15 @@ export default function DatabasesPage() {
             <Button type="button" variant="outline" onClick={closeCreateDialog}>
               {t('common.cancel')}
             </Button>
-            <Button type="submit" disabled={createMutation.isPending || !projectId}>
+            <Button
+              type="submit"
+              disabled={
+                createMutation.isPending ||
+                !name.trim() ||
+                !projectId ||
+                (isMultiMode && servers.length > 1 && !serverChoice)
+              }
+            >
               {createMutation.isPending && (
                 <Loader2 size={16} className="animate-spin" />
               )}
