@@ -63,6 +63,29 @@ interface Metric {
   timestamp: string;
 }
 
+interface ContainerOverviewRow {
+  id: string;
+  containerName: string;
+  cpuPercent: number;
+  memoryUsed: string | number;
+  memoryLimit: string | number;
+  timestamp: string;
+  application?: { id: string; name: string; displayName?: string | null } | null;
+}
+
+// Bytes → human units (IEC). Local to this page to avoid a shared-lib churn.
+function fmtContainerBytes(n: number): string {
+  if (!n || n < 0) return '0 B';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
 interface ServerRow {
   id: string;
   name: string;
@@ -267,6 +290,21 @@ export default function MonitoringPage() {
     queryFn: () => api.get(`/monitoring/alert-rules?serverId=${serverId}`),
     enabled: isAdmin && !!serverId,
   });
+
+  // Fleet-wide per-container usage — latest sample per container across every
+  // server the caller can see. Independent of the selected server; refreshed
+  // on the same cadence as the metric charts.
+  const [containerSort, setContainerSort] = useState<'cpu' | 'mem'>('cpu');
+  const { data: containers = [] } = useQuery<ContainerOverviewRow[]>({
+    queryKey: ['monitoring', 'containers-overview'],
+    queryFn: () => api.get('/monitoring/containers/overview'),
+    refetchInterval: 15000,
+  });
+  const sortedContainers = [...containers].sort((a, b) =>
+    containerSort === 'cpu'
+      ? b.cpuPercent - a.cpuPercent
+      : Number(b.memoryUsed) - Number(a.memoryUsed),
+  );
 
   // --- Mutations ---
   const createAlert = useMutation({
@@ -841,7 +879,79 @@ export default function MonitoringPage() {
           </div>
           )}
 
-          {/* ========== 8. Alert Rules ========== */}
+          {/* ========== 8. Application consumption (fleet-wide) ========== */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Container size={16} />
+                <h2 className="text-base font-semibold">{t('monitoring.appUsageTitle')}</h2>
+                <Badge variant="secondary" className="text-[10px]">{containers.length}</Badge>
+              </div>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => setContainerSort('cpu')}
+                  className={cn('rounded-md px-2.5 py-1 text-xs transition-colors',
+                    containerSort === 'cpu' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-accent')}
+                >
+                  {t('monitoring.sortCpu')}
+                </button>
+                <button
+                  onClick={() => setContainerSort('mem')}
+                  className={cn('rounded-md px-2.5 py-1 text-xs transition-colors',
+                    containerSort === 'mem' ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-accent')}
+                >
+                  {t('monitoring.sortMem')}
+                </button>
+              </div>
+            </div>
+            <Card>
+              <CardContent className="p-0">
+                {sortedContainers.length === 0 ? (
+                  <p className="py-8 text-center text-sm text-muted-foreground">{t('monitoring.appUsageEmpty')}</p>
+                ) : (
+                  <div className="divide-y divide-border">
+                    {sortedContainers.map((c) => {
+                      const used = Number(c.memoryUsed);
+                      const limit = Number(c.memoryLimit);
+                      const memPct = limit > 0 ? (used / limit) * 100 : 0;
+                      const label = c.application?.displayName || c.application?.name || c.containerName;
+                      const row = (
+                        <div className="flex items-center gap-3 px-4 py-2.5">
+                          <Container size={14} className="shrink-0 text-muted-foreground" />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium">{label}</p>
+                            {c.application && (
+                              <p className="truncate text-[11px] font-mono text-muted-foreground">{c.containerName}</p>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-4 text-sm shrink-0">
+                            <span className="flex items-center gap-1">
+                              <Cpu size={12} className="text-violet-500" />
+                              <span className="font-mono">{c.cpuPercent.toFixed(1)}%</span>
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <MemoryStick size={12} className="text-blue-500" />
+                              <span className="font-mono">{fmtContainerBytes(used)}</span>
+                              {limit > 0 && <span className="text-[11px] text-muted-foreground">({memPct.toFixed(0)}%)</span>}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                      return c.application ? (
+                        <a key={c.id} href={`/dashboard/applications/${c.application.id}`} className="block hover:bg-accent/40 transition-colors">
+                          {row}
+                        </a>
+                      ) : (
+                        <div key={c.id}>{row}</div>
+                      );
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* ========== 9. Alert Rules ========== */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">

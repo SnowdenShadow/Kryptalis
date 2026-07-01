@@ -34,6 +34,7 @@ import {
   isAppLocal,
   assertAppOwnership,
   projectNetworkName,
+  parseDockerStatsJson,
   APPS_DIR,
 } from './applications.helpers';
 import { assertCloneHostAllowed, SELF_HOSTED_PROVIDERS } from '../git-providers/git-providers.service';
@@ -656,6 +657,51 @@ export class ApplicationOpsService implements OnModuleInit {
       return { logs: stdout || stderr || 'No output yet.' };
     } catch (err: any) {
       return { logs: err?.stderr || err?.message || 'Failed to fetch logs.' };
+    }
+  }
+
+  /**
+   * Live per-container resource usage for one app (CPU/mem/net/block IO),
+   * on-demand. Local → `docker stats --no-stream` for the app's container(s);
+   * remote → an awaited STATS agent task. Mirrors getLogs' local/remote split.
+   * Read-only: VIEWER+ (assertAppOwnership default). Returns { stats: [...] }.
+   */
+  async liveStats(userId: string, id: string) {
+    const app = await assertAppOwnership(this.prisma, userId, id);
+    const slug = slugify(app.name);
+    const server = await resolveAppServer(this.prisma, id);
+    // The container name the deploy persisted is the source of truth; the
+    // on-disk heuristic is the legacy fallback (same logic as execCommand).
+    const cname = app.containerName || resolveContainerName(slug, id);
+
+    if (!isAppLocal(server) && server) {
+      try {
+        const task = await this.agent.enqueueAndWait(
+          server.id,
+          'STATS',
+          { containerName: cname },
+          20_000,
+        );
+        if (task.status === 'FAILED') return { stats: [], error: task.error || 'agent stats failed' };
+        const r: any = task.result;
+        return { stats: Array.isArray(r?.stats) ? r.stats : [] };
+      } catch (err: any) {
+        return { stats: [], error: err?.message || 'failed to fetch stats from agent' };
+      }
+    }
+
+    // Local: docker stats for this app's container by name. --no-stream takes
+    // ~1-2s (two samples); acceptable for an on-demand call.
+    try {
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['stats', '--no-stream', '--format', '{{json .}}', cname],
+        { timeout: 15_000 },
+      );
+      return { stats: parseDockerStatsJson(stdout) };
+    } catch (err: any) {
+      // Container gone / docker down → empty, not a 500.
+      return { stats: [], error: err?.stderr || err?.message || 'docker stats failed' };
     }
   }
 

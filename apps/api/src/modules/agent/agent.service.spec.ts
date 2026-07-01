@@ -32,6 +32,9 @@ function makePrisma() {
     },
     agentToken: { findFirst: vi.fn() },
     server: { update: vi.fn().mockResolvedValue({}) },
+    serverMetric: { create: vi.fn().mockResolvedValue({}) },
+    application: { findMany: vi.fn().mockResolvedValue([]), update: vi.fn().mockResolvedValue({}) },
+    containerMetric: { createMany: vi.fn().mockResolvedValue({ count: 0 }) },
     $queryRawUnsafe: vi.fn(),
   };
 }
@@ -326,5 +329,59 @@ describe('taskResult git-credential redaction', () => {
     );
     expect(failCall![0].data.error).not.toContain('abc.def.ghi');
     expect(failCall![0].data.error).toContain('<redacted>');
+  });
+});
+
+describe('heartbeat — container stats persistence', () => {
+  const baseHb = {
+    agentVersion: '1.0.0', os: 'linux', arch: 'amd64', uptime: 100,
+    metrics: { cpuPercent: 5, memoryUsed: 1, memoryTotal: 2, diskUsed: 1, diskTotal: 2 },
+  };
+
+  it('persists containerStats as ContainerMetric rows, resolving applicationId by name', async () => {
+    const { service, prisma } = makeService();
+    allowAgent(prisma);
+    // One managed container maps to app a1; the other is unmatched (null appId).
+    prisma.application.findMany.mockResolvedValue([
+      { id: 'a1', containerName: 'dockcontrol-shop' },
+    ]);
+
+    await service.heartbeat('s1', 'tok', {
+      ...baseHb,
+      containerStats: [
+        { name: 'dockcontrol-shop', cpuPercent: 12.5, memoryUsed: 340, memoryLimit: 512, networkIn: 10, networkOut: 20, blockRead: 1, blockWrite: 2 },
+        { name: 'dockcontrol-orphan', cpuPercent: 1, memoryUsed: 5, memoryLimit: 10, networkIn: 0, networkOut: 0, blockRead: 0, blockWrite: 0 },
+      ],
+    } as any);
+
+    expect(prisma.containerMetric.createMany).toHaveBeenCalledTimes(1);
+    const rows = prisma.containerMetric.createMany.mock.calls[0][0].data;
+    expect(rows).toHaveLength(2);
+    const shop = rows.find((r: any) => r.containerName === 'dockcontrol-shop');
+    expect(shop.applicationId).toBe('a1');
+    expect(shop.cpuPercent).toBe(12.5);
+    expect(shop.memoryUsed).toBe(340n); // coerced to BigInt
+    const orphan = rows.find((r: any) => r.containerName === 'dockcontrol-orphan');
+    expect(orphan.applicationId).toBeNull();
+  });
+
+  it('a container-stats persist failure does not fail the heartbeat', async () => {
+    const { service, prisma } = makeService();
+    allowAgent(prisma);
+    prisma.containerMetric.createMany.mockRejectedValue(new Error('db down'));
+    const res = await service.heartbeat('s1', 'tok', {
+      ...baseHb,
+      containerStats: [
+        { name: 'dockcontrol-x', cpuPercent: 1, memoryUsed: 1, memoryLimit: 2, networkIn: 0, networkOut: 0, blockRead: 0, blockWrite: 0 },
+      ],
+    } as any);
+    expect(res).toEqual({ ok: true });
+  });
+
+  it('no containerStats → no ContainerMetric write', async () => {
+    const { service, prisma } = makeService();
+    allowAgent(prisma);
+    await service.heartbeat('s1', 'tok', baseHb as any);
+    expect(prisma.containerMetric.createMany).not.toHaveBeenCalled();
   });
 });

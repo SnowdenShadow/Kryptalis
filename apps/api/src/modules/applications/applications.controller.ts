@@ -58,6 +58,12 @@ export class ApplicationsController {
     return this.svc.getLogs(userId, id, lines ? parseInt(lines, 10) : 100);
   }
 
+  @Get(':id/stats/live')
+  @ApiOperation({ summary: 'Live per-container resource usage (CPU/mem/net/block IO)' })
+  liveStats(@CurrentUser('id') userId: string, @Param('id') id: string) {
+    return this.svc.liveStats(userId, id);
+  }
+
   @Post(':id/exec')
   @ApiOperation({ summary: 'Execute command in container' })
   exec(@CurrentUser('id') userId: string, @Param('id') id: string, @Body() dto: ExecCommandDto) {

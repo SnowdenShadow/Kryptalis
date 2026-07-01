@@ -41,6 +41,22 @@ export class MonitoringController {
     return this.svc.getMetrics(userId, serverId, period);
   }
 
+  @Get('applications/:appId/metrics')
+  @ApiOperation({ summary: 'Per-container resource history for an app (project access required)' })
+  appMetrics(
+    @CurrentUser('id') userId: string,
+    @Param('appId') appId: string,
+    @Query('period') period?: string,
+  ) {
+    return this.svc.getAppMetrics(userId, appId, period);
+  }
+
+  @Get('containers/overview')
+  @ApiOperation({ summary: 'Latest resource usage per container across accessible servers' })
+  containerOverview(@CurrentUser('id') userId: string) {
+    return this.svc.getContainerOverview(userId);
+  }
+
   @Post('alert-rules')
   @Roles('ADMIN', 'SUPERADMIN')
   @ApiOperation({ summary: 'Create alert rule (admin only)' })

@@ -817,6 +817,10 @@ export class ApplicationsService implements OnModuleInit {
     return this.ops.getLogs(userId, id, lines);
   }
 
+  liveStats(userId: string, id: string) {
+    return this.ops.liveStats(userId, id);
+  }
+
   execCommand(userId: string, id: string, command: string) {
     return this.ops.execCommand(userId, id, command);
   }

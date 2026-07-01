@@ -10,8 +10,15 @@ import { BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
+import { assertProjectAccess } from '../../common/rbac/project-access';
+import { parseDockerStatsJson } from '../applications/applications.helpers';
+import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { CreateAlertRuleDto } from './dto/create-alert-rule.dto';
 import { UpdateAlertRuleDto } from './dto/update-alert-rule.dto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const PERIOD_MAP: Record<string, number> = {
   '24h': 24 * 60 * 60 * 1000,
@@ -30,6 +37,8 @@ const ALERT_EVAL_INTERVAL_MS = 30_000;
 export class MonitoringService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MonitoringService.name);
   private evalTimer: NodeJS.Timeout | null = null;
+  private containerPruneTimer: NodeJS.Timeout | null = null;
+  private localStatsTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private prisma: PrismaService,
@@ -38,9 +47,9 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
-    // Single-instance scheduler guard: no eval loop in tests OR on a follower
+    // Single-instance scheduler guard: no loops in tests OR on a follower
     // replica (SCHEDULER_ENABLED=false) — otherwise every replica evaluates
-    // the same alert rules and fires duplicate notifications.
+    // the same alert rules / prunes the same table.
     if (!this.schedulerLeader.shouldRun()) return;
     this.evalTimer = setInterval(
       () => this.evaluateAlerts().catch((e) =>
@@ -49,10 +58,29 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
       ALERT_EVAL_INTERVAL_MS,
     );
     this.evalTimer.unref?.();
+    // Container-metric retention prune: once shortly after boot, then every 6h.
+    setTimeout(() => void this.pruneContainerMetrics(), 60_000);
+    this.containerPruneTimer = setInterval(
+      () => void this.pruneContainerMetrics(),
+      6 * 60 * 60 * 1000,
+    );
+    this.containerPruneTimer.unref?.();
+    // Local container-stats collector: remote hosts ship stats via heartbeat,
+    // but LOCAL apps have no agent — so the API samples `docker stats` itself
+    // on the same ~30s cadence and persists ContainerMetric rows for them.
+    this.localStatsTimer = setInterval(
+      () => this.collectLocalContainerStats().catch((e) =>
+        this.logger.warn(`Local container-stats collect failed: ${e.message}`),
+      ),
+      ALERT_EVAL_INTERVAL_MS,
+    );
+    this.localStatsTimer.unref?.();
   }
 
   onModuleDestroy() {
     if (this.evalTimer) clearInterval(this.evalTimer);
+    if (this.containerPruneTimer) clearInterval(this.containerPruneTimer);
+    if (this.localStatsTimer) clearInterval(this.localStatsTimer);
   }
 
   /**
@@ -213,6 +241,208 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
       return rows;
     }
     return this.downsample(rows, ms);
+  }
+
+  // ── container metrics (per-app resource history + overview) ─────────
+
+  /**
+   * Historical per-container resource samples for one application, scoped to
+   * the caller's project access (VIEWER+). Same period + downsample ladder as
+   * server metrics. When an app runs several containers (multi-service /
+   * PHP nginx+fpm) the samples are bucketed per containerName so each keeps
+   * its own line.
+   */
+  async getAppMetrics(userId: string, applicationId: string, period: string = '24h') {
+    const app = await this.prisma.application.findUnique({
+      where: { id: applicationId },
+      select: { projectId: true },
+    });
+    if (!app) throw new NotFoundException('Application not found');
+    await assertProjectAccess(this.prisma, userId, app.projectId, 'VIEWER');
+
+    const ms = PERIOD_MAP[period] || PERIOD_MAP['24h'];
+    const since = new Date(Date.now() - ms);
+    const rows = await this.prisma.containerMetric.findMany({
+      where: { applicationId, timestamp: { gte: since } },
+      orderBy: { timestamp: 'asc' },
+    });
+    if (ms <= PERIOD_MAP['24h'] || rows.length === 0) return rows;
+    return this.downsampleContainer(rows, ms);
+  }
+
+  /**
+   * Fleet-wide "current usage" overview: the latest sample per container the
+   * caller can see (scoped via accessibleServerIds, same as server metrics).
+   * Feeds the global table on the Monitoring page (sortable by CPU/RAM).
+   */
+  async getContainerOverview(userId: string) {
+    const allowed = await this.accessibleServerIds(userId);
+    if (allowed.length === 0) return [];
+    // One recent window is enough to find "latest per container" cheaply —
+    // anything older than a few minutes is stale/stopped anyway.
+    const since = new Date(Date.now() - 10 * 60_000);
+    const rows = await this.prisma.containerMetric.findMany({
+      where: { serverId: { in: allowed }, timestamp: { gte: since } },
+      orderBy: { timestamp: 'desc' },
+      include: {
+        application: { select: { id: true, name: true, displayName: true, projectId: true } },
+      },
+    });
+    // Keep only the newest row per containerName (rows are desc, so first wins).
+    const seen = new Set<string>();
+    const latest: typeof rows = [];
+    for (const r of rows) {
+      const key = `${r.serverId}:${r.containerName}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      latest.push(r);
+    }
+    return latest;
+  }
+
+  /**
+   * Retention prune for container_metrics — this table grows an order of
+   * magnitude faster than server_metrics, so the default window is shorter
+   * (container_metrics_retention_days, default 7d). Age-based only; the
+   * per-container index keeps the delete cheap. Runs on the leader replica.
+   */
+  async pruneContainerMetrics(): Promise<void> {
+    try {
+      const retention = this.retentionDays();
+      const cutoff = new Date(Date.now() - retention * 24 * 60 * 60 * 1000);
+      const res = await this.prisma.containerMetric.deleteMany({
+        where: { timestamp: { lt: cutoff } },
+      });
+      if (res.count > 0) {
+        this.logger.log(`Container-metric retention prune: removed ${res.count} rows (> ${retention}d).`);
+      }
+    } catch (e) {
+      this.logger.error(`Container-metric prune failed: ${(e as Error).message}`);
+    }
+  }
+
+  private retentionDays(): number {
+    // Kept as a method so a future SystemSetting override slots in here.
+    return 7;
+  }
+
+  /**
+   * Sample `docker stats` for LOCAL dockcontrol-* containers and persist them
+   * as ContainerMetric rows. Remote hosts self-report via the agent heartbeat;
+   * this covers the API box's own containers, which have no agent. Resolves
+   * each container to its app + local server by containerName. Best-effort:
+   * docker down / no local server → no-op.
+   */
+  async collectLocalContainerStats(): Promise<void> {
+    // Find the local server row (host is a loopback alias). Without one we
+    // have no serverId to attribute samples to, so skip.
+    const servers = await this.prisma.server.findMany({ select: { id: true, host: true } });
+    const local = servers.find((s) => isLocalHost(s.host));
+    if (!local) return;
+
+    let stdout = '';
+    try {
+      ({ stdout } = await execFileAsync(
+        'docker',
+        ['stats', '--no-stream', '--format', '{{json .}}'],
+        { timeout: 20_000, maxBuffer: 8 * 1024 * 1024 },
+      ));
+    } catch {
+      return; // docker missing/down — nothing to record
+    }
+    const stats = parseDockerStatsJson(stdout).filter((s) => s.name.startsWith('dockcontrol-'));
+    if (stats.length === 0) return;
+
+    // Attribute to apps placed on the local server by containerName.
+    const apps = await this.prisma.application.findMany({
+      where: { serverId: local.id, containerName: { in: stats.map((s) => s.name) } },
+      select: { id: true, containerName: true },
+    });
+    const appByName = new Map(apps.map((a) => [a.containerName!, a.id]));
+
+    await this.prisma.containerMetric.createMany({
+      data: stats.map((s) => ({
+        serverId: local.id,
+        applicationId: appByName.get(s.name) ?? null,
+        containerName: s.name,
+        cpuPercent: Number.isFinite(s.cpuPercent) ? s.cpuPercent : 0,
+        memoryUsed: BigInt(Math.max(0, Math.trunc(s.memoryUsed))),
+        memoryLimit: BigInt(Math.max(0, Math.trunc(s.memoryLimit))),
+        networkIn: BigInt(Math.max(0, Math.trunc(s.networkIn))),
+        networkOut: BigInt(Math.max(0, Math.trunc(s.networkOut))),
+        blockRead: BigInt(Math.max(0, Math.trunc(s.blockRead))),
+        blockWrite: BigInt(Math.max(0, Math.trunc(s.blockWrite))),
+      })),
+    });
+  }
+
+  /**
+   * Bucket container rows per containerName and average each numeric field
+   * within a time bucket (BigInt summed then divided, like downsample()).
+   * Returns rows in the same shape, one representative id per bucket.
+   */
+  private downsampleContainer(
+    rows: Array<{
+      id: string; serverId: string; applicationId: string | null; containerName: string;
+      cpuPercent: number; memoryUsed: bigint; memoryLimit: bigint;
+      networkIn: bigint; networkOut: bigint; blockRead: bigint; blockWrite: bigint;
+      timestamp: Date;
+    }>,
+    windowMs: number,
+  ) {
+    let bucketMs = windowMs <= PERIOD_MAP['30d'] ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
+    const slots = Math.ceil(windowMs / bucketMs);
+    if (slots > 720) bucketMs = Math.ceil(windowMs / 720);
+
+    type Acc = {
+      bucketStart: number; count: number; cpuSum: number;
+      memoryUsedSum: bigint; memoryLimitSum: bigint;
+      networkInSum: bigint; networkOutSum: bigint; blockReadSum: bigint; blockWriteSum: bigint;
+      firstId: string; serverId: string; applicationId: string | null; containerName: string;
+    };
+    // Key buckets by (containerName, bucket) so multi-container apps stay split.
+    const buckets = new Map<string, Acc>();
+    for (const r of rows) {
+      const slot = Math.floor(r.timestamp.getTime() / bucketMs);
+      const key = `${r.containerName}:${slot}`;
+      let acc = buckets.get(key);
+      if (!acc) {
+        acc = {
+          bucketStart: slot * bucketMs, count: 0, cpuSum: 0,
+          memoryUsedSum: 0n, memoryLimitSum: 0n,
+          networkInSum: 0n, networkOutSum: 0n, blockReadSum: 0n, blockWriteSum: 0n,
+          firstId: r.id, serverId: r.serverId, applicationId: r.applicationId, containerName: r.containerName,
+        };
+        buckets.set(key, acc);
+      }
+      acc.count += 1;
+      acc.cpuSum += r.cpuPercent;
+      acc.memoryUsedSum += r.memoryUsed;
+      acc.memoryLimitSum += r.memoryLimit;
+      acc.networkInSum += r.networkIn;
+      acc.networkOutSum += r.networkOut;
+      acc.blockReadSum += r.blockRead;
+      acc.blockWriteSum += r.blockWrite;
+    }
+    return Array.from(buckets.values())
+      .sort((a, b) => a.bucketStart - b.bucketStart)
+      .map((a) => {
+        const n = BigInt(a.count);
+        return {
+          id: a.firstId,
+          serverId: a.serverId,
+          applicationId: a.applicationId,
+          containerName: a.containerName,
+          cpuPercent: a.cpuSum / a.count,
+          memoryUsed: a.memoryUsedSum / n,
+          memoryLimit: a.memoryLimitSum / n,
+          networkIn: a.networkInSum / n,
+          networkOut: a.networkOutSum / n,
+          blockRead: a.blockReadSum / n,
+          blockWrite: a.blockWriteSum / n,
+          timestamp: new Date(a.bucketStart),
+        };
+      });
   }
 
   /**

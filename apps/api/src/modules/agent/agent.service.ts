@@ -444,6 +444,18 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
        *  release). Lets the dashboard show real RUNNING/STOPPED for remote
        *  apps without per-request agent round-trips. */
       containers?: Array<{ name: string; state: string }>;
+      /** Live per-container resource usage (agent ≥ the container-stats
+       *  release). Persisted as ContainerMetric history. */
+      containerStats?: Array<{
+        name: string;
+        cpuPercent: number;
+        memoryUsed: number;
+        memoryLimit: number;
+        networkIn: number;
+        networkOut: number;
+        blockRead: number;
+        blockWrite: number;
+      }>;
     },
   ) {
     await this.validateToken(serverId, token);
@@ -476,7 +488,48 @@ export class AgentService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`heartbeat status sync failed: ${(e as Error).message}`),
       );
     }
+    if (Array.isArray(data.containerStats) && data.containerStats.length > 0) {
+      await this.persistContainerStats(serverId, data.containerStats).catch((e) =>
+        this.logger.warn(`heartbeat container-stats persist failed: ${(e as Error).message}`),
+      );
+    }
     return { ok: true };
+  }
+
+  /**
+   * Persist a heartbeat's per-container resource samples as ContainerMetric
+   * rows. Each sample's owning app is resolved by matching containerName
+   * against Application.containerName on this server (null when unmanaged or
+   * not yet matched). One createMany per heartbeat. Best-effort — a bad row
+   * never fails the heartbeat.
+   */
+  private async persistContainerStats(
+    serverId: string,
+    stats: Array<{
+      name: string; cpuPercent: number; memoryUsed: number; memoryLimit: number;
+      networkIn: number; networkOut: number; blockRead: number; blockWrite: number;
+    }>,
+  ): Promise<void> {
+    const names = stats.map((s) => s.name);
+    const apps = await this.prisma.application.findMany({
+      where: { serverId, containerName: { in: names } },
+      select: { id: true, containerName: true },
+    });
+    const appByName = new Map(apps.map((a) => [a.containerName!, a.id]));
+    await this.prisma.containerMetric.createMany({
+      data: stats.map((s) => ({
+        serverId,
+        applicationId: appByName.get(s.name) ?? null,
+        containerName: s.name,
+        cpuPercent: Number.isFinite(s.cpuPercent) ? s.cpuPercent : 0,
+        memoryUsed: BigInt(Math.max(0, Math.trunc(s.memoryUsed || 0))),
+        memoryLimit: BigInt(Math.max(0, Math.trunc(s.memoryLimit || 0))),
+        networkIn: BigInt(Math.max(0, Math.trunc(s.networkIn || 0))),
+        networkOut: BigInt(Math.max(0, Math.trunc(s.networkOut || 0))),
+        blockRead: BigInt(Math.max(0, Math.trunc(s.blockRead || 0))),
+        blockWrite: BigInt(Math.max(0, Math.trunc(s.blockWrite || 0))),
+      })),
+    });
   }
 
   /**

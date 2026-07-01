@@ -81,6 +81,89 @@ export function resolveContainerName(slug: string, applicationId: string): strin
   return `dockcontrol-${slug}`;
 }
 
+// ── docker stats parsing ─────────────────────────────────────────────────
+// Mirrors the Go agent's parser (apps/agent/internal/monitor): turns the
+// human-readable `docker stats --format {{json .}}` fields into numbers so the
+// LOCAL live-stats path produces the same shape as the remote agent's STATS
+// task. Exported for direct unit testing.
+
+export interface ContainerLiveStat {
+  name: string;
+  cpuPercent: number;
+  memoryUsed: number;
+  memoryLimit: number;
+  networkIn: number;
+  networkOut: number;
+  blockRead: number;
+  blockWrite: number;
+}
+
+/** "12.34%" → 12.34. Bad input → 0. */
+export function parseStatPercent(s: string): number {
+  const v = parseFloat(String(s ?? '').trim().replace(/%$/, ''));
+  return Number.isFinite(v) ? v : 0;
+}
+
+/** Docker size ("340MiB", "2.1GB", "0B", "1.5kB") → bytes. Mixed IEC/SI. */
+export function parseStatSize(s: string): number {
+  const str = String(s ?? '').trim();
+  if (!str || str === '--') return 0;
+  const units: Array<[string, number]> = [
+    ['PiB', 2 ** 50], ['TiB', 2 ** 40], ['GiB', 2 ** 30], ['MiB', 2 ** 20], ['KiB', 2 ** 10],
+    ['PB', 1e15], ['TB', 1e12], ['GB', 1e9], ['MB', 1e6], ['kB', 1e3], ['KB', 1e3],
+    ['B', 1],
+  ];
+  for (const [suffix, mult] of units) {
+    if (str.endsWith(suffix)) {
+      const n = parseFloat(str.slice(0, -suffix.length).trim());
+      return Number.isFinite(n) ? Math.trunc(n * mult) : 0;
+    }
+  }
+  const bare = parseFloat(str);
+  return Number.isFinite(bare) ? Math.trunc(bare) : 0;
+}
+
+/** Split a docker "A / B" pair into two byte counts. */
+export function parseStatPair(s: string): [number, number] {
+  const [a, b] = String(s ?? '').split('/');
+  if (b === undefined) return [parseStatSize(a), 0];
+  return [parseStatSize(a), parseStatSize(b)];
+}
+
+/**
+ * Parse newline-delimited `docker stats --format {{json .}}` output into
+ * ContainerLiveStat records. Unparseable lines are skipped. Caller already
+ * scopes to specific container(s) via the docker argv, so no prefix filter.
+ */
+export function parseDockerStatsJson(stdout: string): ContainerLiveStat[] {
+  const out: ContainerLiveStat[] = [];
+  for (const line of String(stdout ?? '').trim().split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    let d: any;
+    try {
+      d = JSON.parse(t);
+    } catch {
+      continue;
+    }
+    if (!d?.Name) continue;
+    const [memUsed, memLimit] = parseStatPair(d.MemUsage);
+    const [netIn, netOut] = parseStatPair(d.NetIO);
+    const [blkRead, blkWrite] = parseStatPair(d.BlockIO);
+    out.push({
+      name: d.Name,
+      cpuPercent: parseStatPercent(d.CPUPerc),
+      memoryUsed: memUsed,
+      memoryLimit: memLimit,
+      networkIn: netIn,
+      networkOut: netOut,
+      blockRead: blkRead,
+      blockWrite: blkWrite,
+    });
+  }
+  return out;
+}
+
 export interface PortDef {
   service: string;
   host: number | null;

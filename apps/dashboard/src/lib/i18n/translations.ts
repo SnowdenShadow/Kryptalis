@@ -72,7 +72,8 @@ export const translations: Record<string, Record<string, string>> = {
 
     // ── apps ───────────────────────────────────────────────────────
     'apps.title': 'Applications', 'apps.subtitle': 'Deploy and manage your applications', 'apps.deploy': 'Deploy', 'apps.start': 'Start', 'apps.stop': 'Stop', 'apps.restart': 'Restart', 'apps.redeploy': 'Redeploy', 'apps.empty': 'No applications yet', 'apps.emptyDesc': 'Deploy your first application', 'apps.framework': 'Framework', 'apps.gitUrl': 'Git URL', 'apps.gitBranch': 'Git Branch', 'apps.port': 'Port', 'apps.buildCommand': 'Build Command', 'apps.startCommand': 'Start Command', 'apps.selectProject': 'Select a project', 'apps.selectFramework': 'Select a framework', 'apps.searchPlaceholder': 'Search applications...',
-    'apps.tab.overview': 'Overview', 'apps.tab.logs': 'Logs', 'apps.tab.terminal': 'Terminal', 'apps.tab.deployments': 'Deployments', 'apps.tab.files': 'Files', 'apps.tab.ports': 'Ports', 'apps.tab.env': 'Env', 'apps.tab.settings': 'Settings',
+    'apps.tab.overview': 'Overview', 'apps.tab.resources': 'Resources', 'apps.tab.logs': 'Logs', 'apps.tab.terminal': 'Terminal', 'apps.tab.deployments': 'Deployments', 'apps.tab.files': 'Files', 'apps.tab.ports': 'Ports', 'apps.tab.env': 'Env', 'apps.tab.settings': 'Settings',
+    'resources.cpu': 'CPU', 'resources.memory': 'Memory', 'resources.network': 'Network', 'resources.blockIo': 'Disk I/O', 'resources.history': 'History', 'resources.cpuHistory': 'CPU history', 'resources.memoryHistory': 'Memory history', 'resources.noLive': 'No live stats — the container may be stopped.', 'resources.unavailable': 'Live stats unavailable (agent unreachable or container stopped).', 'resources.noHistory': 'No history yet — samples are collected every ~30s.',
     'apps.status': 'Status', 'apps.connectionInfo': 'Connection Info', 'apps.domain': 'Domain', 'apps.project': 'Project', 'apps.notSet': 'Not set', 'apps.noDomain': 'No domain', 'apps.gitInfo': 'Git Info',
     'apps.config': 'Configuration', 'apps.configDesc': 'Application settings and build configuration',
     'apps.terminalDesc': 'Execute commands in the application container',
@@ -472,6 +473,7 @@ export const translations: Record<string, Record<string, string>> = {
     'databases.deleteConfirmBefore': 'Are you sure you want to delete ',
     'databases.deleteConfirmAfter': '? All data will be permanently lost. This action cannot be undone.',
     'monitoring.title': 'Monitoring', 'monitoring.subtitle': 'Monitor server resources in real-time', 'monitoring.selectServer': 'Select a server to view metrics', 'monitoring.noMetrics': 'No metrics yet', 'monitoring.alertRules': 'Alert Rules', 'monitoring.addAlert': 'Add Alert', 'monitoring.metric': 'Metric', 'monitoring.threshold': 'Threshold', 'monitoring.channel': 'Channel', 'monitoring.network': 'Network',
+    'monitoring.appUsageTitle': 'Application consumption', 'monitoring.appUsageEmpty': 'No container samples yet — usage appears once apps are running.', 'monitoring.sortCpu': 'By CPU', 'monitoring.sortMem': 'By RAM',
     // ── monitoring (v2 — extra keys) ──
     'monitoring.cores': 'cores',
     'monitoring.up': 'Up',
@@ -1505,7 +1507,8 @@ export const translations: Record<string, Record<string, string>> = {
 
     // ── apps ───────────────────────────────────────────────────────
     'apps.title': 'Applications', 'apps.subtitle': 'Déployez et gérez vos applications', 'apps.deploy': 'Déployer', 'apps.start': 'Démarrer', 'apps.stop': 'Arrêter', 'apps.restart': 'Redémarrer', 'apps.redeploy': 'Redéployer', 'apps.empty': 'Aucune application', 'apps.emptyDesc': 'Déployez votre première application', 'apps.framework': 'Framework', 'apps.gitUrl': 'URL Git', 'apps.gitBranch': 'Branche Git', 'apps.port': 'Port', 'apps.buildCommand': 'Commande de build', 'apps.startCommand': 'Commande de démarrage', 'apps.selectProject': 'Sélectionner un projet', 'apps.selectFramework': 'Sélectionner un framework', 'apps.searchPlaceholder': 'Rechercher une application...',
-    'apps.tab.overview': "Vue d'ensemble", 'apps.tab.logs': 'Logs', 'apps.tab.terminal': 'Terminal', 'apps.tab.deployments': 'Déploiements', 'apps.tab.files': 'Fichiers', 'apps.tab.ports': 'Ports', 'apps.tab.env': 'Env', 'apps.tab.settings': 'Paramètres',
+    'apps.tab.overview': "Vue d'ensemble", 'apps.tab.resources': 'Ressources', 'apps.tab.logs': 'Logs', 'apps.tab.terminal': 'Terminal', 'apps.tab.deployments': 'Déploiements', 'apps.tab.files': 'Fichiers', 'apps.tab.ports': 'Ports', 'apps.tab.env': 'Env', 'apps.tab.settings': 'Paramètres',
+    'resources.cpu': 'CPU', 'resources.memory': 'Mémoire', 'resources.network': 'Réseau', 'resources.blockIo': 'E/S disque', 'resources.history': 'Historique', 'resources.cpuHistory': 'Historique CPU', 'resources.memoryHistory': 'Historique mémoire', 'resources.noLive': 'Aucune stat en direct — le conteneur est peut-être arrêté.', 'resources.unavailable': 'Stats en direct indisponibles (agent injoignable ou conteneur arrêté).', 'resources.noHistory': 'Pas encore d\'historique — les échantillons sont collectés toutes les ~30 s.',
     'apps.status': 'Statut', 'apps.connectionInfo': 'Informations de connexion', 'apps.domain': 'Domaine', 'apps.project': 'Projet', 'apps.notSet': 'Non défini', 'apps.noDomain': 'Aucun domaine', 'apps.gitInfo': 'Infos Git',
     'apps.config': 'Configuration', 'apps.configDesc': 'Paramètres et configuration de build',
     'apps.terminalDesc': "Exécutez des commandes dans le conteneur de l'application",
@@ -1905,6 +1908,7 @@ export const translations: Record<string, Record<string, string>> = {
     'databases.deleteConfirmBefore': 'Es-tu sûr de vouloir supprimer ',
     'databases.deleteConfirmAfter': ' ? Toutes les données seront perdues définitivement. Cette action est irréversible.',
     'monitoring.title': 'Monitoring', 'monitoring.subtitle': 'Surveillez les ressources en temps réel', 'monitoring.selectServer': 'Sélectionnez un serveur pour voir les métriques', 'monitoring.noMetrics': 'Pas encore de métriques', 'monitoring.alertRules': "Règles d'alerte", 'monitoring.addAlert': 'Ajouter une alerte', 'monitoring.metric': 'Métrique', 'monitoring.threshold': 'Seuil', 'monitoring.channel': 'Canal', 'monitoring.network': 'Réseau',
+    'monitoring.appUsageTitle': 'Consommation des applications', 'monitoring.appUsageEmpty': 'Aucun échantillon de conteneur — la consommation apparaît une fois les apps démarrées.', 'monitoring.sortCpu': 'Par CPU', 'monitoring.sortMem': 'Par RAM',
     // ── monitoring (v2 — extra keys) ──
     'monitoring.cores': 'cores',
     'monitoring.up': 'Up',

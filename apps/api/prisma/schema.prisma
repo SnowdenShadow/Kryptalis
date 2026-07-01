@@ -212,6 +212,7 @@ model Server {
   backups      Backup[]
   alertRules   AlertRule[]
   metrics      ServerMetric[]
+  containerMetrics ContainerMetric[]
   tasks        AgentTask[]
   mailServers  MailServer[]
 
@@ -401,6 +402,7 @@ model Application {
   databases        Database[]
   sftpAccounts     SftpAccount[]
   cronJobs         CronJob[]
+  containerMetrics ContainerMetric[]
 
   @@index([projectId])
   @@index([serverId])
@@ -947,6 +949,37 @@ model ServerMetric {
   @@map("server_metrics")
 }
 
+// Per-container resource usage sample (CPU / memory / net / block IO), the
+// container-level analogue of ServerMetric. Fed by the agent heartbeat
+// (`containerStats`) for remote hosts and by a local `docker stats` collector
+// for the API box. `applicationId` links the sample to its owning app when the
+// container name matches an Application.containerName (null for unmanaged or
+// not-yet-matched containers). Short retention (see container_metrics_retention_days,
+// default 7d) + a per-container cap keep the row count bounded — this table
+// grows an order of magnitude faster than server_metrics.
+model ContainerMetric {
+  id            String   @id @default(cuid())
+  serverId      String
+  applicationId String?
+  containerName String
+  cpuPercent    Float
+  memoryUsed    BigInt
+  memoryLimit   BigInt
+  networkIn     BigInt
+  networkOut    BigInt
+  blockRead     BigInt
+  blockWrite    BigInt
+  timestamp     DateTime @default(now())
+
+  server      Server       @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  application Application?  @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  @@index([applicationId, timestamp])
+  @@index([serverId, timestamp])
+  @@index([containerName, timestamp])
+  @@map("container_metrics")
+}
+
 model AlertRule {
   id        String       @id @default(cuid())
   name      String
@@ -1013,6 +1046,7 @@ enum TaskType {
   LOGS
   EXEC
   STATUS
+  STATS
   FILE_READ
   FILE_WRITE
   FILE_LIST

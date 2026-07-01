@@ -59,6 +59,7 @@ import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { PhpConfigCard } from './php-config-card';
 import { InteractiveTerminal } from './interactive-terminal';
+import { ResourcesTab } from './resources-tab';
 import {
   STATUS_VARIANT,
   STATUS_COLOR,
@@ -79,7 +80,7 @@ type ApplicationDetail = ApplicationResponse;
 type Deployment = DeploymentResponse;
 
 
-type TabId = 'overview' | 'logs' | 'terminal' | 'deployments' | 'files' | 'ports' | 'env' | 'settings';
+type TabId = 'overview' | 'resources' | 'logs' | 'terminal' | 'deployments' | 'files' | 'ports' | 'env' | 'settings';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -93,6 +94,7 @@ const LOG_LINE_OPTIONS = [50, 100, 200, 500] as const;
 // dangerous), Files/Terminal further right because they're rarely needed.
 const TAB_IDS: { id: TabId; key: string }[] = [
   { id: 'overview', key: 'apps.tab.overview' },
+  { id: 'resources', key: 'apps.tab.resources' },
   { id: 'deployments', key: 'apps.tab.deployments' },
   { id: 'logs', key: 'apps.tab.logs' },
   { id: 'env', key: 'apps.tab.envVars' },
@@ -1065,6 +1067,11 @@ export default function ApplicationDetailPage() {
             </Card>
           </>
         )}
+
+        {/* ============================================================== */}
+        {/* Resources Tab (live + historical container usage)              */}
+        {/* ============================================================== */}
+        {activeTab === 'resources' && <ResourcesTab appId={id} />}
 
         {/* ============================================================== */}
         {/* Logs Tab                                                        */}

@@ -12,6 +12,40 @@ export class HeartbeatContainerDto {
   state: string;
 }
 
+export class HeartbeatContainerStatDto {
+  @ApiProperty()
+  @IsString()
+  name: string;
+
+  @ApiProperty()
+  @IsNumber()
+  cpuPercent: number;
+
+  @ApiProperty()
+  @IsNumber()
+  memoryUsed: number;
+
+  @ApiProperty()
+  @IsNumber()
+  memoryLimit: number;
+
+  @ApiProperty()
+  @IsNumber()
+  networkIn: number;
+
+  @ApiProperty()
+  @IsNumber()
+  networkOut: number;
+
+  @ApiProperty()
+  @IsNumber()
+  blockRead: number;
+
+  @ApiProperty()
+  @IsNumber()
+  blockWrite: number;
+}
+
 export class AgentHeartbeatDto {
   @ApiProperty()
   @IsString()
@@ -54,4 +88,13 @@ export class AgentHeartbeatDto {
   @ValidateNested({ each: true })
   @Type(() => HeartbeatContainerDto)
   containers?: HeartbeatContainerDto[];
+
+  /** Live per-container resource usage (agents ≥ the container-stats release).
+   *  Persisted as ContainerMetric history. */
+  @ApiProperty({ required: false, type: [HeartbeatContainerStatDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => HeartbeatContainerStatDto)
+  containerStats?: HeartbeatContainerStatDto[];
 }

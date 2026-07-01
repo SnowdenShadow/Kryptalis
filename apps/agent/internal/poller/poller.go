@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/dockcontrol/agent/internal/config"
+	"github.com/dockcontrol/agent/internal/monitor"
 	"github.com/dockcontrol/agent/internal/tasks"
 )
 
@@ -239,6 +240,8 @@ func (p *Poller) handleTask(ctx context.Context, task Task) {
 		result, taskErr = p.runExec(tctx, task)
 	case "STATUS":
 		result, taskErr = p.runStatus(tctx, task)
+	case "STATS":
+		result, taskErr = p.runStats(tctx, task)
 	case "FILE_READ":
 		result, taskErr = p.runFileRead(task)
 	case "FILE_WRITE":
@@ -1088,6 +1091,35 @@ func (p *Poller) runStatus(ctx context.Context, task Task) (map[string]interface
 		return map[string]interface{}{"output": string(out)}, err.Error()
 	}
 	return map[string]interface{}{"output": string(out)}, ""
+}
+
+// runStats returns live `docker stats --no-stream` for the requested
+// container(s). Payload:
+//   - containerName (optional): a single container to sample. When set we pass
+//     it straight to `docker stats <name>` so multi-service stacks or a bad
+//     name don't drag in every container.
+//   - when absent: sample every dockcontrol-managed container on the host.
+// The API uses this for the on-demand "live" view of a remote app.
+func (p *Poller) runStats(ctx context.Context, task Task) (map[string]interface{}, string) {
+	args := []string{"stats", "--no-stream", "--format", "{{json .}}"}
+	name, _ := task.Payload["containerName"].(string)
+	onlyManaged := true
+	if name != "" {
+		args = append(args, name)
+		onlyManaged = false // we already scoped to the exact container
+	}
+	c := exec.CommandContext(ctx, "docker", args...)
+	out, err := c.Output()
+	if err != nil {
+		return nil, err.Error()
+	}
+	stats := monitor.ParseDockerStatsJSON(string(out), onlyManaged)
+	// Marshal through JSON so the map matches the API's expected shape
+	// (camelCase keys from the ContainerStat json tags).
+	b, _ := json.Marshal(map[string]interface{}{"stats": stats})
+	var result map[string]interface{}
+	_ = json.Unmarshal(b, &result)
+	return result, ""
 }
 
 // runFileList lists a directory inside the app dir (remote file manager).
