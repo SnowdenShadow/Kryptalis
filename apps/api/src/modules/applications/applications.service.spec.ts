@@ -117,7 +117,14 @@ function makePrisma() {
       findMany: vi.fn().mockResolvedValue([]),
       update: vi.fn().mockResolvedValue({}),
     },
-    server: { findUnique: vi.fn() },
+    server: {
+      findUnique: vi.fn(),
+      // create() resolves its target via resolveCreateServerId: with no
+      // dto.serverId it reads server.findMany and auto-uses the single
+      // provisioned (LOCAL) server. One ONLINE row → create proceeds past
+      // server resolution into the validation screens the create tests assert.
+      findMany: vi.fn().mockResolvedValue([{ id: 'srv-local', status: 'ONLINE' }]),
+    },
     project: { findUnique: vi.fn() },
   };
 }
@@ -224,7 +231,6 @@ describe('moveServer', () => {
       gitApp({ gitUrl: null, framework: 'DOCKER_COMPOSE', dockerComposeFile: 'services: {}' }),
     );
     prisma.server.findUnique.mockResolvedValue(ONLINE_TARGET);
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'other' });
     mockResolveAppServer.mockResolvedValue({ id: 'old', host: '10.0.0.1', name: 'old-node' } as any);
     mockIsAppLocal.mockReturnValue(false);
     mockIsLocalHost.mockReturnValue(false);
@@ -240,7 +246,6 @@ describe('moveServer', () => {
     const { service, prisma, agent, ops } = makeService();
     prisma.application.findUnique.mockResolvedValue(gitApp());
     prisma.server.findUnique.mockResolvedValue(ONLINE_TARGET);
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'other' });
     mockResolveAppServer.mockResolvedValue({ id: 'old', host: '10.0.0.1', name: 'old-node' } as any);
     mockIsAppLocal.mockReturnValue(false); // remote source
     mockIsLocalHost.mockReturnValue(false); // remote target
@@ -280,7 +285,6 @@ describe('moveServer', () => {
     const { service, prisma, agent, ops } = makeService();
     prisma.application.findUnique.mockResolvedValue(gitApp());
     prisma.server.findUnique.mockResolvedValue({ id: 'new', name: 'local-node', host: '127.0.0.1', status: 'ONLINE' });
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'other' });
     mockResolveAppServer.mockResolvedValue({ id: 'old', host: '10.0.0.1', name: 'old-node' } as any);
     mockIsAppLocal.mockReturnValue(false); // remote source
     mockIsLocalHost.mockReturnValue(true); // local target
@@ -314,7 +318,6 @@ describe('moveServer', () => {
     const { service, prisma, agent, ops } = makeService();
     prisma.application.findUnique.mockResolvedValue(gitApp());
     prisma.server.findUnique.mockResolvedValue(ONLINE_TARGET);
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'other' });
     mockResolveAppServer.mockResolvedValue({ id: 'old', host: '10.0.0.1', name: 'old-node' } as any);
     mockIsAppLocal.mockReturnValue(false);
     mockIsLocalHost.mockReturnValue(false);
@@ -342,7 +345,6 @@ describe('moveServer', () => {
     const { service, prisma, agent, ops } = makeService();
     prisma.application.findUnique.mockResolvedValue(gitApp({ hostPort: 8080 }));
     prisma.server.findUnique.mockResolvedValue(ONLINE_TARGET);
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'other' });
     prisma.application.findMany.mockResolvedValue([{ hostPort: 8080 }]); // taken on target
     mockResolveAppServer.mockResolvedValue({ id: 'old', host: '10.0.0.1', name: 'old-node' } as any);
     mockIsAppLocal.mockReturnValue(false);
@@ -369,7 +371,6 @@ describe('moveServer', () => {
     prisma.server.findUnique.mockImplementation(async ({ where }: any) =>
       where.id === 'old' ? { id: 'old', name: 'old-node', status: 'ONLINE' } : ONLINE_TARGET,
     );
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'other' });
     mockResolveAppServer.mockResolvedValue({ id: 'old', host: '10.0.0.1', name: 'old-node' } as any);
     mockIsAppLocal.mockReturnValue(false);
     mockIsLocalHost.mockReturnValue(false);
@@ -395,7 +396,6 @@ describe('moveServer', () => {
     const { service, prisma, agent, ops } = makeService();
     prisma.application.findUnique.mockResolvedValue(gitApp());
     prisma.server.findUnique.mockResolvedValue(ONLINE_TARGET);
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'other' });
     mockResolveAppServer.mockResolvedValue({ id: 'old', host: '10.0.0.1', name: 'old-node' } as any);
     mockIsAppLocal.mockReturnValue(false);
     mockIsLocalHost.mockReturnValue(false);
