@@ -42,6 +42,14 @@ describe('migration harness', () => {
       expect(tables).toContain(t);
     }
   });
+
+  it('git_providers carries the self-hosted baseUrl column (Gitea/Forgejo)', async () => {
+    db = await freshDb();
+    const { rows } = await db.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns WHERE table_name='git_providers'`,
+    );
+    expect(rows.map((r) => r.column_name)).toContain('baseUrl');
+  });
 });
 
 describe('FK ON DELETE CASCADE', () => {

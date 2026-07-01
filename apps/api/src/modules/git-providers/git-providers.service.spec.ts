@@ -785,3 +785,126 @@ describe('registerWebhook', () => {
     ).rejects.toThrow(/missing the permission/);
   });
 });
+
+// ── Gitea / Forgejo (self-hosted, /api/v1) ───────────────────────────
+
+describe('Gitea/Forgejo support', () => {
+  const BASE = 'https://git.acme.com';
+  const API = `${BASE}/api/v1`;
+
+  it('create: requires a baseUrl for GITEA', async () => {
+    const { service } = makeProvidersService();
+    await expect(
+      service.create('u1', { provider: 'GITEA', name: 'g', token: 't' } as any),
+    ).rejects.toThrow(/base URL/i);
+  });
+
+  it('create: rejects a non-https baseUrl', async () => {
+    const { service } = makeProvidersService();
+    await expect(
+      service.create('u1', { provider: 'GITEA', name: 'g', token: 't', baseUrl: 'http://git.acme.com' } as any),
+    ).rejects.toThrow(/https/i);
+  });
+
+  it('create: rejects a private baseUrl by default (no opt-in)', async () => {
+    const { service } = makeProvidersService();
+    await expect(
+      service.create('u1', { provider: 'GITEA', name: 'g', token: 't', baseUrl: 'https://192.168.1.10' } as any),
+    ).rejects.toThrow(/not allowed/i);
+  });
+
+  it('create: allows a private baseUrl when ALLOW_PRIVATE_GIT_HOSTS=true', async () => {
+    process.env.ALLOW_PRIVATE_GIT_HOSTS = 'true';
+    try {
+      const { service, prisma } = makeProvidersService();
+      onUrl('192.168.1.10/api/v1/user', { login: 'admin', avatar_url: '' });
+      await service.create('u1', {
+        provider: 'FORGEJO', name: 'lan', token: 'tok', baseUrl: 'https://192.168.1.10',
+      } as any);
+      const data = prisma.gitProvider.create.mock.calls[0][0].data;
+      expect(data).toMatchObject({ provider: 'FORGEJO', baseUrl: 'https://192.168.1.10', token: 'enc:tok' });
+    } finally {
+      delete process.env.ALLOW_PRIVATE_GIT_HOSTS;
+    }
+  });
+
+  it('create: validates the token via {base}/api/v1/user with a token header and persists baseUrl', async () => {
+    const { service, prisma } = makeProvidersService();
+    onUrl(`${API}/user`, { login: 'octo', avatar_url: 'https://a/o.png' });
+    await service.create('u1', {
+      provider: 'GITEA', name: 'work', token: 'gta_raw', baseUrl: `${BASE}/`,
+    } as any);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers.Authorization).toBe('token gta_raw');
+    const data = prisma.gitProvider.create.mock.calls[0][0].data;
+    // trailing slash trimmed when persisted
+    expect(data).toMatchObject({ provider: 'GITEA', baseUrl: BASE, username: 'octo', token: 'enc:gta_raw' });
+  });
+
+  it('listBranches: hits {base}/api/v1 and flags the default', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITEA', token: 'enc:t', baseUrl: BASE,
+    });
+    onUrl(`${API}/repos/me/app/branches`, [{ name: 'main' }, { name: 'dev' }]);
+    routes.push({
+      match: (u) => new RegExp(`${API.replace(/[.]/g, '\\.')}/repos/me/app$`).test(u),
+      res: () => json({ default_branch: 'dev' }),
+    });
+    const res = await service.listBranches('gp1', 'u1', 'me/app');
+    expect(res).toEqual([
+      { name: 'main', isDefault: false },
+      { name: 'dev', isDefault: true },
+    ]);
+  });
+
+  it('registerWebhook: POSTs a gitea-type push hook to {base}/api/v1', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'FORGEJO', token: 'enc:t', baseUrl: BASE,
+    });
+    routes.push({
+      match: (u, init) => u.includes('/hooks') && (!init || init.method === undefined),
+      res: () => json([]),
+    });
+    routes.push({
+      match: (u, init) => u.includes('/hooks') && init?.method === 'POST',
+      res: () => json({ id: 1 }, true, 201),
+    });
+    const url = 'https://kryptalis.example.com/api/webhooks/applications/app1';
+    const res = await service.registerWebhook('gp1', 'u1', 'me/app', url, 'sec');
+    expect(res).toEqual({ created: true, alreadyExists: false });
+    const post = fetchMock.mock.calls.find(([, i]: any[]) => i?.method === 'POST')!;
+    expect(String(post[0])).toBe(`${API}/repos/me/app/hooks`);
+    const body = JSON.parse((post[1] as any).body);
+    expect(body).toMatchObject({ type: 'gitea', events: ['push'], config: { url, secret: 'sec' } });
+    expect((post[1] as any).headers.Authorization).toBe('token t');
+  });
+
+  it('listBranches: refuses a private baseUrl host without opt-in (no fetch)', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITEA', token: 'enc:t', baseUrl: 'https://192.168.5.5',
+    });
+    await expect(service.listBranches('gp1', 'u1', 'me/app')).rejects.toThrow(/not allowed/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── per-instance clone-host pinning ──────────────────────────────────
+
+describe('assertCloneHostAllowed with baseUrl (self-hosted pinning)', () => {
+  it('allows a clone URL whose host matches the provider baseUrl', () => {
+    const { service } = makeProvidersService();
+    expect(() =>
+      service.assertCloneHostAllowed('GITEA', 'https://git.acme.com/me/app.git', 'https://git.acme.com'),
+    ).not.toThrow();
+  });
+
+  it('rejects a clone URL whose host differs from the baseUrl (token exfil guard)', () => {
+    const { service } = makeProvidersService();
+    expect(() =>
+      service.assertCloneHostAllowed('GITEA', 'https://evil.example.com/me/app.git', 'https://git.acme.com'),
+    ).toThrow(/does not match/i);
+  });
+});

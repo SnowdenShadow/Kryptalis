@@ -52,10 +52,9 @@ export function repoFullNameFromUrl(gitUrl: string | null | undefined): string {
 }
 
 /**
- * Canonical SaaS clone hosts per provider. A GitProvider row has NO
- * host/baseUrl column (see schema), so self-hosted GitLab/GitHub Enterprise
- * cannot be host-pinned yet — only these canonical hosts are accepted.
- * Self-hosted support needs a `host` column on GitProvider (deferred).
+ * Canonical SaaS clone hosts for the hosted providers. Self-hosted providers
+ * (Gitea/Forgejo) have no canonical host — they are pinned per-instance against
+ * the host of their stored `baseUrl` instead (see assertCloneHostAllowed).
  */
 const PROVIDER_HOSTS: Record<string, string[]> = {
   GITHUB: ['github.com', 'api.github.com'],
@@ -63,12 +62,26 @@ const PROVIDER_HOSTS: Record<string, string[]> = {
   BITBUCKET: ['bitbucket.org'],
 };
 
+/** Self-hosted providers that carry a per-instance baseUrl. */
+export const SELF_HOSTED_PROVIDERS = new Set(['GITEA', 'FORGEJO']);
+
+/**
+ * Whether private/LAN git hosts are permitted. OFF by default — a self-hosted
+ * Gitea on a public domain works out of the box; pointing the platform at an
+ * RFC1918 LAN host requires the operator to explicitly opt in, mirroring
+ * ALLOW_PRIVATE_S3_ENDPOINTS. Loopback/metadata stay blocked regardless.
+ */
+export function gitHostsAllowPrivate(): boolean {
+  return (process.env.ALLOW_PRIVATE_GIT_HOSTS || 'false').toLowerCase() === 'true';
+}
+
 /**
  * Block clone targets that point at the loopback/link-local/private ranges
  * (SSRF). Used for the one-shot PAT path where there's no provider host to
- * pin against — we still refuse private/loopback literals.
+ * pin against — we still refuse private/loopback literals. `allowPrivate`
+ * relaxes RFC1918 (still never loopback/metadata) for opted-in self-hosted LANs.
  */
-export function isPrivateOrLoopbackHost(hostname: string): boolean {
+export function isPrivateOrLoopbackHost(hostname: string, allowPrivate = false): boolean {
   // Delegate to the shared SSRF guard (common/net/ssrf-guard.ts) so the git PAT
   // path benefits from the same coverage the webhook screen has: IPv4 smuggled
   // inside IPv6 (::ffff:127.0.0.1), CGNAT 100.64/10, 0.0.0.0/8, and WHATWG-URL
@@ -76,22 +89,29 @@ export function isPrivateOrLoopbackHost(hostname: string): boolean {
   // full URL, so wrap the host (bracket IPv6 literals).
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
   const hostForUrl = h.includes(':') ? `[${h}]` : h;
-  return screenUrlLiteral(`https://${hostForUrl}`) !== null;
+  return screenUrlLiteral(`https://${hostForUrl}`, { allowPrivate }) !== null;
 }
 
 /**
  * Enforce that a clone URL is safe to inject a decrypted git token into:
- * HTTPS only, and the host must match the selected provider's canonical
- * host. A member who points gitUrl at evil.example.com would otherwise
- * exfiltrate the victim's GitHub/GitLab/Bitbucket token (token exfil + SSRF).
+ * HTTPS only, and the host must match the selected provider's allowed host(s).
+ * A member who points gitUrl at evil.example.com would otherwise exfiltrate the
+ * victim's git token (token exfil + SSRF).
  *
- * `provider` null/unknown (one-shot PAT path) → no provider host to pin, so
- * we only require HTTPS and a non-private/loopback host.
+ * Host pinning, in order of precedence:
+ *   - `baseUrl` set (self-hosted Gitea/Forgejo) → pin to the baseUrl's host.
+ *   - else a known SaaS `provider` → pin to its canonical host(s).
+ *   - else (one-shot PAT / anonymous) → no host pin, just HTTPS + non-private.
  *
- * Centralized here so the create path and the redeploy/webhook path can't
- * drift. Throws BadRequestException on any mismatch.
+ * `allowPrivate` (operator opt-in) relaxes RFC1918 for self-hosted LAN hosts;
+ * loopback/metadata remain blocked. Centralized so create/redeploy/webhook
+ * paths can't drift. Throws BadRequestException on any mismatch.
  */
-export function assertCloneHostAllowed(provider: string | null | undefined, gitUrl: string): void {
+export function assertCloneHostAllowed(
+  provider: string | null | undefined,
+  gitUrl: string,
+  baseUrl?: string | null,
+): void {
   let url: URL;
   try {
     url = new URL(gitUrl);
@@ -101,11 +121,24 @@ export function assertCloneHostAllowed(provider: string | null | undefined, gitU
   if (url.protocol !== 'https:') {
     throw new BadRequestException('Git URL must use https');
   }
+  const allowPrivate = gitHostsAllowPrivate();
   const hostname = url.hostname.toLowerCase();
-  if (isPrivateOrLoopbackHost(hostname)) {
+  if (isPrivateOrLoopbackHost(hostname, allowPrivate)) {
     throw new BadRequestException('Git URL host is not allowed');
   }
-  const allowed = provider ? PROVIDER_HOSTS[provider] : undefined;
+  let allowed: string[] | undefined;
+  if (baseUrl) {
+    // Self-hosted: pin to the instance host. A bad baseUrl throws clearly.
+    let bu: URL;
+    try {
+      bu = new URL(baseUrl);
+    } catch {
+      throw new BadRequestException('Invalid provider base URL');
+    }
+    allowed = [bu.hostname.toLowerCase()];
+  } else if (provider) {
+    allowed = PROVIDER_HOSTS[provider];
+  }
   if (allowed && !allowed.includes(hostname)) {
     throw new BadRequestException('Git URL host does not match the selected provider');
   }
@@ -119,9 +152,16 @@ export function assertCloneHostAllowed(provider: string | null | undefined, gitU
  * validation and clone can't exfiltrate the token or SSRF an internal service.
  * Provider-pinned hosts (github.com etc.) resolve public and pass; the value is
  * for the one-shot PAT / anonymous path where the host is fully user-chosen.
+ * `allowPrivate` honours the self-hosted-LAN opt-in (metadata still blocked).
  */
-export async function assertCloneHostResolvable(gitUrl: string): Promise<void> {
-  const violation = await screenResolvedHost(gitUrl, { allowedSchemes: ['https:'] });
+export async function assertCloneHostResolvable(
+  gitUrl: string,
+  allowPrivate = false,
+): Promise<void> {
+  const violation = await screenResolvedHost(gitUrl, {
+    allowedSchemes: ['https:'],
+    allowPrivate,
+  });
   if (violation) {
     throw new BadRequestException(`Git URL host is not allowed (${violation})`);
   }
@@ -147,12 +187,62 @@ export class GitProvidersService {
    * Delegates to the shared {@link assertCloneHostAllowed} so the create
    * and redeploy/webhook paths share one rule. Throws BadRequestException.
    */
-  assertCloneHostAllowed(provider: string | null | undefined, gitUrl: string): void {
-    assertCloneHostAllowed(provider, gitUrl);
+  assertCloneHostAllowed(
+    provider: string | null | undefined,
+    gitUrl: string,
+    baseUrl?: string | null,
+  ): void {
+    assertCloneHostAllowed(provider, gitUrl, baseUrl);
+  }
+
+  /**
+   * Resolve the API base for a provider. Self-hosted Gitea/Forgejo expose the
+   * GitHub-compatible REST API under `${baseUrl}/api/v1`. Every self-hosted
+   * call screens the baseUrl host first so we never fetch an unscreened host.
+   */
+  private giteaApiBase(gp: { provider: string; baseUrl: string | null }): string {
+    if (!gp.baseUrl) {
+      throw new BadRequestException('Self-hosted provider is missing its base URL');
+    }
+    let bu: URL;
+    try {
+      bu = new URL(gp.baseUrl);
+    } catch {
+      throw new BadRequestException('Invalid provider base URL');
+    }
+    if (bu.protocol !== 'https:') {
+      throw new BadRequestException('Provider base URL must use https');
+    }
+    if (isPrivateOrLoopbackHost(bu.hostname, gitHostsAllowPrivate())) {
+      throw new BadRequestException('Provider base URL host is not allowed');
+    }
+    return `${gp.baseUrl.replace(/\/+$/, '')}/api/v1`;
   }
 
   async create(userId: string, dto: CreateGitProviderDto) {
-    const userInfo = await this.fetchUserInfo(dto.provider, dto.token);
+    // Self-hosted providers require an instance base URL. Normalize + screen it
+    // (HTTPS, non-private unless opted in) BEFORE we send the token anywhere.
+    let baseUrl: string | null = null;
+    if (SELF_HOSTED_PROVIDERS.has(dto.provider)) {
+      if (!dto.baseUrl) {
+        throw new BadRequestException('Gitea/Forgejo require the instance base URL');
+      }
+      let bu: URL;
+      try {
+        bu = new URL(dto.baseUrl);
+      } catch {
+        throw new BadRequestException('Invalid provider base URL');
+      }
+      if (bu.protocol !== 'https:') {
+        throw new BadRequestException('Provider base URL must use https');
+      }
+      if (isPrivateOrLoopbackHost(bu.hostname, gitHostsAllowPrivate())) {
+        throw new BadRequestException('Provider base URL host is not allowed');
+      }
+      baseUrl = `${dto.baseUrl.replace(/\/+$/, '')}`;
+    }
+
+    const userInfo = await this.fetchUserInfo(dto.provider, dto.token, baseUrl);
     if (!userInfo) throw new BadRequestException('Invalid token or unable to fetch user info');
 
     return this.prisma.gitProvider.create({
@@ -160,12 +250,13 @@ export class GitProvidersService {
         userId,
         provider: dto.provider,
         name: dto.name,
+        baseUrl,
         token: this.encryption.encrypt(dto.token),
         username: userInfo.username,
         avatarUrl: userInfo.avatarUrl,
       },
       select: {
-        id: true, provider: true, name: true, username: true, avatarUrl: true, createdAt: true,
+        id: true, provider: true, name: true, baseUrl: true, username: true, avatarUrl: true, createdAt: true,
       },
     });
   }
@@ -174,7 +265,7 @@ export class GitProvidersService {
     return this.prisma.gitProvider.findMany({
       where: { userId },
       select: {
-        id: true, provider: true, name: true, username: true, avatarUrl: true, createdAt: true,
+        id: true, provider: true, name: true, baseUrl: true, username: true, avatarUrl: true, createdAt: true,
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -217,6 +308,23 @@ export class GitProvidersService {
         for (const file of files) {
           const res = await fetch(`https://gitlab.com/api/v4/projects/${projectPath}/repository/files/${encodeURIComponent(file)}?ref=${branch}`, {
             headers: { 'PRIVATE-TOKEN': this.getToken(gp) },
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (res.ok) {
+            found[file] = true;
+            if (file === 'package.json') {
+              const data: any = await res.json();
+              if (data.content) {
+                try { pkgJson = JSON.parse(Buffer.from(data.content, 'base64').toString()); } catch {}
+              }
+            }
+          }
+        }
+      } else if (SELF_HOSTED_PROVIDERS.has(gp.provider)) {
+        const apiBase = this.giteaApiBase(gp);
+        for (const file of files) {
+          const res = await fetch(`${apiBase}/repos/${repoFullName}/contents/${encodeURIComponent(file)}?ref=${branch}`, {
+            headers: { 'Authorization': `token ${this.getToken(gp)}` },
             signal: AbortSignal.timeout(10_000),
           });
           if (res.ok) {
@@ -331,6 +439,17 @@ export class GitProvidersService {
         if (!res.ok) return { content: '', exists: false };
         return { content: await res.text(), exists: true };
       }
+      if (SELF_HOSTED_PROVIDERS.has(gp.provider)) {
+        const apiBase = this.giteaApiBase(gp);
+        const res = await fetch(`${apiBase}/repos/${repoFullName}/contents/${encodeURIComponent(filePath)}?ref=${branch}`, {
+          headers: { 'Authorization': `token ${this.getToken(gp)}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) return { content: '', exists: false };
+        const data: any = await res.json();
+        if (!data?.content) return { content: '', exists: true };
+        return { content: Buffer.from(data.content, 'base64').toString(), exists: true };
+      }
     } catch {}
     return { content: '', exists: false };
   }
@@ -344,6 +463,9 @@ export class GitProvidersService {
       if (gp.provider === 'GITHUB') return await this.fetchGitHubRepos(token);
       if (gp.provider === 'GITLAB') return await this.fetchGitLabRepos(token);
       if (gp.provider === 'BITBUCKET') return await this.fetchBitbucketRepos(token);
+      if (SELF_HOSTED_PROVIDERS.has(gp.provider)) {
+        return await this.fetchGiteaRepos(this.giteaApiBase(gp), token);
+      }
     } catch (err: any) {
       throw new BadRequestException(err.message || 'Failed to fetch repos');
     }
@@ -416,17 +538,34 @@ export class GitProvidersService {
         const def = await this.fetchDefaultBranch(gp.provider, repoFullName, token);
         return names.map((name) => ({ name, isDefault: name === def }));
       }
+      if (SELF_HOSTED_PROVIDERS.has(gp.provider)) {
+        const apiBase = this.giteaApiBase(gp);
+        const names: string[] = [];
+        for (let page = 1; page <= MAX_PAGES; page++) {
+          const res = await fetch(
+            `${apiBase}/repos/${repoFullName}/branches?limit=50&page=${page}`,
+            { headers: { Authorization: `token ${token}` }, signal: AbortSignal.timeout(10_000) },
+          );
+          if (!res.ok) throw new Error(`Gitea API: ${res.status}`);
+          const data: any[] = await res.json();
+          for (const b of data) names.push(b.name);
+          if (data.length < 50) break;
+        }
+        const def = await this.fetchDefaultBranch(gp.provider, repoFullName, token, apiBase);
+        return names.map((name) => ({ name, isDefault: name === def }));
+      }
     } catch (err: any) {
       throw new BadRequestException(err.message || 'Failed to fetch branches');
     }
     return [];
   }
 
-  /** Best-effort default-branch lookup (GitHub/Bitbucket don't flag it inline). */
+  /** Best-effort default-branch lookup (GitHub/Bitbucket/Gitea don't flag it inline). */
   private async fetchDefaultBranch(
     provider: string,
     repoFullName: string,
     token: string,
+    apiBase?: string,
   ): Promise<string | null> {
     try {
       if (provider === 'GITHUB') {
@@ -444,6 +583,14 @@ export class GitProvidersService {
         });
         if (!res.ok) return null;
         return (await res.json())?.mainbranch?.name ?? null;
+      }
+      if (SELF_HOSTED_PROVIDERS.has(provider) && apiBase) {
+        const res = await fetch(`${apiBase}/repos/${repoFullName}`, {
+          headers: { Authorization: `token ${token}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) return null;
+        return (await res.json())?.default_branch ?? null;
       }
     } catch {}
     return null;
@@ -584,6 +731,45 @@ export class GitProvidersService {
         if (!res.ok) throw new Error(await this.hookError(res, 'Bitbucket'));
         return { created: true, alreadyExists: false };
       }
+
+      if (SELF_HOSTED_PROVIDERS.has(gp.provider)) {
+        const apiBase = this.giteaApiBase(gp);
+        const base = `${apiBase}/repos/${repoFullName}/hooks`;
+        const headers = { Authorization: `token ${token}` };
+        // Gitea/Forgejo hook shape mirrors GitHub's: type 'gitea', config map.
+        const body = {
+          type: 'gitea',
+          active: true,
+          events: ['push'],
+          config: { url, content_type: 'json', secret },
+        };
+        const existing = await fetch(`${base}?limit=50`, {
+          headers,
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (existing.ok) {
+          const hooks: any[] = await existing.json();
+          const mine = hooks.find((h) => h?.config?.url === url);
+          if (mine?.id != null) {
+            const upd = await fetch(`${base}/${mine.id}`, {
+              method: 'PATCH',
+              headers: { ...headers, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ active: true, events: ['push'], config: body.config }),
+              signal: AbortSignal.timeout(10_000),
+            });
+            if (!upd.ok) throw new Error(await this.hookError(upd, 'Gitea'));
+            return { created: false, alreadyExists: true };
+          }
+        }
+        const res = await fetch(base, {
+          method: 'POST',
+          headers: { ...headers, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) throw new Error(await this.hookError(res, 'Gitea'));
+        return { created: true, alreadyExists: false };
+      }
     } catch (err: any) {
       if (err instanceof NotFoundException || err instanceof BadRequestException) throw err;
       throw new BadRequestException(err?.message || 'Failed to register webhook');
@@ -606,7 +792,11 @@ export class GitProvidersService {
     return `${provider} webhook API error ${res.status}${detail ? `: ${detail}` : ''}`;
   }
 
-  private async fetchUserInfo(provider: string, token: string): Promise<{ username: string; avatarUrl: string } | null> {
+  private async fetchUserInfo(
+    provider: string,
+    token: string,
+    baseUrl?: string | null,
+  ): Promise<{ username: string; avatarUrl: string } | null> {
     try {
       if (provider === 'GITHUB') {
         const res = await fetch('https://api.github.com/user', {
@@ -635,8 +825,47 @@ export class GitProvidersService {
         const data: any = await res.json();
         return { username: data.username || data.display_name, avatarUrl: data.links?.avatar?.href || '' };
       }
+      if (SELF_HOSTED_PROVIDERS.has(provider)) {
+        // Gitea/Forgejo mirror the GitHub REST API under /api/v1. The baseUrl
+        // was already screened at create()/giteaApiBase time.
+        const apiBase = `${(baseUrl || '').replace(/\/+$/, '')}/api/v1`;
+        const res = await fetch(`${apiBase}/user`, {
+          headers: { 'Authorization': `token ${token}` },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) return null;
+        const data: any = await res.json();
+        return { username: data.login || data.username, avatarUrl: data.avatar_url || '' };
+      }
     } catch {}
     return null;
+  }
+
+  private async fetchGiteaRepos(apiBase: string, token: string): Promise<Repo[]> {
+    const out: Repo[] = [];
+    const MAX_PAGES = 10;
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const res = await fetch(`${apiBase}/user/repos?limit=50&page=${page}`, {
+        headers: { 'Authorization': `token ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) throw new Error(`Gitea API: ${res.status}`);
+      const data: any[] = await res.json();
+      for (const r of data) {
+        out.push({
+          name: r.name,
+          fullName: r.full_name,
+          url: r.clone_url,
+          private: r.private,
+          defaultBranch: r.default_branch || 'main',
+          updatedAt: r.updated_at,
+          description: r.description,
+          language: r.language || '',
+        });
+      }
+      if (data.length < 50) break;
+    }
+    return out;
   }
 
   private async fetchGitHubRepos(token: string): Promise<Repo[]> {

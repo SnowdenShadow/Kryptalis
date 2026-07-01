@@ -54,6 +54,10 @@ model GitProvider {
   provider  String
   name      String
   token     String
+  // Self-hosted instance base URL (e.g. https://git.acme.com) for GITEA/FORGEJO.
+  // NULL for the SaaS providers (GitHub/GitLab/Bitbucket), which resolve to their
+  // canonical hosts. When set, it's the host every API call + clone is pinned to.
+  baseUrl   String?
   // 'PAT' = legacy personal access token, 'OAUTH' = OAuth flow (auto-refresh)
   authMode  String   @default("PAT")
   // OAuth state — only set when authMode='OAUTH'. Stored encrypted via EncryptionService.

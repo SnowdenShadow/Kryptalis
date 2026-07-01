@@ -24,6 +24,15 @@ import * as dns from 'dns';
 export interface SsrfScreenOptions {
   /** Allowed URL schemes (lowercased, with trailing colon). Default http/https. */
   allowedSchemes?: string[];
+  /**
+   * Opt-in: permit RFC1918 private ranges (10/8, 172.16/12, 192.168/16) and
+   * ULA IPv6 (fc00::/7). Used for self-hosted services on a private LAN (e.g. a
+   * Gitea instance behind the firewall) gated by an env flag. Loopback
+   * (127/8, ::1), link-local/metadata (169.254/16 incl. 169.254.169.254,
+   * fe80::/10), CGNAT (100.64/10) and 0.0.0.0/8 stay blocked regardless — those
+   * are never a legitimate user-facing service and are the real SSRF targets.
+   */
+  allowPrivate?: boolean;
 }
 
 const DEFAULT_SCHEMES = ['http:', 'https:'];
@@ -55,15 +64,23 @@ export function screenUrlLiteral(raw: string, opts: SsrfScreenOptions = {}): str
   const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
     const [a, b] = [Number(v4[1]), Number(v4[2])];
+    // Always-blocked ranges, even under allowPrivate: these are never a real
+    // user-facing service and are the classic SSRF pivots.
     if (
       a === 127 || // 127.0.0.0/8 loopback
-      a === 10 || // 10.0.0.0/8 private
-      (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12 private
-      (a === 192 && b === 168) || // 192.168.0.0/16 private
       (a === 169 && b === 254) || // 169.254.0.0/16 link-local incl. 169.254.169.254 metadata
       (a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10 CGNAT
       a === 0 // 0.0.0.0/8 "this host"
     ) {
+      return `private/loopback/link-local address ${host} is not allowed`;
+    }
+    // RFC1918 private ranges — blocked by default, allowed only when the caller
+    // explicitly opts in (e.g. a self-hosted git instance on a private LAN).
+    const isRfc1918 =
+      a === 10 || // 10.0.0.0/8
+      (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
+      (a === 192 && b === 168); // 192.168.0.0/16
+    if (isRfc1918 && !opts.allowPrivate) {
       return `private/loopback/link-local address ${host} is not allowed`;
     }
     return null;
@@ -73,7 +90,12 @@ export function screenUrlLiteral(raw: string, opts: SsrfScreenOptions = {}): str
   // 64:ff9b::a.b.c.d NAT64), so extract any embedded IPv4 and re-screen it.
   if (host.includes(':')) {
     if (host === '::1' || host === '::') return 'loopback address is not allowed';
-    if (/^f[cd][0-9a-f]{2}:/.test(host)) return 'unique-local address (fc00::/7) is not allowed';
+    // ULA (fc00::/7) is the IPv6 analogue of RFC1918 — same opt-in as IPv4
+    // private. When opted in it's an explicitly-allowed private address, so
+    // return null rather than falling through to the IPv6 default-deny below.
+    if (/^f[cd][0-9a-f]{2}:/.test(host)) {
+      return opts.allowPrivate ? null : 'unique-local address (fc00::/7) is not allowed';
+    }
     if (/^fe[89ab][0-9a-f]:/.test(host)) return 'link-local address (fe80::/10) is not allowed';
     const embeddedV4 = extractEmbeddedV4(host);
     if (embeddedV4) {
@@ -91,7 +113,7 @@ export function screenUrlLiteral(raw: string, opts: SsrfScreenOptions = {}): str
  * Returns a violation string, or null when every resolved address is public (or
  * the host was itself an IP literal already screened). Closes DNS rebinding.
  */
-export async function screenResolvedHost(raw: string, _opts: SsrfScreenOptions = {}): Promise<string | null> {
+export async function screenResolvedHost(raw: string, opts: SsrfScreenOptions = {}): Promise<string | null> {
   let url: URL;
   try { url = new URL(raw); } catch { return 'not a valid URL'; }
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
@@ -109,8 +131,12 @@ export async function screenResolvedHost(raw: string, _opts: SsrfScreenOptions =
     // it in a fixed http:// literal purely to reuse screenUrlLiteral's range
     // logic, so we must NOT forward the caller's allowedSchemes here (the
     // original URL's scheme was already validated by screenUrlLiteral); doing
-    // so would falsely reject every address under an https-only policy.
-    const v = screenUrlLiteral(`http://${address.includes(':') ? `[${address}]` : address}`);
+    // so would falsely reject every address under an https-only policy. We DO
+    // forward allowPrivate so a private-LAN name (opt-in) isn't rejected after
+    // it resolves to its RFC1918 address — while metadata/loopback stay blocked.
+    const v = screenUrlLiteral(`http://${address.includes(':') ? `[${address}]` : address}`, {
+      allowPrivate: opts.allowPrivate,
+    });
     if (v) return `resolves to ${address}: ${v}`;
   }
   return null;

@@ -55,6 +55,31 @@ describe('screenUrlLiteral', () => {
   it('returns a violation for a non-URL', () => {
     expect(screenUrlLiteral('not a url')).toMatch(/valid URL/i);
   });
+
+  describe('allowPrivate opt-in (self-hosted LAN)', () => {
+    it('permits RFC1918 IPv4 ranges when allowPrivate is set', () => {
+      for (const h of ['10.0.0.1', '172.16.9.9', '172.31.0.1', '192.168.1.1']) {
+        expect(screenUrlLiteral(`https://${h}/`, { allowPrivate: true }), h).toBeNull();
+      }
+    });
+
+    it('permits ULA IPv6 (fc00::/7) when allowPrivate is set', () => {
+      expect(screenUrlLiteral('https://[fc00::1]/', { allowPrivate: true })).toBeNull();
+    });
+
+    it('STILL blocks loopback / metadata / CGNAT / link-local even with allowPrivate', () => {
+      for (const h of ['127.0.0.1', '169.254.169.254', '100.64.0.1', '0.0.0.0']) {
+        expect(screenUrlLiteral(`https://${h}/`, { allowPrivate: true }), h).toMatch(/not allowed/i);
+      }
+      expect(screenUrlLiteral('https://[::1]/', { allowPrivate: true })).toMatch(/loopback/i);
+      expect(screenUrlLiteral('https://[fe80::1]/', { allowPrivate: true })).toMatch(/link-local/i);
+    });
+
+    it('without allowPrivate, RFC1918 stays blocked (default)', () => {
+      expect(screenUrlLiteral('https://192.168.1.1/')).toMatch(/not allowed/i);
+      expect(screenUrlLiteral('https://[fc00::1]/')).toMatch(/unique-local/i);
+    });
+  });
 });
 
 describe('extractEmbeddedV4', () => {

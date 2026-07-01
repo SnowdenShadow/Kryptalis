@@ -574,8 +574,16 @@ describe('buildAuthHeader', () => {
     );
   });
 
+  it('GITEA/FORGEJO → Basic base64(token:) — PAT as basic-auth username', () => {
+    for (const p of ['GITEA', 'FORGEJO']) {
+      expect(service.buildAuthHeader(p, 'tok1')).toBe(
+        `Authorization: Basic ${Buffer.from('tok1:').toString('base64')}`,
+      );
+    }
+  });
+
   it('unknown provider → Basic base64(token:token)', () => {
-    expect(service.buildAuthHeader('GITEA', 'tok1')).toBe(
+    expect(service.buildAuthHeader('SOMETHING_ELSE', 'tok1')).toBe(
       `Authorization: Basic ${Buffer.from('token:tok1').toString('base64')}`,
     );
   });

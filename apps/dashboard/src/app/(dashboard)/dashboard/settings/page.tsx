@@ -205,7 +205,9 @@ export default function SettingsPage() {
 
   // Git Providers
   const [showAddGit, setShowAddGit] = useState(false);
-  const [gitForm, setGitForm] = useState({ provider: 'GITHUB', name: '', token: '' });
+  const [gitForm, setGitForm] = useState({ provider: 'GITHUB', name: '', token: '', baseUrl: '' });
+  // Gitea/Forgejo are self-hosted — they need an instance URL the others don't.
+  const gitNeedsBaseUrl = gitForm.provider === 'GITEA' || gitForm.provider === 'FORGEJO';
 
   const { data: gitProviders = [] } = useQuery<any[]>({
     queryKey: ['git-providers'],
@@ -218,7 +220,7 @@ export default function SettingsPage() {
       queryClient.invalidateQueries({ queryKey: ['git-providers'] });
       toast.success(t('settings.gitToastAdded'));
       setShowAddGit(false);
-      setGitForm({ provider: 'GITHUB', name: '', token: '' });
+      setGitForm({ provider: 'GITHUB', name: '', token: '', baseUrl: '' });
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -775,7 +777,11 @@ export default function SettingsPage() {
               ) : (
                 <div className="space-y-2">
                   {gitProviders.map((gp: any) => {
-                    const icon = gp.provider === 'GITHUB' ? '🐙' : gp.provider === 'GITLAB' ? '🦊' : '🪣';
+                    const icon = gp.provider === 'GITHUB' ? '🐙'
+                      : gp.provider === 'GITLAB' ? '🦊'
+                      : gp.provider === 'GITEA' ? '🍵'
+                      : gp.provider === 'FORGEJO' ? '🟧'
+                      : '🪣';
                     return (
                       <div key={gp.id} className="flex items-center justify-between rounded-lg border border-border p-4">
                         <div className="flex items-center gap-3">
@@ -784,6 +790,7 @@ export default function SettingsPage() {
                             <p className="font-semibold">{gp.name}</p>
                             <p className="text-xs text-muted-foreground">
                               {gp.provider} · @{gp.username}
+                              {gp.baseUrl ? ` · ${gp.baseUrl.replace(/^https?:\/\//, '')}` : ''}
                             </p>
                           </div>
                           <Badge variant="success" className="ml-2">{t('settings.gitConnected')}</Badge>
@@ -821,6 +828,12 @@ export default function SettingsPage() {
                 <p className="font-semibold text-foreground">Bitbucket</p>
                 <p>{t('settings.gitHowBitbucket', { scope: '' }).split('{scope}')[0]}
                   <code className="text-xs bg-muted px-1 rounded">Repositories: Read</code>
+                </p>
+              </div>
+              <div>
+                <p className="font-semibold text-foreground">Gitea / Forgejo</p>
+                <p>{t('settings.gitHowGitea', { scope: '' }).split('{scope}')[0]}
+                  <code className="text-xs bg-muted px-1 rounded">repo, write:repository</code>
                 </p>
               </div>
             </CardContent>
@@ -870,8 +883,18 @@ export default function SettingsPage() {
                       <option value="GITHUB">🐙 GitHub</option>
                       <option value="GITLAB">🦊 GitLab</option>
                       <option value="BITBUCKET">🪣 Bitbucket</option>
+                      <option value="GITEA">🍵 Gitea</option>
+                      <option value="FORGEJO">🟧 Forgejo</option>
                     </Select>
                   </div>
+                  {gitNeedsBaseUrl && (
+                    <div className="space-y-2">
+                      <Label>{t('settings.gitBaseUrl')}</Label>
+                      <Input placeholder={t('settings.gitBaseUrlPh')} value={gitForm.baseUrl}
+                        onChange={(e) => setGitForm({ ...gitForm, baseUrl: e.target.value })}
+                        className="font-mono" />
+                    </div>
+                  )}
                   <div className="space-y-2">
                     <Label>{t('settings.gitDisplayName')}</Label>
                     <Input placeholder={t('settings.gitDisplayPh')} value={gitForm.name}
@@ -884,7 +907,7 @@ export default function SettingsPage() {
                   </div>
                   <Button
                     className="w-full"
-                    disabled={!gitForm.name || !gitForm.token || addGitMutation.isPending}
+                    disabled={!gitForm.name || !gitForm.token || (gitNeedsBaseUrl && !gitForm.baseUrl) || addGitMutation.isPending}
                     onClick={() => addGitMutation.mutate(gitForm)}
                   >
                     {addGitMutation.isPending

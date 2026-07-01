@@ -43,7 +43,7 @@ import {
   removeCollidingContainers,
   findComposePath,
 } from './applications.helpers';
-import { assertCloneHostResolvable } from '../git-providers/git-providers.service';
+import { assertCloneHostResolvable, gitHostsAllowPrivate } from '../git-providers/git-providers.service';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
@@ -1241,6 +1241,12 @@ export class ApplicationDeployService implements OnModuleInit {
       const b = Buffer.from(`x-token-auth:${token}`).toString('base64');
       return `Authorization: Basic ${b}`;
     }
+    if (provider === 'GITEA' || provider === 'FORGEJO') {
+      // Gitea/Forgejo HTTP clone accepts the PAT as the basic-auth username
+      // (any/empty password). Mirrors `git clone https://<token>@host/…`.
+      const b = Buffer.from(`${token}:`).toString('base64');
+      return `Authorization: Basic ${b}`;
+    }
     const b = Buffer.from(`token:${token}`).toString('base64');
     return `Authorization: Basic ${b}`;
   }
@@ -1461,8 +1467,10 @@ export class ApplicationDeployService implements OnModuleInit {
       // DNS-rebinding screen (M-7): resolve the clone host right before we
       // inject the credential and connect. A public name that rebinds to a
       // private/metadata IP between create-time validation and this clone is
-      // rejected here. Provider-pinned hosts resolve public and pass.
-      await assertCloneHostResolvable(gitUrl);
+      // rejected here. Provider-pinned hosts resolve public and pass. Honour the
+      // self-hosted-LAN opt-in so an intentional private Gitea isn't rejected
+      // (metadata/loopback stay blocked even then).
+      await assertCloneHostResolvable(gitUrl, gitHostsAllowPrivate());
       // Never echo the cloneArgs verbatim — the http.extraheader contains
       // the git provider's bearer token. Log a redacted form.
       const redactedArgs = cloneArgs.map((a) =>

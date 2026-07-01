@@ -248,7 +248,8 @@ export class ApplicationOpsService implements OnModuleInit {
     // decrypted token into the clone. The redeploy/webhook path looks up the
     // provider by id with no user scope, so without this a member could have
     // stored a gitUrl pointing at an attacker host and exfiltrate the token.
-    if (app.gitUrl) assertCloneHostAllowed(gp.provider, app.gitUrl);
+    // For self-hosted Gitea/Forgejo the host is pinned to the provider's baseUrl.
+    if (app.gitUrl) assertCloneHostAllowed(gp.provider, app.gitUrl, gp.baseUrl);
     return this.deploy.buildAuthHeader(gp.provider, this.encryption.decrypt(gp.token));
   }
 

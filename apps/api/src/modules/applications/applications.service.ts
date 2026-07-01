@@ -247,10 +247,11 @@ export class ApplicationsService implements OnModuleInit {
       if (gitProviderId) {
         const gp = await this.prisma.gitProvider.findFirst({
           where: { id: gitProviderId, userId },
-          select: { provider: true },
+          select: { provider: true, baseUrl: true },
         });
         if (!gp) throw new ForbiddenException('Git provider not yours');
-        assertCloneHostAllowed(gp.provider, dto.gitUrl);
+        // Self-hosted providers pin to their instance host (gp.baseUrl).
+        assertCloneHostAllowed(gp.provider, dto.gitUrl, gp.baseUrl);
       } else {
         // One-shot PAT or anonymous public repo: no provider host to pin
         // against, but still require HTTPS and reject private/loopback/SSRF
@@ -652,14 +653,16 @@ export class ApplicationsService implements OnModuleInit {
     // caller is at least DEVELOPER on the project.
     if (dto.gitUrl !== undefined && dto.gitUrl) {
       let providerType: string | null = null;
+      let providerBaseUrl: string | null = null;
       if (existing.gitProviderId) {
         const gp = await this.prisma.gitProvider.findUnique({
           where: { id: existing.gitProviderId },
-          select: { provider: true },
+          select: { provider: true, baseUrl: true },
         });
         providerType = gp?.provider ?? null;
+        providerBaseUrl = gp?.baseUrl ?? null;
       }
-      assertCloneHostAllowed(providerType, dto.gitUrl);
+      assertCloneHostAllowed(providerType, dto.gitUrl, providerBaseUrl);
     }
     // Empty string on displayName means "revert to canonical name".
     const data: any = { ...dto };
