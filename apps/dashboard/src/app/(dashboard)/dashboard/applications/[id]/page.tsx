@@ -1909,10 +1909,10 @@ export default function ApplicationDetailPage() {
                 </CardHeader>
                 <CardContent className="flex items-center justify-between gap-3">
                   <p className="text-sm font-medium">
-                    {app.server?.name || app.project?.server?.name || '—'}
-                    {(app.server?.host || app.project?.server?.host) && (
+                    {app.server?.name || '—'}
+                    {app.server?.host && (
                       <span className="ml-2 font-mono text-xs text-muted-foreground">
-                        {app.server?.host || app.project?.server?.host}
+                        {app.server.host}
                       </span>
                     )}
                   </p>
@@ -1952,7 +1952,7 @@ export default function ApplicationDetailPage() {
               <option value="">—</option>
               {allServers
                 .filter((s) => s.status === 'ONLINE')
-                .filter((s) => s.id !== (app.server?.id ?? app.project?.server?.id))
+                .filter((s) => s.id !== app.server?.id)
                 .map((s) => (
                   <option key={s.id} value={s.id}>{s.name} ({s.host})</option>
                 ))}
