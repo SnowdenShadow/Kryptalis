@@ -40,8 +40,31 @@ import { cn } from '@/lib/utils';
  * never has to remember which dialog to open for which case.
  */
 
-type Mode = 'git' | 'docker' | 'compose' | 'dockerfile' | 'marketplace';
+type Mode = 'git' | 'docker' | 'compose' | 'dockerfile' | 'marketplace' | 'php';
 type GitSource = 'provider' | 'url';
+
+// PHP hosting — mirrors SUPPORTED_PHP_VERSIONS / DEFAULT_PHP_VERSION on the API
+// (apps/api/.../applications/php-site.constants.ts). A PHP site is just an
+// Application with framework PHP_SITE; the create body is POST /applications.
+const PHP_VERSIONS = ['8.5', '8.4', '8.3', '8.2', '8.1', '8.0', '7.4'] as const;
+const DEFAULT_PHP_VERSION = '8.4';
+const PHP_EXTENSIONS = [
+  'mbstring', 'exif', 'soap', 'xsl', 'gmp', 'pcntl', 'sockets', 'redis', 'imagick',
+] as const;
+// Preset → extensions + php.ini (mirrors PHP_PRESETS on the API). Selecting a
+// preset pre-fills the toggles once; manual changes then win.
+const PHP_PRESET_DEFS: Record<string, { extensions: string[]; ini: Record<string, string> }> = {
+  wordpress: { extensions: ['mbstring', 'exif', 'imagick'], ini: { upload_max_filesize: '64M', post_max_size: '64M', memory_limit: '256M' } },
+  laravel: { extensions: ['mbstring', 'pcntl', 'redis'], ini: { memory_limit: '256M', max_execution_time: '120' } },
+  symfony: { extensions: ['mbstring', 'xsl'], ini: { memory_limit: '256M' } },
+};
+const PHP_INI_FIELDS: { key: string; placeholder: string }[] = [
+  { key: 'memory_limit', placeholder: '256M' },
+  { key: 'upload_max_filesize', placeholder: '64M' },
+  { key: 'post_max_size', placeholder: '64M' },
+  { key: 'max_execution_time', placeholder: '120' },
+  { key: 'timezone', placeholder: 'Europe/Paris' },
+];
 
 interface Project { id: string; name: string }
 interface GitProvider { id: string; provider: string; username?: string }
@@ -141,6 +164,12 @@ export function QuickDeployDialog({
   // ── Marketplace mode state ──────────────────────────────────────
   const [marketplaceSearch, setMarketplaceSearch] = useState('');
   const [marketplaceApp, setMarketplaceApp] = useState<MarketplaceApp | null>(null);
+
+  // ── PHP mode state ──────────────────────────────────────────────
+  const [phpVersion, setPhpVersion] = useState<string>(DEFAULT_PHP_VERSION);
+  const [phpPreset, setPhpPreset] = useState<string>('none');
+  const [phpExtensions, setPhpExtensions] = useState<string[]>([]);
+  const [phpIni, setPhpIni] = useState<Record<string, string>>({});
 
   // ── Common fields ───────────────────────────────────────────────
   const [projectId, setProjectId] = useState('');
@@ -363,6 +392,10 @@ export function QuickDeployDialog({
     setDockerfileContent('');
     setMarketplaceSearch('');
     setMarketplaceApp(null);
+    setPhpVersion(DEFAULT_PHP_VERSION);
+    setPhpPreset('none');
+    setPhpExtensions([]);
+    setPhpIni({});
     setProjectId('');
     setName('');
     setExposeMode('none');
@@ -388,7 +421,10 @@ export function QuickDeployDialog({
     (mode === 'docker' && dockerImage.trim().length > 0) ||
     (mode === 'compose' && /services\s*:/.test(composeContent)) ||
     (mode === 'dockerfile' && /^\s*FROM\s+\S+/im.test(dockerfileContent)) ||
-    (mode === 'marketplace' && !!marketplaceApp);
+    (mode === 'marketplace' && !!marketplaceApp) ||
+    // PHP has no external "source" — the runtime image is built from the
+    // chosen version. Project + name (checked separately) are all it needs.
+    (mode === 'php' && PHP_VERSIONS.includes(phpVersion as any));
 
   const hostPortNumber = hostPort.trim() ? parseInt(hostPort.trim(), 10) : null;
   const needsPort = exposeMode === 'port' || exposeMode === 'domain-port';
@@ -476,6 +512,17 @@ export function QuickDeployDialog({
       } else if (mode === 'dockerfile') {
         body.framework = 'DOCKER';
         body.dockerfileContent = dockerfileContent;
+      } else if (mode === 'php') {
+        // A PHP site is an Application (framework PHP_SITE). Extensions/ini
+        // shown in the dialog are authoritative; phpPreset is only a label.
+        body.framework = 'PHP_SITE';
+        body.phpVersion = phpVersion;
+        body.phpWebServer = 'apache';
+        body.phpExtensions = phpExtensions;
+        body.phpIni = Object.fromEntries(
+          Object.entries(phpIni).filter(([, v]) => v && v.trim()),
+        );
+        body.phpPreset = phpPreset === 'none' ? null : phpPreset;
       }
       if (needsDomain) {
         if (domainChoice === 'new') body.domain = newDomain.trim();
@@ -605,6 +652,12 @@ export function QuickDeployDialog({
             desc={t('quickDeploy.modeMarketDesc') || 'WordPress, Postgres, n8n, Nextcloud + more — pre-configured.'}
             onClick={() => setMode('marketplace')}
           />
+          <ModeCard
+            icon={FileCode}
+            title={t('quickDeploy.modePhp') || 'PHP site'}
+            desc={t('quickDeploy.modePhpDesc') || 'Apache + PHP (7.4–8.5). WordPress/Laravel/Symfony ready. Upload over SFTP.'}
+            onClick={() => setMode('php')}
+          />
         </div>
       </Dialog>
     );
@@ -635,6 +688,7 @@ export function QuickDeployDialog({
           {mode === 'compose' && (t('quickDeploy.titleCompose') || 'Deploy a Compose stack')}
           {mode === 'dockerfile' && (t('quickDeploy.titleDockerfile') || 'Deploy a Dockerfile')}
           {mode === 'marketplace' && (t('quickDeploy.titleMarket') || 'Install from Marketplace')}
+          {mode === 'php' && (t('quickDeploy.titlePhp') || 'Deploy a PHP site')}
         </DialogTitle>
       </DialogHeader>
 
@@ -743,6 +797,16 @@ export function QuickDeployDialog({
             setSearch={setMarketplaceSearch}
             picked={marketplaceApp}
             setPicked={setMarketplaceApp}
+            t={t}
+          />
+        )}
+
+        {mode === 'php' && (
+          <PhpConfigPicker
+            version={phpVersion} setVersion={setPhpVersion}
+            preset={phpPreset} setPreset={setPhpPreset}
+            extensions={phpExtensions} setExtensions={setPhpExtensions}
+            ini={phpIni} setIni={setPhpIni}
             t={t}
           />
         )}
@@ -940,6 +1004,110 @@ function ModeCard({
       <p className="font-medium text-sm">{title}</p>
       <p className="text-[11px] text-muted-foreground mt-1">{desc}</p>
     </button>
+  );
+}
+
+// ── PHP config sub-component ──────────────────────────────────────
+// Version + preset + extensions + php.ini. A preset pre-fills the toggles
+// ONCE; after that the toggles are authoritative (mirrors the standalone PHP
+// page's behaviour so a deployed site matches exactly what's shown).
+function PhpConfigPicker({
+  version, setVersion, preset, setPreset, extensions, setExtensions, ini, setIni, t,
+}: {
+  version: string;
+  setVersion: (v: string) => void;
+  preset: string;
+  setPreset: (v: string) => void;
+  extensions: string[];
+  setExtensions: (v: string[]) => void;
+  ini: Record<string, string>;
+  setIni: (v: Record<string, string>) => void;
+  t: (k: string) => string;
+}) {
+  const applyPreset = (p: string) => {
+    setPreset(p);
+    if (p !== 'none' && PHP_PRESET_DEFS[p]) {
+      setExtensions(PHP_PRESET_DEFS[p].extensions);
+      setIni(PHP_PRESET_DEFS[p].ini);
+    }
+  };
+  const toggleExt = (ext: string) => {
+    // Manually changing a toggle switches the preset label back to custom.
+    setPreset('none');
+    setExtensions(
+      extensions.includes(ext) ? extensions.filter((e) => e !== ext) : [...extensions, ext],
+    );
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Version + preset */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1.5">
+          <Label className="text-sm">{t('quickDeploy.phpVersion') || 'PHP version'}</Label>
+          <Select value={version} onChange={(e) => setVersion(e.target.value)}>
+            {PHP_VERSIONS.map((v) => (
+              <option key={v} value={v}>{`PHP ${v}`}</option>
+            ))}
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label className="text-sm">{t('quickDeploy.phpPreset') || 'Preset'}</Label>
+          <Select value={preset} onChange={(e) => applyPreset(e.target.value)}>
+            <option value="none">{t('quickDeploy.phpPresetNone') || 'None (custom)'}</option>
+            <option value="wordpress">WordPress</option>
+            <option value="laravel">Laravel</option>
+            <option value="symfony">Symfony</option>
+          </Select>
+        </div>
+      </div>
+
+      {/* Extensions */}
+      <div className="space-y-1.5">
+        <Label className="text-sm">{t('quickDeploy.phpExtensions') || 'Extra extensions'}</Label>
+        <p className="text-[11px] text-muted-foreground">
+          {t('quickDeploy.phpExtensionsHint') ||
+            'The base pack (DB drivers, gd, intl, zip, opcache, bcmath) is always included.'}
+        </p>
+        <div className="flex flex-wrap gap-1.5 pt-1">
+          {PHP_EXTENSIONS.map((ext) => (
+            <button
+              key={ext}
+              type="button"
+              onClick={() => toggleExt(ext)}
+              className={cn(
+                'rounded-full border px-2.5 py-1 text-[11px] transition-colors',
+                extensions.includes(ext)
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : 'border-border text-muted-foreground hover:bg-accent/40',
+              )}
+            >
+              {ext}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* php.ini overrides */}
+      <div className="space-y-1.5">
+        <Label className="text-sm">{t('quickDeploy.phpIni') || 'php.ini overrides'}</Label>
+        <div className="grid grid-cols-2 gap-2">
+          {PHP_INI_FIELDS.map((f) => (
+            <Input
+              key={f.key}
+              placeholder={`${f.key} (${f.placeholder})`}
+              value={ini[f.key] || ''}
+              onChange={(e) => setIni({ ...ini, [f.key]: e.target.value })}
+            />
+          ))}
+        </div>
+      </div>
+
+      <p className="text-[11px] text-muted-foreground">
+        {t('quickDeploy.phpHint') ||
+          'Files are uploaded over SFTP into the site\'s public/ docroot. Attach a database from the app detail page.'}
+      </p>
+    </div>
   );
 }
 

@@ -80,11 +80,29 @@ export const useAuthStore = create<AuthState>()(
 );
 
 interface SidebarState {
+  /** Whole rail collapsed to icons-only. */
   collapsed: boolean;
   toggle: () => void;
+  /** Per-section fold state, keyed by section id. Missing = expanded. */
+  collapsedSections: Record<string, boolean>;
+  toggleSection: (id: string) => void;
 }
 
-export const useSidebarStore = create<SidebarState>()((set) => ({
-  collapsed: false,
-  toggle: () => set((s) => ({ collapsed: !s.collapsed })),
-}));
+// Persisted so a user's collapsed rail + folded sections survive reloads.
+export const useSidebarStore = create<SidebarState>()(
+  persist(
+    (set) => ({
+      collapsed: false,
+      toggle: () => set((s) => ({ collapsed: !s.collapsed })),
+      collapsedSections: {},
+      toggleSection: (id) =>
+        set((s) => ({
+          collapsedSections: {
+            ...s.collapsedSections,
+            [id]: !s.collapsedSections[id],
+          },
+        })),
+    }),
+    { name: 'dockcontrol-sidebar' },
+  ),
+);

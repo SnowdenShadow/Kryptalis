@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Rocket,
@@ -46,6 +46,7 @@ import {
 import type { ApplicationResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
 import { useProjects, useApplications, usePublicSettings } from '@/lib/hooks';
+import { useAuthStore } from '@/lib/store';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { FRAMEWORK_LABELS, makeTimeAgo, publicAppUrl } from '@/lib/app-format';
@@ -63,7 +64,12 @@ interface ProjectOption {
   id: string;
   name: string;
   server?: { id: string; name: string; host?: string } | null;
+  /** Caller's membership row — GET /projects includes members: [{ role }]. */
+  members?: { role: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER' }[];
 }
+
+type Role = 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER';
+const ROLE_RANK: Record<Role, number> = { OWNER: 100, ADMIN: 80, DEVELOPER: 50, VIEWER: 10 };
 
 // Mirror of slugify() in apps/api/.../applications.service.ts — must stay
 // byte-for-byte equivalent so the preview matches what the backend creates.
@@ -120,6 +126,13 @@ export default function ApplicationsPage() {
   const [search, setSearch] = useState('');
   const [filterProject, setFilterProject] = useState('');
   const [filterStatus, setFilterStatus] = useState<'' | 'RUNNING' | 'STOPPED' | 'ERROR' | 'DEPLOYING'>('');
+  // Type filter. PHP sites (framework PHP_SITE) used to have their own page;
+  // they're now surfaced here via `?type=php` (the old /dashboard/php route
+  // redirects to it), alongside web (git-built) and container-based apps.
+  const searchParams = useSearchParams();
+  const [filterType, setFilterType] = useState<'' | 'php' | 'web' | 'container'>(
+    searchParams.get('type') === 'php' ? 'php' : '',
+  );
 
   // --- List ---
   const { data: applications = [], isLoading } = useApplications<Application[]>();
@@ -138,6 +151,15 @@ export default function ApplicationsPage() {
     if (filterProject) {
       result = result.filter((a) => a.project?.id === filterProject);
     }
+    if (filterType) {
+      result = result.filter((a) => {
+        const fw = a.framework;
+        if (filterType === 'php') return fw === 'PHP_SITE';
+        if (filterType === 'container') return fw === 'DOCKER' || fw === 'DOCKER_COMPOSE';
+        // 'web' = everything else (git-built framework apps, static, etc.).
+        return fw !== 'PHP_SITE' && fw !== 'DOCKER' && fw !== 'DOCKER_COMPOSE';
+      });
+    }
     if (filterStatus) {
       result = result.filter((a) =>
         filterStatus === 'DEPLOYING'
@@ -154,10 +176,38 @@ export default function ApplicationsPage() {
       );
     }
     return result;
-  }, [applications, search, filterProject, filterStatus]);
+  }, [applications, search, filterProject, filterStatus, filterType]);
 
   // --- Projects for dropdown ---
   const { data: projects = [] } = useProjects<ProjectOption[]>();
+
+  // --- Role awareness ---
+  // Platform ADMIN/SUPERADMIN act as OWNER everywhere (mirrors the API's
+  // project-access bypass); otherwise the caller's per-project role comes from
+  // the membership row GET /projects embeds. We gate action buttons on it so a
+  // VIEWER never sees Deploy/Start/Stop/Delete they can't actually perform.
+  const me = useAuthStore((s) => s.user);
+  const isPlatformAdmin = me?.role === 'ADMIN' || me?.role === 'SUPERADMIN';
+  const roleByProject = useMemo(() => {
+    const map = new Map<string, Role>();
+    for (const p of projects) {
+      const r = p.members?.[0]?.role;
+      if (r) map.set(p.id, r);
+    }
+    return map;
+  }, [projects]);
+  const roleFor = (projectId?: string): Role | undefined => {
+    if (isPlatformAdmin) return 'OWNER';
+    return projectId ? roleByProject.get(projectId) : undefined;
+  };
+  const canManage = (projectId?: string, min: Role = 'DEVELOPER') => {
+    const r = roleFor(projectId);
+    return !!r && ROLE_RANK[r] >= ROLE_RANK[min];
+  };
+  // Deploy button: shown when the user can deploy on at least ONE project
+  // (or is a platform admin). A pure VIEWER on every project sees no Deploy.
+  const canDeployAnywhere =
+    isPlatformAdmin || projects.some((p) => canManage(p.id, 'DEVELOPER'));
 
   // --- Deploy dialogs ---
   // Single unified Deploy dialog — Git / Docker / Marketplace all flow
@@ -519,10 +569,12 @@ export default function ApplicationsPage() {
             </Badge>
           )}
         </div>
-        <Button onClick={() => setShowQuickDeploy(true)}>
-          <Plus size={16} />
-          {t('apps.deploy')}
-        </Button>
+        {canDeployAnywhere && (
+          <Button onClick={() => setShowQuickDeploy(true)}>
+            <Plus size={16} />
+            {t('apps.deploy')}
+          </Button>
+        )}
       </div>
 
       {/* Search + Project Filter — search fills the row, filters sit on the
@@ -542,6 +594,19 @@ export default function ApplicationsPage() {
 
           {/* Right-hand filter group — keeps the controls together at the edge. */}
           <div className="flex flex-wrap items-center gap-2">
+            {/* Type — All / Web / Container / PHP. */}
+            <div className="w-40 shrink-0">
+              <Select
+                value={filterType}
+                onChange={(e) => setFilterType(e.target.value as any)}
+              >
+                <option value="">{t('apps.filterAllTypes')}</option>
+                <option value="web">{t('apps.filterTypeWeb')}</option>
+                <option value="container">{t('apps.filterTypeContainer')}</option>
+                <option value="php">{t('apps.filterTypePhp')}</option>
+              </Select>
+            </div>
+
             {/* Status — fixed-width wrapper (the Select's inner div is w-full
                 and ignores className width). */}
             <div className="w-44 shrink-0">
@@ -588,8 +653,8 @@ export default function ApplicationsPage() {
               </div>
             ) : null}
 
-            {(search || filterProject || filterStatus) && (
-              <Button variant="ghost" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); }}>
+            {(search || filterProject || filterStatus || filterType) && (
+              <Button variant="ghost" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); setFilterType(''); }}>
                 {t('apps.filterClear')}
               </Button>
             )}
@@ -627,12 +692,12 @@ export default function ApplicationsPage() {
             </Button>
           </CardContent>
         </Card>
-      ) : filtered.length === 0 && (search || filterProject || filterStatus) ? (
+      ) : filtered.length === 0 && (search || filterProject || filterStatus || filterType) ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12 gap-3">
             <Search size={40} className="text-muted-foreground" />
             <p className="text-muted-foreground">{t('apps.filterNoMatch')}</p>
-            <Button size="sm" variant="outline" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); }}>
+            <Button size="sm" variant="outline" onClick={() => { setSearch(''); setFilterProject(''); setFilterStatus(''); setFilterType(''); }}>
               {t('apps.filterClearAll')}
             </Button>
           </CardContent>
@@ -668,6 +733,9 @@ export default function ApplicationsPage() {
           const isRunning = app.status === 'RUNNING';
           const isStopped = app.status === 'STOPPED';
           const isDeploying = app.status === 'DEPLOYING' || app.status === 'BUILDING';
+          // Lifecycle + delete require DEVELOPER+ on the app's project. A
+          // VIEWER sees status + logs but no mutating controls.
+          const canManageApp = canManage(app.project?.id, 'DEVELOPER');
           const statusLabel = app.status === 'RUNNING' ? t('apps.statusRunning') : app.status === 'STOPPED' ? t('apps.statusStopped') : app.status === 'ERROR' ? t('apps.statusError') : app.status === 'DEPLOYING' ? t('apps.statusDeploying') : app.status === 'BUILDING' ? t('apps.statusBuilding') : app.status;
 
             return (
@@ -821,13 +889,13 @@ export default function ApplicationsPage() {
                     <div className="flex items-center justify-between pt-2 border-t border-border">
                       <span className="text-xs text-muted-foreground">{timeAgo(app.createdAt)}</span>
                       <div className="flex items-center gap-2">
-                        {isStopped && (
+                        {canManageApp && isStopped && (
                           <Button size="sm" variant="outline" disabled={actionMutation.isPending}
                             onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'start' }); }}>
                             <Play size={14} /> {t('apps.start')}
                           </Button>
                         )}
-                        {isRunning && (
+                        {canManageApp && isRunning && (
                           <>
                             <Button size="sm" variant="outline" disabled={actionMutation.isPending}
                               onClick={(e) => { stop(e); actionMutation.mutate({ id: app.id, action: 'stop' }); }}>
@@ -843,10 +911,12 @@ export default function ApplicationsPage() {
                           onClick={(e) => { stop(e); setLogsAppId(app.id); setLogsAppName(app.name); }}>
                           <Terminal size={14} /> {t('apps.logsButton')}
                         </Button>
-                        <Button size="sm" variant="destructive"
-                          onClick={(e) => { stop(e); setDeleteTarget(app); }}>
-                          <Trash2 size={14} />
-                        </Button>
+                        {canManageApp && (
+                          <Button size="sm" variant="destructive"
+                            onClick={(e) => { stop(e); setDeleteTarget(app); }}>
+                            <Trash2 size={14} />
+                          </Button>
+                        )}
                       </div>
                     </div>
                   </div>

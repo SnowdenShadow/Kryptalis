@@ -2,6 +2,7 @@ export const translations: Record<string, Record<string, string>> = {
   en: {
     // ── nav ─────────────────────────────────────────────────────────
     'nav.overview': 'Overview', 'nav.server': 'Server', 'nav.projects': 'Projects', 'nav.applications': 'Applications', 'nav.php': 'PHP Sites', 'nav.cron': 'Cron Jobs', 'nav.domains': 'Domains', 'nav.docker': 'Docker', 'nav.databases': 'Databases', 'nav.monitoring': 'Monitoring', 'nav.backups': 'Backups', 'nav.marketplace': 'Marketplace', 'nav.emails': 'Emails', 'nav.files': 'Files', 'nav.sftp': 'SFTP', 'nav.settings': 'Settings', 'nav.admin': 'Admin', 'nav.toggleTheme': 'Toggle theme',
+    'nav.section.deploy': 'Deployment', 'nav.section.data': 'Data', 'nav.section.infra': 'Infrastructure', 'nav.section.comms': 'Communication',
 
     // ── PHP sites ──────────────────────────────────────────────────
     'php.title': 'PHP Sites', 'php.subtitle': 'Classic Apache + PHP hosting — pick a version, upload your files over SFTP.', 'php.create': 'New PHP Site', 'php.empty': 'No PHP sites yet', 'php.emptyHint': 'Create one to host a PHP app on Apache with the version you choose.', 'php.name': 'Site name', 'php.version': 'PHP version', 'php.project': 'Project', 'php.domain': 'Domain', 'php.domainHint': 'Optional — attach a domain now (auto HTTPS), or add one later.', 'php.domainNone': 'No domain (configure later)', 'php.created': 'PHP site created — deploying…', 'php.deleteConfirm': 'Delete this PHP site and its container?', 'php.deleted': 'PHP site deleted', 'php.uploadHint': 'Upload your files over SFTP into the site\'s public/ folder.', 'php.openSite': 'Open site', 'php.databases': 'Databases', 'php.manageFiles': 'Manage files', 'php.dbHint': 'Attach a managed database — its connection details are injected as DB_* env vars and the site redeploys.', 'php.dbNone': 'No database attached yet.', 'php.dbAttachExisting': 'Attach an existing database', 'php.dbCreateNew': 'Or create a new one', 'php.dbAttach': 'Attach', 'php.dbDetach': 'Detach', 'php.dbAttached': 'Database attached — env injected, redeploying.', 'php.dbDetached': 'Database detached.', 'php.dbCreated': 'Database created & attached.', 'php.dbEnvHint': 'Read these in PHP with getenv(\'DB_HOST\'), etc. — or use DATABASE_URL.', 'php.changeVersion': 'Change PHP version (rebuilds the site)', 'php.versionChanged': 'PHP version changed — the site is rebuilding.', 'php.details': 'Details & logs',
@@ -255,6 +256,7 @@ export const translations: Record<string, Record<string, string>> = {
 
     // ── applications list (v2) ──────────────────────────────────────
     'apps.filterAllStatuses': 'All statuses',
+    'apps.filterAllTypes': 'All types', 'apps.filterTypeWeb': 'Web', 'apps.filterTypeContainer': 'Container', 'apps.filterTypePhp': 'PHP',
     'apps.statusRunning': 'Running',
     'apps.statusStopped': 'Stopped',
     'apps.statusDeploying': 'Deploying',
@@ -964,9 +966,19 @@ export const translations: Record<string, Record<string, string>> = {
     'quickDeploy.modeDockerDesc': 'Any image from Docker Hub, GHCR, or a private registry.',
     'quickDeploy.modeMarket': 'Marketplace',
     'quickDeploy.modeMarketDesc': 'WordPress, Postgres, n8n, Nextcloud + more — pre-configured.',
+    'quickDeploy.modePhp': 'PHP site',
+    'quickDeploy.modePhpDesc': 'Apache + PHP (7.4–8.5). WordPress/Laravel/Symfony ready. Upload over SFTP.',
     'quickDeploy.titleGit': 'Deploy from Git',
     'quickDeploy.titleDocker': 'Deploy a Docker image',
     'quickDeploy.titleMarket': 'Install from Marketplace',
+    'quickDeploy.titlePhp': 'Deploy a PHP site',
+    'quickDeploy.phpVersion': 'PHP version',
+    'quickDeploy.phpPreset': 'Preset',
+    'quickDeploy.phpPresetNone': 'None (custom)',
+    'quickDeploy.phpExtensions': 'Extra extensions',
+    'quickDeploy.phpExtensionsHint': 'The base pack (DB drivers, gd, intl, zip, opcache, bcmath) is always included.',
+    'quickDeploy.phpIni': 'php.ini overrides',
+    'quickDeploy.phpHint': "Files are uploaded over SFTP into the site's public/ docroot. Attach a database from the app detail page.",
     'quickDeploy.fromConnected': 'Connected provider',
     'quickDeploy.fromUrl': 'Git URL',
     'quickDeploy.howToReach': 'How will people reach it?',
@@ -1428,6 +1440,7 @@ export const translations: Record<string, Record<string, string>> = {
   fr: {
     // ── nav ─────────────────────────────────────────────────────────
     'nav.overview': "Vue d'ensemble", 'nav.server': 'Serveur', 'nav.projects': 'Projets', 'nav.applications': 'Applications', 'nav.php': 'Sites PHP', 'nav.cron': 'Tâches Cron', 'nav.domains': 'Domaines', 'nav.docker': 'Docker', 'nav.databases': 'Bases de données', 'nav.monitoring': 'Monitoring', 'nav.backups': 'Sauvegardes', 'nav.marketplace': 'Marketplace', 'nav.emails': 'Emails', 'nav.files': 'Fichiers', 'nav.sftp': 'SFTP', 'nav.settings': 'Paramètres', 'nav.admin': 'Admin', 'nav.toggleTheme': 'Changer le thème',
+    'nav.section.deploy': 'Déploiement', 'nav.section.data': 'Données', 'nav.section.infra': 'Infrastructure', 'nav.section.comms': 'Communication',
 
     // ── Sites PHP ──────────────────────────────────────────────────
     'php.title': 'Sites PHP', 'php.subtitle': 'Hébergement classique Apache + PHP — choisissez une version, envoyez vos fichiers en SFTP.', 'php.create': 'Nouveau site PHP', 'php.empty': 'Aucun site PHP pour le moment', 'php.emptyHint': 'Créez-en un pour héberger une app PHP sous Apache avec la version de votre choix.', 'php.name': 'Nom du site', 'php.version': 'Version PHP', 'php.project': 'Projet', 'php.domain': 'Domaine', 'php.domainHint': 'Optionnel — attachez un domaine maintenant (HTTPS auto), ou plus tard.', 'php.domainNone': 'Aucun domaine (à configurer plus tard)', 'php.created': 'Site PHP créé — déploiement…', 'php.deleteConfirm': 'Supprimer ce site PHP et son conteneur ?', 'php.deleted': 'Site PHP supprimé', 'php.uploadHint': 'Envoyez vos fichiers en SFTP dans le dossier public/ du site.', 'php.openSite': 'Ouvrir le site', 'php.databases': 'Bases de données', 'php.manageFiles': 'Gérer les fichiers', 'php.dbHint': 'Rattachez une base gérée — ses identifiants sont injectés en variables DB_* et le site est redéployé.', 'php.dbNone': 'Aucune base rattachée pour le moment.', 'php.dbAttachExisting': 'Rattacher une base existante', 'php.dbCreateNew': 'Ou en créer une nouvelle', 'php.dbAttach': 'Rattacher', 'php.dbDetach': 'Détacher', 'php.dbAttached': 'Base rattachée — variables injectées, redéploiement.', 'php.dbDetached': 'Base détachée.', 'php.dbCreated': 'Base créée et rattachée.', 'php.dbEnvHint': 'Lisez-les en PHP avec getenv(\'DB_HOST\'), etc. — ou utilisez DATABASE_URL.', 'php.changeVersion': 'Changer la version PHP (reconstruit le site)', 'php.versionChanged': 'Version PHP changée — le site se reconstruit.', 'php.details': 'Détails & logs',
@@ -1680,6 +1693,7 @@ export const translations: Record<string, Record<string, string>> = {
 
     // ── applications list (v2) ──────────────────────────────────────
     'apps.filterAllStatuses': 'Tous les statuts',
+    'apps.filterAllTypes': 'Tous les types', 'apps.filterTypeWeb': 'Web', 'apps.filterTypeContainer': 'Conteneur', 'apps.filterTypePhp': 'PHP',
     'apps.statusRunning': 'En cours',
     'apps.statusStopped': 'Arrêtée',
     'apps.statusDeploying': 'Déploiement',
@@ -2389,9 +2403,19 @@ export const translations: Record<string, Record<string, string>> = {
     'quickDeploy.modeDockerDesc': 'N\'importe quelle image de Docker Hub, GHCR, ou registry privé.',
     'quickDeploy.modeMarket': 'Marketplace',
     'quickDeploy.modeMarketDesc': 'WordPress, Postgres, n8n, Nextcloud, etc. — préconfigurés.',
+    'quickDeploy.modePhp': 'Site PHP',
+    'quickDeploy.modePhpDesc': 'Apache + PHP (7.4–8.5). WordPress/Laravel/Symfony prêts. Upload via SFTP.',
     'quickDeploy.titleGit': 'Déployer depuis Git',
     'quickDeploy.titleDocker': 'Déployer une image Docker',
     'quickDeploy.titleMarket': 'Installer depuis la Marketplace',
+    'quickDeploy.titlePhp': 'Déployer un site PHP',
+    'quickDeploy.phpVersion': 'Version PHP',
+    'quickDeploy.phpPreset': 'Préréglage',
+    'quickDeploy.phpPresetNone': 'Aucun (personnalisé)',
+    'quickDeploy.phpExtensions': 'Extensions supplémentaires',
+    'quickDeploy.phpExtensionsHint': 'Le pack de base (drivers DB, gd, intl, zip, opcache, bcmath) est toujours inclus.',
+    'quickDeploy.phpIni': 'Surcharges php.ini',
+    'quickDeploy.phpHint': 'Les fichiers sont envoyés via SFTP dans le docroot public/ du site. Attachez une base depuis la page de l\'application.',
     'quickDeploy.fromConnected': 'Fournisseur connecté',
     'quickDeploy.fromUrl': 'URL Git',
     'quickDeploy.howToReach': 'Comment les utilisateurs y accèdent ?',

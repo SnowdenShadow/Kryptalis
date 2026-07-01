@@ -20,7 +20,7 @@ import {
   ShieldAlert,
   ChevronLeft,
   ChevronRight,
-  FileCode2,
+  ChevronDown,
   Clock,
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
@@ -32,39 +32,80 @@ import { useApplications, usePublicSettings } from '@/lib/hooks';
 
 type NavBadge = 'applications' | 'servers';
 
-const navigation: Array<{
+interface NavItem {
   key: string;
   href: string;
   icon: typeof LayoutDashboard;
   multiOnly?: boolean;
   adminOnly?: boolean;
   badge?: NavBadge;
-}> = [
-  { key: 'nav.overview', href: '/dashboard', icon: LayoutDashboard },
-  { key: 'nav.server', href: '/dashboard/servers', icon: Server, multiOnly: true, adminOnly: true, badge: 'servers' },
-  { key: 'nav.projects', href: '/dashboard/projects', icon: FolderKanban },
-  { key: 'nav.applications', href: '/dashboard/applications', icon: Rocket, badge: 'applications' },
-  { key: 'nav.php', href: '/dashboard/php', icon: FileCode2 },
-  { key: 'nav.cron', href: '/dashboard/cron', icon: Clock },
-  { key: 'nav.domains', href: '/dashboard/domains', icon: Globe },
-  // Docker (@Roles on /docker) and Monitoring (/servers/local*) are
-  // admin-only API surfaces — hide them from regular users.
-  { key: 'nav.docker', href: '/dashboard/docker', icon: Container, adminOnly: true },
-  { key: 'nav.databases', href: '/dashboard/databases', icon: Database },
-  { key: 'nav.monitoring', href: '/dashboard/monitoring', icon: Activity, adminOnly: true },
-  { key: 'nav.backups', href: '/dashboard/backups', icon: Archive },
-  { key: 'nav.marketplace', href: '/dashboard/marketplace', icon: Store },
-  { key: 'nav.emails', href: '/dashboard/emails', icon: Mail },
-  { key: 'nav.files', href: '/dashboard/files', icon: FolderOpen },
-  { key: 'nav.sftp', href: '/dashboard/sftp', icon: KeyRound },
-  { key: 'nav.settings', href: '/dashboard/settings', icon: Settings },
+}
+
+interface NavSection {
+  /** Stable id used to persist the per-section fold state. */
+  id: string;
+  /** i18n key for the section title (null = no header, always-shown group). */
+  titleKey: string | null;
+  items: NavItem[];
+}
+
+// Grouped navigation. "Sites PHP" is gone — a PHP site IS an Application
+// (framework PHP_SITE), reachable via the type filter on /applications.
+const sections: NavSection[] = [
+  {
+    id: 'top',
+    titleKey: null,
+    items: [{ key: 'nav.overview', href: '/dashboard', icon: LayoutDashboard }],
+  },
+  {
+    id: 'deploy',
+    titleKey: 'nav.section.deploy',
+    items: [
+      { key: 'nav.projects', href: '/dashboard/projects', icon: FolderKanban },
+      { key: 'nav.applications', href: '/dashboard/applications', icon: Rocket, badge: 'applications' },
+      { key: 'nav.domains', href: '/dashboard/domains', icon: Globe },
+      { key: 'nav.marketplace', href: '/dashboard/marketplace', icon: Store },
+    ],
+  },
+  {
+    id: 'data',
+    titleKey: 'nav.section.data',
+    items: [
+      { key: 'nav.databases', href: '/dashboard/databases', icon: Database },
+      { key: 'nav.backups', href: '/dashboard/backups', icon: Archive },
+      { key: 'nav.files', href: '/dashboard/files', icon: FolderOpen },
+      { key: 'nav.sftp', href: '/dashboard/sftp', icon: KeyRound },
+    ],
+  },
+  {
+    id: 'infra',
+    titleKey: 'nav.section.infra',
+    items: [
+      { key: 'nav.server', href: '/dashboard/servers', icon: Server, multiOnly: true, adminOnly: true, badge: 'servers' },
+      // Docker (@Roles on /docker) and Monitoring (/servers/local*) are
+      // admin-only API surfaces — hide them from regular users.
+      { key: 'nav.docker', href: '/dashboard/docker', icon: Container, adminOnly: true },
+      { key: 'nav.monitoring', href: '/dashboard/monitoring', icon: Activity, adminOnly: true },
+      { key: 'nav.cron', href: '/dashboard/cron', icon: Clock },
+    ],
+  },
+  {
+    id: 'comms',
+    titleKey: 'nav.section.comms',
+    items: [{ key: 'nav.emails', href: '/dashboard/emails', icon: Mail }],
+  },
+  {
+    id: 'settings',
+    titleKey: null,
+    items: [{ key: 'nav.settings', href: '/dashboard/settings', icon: Settings }],
+  },
 ];
 
 const ADMIN_ROLES = new Set(['ADMIN', 'SUPERADMIN']);
 
 export function Sidebar() {
   const pathname = usePathname();
-  const { collapsed, toggle } = useSidebarStore();
+  const { collapsed, toggle, collapsedSections, toggleSection } = useSidebarStore();
   const { user } = useAuthStore();
   const { t } = useTranslation();
   const isAdmin = user?.role && ADMIN_ROLES.has(user.role);
@@ -105,6 +146,44 @@ export function Sidebar() {
     return null;
   };
 
+  // An item is visible only if it clears its multi/admin gates.
+  const itemVisible = (item: NavItem) =>
+    !(item.multiOnly && !isMulti) && !(item.adminOnly && !isAdmin);
+
+  const renderItem = (item: NavItem) => {
+    const isActive =
+      item.href === '/dashboard'
+        ? pathname === '/dashboard'
+        : pathname.startsWith(item.href);
+    const count = badgeCount(item.badge);
+    return (
+      <Link
+        key={item.key}
+        href={item.href}
+        className={cn(
+          'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+          isActive
+            ? 'bg-primary/10 text-primary'
+            : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+          collapsed && 'justify-center px-2',
+        )}
+        title={collapsed ? t(item.key) : undefined}
+      >
+        <item.icon size={20} />
+        {!collapsed && (
+          <>
+            <span className="flex-1">{t(item.key)}</span>
+            {count !== null && (
+              <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                {count}
+              </span>
+            )}
+          </>
+        )}
+      </Link>
+    );
+  };
+
   return (
     <aside
       className={cn(
@@ -130,47 +209,47 @@ export function Sidebar() {
       </div>
 
       <nav className="flex-1 space-y-1 overflow-y-auto p-2">
-        {navigation.map((item) => {
-          if (item.multiOnly && !isMulti) return null;
-          if (item.adminOnly && !isAdmin) return null;
-          const isActive =
-            item.href === '/dashboard'
-              ? pathname === '/dashboard'
-              : pathname.startsWith(item.href);
-          const count = badgeCount(item.badge);
+        {sections.map((section) => {
+          const visibleItems = section.items.filter(itemVisible);
+          if (visibleItems.length === 0) return null;
 
+          // Headerless groups (overview, settings) render their items flat.
+          if (!section.titleKey) {
+            return (
+              <div key={section.id} className="space-y-1">
+                {visibleItems.map(renderItem)}
+              </div>
+            );
+          }
+
+          const folded = !!collapsedSections[section.id];
           return (
-            <Link
-              key={item.key}
-              href={item.href}
-              className={cn(
-                'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-                isActive
-                  ? 'bg-primary/10 text-primary'
-                  : 'text-muted-foreground hover:bg-accent hover:text-foreground',
-                collapsed && 'justify-center px-2',
-              )}
-              title={collapsed ? t(item.key) : undefined}
-            >
-              <item.icon size={20} />
+            <div key={section.id} className="pt-2">
               {!collapsed && (
-                <>
-                  <span className="flex-1">{t(item.key)}</span>
-                  {count !== null && (
-                    <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-                      {count}
-                    </span>
-                  )}
-                </>
+                <button
+                  onClick={() => toggleSection(section.id)}
+                  className="flex w-full items-center gap-1 px-3 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60 transition-colors hover:text-muted-foreground"
+                >
+                  <ChevronDown
+                    size={12}
+                    className={cn('transition-transform', folded && '-rotate-90')}
+                  />
+                  <span>{t(section.titleKey)}</span>
+                </button>
               )}
-            </Link>
+              {/* When the rail is collapsed we ignore the fold state and always
+                  show the icons — there's no header to toggle them with. */}
+              {(collapsed || !folded) && (
+                <div className="space-y-1">{visibleItems.map(renderItem)}</div>
+              )}
+            </div>
           );
         })}
 
         {isAdmin && (
-          <>
+          <div className="pt-2">
             {!collapsed && (
-              <div className="px-3 pt-4 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/60">
+              <div className="px-3 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/60">
                 {t('nav.admin')}
               </div>
             )}
@@ -188,7 +267,7 @@ export function Sidebar() {
               <ShieldAlert size={20} />
               {!collapsed && <span>{t('nav.admin')}</span>}
             </Link>
-          </>
+          </div>
         )}
       </nav>
 
