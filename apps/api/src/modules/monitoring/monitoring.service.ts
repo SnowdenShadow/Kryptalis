@@ -271,18 +271,37 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Fleet-wide "current usage" overview: the latest sample per container the
-   * caller can see (scoped via accessibleServerIds, same as server metrics).
-   * Feeds the global table on the Monitoring page (sortable by CPU/RAM).
+   * "Current usage" overview: the latest sample per container the caller may
+   * see. Feeds the global table on the Monitoring page (sortable by CPU/RAM).
+   *
+   * TENANCY: a platform admin sees every container across the fleet (including
+   * unmanaged ones with no applicationId — infra containers). A regular user
+   * sees ONLY containers belonging to applications in their projects — scoping
+   * by serverId alone would leak every co-tenant's containers on a shared
+   * LOCAL host, so non-admins are scoped by applicationId instead.
    */
   async getContainerOverview(userId: string) {
-    const allowed = await this.accessibleServerIds(userId);
-    if (allowed.length === 0) return [];
+    const me = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    const isAdmin = me?.role === 'ADMIN' || me?.role === 'SUPERADMIN';
+
     // One recent window is enough to find "latest per container" cheaply —
     // anything older than a few minutes is stale/stopped anyway.
     const since = new Date(Date.now() - 10 * 60_000);
+    const where: any = { timestamp: { gte: since } };
+
+    if (!isAdmin) {
+      // Restrict to the caller's own apps. An unmanaged container (null
+      // applicationId) is never shown to a non-admin.
+      const appIds = await this.accessibleApplicationIds(userId);
+      if (appIds.length === 0) return [];
+      where.applicationId = { in: appIds };
+    }
+
     const rows = await this.prisma.containerMetric.findMany({
-      where: { serverId: { in: allowed }, timestamp: { gte: since } },
+      where,
       orderBy: { timestamp: 'desc' },
       include: {
         application: { select: { id: true, name: true, displayName: true, projectId: true } },
@@ -298,6 +317,27 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
       latest.push(r);
     }
     return latest;
+  }
+
+  /** Application IDs the caller has any project access to (admins: all). */
+  private async accessibleApplicationIds(userId: string): Promise<string[]> {
+    const me = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true },
+    });
+    if (me?.role === 'ADMIN' || me?.role === 'SUPERADMIN') {
+      const all = await this.prisma.application.findMany({ select: { id: true } });
+      return all.map((a) => a.id);
+    }
+    const memberships = await this.prisma.projectMember.findMany({
+      where: { userId },
+      select: { project: { select: { applications: { select: { id: true } } } } },
+    });
+    const ids = new Set<string>();
+    for (const m of memberships) {
+      for (const a of m.project.applications ?? []) ids.add(a.id);
+    }
+    return Array.from(ids);
   }
 
   /**
@@ -336,9 +376,20 @@ export class MonitoringService implements OnModuleInit, OnModuleDestroy {
   async collectLocalContainerStats(): Promise<void> {
     // Find the local server row (host is a loopback alias). Without one we
     // have no serverId to attribute samples to, so skip.
-    const servers = await this.prisma.server.findMany({ select: { id: true, host: true } });
+    const servers = await this.prisma.server.findMany({
+      select: { id: true, host: true, lastSeenAt: true },
+    });
     const local = servers.find((s) => isLocalHost(s.host));
     if (!local) return;
+
+    // Double-count guard: if the local server ALSO runs an agent (it recently
+    // sent a heartbeat), that heartbeat already persists its container stats —
+    // sampling here too would write every row twice per cadence and skew the
+    // history. Defer to the agent in that case. "Recent" = within 2 heartbeat
+    // intervals (~1 min); a stale/absent agent means we own the sampling.
+    if (local.lastSeenAt && Date.now() - local.lastSeenAt.getTime() < 90_000) {
+      return;
+    }
 
     let stdout = '';
     try {

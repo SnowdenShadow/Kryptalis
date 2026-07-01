@@ -31,6 +31,7 @@ import {
   makeTimeAgo,
   publicAppUrl,
 } from '@/lib/app-format';
+import { ProjectResourcesTab } from './project-resources-tab';
 
 type Role = 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER';
 const ROLE_RANK: Record<Role, number> = { OWNER: 100, ADMIN: 80, DEVELOPER: 50, VIEWER: 10 };
@@ -57,7 +58,7 @@ interface Member {
 // STATUS_COLOR / STATUS_VARIANT / FW / publicAppUrl / makeTimeAgo come
 // from @/lib/app-format.
 
-type Tab = 'overview' | 'applications' | 'mesh' | 'members' | 'settings';
+type Tab = 'overview' | 'applications' | 'resources' | 'mesh' | 'members' | 'settings';
 
 interface MeshNode {
   id: string;
@@ -154,6 +155,7 @@ export default function ProjectDetailPage() {
   const TABS: { id: Tab; label: string }[] = [
     { id: 'overview', label: t('projects.tab.overview') },
     { id: 'applications', label: t('projects.tab.applications') },
+    { id: 'resources', label: t('projects.tab.resources') },
     { id: 'mesh', label: t('projects.tab.mesh') },
     { id: 'members', label: t('projects.tab.members') },
     { id: 'settings', label: t('projects.tab.settings') },
@@ -624,6 +626,9 @@ export default function ProjectDetailPage() {
           )}
         </>
       )}
+
+      {/* Resources Tab — whole-project resource consumption */}
+      {activeTab === 'resources' && <ProjectResourcesTab projectId={id} />}
 
       {/* Service Mesh Tab */}
       {activeTab === 'mesh' && (

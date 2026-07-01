@@ -387,7 +387,7 @@ describe('getContainerOverview', () => {
   it('keeps only the newest row per (server, container)', async () => {
     const { service, prisma } = makeService();
     prisma.user.findUnique.mockResolvedValue({ role: 'ADMIN' });
-    prisma.server.findMany.mockResolvedValue([{ id: 's1' }]);
+    prisma.application.findMany.mockResolvedValue([{ id: 'a1' }]);
     // Rows arrive desc by timestamp — first per key wins.
     prisma.containerMetric.findMany.mockResolvedValue([
       cmRow({ id: 'new', containerName: 'dockcontrol-shop', cpuPercent: 50 }),
@@ -397,6 +397,31 @@ describe('getContainerOverview', () => {
     const res = await service.getContainerOverview('u1');
     expect(res).toHaveLength(2);
     expect(res.find((r: any) => r.containerName === 'dockcontrol-shop')?.id).toBe('new');
+  });
+
+  it('TENANCY: a non-admin is scoped by applicationId, never by server (no co-tenant leak)', async () => {
+    const { service, prisma } = makeService();
+    prisma.user.findUnique.mockResolvedValue({ role: 'USER' });
+    // The user's projects contain only app a1.
+    prisma.projectMember.findMany.mockResolvedValue([
+      { project: { applications: [{ id: 'a1' }] } },
+    ]);
+    prisma.containerMetric.findMany.mockResolvedValue([]);
+
+    await service.getContainerOverview('u1');
+
+    // The query MUST filter by applicationId (their apps), not serverId.
+    const where = prisma.containerMetric.findMany.mock.calls[0][0].where;
+    expect(where.applicationId).toEqual({ in: ['a1'] });
+    expect(where.serverId).toBeUndefined();
+  });
+
+  it('a non-admin with no apps gets [] without querying metrics', async () => {
+    const { service, prisma } = makeService();
+    prisma.user.findUnique.mockResolvedValue({ role: 'USER' });
+    prisma.projectMember.findMany.mockResolvedValue([]);
+    expect(await service.getContainerOverview('u1')).toEqual([]);
+    expect(prisma.containerMetric.findMany).not.toHaveBeenCalled();
   });
 });
 
@@ -421,7 +446,18 @@ describe('pruneContainerMetrics', () => {
 describe('collectLocalContainerStats', () => {
   it('no local server → no-op (no createMany)', async () => {
     const { service, prisma } = makeService();
-    prisma.server.findMany.mockResolvedValue([{ id: 's1', host: '10.0.0.9' }]); // remote only
+    prisma.server.findMany.mockResolvedValue([{ id: 's1', host: '10.0.0.9', lastSeenAt: null }]); // remote only
+    await service.collectLocalContainerStats();
+    expect(prisma.containerMetric.createMany).not.toHaveBeenCalled();
+  });
+
+  it('DOUBLE-COUNT GUARD: skips when the local server has a recent heartbeat (agent owns it)', async () => {
+    const { service, prisma } = makeService();
+    // Local server that sent a heartbeat 10s ago → its agent already persists
+    // container stats; sampling here would double-count.
+    prisma.server.findMany.mockResolvedValue([
+      { id: 'local', host: '127.0.0.1', lastSeenAt: new Date(Date.now() - 10_000) },
+    ]);
     await service.collectLocalContainerStats();
     expect(prisma.containerMetric.createMany).not.toHaveBeenCalled();
   });

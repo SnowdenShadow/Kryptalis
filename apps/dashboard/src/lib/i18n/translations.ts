@@ -32,7 +32,8 @@ export const translations: Record<string, Record<string, string>> = {
 
     // ── projects ───────────────────────────────────────────────────
     'projects.title': 'Projects', 'projects.subtitle': 'Organize your applications into projects', 'projects.new': 'New Project', 'projects.empty': 'No projects yet', 'projects.emptyDesc': 'Create a project to group your applications', 'projects.selectServer': 'Select a server', 'projects.deleteConfirm': 'Are you sure you want to delete this project?',
-    'projects.tab.overview': 'Overview', 'projects.tab.applications': 'Applications', 'projects.tab.members': 'Members', 'projects.tab.settings': 'Settings',
+    'projects.tab.overview': 'Overview', 'projects.tab.applications': 'Applications', 'projects.tab.resources': 'Resources', 'projects.tab.members': 'Members', 'projects.tab.settings': 'Settings',
+    'projectResources.perApp': 'Per-application usage', 'projectResources.empty': 'No resource samples yet — usage appears once the apps are running.', 'projectResources.acrossContainers': 'across {n} container(s)',
     'projects.totalApps': 'Total Apps', 'projects.running': 'Running', 'projects.stopped': 'Stopped', 'projects.domains': 'Domains',
     'projects.info': 'Project Info', 'projects.appStatus': 'Application Status', 'projects.details': 'Project Details',
     'projects.dangerZone': 'Danger Zone', 'projects.dangerDesc': 'Irreversible actions',
@@ -1467,7 +1468,8 @@ export const translations: Record<string, Record<string, string>> = {
 
     // ── projects ───────────────────────────────────────────────────
     'projects.title': 'Projets', 'projects.subtitle': 'Organisez vos applications en projets', 'projects.new': 'Nouveau projet', 'projects.empty': 'Aucun projet', 'projects.emptyDesc': 'Créez un projet pour regrouper vos applications', 'projects.selectServer': 'Sélectionner un serveur', 'projects.deleteConfirm': 'Êtes-vous sûr de vouloir supprimer ce projet ?',
-    'projects.tab.overview': "Vue d'ensemble", 'projects.tab.applications': 'Applications', 'projects.tab.members': 'Membres', 'projects.tab.settings': 'Paramètres',
+    'projects.tab.overview': "Vue d'ensemble", 'projects.tab.applications': 'Applications', 'projects.tab.resources': 'Ressources', 'projects.tab.members': 'Membres', 'projects.tab.settings': 'Paramètres',
+    'projectResources.perApp': 'Consommation par application', 'projectResources.empty': 'Aucun échantillon pour le moment — la consommation apparaît une fois les apps démarrées.', 'projectResources.acrossContainers': 'sur {n} conteneur(s)',
     'projects.totalApps': 'Apps totales', 'projects.running': 'En cours', 'projects.stopped': 'Arrêtées', 'projects.domains': 'Domaines',
     'projects.info': 'Infos du projet', 'projects.appStatus': 'Statut des applications', 'projects.details': 'Détails du projet',
     'projects.dangerZone': 'Zone de danger', 'projects.dangerDesc': 'Actions irréversibles',

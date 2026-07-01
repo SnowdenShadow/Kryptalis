@@ -36,6 +36,20 @@ import * as fs from 'fs';
 
 const execFileAsync = promisify(execFile);
 
+/** Zero-initialised resource-usage accumulator (bytes + summed CPU %). */
+function emptyUsage() {
+  return {
+    cpuPercent: 0,
+    memoryUsed: 0,
+    memoryLimit: 0,
+    networkIn: 0,
+    networkOut: 0,
+    blockRead: 0,
+    blockWrite: 0,
+    containers: 0,
+  };
+}
+
 @Injectable()
 export class ProjectsService implements OnModuleInit {
   private readonly logger = new Logger(ProjectsService.name);
@@ -978,6 +992,128 @@ export class ProjectsService implements OnModuleInit {
       envSuggestions,
       hint: 'Containers in this project share a docker network and can reach each other by these hostnames. Use them in env vars instead of IPs.',
     };
+  }
+
+  // ── Resource usage (aggregated across the project's apps) ───────────
+
+  /**
+   * Current resource consumption of the whole project: the latest metric
+   * sample per app (summed into project totals) plus a per-app breakdown.
+   * Reads ContainerMetric — populated by the agent heartbeat (remote) and the
+   * local docker-stats collector. VIEWER+ on the project.
+   *
+   * "Latest per app" sums every container of that app (a PHP nginx app has a
+   * web + -fpm sidecar, a compose stack several) at its most recent timestamp,
+   * so multi-container apps aren't under-counted.
+   */
+  async getResourceUsage(projectId: string, userId: string) {
+    await assertProjectAccess(this.prisma, userId, projectId, 'VIEWER');
+    const apps = await this.prisma.application.findMany({
+      where: { projectId },
+      select: { id: true, name: true, displayName: true, status: true, framework: true },
+    });
+    if (apps.length === 0) {
+      return { projectId, totals: emptyUsage(), apps: [] };
+    }
+
+    // One recent window is enough to find each container's latest sample.
+    const since = new Date(Date.now() - 10 * 60_000);
+    const rows = await this.prisma.containerMetric.findMany({
+      where: { applicationId: { in: apps.map((a) => a.id) }, timestamp: { gte: since } },
+      orderBy: { timestamp: 'desc' },
+    });
+
+    // Keep the newest row per (app, container), then sum per app.
+    const seen = new Set<string>();
+    const perApp = new Map<string, ReturnType<typeof emptyUsage>>();
+    for (const r of rows) {
+      const key = `${r.applicationId}:${r.containerName}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const acc = perApp.get(r.applicationId!) ?? emptyUsage();
+      acc.cpuPercent += r.cpuPercent;
+      acc.memoryUsed += Number(r.memoryUsed);
+      acc.memoryLimit += Number(r.memoryLimit);
+      acc.networkIn += Number(r.networkIn);
+      acc.networkOut += Number(r.networkOut);
+      acc.blockRead += Number(r.blockRead);
+      acc.blockWrite += Number(r.blockWrite);
+      acc.containers += 1;
+      perApp.set(r.applicationId!, acc);
+    }
+
+    const appUsage = apps.map((a) => ({
+      id: a.id,
+      name: a.displayName || a.name,
+      status: a.status,
+      framework: a.framework,
+      usage: perApp.get(a.id) ?? emptyUsage(),
+    }));
+
+    const totals = emptyUsage();
+    for (const u of perApp.values()) {
+      totals.cpuPercent += u.cpuPercent;
+      totals.memoryUsed += u.memoryUsed;
+      totals.memoryLimit += u.memoryLimit;
+      totals.networkIn += u.networkIn;
+      totals.networkOut += u.networkOut;
+      totals.blockRead += u.blockRead;
+      totals.blockWrite += u.blockWrite;
+      totals.containers += u.containers;
+    }
+    // Round the summed CPU to one decimal (float sums drift).
+    totals.cpuPercent = Math.round(totals.cpuPercent * 10) / 10;
+
+    return { projectId, totals, apps: appUsage };
+  }
+
+  /**
+   * Historical project consumption: CPU % and memory summed across ALL the
+   * project's containers, bucketed over time (24h/7d/30d). One series for the
+   * whole project — the "is my project heavier this week?" view.
+   */
+  async getResourceHistory(projectId: string, userId: string, period = '24h') {
+    await assertProjectAccess(this.prisma, userId, projectId, 'VIEWER');
+    const apps = await this.prisma.application.findMany({
+      where: { projectId },
+      select: { id: true },
+    });
+    if (apps.length === 0) return [];
+
+    const periodMs: Record<string, number> = {
+      '24h': 24 * 60 * 60 * 1000,
+      '7d': 7 * 24 * 60 * 60 * 1000,
+      '30d': 30 * 24 * 60 * 60 * 1000,
+    };
+    const ms = periodMs[period] || periodMs['24h'];
+    const since = new Date(Date.now() - ms);
+    const rows = await this.prisma.containerMetric.findMany({
+      where: { applicationId: { in: apps.map((a) => a.id) }, timestamp: { gte: since } },
+      orderBy: { timestamp: 'asc' },
+      select: { cpuPercent: true, memoryUsed: true, timestamp: true },
+    });
+    if (rows.length === 0) return [];
+
+    // Bucket size: 24h raw-ish (5m), 7d → 1h, 30d → 1h capped at 720 pts.
+    let bucketMs = ms <= periodMs['24h'] ? 5 * 60 * 1000 : 60 * 60 * 1000;
+    if (Math.ceil(ms / bucketMs) > 720) bucketMs = Math.ceil(ms / 720);
+
+    // Sum every container in a bucket → project-wide CPU% + memory bytes.
+    const buckets = new Map<number, { start: number; cpu: number; mem: number }>();
+    for (const r of rows) {
+      const slot = Math.floor(r.timestamp.getTime() / bucketMs);
+      const acc = buckets.get(slot) ?? { start: slot * bucketMs, cpu: 0, mem: 0 };
+      acc.cpu += r.cpuPercent;
+      acc.mem += Number(r.memoryUsed);
+      buckets.set(slot, acc);
+    }
+    return Array.from(buckets.values())
+      .sort((a, b) => a.start - b.start)
+      .map((b) => ({
+        timestamp: new Date(b.start),
+        cpuPercent: Math.round(b.cpu * 10) / 10,
+        memoryUsed: b.mem,
+      }));
   }
 
   // ── Members ───────────────────────────────────────────────────────

@@ -1095,22 +1095,62 @@ func (p *Poller) runStatus(ctx context.Context, task Task) (map[string]interface
 
 // runStats returns live `docker stats --no-stream` for the requested
 // container(s). Payload:
-//   - containerName (optional): a single container to sample. When set we pass
-//     it straight to `docker stats <name>` so multi-service stacks or a bad
-//     name don't drag in every container.
-//   - when absent: sample every dockcontrol-managed container on the host.
-// The API uses this for the on-demand "live" view of a remote app.
+//   - containerNames (optional): a list of containers to sample (an app may
+//     run several — e.g. a PHP nginx site's web + -fpm sidecar). Preferred.
+//   - containerName (optional): a single container (back-compat). Merged in.
+//   - when neither is set: sample every dockcontrol-managed container.
+// The API uses this for the on-demand "live" view of a remote app, then
+// filters the result to the app's own container names.
 func (p *Poller) runStats(ctx context.Context, task Task) (map[string]interface{}, string) {
 	args := []string{"stats", "--no-stream", "--format", "{{json .}}"}
-	name, _ := task.Payload["containerName"].(string)
+
+	// Collect explicit names from containerNames[] and/or containerName.
+	var names []string
+	if raw, ok := task.Payload["containerNames"].([]interface{}); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				names = append(names, s)
+			}
+		}
+	}
+	if s, ok := task.Payload["containerName"].(string); ok && s != "" {
+		// Avoid duplicating a name already present in containerNames.
+		found := false
+		for _, n := range names {
+			if n == s {
+				found = true
+				break
+			}
+		}
+		if !found {
+			names = append(names, s)
+		}
+	}
+
 	onlyManaged := true
-	if name != "" {
-		args = append(args, name)
-		onlyManaged = false // we already scoped to the exact container
+	if len(names) > 0 {
+		args = append(args, names...)
+		onlyManaged = false // already scoped to exact containers
 	}
 	c := exec.CommandContext(ctx, "docker", args...)
 	out, err := c.Output()
 	if err != nil {
+		// A missing container makes `docker stats a b` fail wholesale. Retry
+		// with each name individually so present containers still report.
+		if len(names) > 1 {
+			var acc []monitor.ContainerStat
+			for _, n := range names {
+				o, e := exec.CommandContext(ctx, "docker", "stats", "--no-stream", "--format", "{{json .}}", n).Output()
+				if e != nil {
+					continue
+				}
+				acc = append(acc, monitor.ParseDockerStatsJSON(string(o), false)...)
+			}
+			b, _ := json.Marshal(map[string]interface{}{"stats": acc})
+			var result map[string]interface{}
+			_ = json.Unmarshal(b, &result)
+			return result, ""
+		}
 		return nil, err.Error()
 	}
 	stats := monitor.ParseDockerStatsJSON(string(out), onlyManaged)

@@ -662,9 +662,16 @@ export class ApplicationOpsService implements OnModuleInit {
 
   /**
    * Live per-container resource usage for one app (CPU/mem/net/block IO),
-   * on-demand. Local → `docker stats --no-stream` for the app's container(s);
-   * remote → an awaited STATS agent task. Mirrors getLogs' local/remote split.
-   * Read-only: VIEWER+ (assertAppOwnership default). Returns { stats: [...] }.
+   * on-demand. Local → `docker stats --no-stream` for ALL of the app's
+   * containers; remote → an awaited STATS agent task. Mirrors getLogs'
+   * local/remote split. Read-only: VIEWER+ (assertAppOwnership default).
+   * Returns { stats: [...] }.
+   *
+   * A single app can run several containers: an NGINX-mode PHP site adds a
+   * `<name>-fpm` sidecar (the container that actually burns CPU/RAM), and any
+   * compose stack can define more. We sample every one of them so the live
+   * view matches what the heartbeat history already captures — not just the
+   * primary container.
    */
   async liveStats(userId: string, id: string) {
     const app = await assertAppOwnership(this.prisma, userId, id);
@@ -672,34 +679,57 @@ export class ApplicationOpsService implements OnModuleInit {
     const server = await resolveAppServer(this.prisma, id);
     // The container name the deploy persisted is the source of truth; the
     // on-disk heuristic is the legacy fallback (same logic as execCommand).
-    const cname = app.containerName || resolveContainerName(slug, id);
+    const primary = app.containerName || resolveContainerName(slug, id);
+    // NGINX-mode PHP sites run the PHP runtime in a `<name>-fpm` sidecar (see
+    // execCommand). Sample it too — otherwise the busiest container is hidden.
+    const names = [primary];
+    if (app.framework === 'PHP_SITE' && (app as any).phpWebServer === 'nginx') {
+      names.push(`${primary}-fpm`);
+    }
 
     if (!isAppLocal(server) && server) {
       try {
+        // Empty containerName → the agent samples every managed container; we
+        // then filter to this app's names so a multi-service host isn't dumped.
         const task = await this.agent.enqueueAndWait(
           server.id,
           'STATS',
-          { containerName: cname },
+          { containerName: primary, containerNames: names },
           20_000,
         );
         if (task.status === 'FAILED') return { stats: [], error: task.error || 'agent stats failed' };
         const r: any = task.result;
-        return { stats: Array.isArray(r?.stats) ? r.stats : [] };
+        const all = Array.isArray(r?.stats) ? r.stats : [];
+        const filtered = all.filter((s: any) => names.includes(s?.name));
+        return { stats: filtered.length > 0 ? filtered : all };
       } catch (err: any) {
         return { stats: [], error: err?.message || 'failed to fetch stats from agent' };
       }
     }
 
-    // Local: docker stats for this app's container by name. --no-stream takes
-    // ~1-2s (two samples); acceptable for an on-demand call.
+    // Local: docker stats for this app's container(s) by name. --no-stream
+    // takes ~1-2s (two samples); acceptable for an on-demand call. Passing
+    // multiple names scopes the sample to exactly this app.
     try {
       const { stdout } = await execFileAsync(
         'docker',
-        ['stats', '--no-stream', '--format', '{{json .}}', cname],
+        ['stats', '--no-stream', '--format', '{{json .}}', ...names],
         { timeout: 15_000 },
       );
       return { stats: parseDockerStatsJson(stdout) };
     } catch (err: any) {
+      // A missing sidecar makes `docker stats a b` error out entirely; retry
+      // with just the primary so a single-container app still reports.
+      if (names.length > 1) {
+        try {
+          const { stdout } = await execFileAsync(
+            'docker',
+            ['stats', '--no-stream', '--format', '{{json .}}', primary],
+            { timeout: 15_000 },
+          );
+          return { stats: parseDockerStatsJson(stdout) };
+        } catch { /* fall through to the error below */ }
+      }
       // Container gone / docker down → empty, not a 500.
       return { stats: [], error: err?.stderr || err?.message || 'docker stats failed' };
     }

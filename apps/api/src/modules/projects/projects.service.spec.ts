@@ -46,6 +46,7 @@ function makePrisma() {
       updateMany: vi.fn().mockResolvedValue({}),
     },
     database: { updateMany: vi.fn().mockResolvedValue({}) },
+    containerMetric: { findMany: vi.fn().mockResolvedValue([]) },
     agentTask: { findFirst: vi.fn() },
     server: { findFirst: vi.fn(), findUnique: vi.fn() },
     user: { findUnique: vi.fn() },
@@ -810,5 +811,91 @@ describe('getServiceMesh', () => {
     prisma.project.findUnique.mockResolvedValue(null);
 
     await expect(service.getServiceMesh('p1', 'u1')).rejects.toThrow(NotFoundException);
+  });
+});
+
+describe('getResourceUsage', () => {
+  function cm(over: Record<string, any> = {}) {
+    return {
+      applicationId: 'a1', containerName: 'dockcontrol-shop',
+      cpuPercent: 10, memoryUsed: 100n, memoryLimit: 500n,
+      networkIn: 1n, networkOut: 2n, blockRead: 3n, blockWrite: 4n,
+      timestamp: new Date('2026-06-01T10:00:00Z'), ...over,
+    };
+  }
+
+  it('requires VIEWER access', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('VIEWER');
+    prisma.application.findMany.mockResolvedValue([]);
+    await service.getResourceUsage('p1', 'u1');
+    expect(mockAssert).toHaveBeenCalledWith(expect.anything(), 'u1', 'p1', 'VIEWER');
+  });
+
+  it('returns empty totals when the project has no apps', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('VIEWER');
+    prisma.application.findMany.mockResolvedValue([]);
+    const res = await service.getResourceUsage('p1', 'u1');
+    expect(res.apps).toEqual([]);
+    expect(res.totals.cpuPercent).toBe(0);
+    expect(res.totals.containers).toBe(0);
+  });
+
+  it('sums the newest sample of EVERY container per app (multi-container app)', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('VIEWER');
+    prisma.application.findMany.mockResolvedValue([
+      { id: 'a1', name: 'Shop', displayName: null, status: 'RUNNING', framework: 'PHP_SITE' },
+    ]);
+    // Two containers for a1 (web + fpm), each with an old + new row (desc order).
+    prisma.containerMetric.findMany.mockResolvedValue([
+      cm({ containerName: 'dockcontrol-shop', cpuPercent: 12, memoryUsed: 100n }),      // newest web
+      cm({ containerName: 'dockcontrol-shop', cpuPercent: 99, memoryUsed: 999n }),      // older web (ignored)
+      cm({ containerName: 'dockcontrol-shop-fpm', cpuPercent: 8, memoryUsed: 200n }),   // newest fpm
+    ]);
+    const res = await service.getResourceUsage('p1', 'u1');
+    // Project totals sum both containers' newest: cpu 12+8=20, mem 100+200=300.
+    expect(res.totals.cpuPercent).toBe(20);
+    expect(res.totals.memoryUsed).toBe(300);
+    expect(res.totals.containers).toBe(2);
+    expect(res.apps[0].usage.cpuPercent).toBe(20);
+  });
+
+  it('an app with no samples reports zero usage (still listed)', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('VIEWER');
+    prisma.application.findMany.mockResolvedValue([
+      { id: 'a1', name: 'Idle', displayName: null, status: 'STOPPED', framework: 'DOCKER' },
+    ]);
+    prisma.containerMetric.findMany.mockResolvedValue([]);
+    const res = await service.getResourceUsage('p1', 'u1');
+    expect(res.apps).toHaveLength(1);
+    expect(res.apps[0].usage.memoryUsed).toBe(0);
+  });
+});
+
+describe('getResourceHistory', () => {
+  it('returns [] when the project has no apps', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('VIEWER');
+    prisma.application.findMany.mockResolvedValue([]);
+    expect(await service.getResourceHistory('p1', 'u1', '24h')).toEqual([]);
+  });
+
+  it('buckets and sums CPU + memory across containers over time', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('VIEWER');
+    prisma.application.findMany.mockResolvedValue([{ id: 'a1' }]);
+    const base = new Date('2026-06-01T10:00:00Z').getTime();
+    // Two containers in the SAME 5-min bucket → summed.
+    prisma.containerMetric.findMany.mockResolvedValue([
+      { cpuPercent: 10, memoryUsed: 100n, timestamp: new Date(base) },
+      { cpuPercent: 5, memoryUsed: 50n, timestamp: new Date(base + 30_000) },
+    ]);
+    const res: any[] = await service.getResourceHistory('p1', 'u1', '24h');
+    expect(res).toHaveLength(1);
+    expect(res[0].cpuPercent).toBe(15);
+    expect(res[0].memoryUsed).toBe(150);
   });
 });

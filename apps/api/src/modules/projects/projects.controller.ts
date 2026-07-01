@@ -6,6 +6,7 @@ import {
   Delete,
   Param,
   Body,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
@@ -84,6 +85,22 @@ export class ProjectsController {
   @ApiOperation({ summary: 'Service mesh: internal hostnames + env var suggestions' })
   getServiceMesh(@Param('id') id: string, @CurrentUser('id') userId: string) {
     return this.projectsService.getServiceMesh(id, userId);
+  }
+
+  @Get(':id/usage')
+  @ApiOperation({ summary: 'Current resource usage: project totals + per-app breakdown' })
+  getResourceUsage(@Param('id') id: string, @CurrentUser('id') userId: string) {
+    return this.projectsService.getResourceUsage(id, userId);
+  }
+
+  @Get(':id/usage/history')
+  @ApiOperation({ summary: 'Historical project-wide CPU + memory consumption' })
+  getResourceHistory(
+    @Param('id') id: string,
+    @CurrentUser('id') userId: string,
+    @Query('period') period?: string,
+  ) {
+    return this.projectsService.getResourceHistory(id, userId, period);
   }
 
   // ── Members ───────────────────────────────────────────────────────
