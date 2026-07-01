@@ -4,7 +4,6 @@ import { DomainSummary } from './domain';
 export interface CreateProjectRequest {
   name: string;
   description?: string;
-  serverId: string;
 }
 
 /**
@@ -29,12 +28,10 @@ export interface ProjectResponse {
   id: string;
   name: string;
   description: string | null;
-  serverId: string;
   userId?: string;
   storageQuotaBytes?: string | null;
   createdAt: string;
   updatedAt: string;
-  server?: { id: string; name: string; host?: string };
   applications?: ProjectApplicationSummary[];
   /** Caller's membership rows — GET /projects includes `members: [{ role }]`. */
   members?: { role: `${ProjectRole}` }[];

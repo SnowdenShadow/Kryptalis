@@ -101,16 +101,12 @@ export interface ApplicationResponse {
   createdAt: string;
   updatedAt: string;
   // Relations (included on list/detail endpoints)
-  /** Per-app server placement (NULL = inherits the project's server).
-   *  Wins over project.server when set. */
+  /** Per-app server placement — required. The dashboard derives the app's
+   *  IP:port URL from this (a project has no server of its own). */
   server?: { id?: string; name?: string; host?: string | null } | null;
   project?: {
     id: string;
     name: string;
-    /** Project's DEFAULT server. The dashboard derives IP:port URLs from
-     *  the app's resolved server (app.server > project.server) in MULTI
-     *  mode — the remote server ≠ the host serving the dashboard. */
-    server?: { id?: string; name?: string; host?: string | null } | null;
   };
   domains?: DomainSummary[];
   portBindings?: ApplicationPortBinding[];

@@ -47,7 +47,7 @@ export function InfrastructureTab() {
 
   const remoteServers = servers.filter((s) => s.host !== '127.0.0.1');
   const appsOnRemote = apps.filter(
-    (a: any) => a.project?.server && a.project.server.host !== '127.0.0.1',
+    (a: any) => a.server && a.server.host !== '127.0.0.1',
   );
 
   const switchModeMutation = useMutation({
