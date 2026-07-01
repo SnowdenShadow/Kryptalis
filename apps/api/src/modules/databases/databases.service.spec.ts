@@ -34,6 +34,13 @@ vi.mock('../../common/rbac/project-access', () => ({
   listAccessibleProjectIds: vi.fn(),
 }));
 
+// Fine-grained permission gate is exercised in its own spec; here it's a
+// no-op so these business-logic tests aren't coupled to the permission grid.
+vi.mock('../../common/rbac/project-permissions', () => ({
+  assertPermission: vi.fn(),
+  assertCapability: vi.fn(),
+}));
+
 import * as fs from 'fs';
 import { execFile, spawn } from 'child_process';
 import {
@@ -570,7 +577,7 @@ describe('RBAC scoping', () => {
     await expect(service.start('u1', 'db1')).rejects.toThrow('Unlinked databases are admin-only');
   });
 
-  it('remove requires ADMIN role on the project', async () => {
+  it('remove requires DEVELOPER rank + the databases:delete permission', async () => {
     const { service, prisma } = makeService();
     prisma.database.findUnique.mockResolvedValue({
       id: 'db1', projectId: 'p1', applicationId: null, name: 'd', autoImported: false,
@@ -578,7 +585,9 @@ describe('RBAC scoping', () => {
     mockAssert.mockRejectedValue(new ForbiddenException());
 
     await expect(service.remove('u1', 'db1')).rejects.toThrow(ForbiddenException);
-    expect(mockAssert).toHaveBeenCalledWith(expect.anything(), 'u1', 'p1', 'ADMIN');
+    // Rank floor is DEVELOPER now; the fine-grained databases:delete perm (a
+    // no-op in this spec) expresses "can delete" precisely on top of it.
+    expect(mockAssert).toHaveBeenCalledWith(expect.anything(), 'u1', 'p1', 'DEVELOPER');
     expect(prisma.database.delete).not.toHaveBeenCalled();
   });
 });

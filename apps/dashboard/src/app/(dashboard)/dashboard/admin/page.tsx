@@ -5,7 +5,9 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Users, Settings, Activity, ShieldAlert, Crown, Shield, Eye, EyeOff, Search,
   Trash2, UserPlus, Ban, KeyRound, RefreshCw, AlertTriangle, Lock, LockOpen,
+  FolderKanban, ExternalLink, Server as ServerIcon,
 } from 'lucide-react';
+import Link from 'next/link';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent, CardDescription } from '@/components/ui/card';
@@ -47,7 +49,15 @@ interface Overview {
   recentSignups: { id: string; name: string; email: string; status: Status; createdAt: string }[];
 }
 
-type Tab = 'overview' | 'users' | 'settings' | 'system' | 'updates' | 'infrastructure' | 'audit';
+type Tab = 'overview' | 'users' | 'projects' | 'settings' | 'system' | 'updates' | 'infrastructure' | 'audit';
+
+interface AdminProject {
+  id: string; name: string; description: string | null; createdAt: string;
+  user: { id: string; name: string; email: string } | null;
+  runningApps: number;
+  servers: { id: string; name: string; host: string }[];
+  _count: { applications: number; databases: number; members: number; domains: number };
+}
 
 const ROLE_BADGE: Record<Role, { variant: 'success' | 'warning' | 'secondary' | 'outline'; icon: typeof Crown }> = {
   SUPERADMIN: { variant: 'success', icon: Crown },
@@ -214,6 +224,23 @@ export default function AdminPage() {
     onError: (err: Error) => toast.error(err.message),
   });
 
+  // ── Projects (global) ────────────────────────────────────────────
+  const [projectSearch, setProjectSearch] = useState('');
+  const [debouncedProjectSearch, setDebouncedProjectSearch] = useState('');
+  useEffect(() => {
+    const h = setTimeout(() => setDebouncedProjectSearch(projectSearch), 300);
+    return () => clearTimeout(h);
+  }, [projectSearch]);
+  const { data: projectsData } = useQuery<{ total: number; projects: AdminProject[] }>({
+    queryKey: ['admin-projects', debouncedProjectSearch],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (debouncedProjectSearch) params.set('search', debouncedProjectSearch);
+      return api.get(`/admin/projects?${params}`);
+    },
+    enabled: isAdmin && activeTab === 'projects',
+  });
+
   // ── Audit ────────────────────────────────────────────────────────
   const { data: auditData } = useQuery<{ total: number; logs: AuditLog[] }>({
     queryKey: ['admin-audit'],
@@ -224,6 +251,7 @@ export default function AdminPage() {
   const TABS: { id: Tab; label: string; icon: typeof Users }[] = [
     { id: 'overview', label: t('admin.tab.overview'), icon: Activity },
     { id: 'users', label: t('admin.tab.users'), icon: Users },
+    { id: 'projects', label: t('admin.tab.projects'), icon: FolderKanban },
     { id: 'settings', label: t('admin.tab.settings'), icon: Settings },
     { id: 'system', label: t('admin.tab.system'), icon: Settings },
     { id: 'infrastructure', label: t('admin.tab.infrastructure'), icon: Activity },
@@ -447,6 +475,79 @@ export default function AdminPage() {
             </CardContent>
           </Card>
           <p className="text-xs text-muted-foreground text-right">{t('admin.totalCount', { n: usersData?.total ?? 0 })}</p>
+        </div>
+      )}
+
+      {/* ─────────────── Projects (global) ─────────────── */}
+      {activeTab === 'projects' && (
+        <div className="space-y-3">
+          <div className="relative max-w-md">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <Input className="pl-9" placeholder={t('admin.projects.search')} value={projectSearch}
+              onChange={(e) => setProjectSearch(e.target.value)} />
+          </div>
+          <Card>
+            <CardContent className="p-0 overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="border-b border-border bg-muted/30">
+                  <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+                    <th className="px-4 py-2.5 font-medium">{t('admin.projects.name')}</th>
+                    <th className="px-4 py-2.5 font-medium">{t('admin.projects.owner')}</th>
+                    <th className="px-4 py-2.5 font-medium text-center">{t('admin.projects.apps')}</th>
+                    <th className="px-4 py-2.5 font-medium">{t('admin.projects.servers')}</th>
+                    <th className="px-4 py-2.5 font-medium text-right">{t('admin.projects.open')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {projectsData?.projects?.map(p => (
+                    <tr key={p.id} className="border-b last:border-0 hover:bg-accent/30">
+                      <td className="px-4 py-2.5">
+                        <p className="font-medium">{p.name}</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {t('admin.projects.counts', { a: p._count.applications, d: p._count.databases, m: p._count.members })}
+                        </p>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        {p.user ? (
+                          <div>
+                            <p className="text-xs font-medium">{p.user.name}</p>
+                            <p className="text-[11px] text-muted-foreground">{p.user.email}</p>
+                          </div>
+                        ) : <span className="text-muted-foreground">—</span>}
+                      </td>
+                      <td className="px-4 py-2.5 text-center">
+                        <Badge variant={p.runningApps > 0 ? 'success' : 'secondary'} className="text-[10px]">
+                          {p.runningApps}/{p._count.applications}
+                        </Badge>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex flex-wrap gap-1">
+                          {p.servers.length === 0 ? (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          ) : p.servers.map(s => (
+                            <Badge key={s.id} variant="outline" className="text-[10px] gap-1">
+                              <ServerIcon size={9} /> {s.name}
+                            </Badge>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        <Link href={`/dashboard/projects/${p.id}`}>
+                          <Button size="sm" variant="ghost" className="h-7">
+                            <ExternalLink size={13} /> {t('admin.projects.manage')}
+                          </Button>
+                        </Link>
+                      </td>
+                    </tr>
+                  ))}
+                  {projectsData?.projects?.length === 0 && (
+                    <tr><td colSpan={5} className="px-4 py-8 text-center text-muted-foreground text-sm">{t('admin.projects.none')}</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+          <p className="text-xs text-muted-foreground text-right">{t('admin.totalCount', { n: projectsData?.total ?? 0 })}</p>
         </div>
       )}
 

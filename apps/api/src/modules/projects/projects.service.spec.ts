@@ -8,12 +8,20 @@ vi.mock('../../common/rbac/project-access', () => ({
   listAccessibleProjectIds: vi.fn(),
 }));
 
+vi.mock('../../common/rbac/project-permissions', () => ({
+  assertCapability: vi.fn(),
+  listEffectivePermissions: vi.fn(),
+}));
+
 import {
   assertProjectAccess,
   getProjectRole,
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
+import { assertCapability } from '../../common/rbac/project-permissions';
 import { ProjectsService } from './projects.service';
+
+const mockCapability = vi.mocked(assertCapability);
 
 /**
  * Pure service-level tests: every dependency is a plain object of vi.fn()s —
@@ -47,6 +55,13 @@ function makePrisma() {
     },
     database: { updateMany: vi.fn().mockResolvedValue({}) },
     containerMetric: { findMany: vi.fn().mockResolvedValue([]) },
+    projectCustomRole: {
+      findMany: vi.fn().mockResolvedValue([]),
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn().mockResolvedValue({}),
+      delete: vi.fn().mockResolvedValue({}),
+    },
     agentTask: { findFirst: vi.fn() },
     server: { findFirst: vi.fn(), findUnique: vi.fn() },
     user: { findUnique: vi.fn() },
@@ -360,6 +375,59 @@ describe('addMember', () => {
     await expect(
       service.addMember('p1', 'actor', { userId: 'u2', role: 'OWNER' }),
     ).rejects.toThrow('Only the OWNER can grant OWNER role');
+  });
+
+  it('FOOT-GUN FIX: refuses to add/re-role YOURSELF (the demote-self-to-DEVELOPER trap)', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('OWNER');
+
+    await expect(
+      service.addMember('p1', 'actor', { userId: 'actor', role: 'DEVELOPER' }),
+    ).rejects.toThrow(/can't add or re-role yourself/i);
+    // Never reaches the upsert.
+    expect(prisma.projectMember.upsert).not.toHaveBeenCalled();
+  });
+
+  it('refuses to add yourself by EMAIL too (resolves to the actor id)', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('OWNER');
+    prisma.user.findUnique.mockResolvedValue({ id: 'actor' });
+
+    await expect(
+      service.addMember('p1', 'actor', { email: 'me@x.io', role: 'VIEWER' }),
+    ).rejects.toThrow(/yourself/i);
+  });
+
+  it('re-adding an existing member is a role change and CANNOT demote the last OWNER', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('OWNER');
+    prisma.projectMember.findFirst.mockResolvedValue({ id: 'm-owner', role: 'OWNER' });
+    prisma.projectMember.count.mockResolvedValue(1);
+
+    await expect(
+      service.addMember('p1', 'actor', { userId: 'u2', role: 'DEVELOPER' }),
+    ).rejects.toThrow('Cannot demote the last OWNER');
+    expect(prisma.projectMember.upsert).not.toHaveBeenCalled();
+  });
+
+  it('a non-OWNER cannot re-role an existing OWNER via add', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('ADMIN');
+    prisma.projectMember.findFirst.mockResolvedValue({ id: 'm-owner', role: 'OWNER' });
+
+    await expect(
+      service.addMember('p1', 'actor', { userId: 'u2', role: 'ADMIN' }),
+    ).rejects.toThrow('Only the OWNER can modify the OWNER');
+  });
+
+  it('re-adding with the SAME role is a no-op (no upsert)', async () => {
+    const { service, prisma } = makeService();
+    mockAssert.mockResolvedValue('OWNER');
+    prisma.projectMember.findFirst.mockResolvedValue({ id: 'm2', role: 'DEVELOPER' });
+
+    const res = await service.addMember('p1', 'actor', { userId: 'u2', role: 'DEVELOPER' });
+    expect(res.id).toBe('m2');
+    expect(prisma.projectMember.upsert).not.toHaveBeenCalled();
   });
 
   it('resolves the target by email and 404s on unknown address', async () => {
@@ -897,5 +965,89 @@ describe('getResourceHistory', () => {
     expect(res).toHaveLength(1);
     expect(res[0].cpuPercent).toBe(15);
     expect(res[0].memoryUsed).toBe(150);
+  });
+});
+
+describe('custom roles', () => {
+  beforeEach(() => {
+    mockCapability.mockResolvedValue('ADMIN' as any);
+  });
+
+  it('createCustomRole caps permissions to the baseRole preset (no escalation)', async () => {
+    const { service, prisma } = makeService();
+    prisma.projectCustomRole.create.mockImplementation(async ({ data }: any) => ({ id: 'r1', ...data }));
+
+    // A VIEWER-based custom role that TRIES to grant apps:deploy — must be dropped.
+    const res: any = await service.createCustomRole('p1', 'actor', {
+      name: 'ReadPlus',
+      baseRole: 'VIEWER',
+      permissions: ['apps:view', 'apps:deploy', 'databases:view'],
+    });
+    // apps:deploy is not in the VIEWER preset → capped out. Only the :view perms survive.
+    expect(res.permissions).toContain('apps:view');
+    expect(res.permissions).toContain('databases:view');
+    expect(res.permissions).not.toContain('apps:deploy');
+  });
+
+  it('createCustomRole never allows an OWNER baseRole (clamped to DEVELOPER)', async () => {
+    const { service, prisma } = makeService();
+    prisma.projectCustomRole.create.mockImplementation(async ({ data }: any) => ({ id: 'r1', ...data }));
+    const res: any = await service.createCustomRole('p1', 'actor', {
+      name: 'X', baseRole: 'OWNER' as any, permissions: [],
+    });
+    expect(res.baseRole).toBe('DEVELOPER');
+  });
+
+  it('createCustomRole requires roles:manage (ADMIN+)', async () => {
+    const { service } = makeService();
+    mockCapability.mockRejectedValue(new ForbiddenException());
+    await expect(
+      service.createCustomRole('p1', 'actor', { name: 'X' }),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('createCustomRole rejects an empty name', async () => {
+    const { service } = makeService();
+    await expect(service.createCustomRole('p1', 'actor', { name: '  ' })).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+
+  it('assignCustomRole syncs the member rank to the role baseRole', async () => {
+    const { service, prisma } = makeService();
+    prisma.projectMember.findFirst.mockResolvedValue({ id: 'm1', role: 'VIEWER' });
+    prisma.projectCustomRole.findFirst.mockResolvedValue({ id: 'r1', baseRole: 'DEVELOPER' });
+    prisma.projectMember.update.mockResolvedValue({ id: 'm1' });
+
+    await service.assignCustomRole('p1', 'actor', 'm1', 'r1');
+    expect(prisma.projectMember.update).toHaveBeenCalledWith({
+      where: { id: 'm1' },
+      data: { customRoleId: 'r1', role: 'DEVELOPER' },
+    });
+  });
+
+  it('assignCustomRole refuses to re-role the OWNER', async () => {
+    const { service, prisma } = makeService();
+    prisma.projectMember.findFirst.mockResolvedValue({ id: 'm1', role: 'OWNER' });
+    await expect(service.assignCustomRole('p1', 'actor', 'm1', 'r1')).rejects.toThrow(
+      /OWNER's role/i,
+    );
+  });
+
+  it('assignCustomRole with null clears the custom role', async () => {
+    const { service, prisma } = makeService();
+    prisma.projectMember.findFirst.mockResolvedValue({ id: 'm1', role: 'DEVELOPER' });
+    prisma.projectMember.update.mockResolvedValue({ id: 'm1' });
+    await service.assignCustomRole('p1', 'actor', 'm1', null);
+    expect(prisma.projectMember.update).toHaveBeenCalledWith({
+      where: { id: 'm1' },
+      data: { customRoleId: null },
+    });
+  });
+
+  it('deleteCustomRole 404s on a role from another project', async () => {
+    const { service, prisma } = makeService();
+    prisma.projectCustomRole.findFirst.mockResolvedValue(null);
+    await expect(service.deleteCustomRole('p1', 'actor', 'rX')).rejects.toThrow(NotFoundException);
   });
 });

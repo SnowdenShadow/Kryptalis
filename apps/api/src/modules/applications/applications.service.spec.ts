@@ -27,6 +27,12 @@ vi.mock('../../common/rbac/project-access', () => ({
   listAccessibleProjectIds: vi.fn(),
 }));
 
+// Fine-grained permission gate exercised in its own spec — no-op here.
+vi.mock('../../common/rbac/project-permissions', () => ({
+  assertPermission: vi.fn(),
+  assertCapability: vi.fn(),
+}));
+
 import { slugify, ApplicationsService } from './applications.service';
 import { ApplicationRepository } from './application.repository';
 import { assertCloneHostAllowed } from '../git-providers/git-providers.service';

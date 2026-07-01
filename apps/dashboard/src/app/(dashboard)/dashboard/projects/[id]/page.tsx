@@ -32,6 +32,7 @@ import {
   publicAppUrl,
 } from '@/lib/app-format';
 import { ProjectResourcesTab } from './project-resources-tab';
+import { CustomRolesManager } from './custom-roles-manager';
 
 type Role = 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER';
 const ROLE_RANK: Record<Role, number> = { OWNER: 100, ADMIN: 80, DEVELOPER: 50, VIEWER: 10 };
@@ -52,8 +53,10 @@ type Project = ProjectResponse;
 
 interface Member {
   id: string; role: Role; createdAt: string;
+  customRoleId?: string | null;
   user: { id: string; name: string; email: string };
 }
+interface CustomRoleOption { id: string; name: string; baseRole: Role }
 
 // STATUS_COLOR / STATUS_VARIANT / FW / publicAppUrl / makeTimeAgo come
 // from @/lib/app-format.
@@ -150,6 +153,13 @@ export default function ProjectDetailPage() {
     queryKey: ['project-members', id],
     queryFn: () => api.get(`/projects/${id}/members`),
     enabled: !!id,
+  });
+
+  // Custom roles for the per-member "custom role" dropdown (members tab).
+  const { data: customRoles = [] } = useQuery<CustomRoleOption[]>({
+    queryKey: ['project-custom-roles', id],
+    queryFn: () => api.get(`/projects/${id}/roles`),
+    enabled: !!id && activeTab === 'members',
   });
 
   const TABS: { id: Tab; label: string }[] = [
@@ -328,6 +338,18 @@ export default function ProjectDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['project-members', id] });
       queryClient.invalidateQueries({ queryKey: ['project', id] });
       setRoleChangeTarget(null);
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  // Assign / clear a member's custom role (roleId === '' clears it).
+  const assignCustomRoleMutation = useMutation({
+    mutationFn: ({ memberId, roleId }: { memberId: string; roleId: string | null }) =>
+      api.patch(`/projects/${id}/members/${memberId}/custom-role`, { roleId }),
+    onSuccess: () => {
+      toast.success(t('toast.roleUpdated'));
+      queryClient.invalidateQueries({ queryKey: ['project-members', id] });
+      queryClient.invalidateQueries({ queryKey: ['project-custom-roles', id] });
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -814,17 +836,40 @@ export default function ProjectDetailPage() {
                       </div>
                       {canEdit && (
                         <>
-                          <Select
-                            value={m.role}
-                            disabled={changeRoleMutation.isPending}
-                            onChange={(e) => requestRoleChange(m, e.target.value as Role)}
-                            wrapperClassName="w-36 shrink-0"
-                            className="h-9 text-xs"
-                          >
-                            {(['VIEWER', 'DEVELOPER', 'ADMIN', ...(myRole === 'OWNER' ? ['OWNER'] : [])] as Role[]).map(r => (
-                              <option key={r} value={r}>{r}</option>
-                            ))}
-                          </Select>
+                          {/* Custom role picker (optional). When set, it drives
+                              the member's base rank + fine-grained perms, so the
+                              plain role select is hidden. */}
+                          {customRoles.length > 0 && (
+                            <Select
+                              value={m.customRoleId ?? ''}
+                              disabled={assignCustomRoleMutation.isPending}
+                              onChange={(e) =>
+                                assignCustomRoleMutation.mutate({ memberId: m.id, roleId: e.target.value || null })
+                              }
+                              wrapperClassName="w-40 shrink-0"
+                              className="h-9 text-xs"
+                            >
+                              <option value="">{t('roles.noCustom')}</option>
+                              {customRoles.map((cr) => (
+                                <option key={cr.id} value={cr.id}>{cr.name}</option>
+                              ))}
+                            </Select>
+                          )}
+                          {/* Base role select — only when NO custom role is set
+                              (the custom role owns the rank otherwise). */}
+                          {!m.customRoleId && (
+                            <Select
+                              value={m.role}
+                              disabled={changeRoleMutation.isPending}
+                              onChange={(e) => requestRoleChange(m, e.target.value as Role)}
+                              wrapperClassName="w-36 shrink-0"
+                              className="h-9 text-xs"
+                            >
+                              {(['VIEWER', 'DEVELOPER', 'ADMIN', ...(myRole === 'OWNER' ? ['OWNER'] : [])] as Role[]).map(r => (
+                                <option key={r} value={r}>{r}</option>
+                              ))}
+                            </Select>
+                          )}
                           {myRole === 'OWNER' && m.role !== 'OWNER' && (
                             <Button
                               size="sm"
@@ -860,6 +905,9 @@ export default function ProjectDetailPage() {
                 <li><strong className="text-foreground">{t('members.role.VIEWER')}</strong> — {t('members.roleDesc.VIEWER')}</li>
               </ul>
             </div>
+
+            {/* Reusable custom roles (fine-grained permission grid) */}
+            <CustomRolesManager projectId={id} canManage={has(myRole, 'ADMIN')} />
           </CardContent>
         </Card>
       )}

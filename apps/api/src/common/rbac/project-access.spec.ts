@@ -16,7 +16,7 @@ import {
 function makePrisma() {
   return {
     user: { findUnique: vi.fn() },
-    projectMember: { findUnique: vi.fn(), findMany: vi.fn() },
+    projectMember: { findUnique: vi.fn(), findMany: vi.fn(), update: vi.fn().mockResolvedValue({}) },
     project: { findUnique: vi.fn(), findMany: vi.fn() },
   };
 }
@@ -54,13 +54,36 @@ describe('getProjectRole', () => {
     prisma = makePrisma();
   });
 
-  it('returns the explicit membership role when the user is a member', async () => {
+  it('returns the explicit membership role when the user is a member (and not the legacy owner)', async () => {
     prisma.projectMember.findUnique.mockResolvedValue({ role: 'DEVELOPER' });
+    prisma.project.findUnique.mockResolvedValue({ userId: 'someone-else' });
     const role = await getProjectRole(asPrisma(prisma), 'u1', 'p1');
     expect(role).toBe('DEVELOPER');
-    // Short-circuits before touching project/user tables.
-    expect(prisma.project.findUnique).not.toHaveBeenCalled();
+    // An explicit membership is authoritative — no platform-admin lookup, no
+    // self-heal write.
     expect(prisma.user.findUnique).not.toHaveBeenCalled();
+    expect(prisma.projectMember.update).not.toHaveBeenCalled();
+  });
+
+  it('FOOT-GUN FIX: the legacy owner keeps OWNER even if their membership row drifted to DEVELOPER', async () => {
+    // The exact "I added my own email as DEVELOPER and it demoted me" case.
+    prisma.projectMember.findUnique.mockResolvedValue({ role: 'DEVELOPER' });
+    prisma.project.findUnique.mockResolvedValue({ userId: 'u1' }); // u1 is the legacy owner
+    const role = await getProjectRole(asPrisma(prisma), 'u1', 'p1');
+    expect(role).toBe('OWNER');
+    // And it self-heals the drifted row back to OWNER.
+    expect(prisma.projectMember.update).toHaveBeenCalledWith({
+      where: { projectId_userId: { projectId: 'p1', userId: 'u1' } },
+      data: { role: 'OWNER' },
+    });
+  });
+
+  it('does NOT write when the legacy owner already has an OWNER membership row', async () => {
+    prisma.projectMember.findUnique.mockResolvedValue({ role: 'OWNER' });
+    prisma.project.findUnique.mockResolvedValue({ userId: 'u1' });
+    const role = await getProjectRole(asPrisma(prisma), 'u1', 'p1');
+    expect(role).toBe('OWNER');
+    expect(prisma.projectMember.update).not.toHaveBeenCalled();
   });
 
   it('membership shadows the platform-admin bypass (global ADMIN with VIEWER membership stays VIEWER)', async () => {

@@ -15,6 +15,11 @@ import {
   getProjectRole,
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
+import {
+  assertCapability,
+  listEffectivePermissions,
+} from '../../common/rbac/project-permissions';
+import { sanitizePermissions, permissionsForRole } from '../../common/rbac/permissions';
 import type { ProjectRole } from '@prisma/client';
 import { AgentService, AgentTaskCompletion } from '../agent/agent.service';
 import { appVolumePrefix, dbVolumePrefix } from '../agent/volume-naming.util';
@@ -1154,6 +1159,43 @@ export class ProjectsService implements OnModuleInit {
     }
     if (!targetUserId) throw new BadRequestException('email or userId required');
 
+    // Guard against the "I added my own email and it demoted me" foot-gun.
+    // Adding YOURSELF here is always a mistake: you're already a member (that's
+    // how you got to this screen), and the upsert below would OVERWRITE your
+    // real role with the one picked in the dialog — an OWNER who re-adds
+    // themselves as DEVELOPER silently loses control of the project. Changing
+    // your own role isn't a thing you do from "Add member" — refuse it.
+    if (targetUserId === actorId) {
+      throw new BadRequestException(
+        "You're already a member of this project — you can't add or re-role yourself here. Use \"Transfer ownership\" to hand OWNER to someone else.",
+      );
+    }
+
+    // If the target is ALREADY a member, this is a role change, not an add —
+    // route it through the same protections updateMember enforces (can't touch
+    // an OWNER unless you are one, can't demote the last OWNER). Without this,
+    // "Add member" is an unguarded backdoor around every updateMember rule.
+    const existing = await this.prisma.projectMember.findFirst({
+      where: { projectId, userId: targetUserId },
+      select: { id: true, role: true },
+    });
+    if (existing) {
+      if (existing.role === payload.role) return existing as any; // no-op
+      if (existing.role === 'OWNER' && actorRole !== 'OWNER') {
+        throw new BadRequestException('Only the OWNER can modify the OWNER');
+      }
+      if (existing.role === 'OWNER' && payload.role !== 'OWNER') {
+        const owners = await this.prisma.projectMember.count({
+          where: { projectId, role: 'OWNER' },
+        });
+        if (owners <= 1) {
+          throw new BadRequestException(
+            'Cannot demote the last OWNER. Promote another member to OWNER first.',
+          );
+        }
+      }
+    }
+
     const result = await this.prisma.projectMember.upsert({
       where: { projectId_userId: { projectId, userId: targetUserId } },
       create: {
@@ -1280,6 +1322,134 @@ export class ProjectsService implements OnModuleInit {
   async getMyRole(projectId: string, userId: string) {
     const role = await getProjectRole(this.prisma, userId, projectId);
     return { role };
+  }
+
+  /** Caller's effective fine-grained permissions on this project (for the UI
+   *  to gate actions). Any member can read their own. */
+  async getMyPermissions(projectId: string, userId: string) {
+    await assertProjectAccess(this.prisma, userId, projectId, 'VIEWER');
+    return listEffectivePermissions(this.prisma, userId, projectId);
+  }
+
+  // ── Custom roles ────────────────────────────────────────────────────
+
+  /** List the project's reusable custom roles + how many members use each. */
+  async listCustomRoles(projectId: string, userId: string) {
+    await assertProjectAccess(this.prisma, userId, projectId, 'VIEWER');
+    return this.prisma.projectCustomRole.findMany({
+      where: { projectId },
+      include: { _count: { select: { members: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  /** Create a custom role. ADMIN+ (roles:manage is rank-gated). Permissions
+   *  are sanitized against the catalog; a role can never carry a permission
+   *  above its baseRole's preset (no privilege escalation through the grid). */
+  async createCustomRole(
+    projectId: string,
+    userId: string,
+    dto: { name: string; baseRole?: ProjectRole; permissions?: string[] },
+  ) {
+    await assertCapability(this.prisma, userId, projectId, 'roles:manage');
+    const name = (dto.name || '').trim();
+    if (!name) throw new BadRequestException('Role name is required');
+    if (name.length > 40) throw new BadRequestException('Role name too long (max 40)');
+    const baseRole: ProjectRole = dto.baseRole && dto.baseRole !== 'OWNER' ? dto.baseRole : 'DEVELOPER';
+    const permissions = this.cappedPermissions(dto.permissions, baseRole);
+    try {
+      return await this.prisma.projectCustomRole.create({
+        data: { projectId, name, baseRole, permissions },
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2002') throw new BadRequestException('A role with that name already exists');
+      throw e;
+    }
+  }
+
+  async updateCustomRole(
+    projectId: string,
+    userId: string,
+    roleId: string,
+    dto: { name?: string; baseRole?: ProjectRole; permissions?: string[] },
+  ) {
+    await assertCapability(this.prisma, userId, projectId, 'roles:manage');
+    const role = await this.prisma.projectCustomRole.findFirst({ where: { id: roleId, projectId } });
+    if (!role) throw new NotFoundException('Custom role not found');
+    const baseRole: ProjectRole =
+      dto.baseRole && dto.baseRole !== 'OWNER' ? dto.baseRole : (role.baseRole as ProjectRole);
+    const data: any = { baseRole };
+    if (dto.name !== undefined) {
+      const name = dto.name.trim();
+      if (!name) throw new BadRequestException('Role name is required');
+      data.name = name;
+    }
+    if (dto.permissions !== undefined) {
+      data.permissions = this.cappedPermissions(dto.permissions, baseRole);
+    }
+    // Keep members' rank in sync when the baseRole changes.
+    try {
+      const updated = await this.prisma.projectCustomRole.update({ where: { id: roleId }, data });
+      if (dto.baseRole && dto.baseRole !== role.baseRole) {
+        await this.prisma.projectMember.updateMany({
+          where: { projectId, customRoleId: roleId },
+          data: { role: baseRole },
+        });
+      }
+      return updated;
+    } catch (e: any) {
+      if (e?.code === 'P2002') throw new BadRequestException('A role with that name already exists');
+      throw e;
+    }
+  }
+
+  async deleteCustomRole(projectId: string, userId: string, roleId: string) {
+    await assertCapability(this.prisma, userId, projectId, 'roles:manage');
+    const role = await this.prisma.projectCustomRole.findFirst({ where: { id: roleId, projectId } });
+    if (!role) throw new NotFoundException('Custom role not found');
+    // FK is SetNull → affected members revert to their base `role`.
+    await this.prisma.projectCustomRole.delete({ where: { id: roleId } });
+    return { message: 'Custom role deleted' };
+  }
+
+  /**
+   * Assign (or clear) a custom role on a member. ADMIN+ (members:manage).
+   * Clearing (roleId=null) reverts the member to their plain `role`. Assigning
+   * also syncs the member's `role` to the custom role's baseRole so the
+   * rank-only checks (assertProjectAccess) stay correct.
+   */
+  async assignCustomRole(
+    projectId: string,
+    actorId: string,
+    memberId: string,
+    roleId: string | null,
+  ) {
+    await assertCapability(this.prisma, actorId, projectId, 'members:manage');
+    const member = await this.prisma.projectMember.findFirst({ where: { id: memberId, projectId } });
+    if (!member) throw new NotFoundException('Member not found');
+    if (member.role === 'OWNER') {
+      throw new BadRequestException("The OWNER's role can't be changed to a custom role.");
+    }
+    if (roleId === null) {
+      return this.prisma.projectMember.update({
+        where: { id: memberId },
+        data: { customRoleId: null },
+      });
+    }
+    const role = await this.prisma.projectCustomRole.findFirst({ where: { id: roleId, projectId } });
+    if (!role) throw new NotFoundException('Custom role not found');
+    return this.prisma.projectMember.update({
+      where: { id: memberId },
+      data: { customRoleId: roleId, role: role.baseRole as ProjectRole },
+    });
+  }
+
+  /** Sanitize + cap a permission list to what the baseRole's preset allows, so
+   *  a custom role can never grant more than its base built-in role. */
+  private cappedPermissions(input: unknown, baseRole: ProjectRole): string[] {
+    const requested = sanitizePermissions(input);
+    const allowed = new Set(permissionsForRole(baseRole));
+    return requested.filter((p) => allowed.has(p));
   }
 
   /**

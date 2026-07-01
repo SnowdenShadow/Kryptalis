@@ -267,12 +267,39 @@ model Project {
   domains      Domain[]
   mailboxes    Mailbox[]
   members      ProjectMember[]
+  customRoles  ProjectCustomRole[]
   sftpAccounts SftpAccount[]
   backups      Backup[]
   backupStorage ProjectBackupStorage?
 
   @@index([userId])
   @@map("projects")
+}
+
+// A reusable, named custom role scoped to ONE project. Carries a fine-grained
+// permission grid (see common/rbac/permissions.ts) plus a baseRole that fixes
+// the member's administrative RANK (member/role admin, project delete are
+// gated by rank, never by the grid — a custom role can't grant "delete
+// project"). Members reference it via ProjectMember.customRoleId; when set, the
+// grid drives every fine-grained permission check while baseRole drives rank.
+model ProjectCustomRole {
+  id          String      @id @default(cuid())
+  projectId   String
+  name        String
+  // Fixes administrative rank + the preset the grid was seeded from.
+  baseRole    ProjectRole @default(DEVELOPER)
+  // JSON string[] of "resource:action" permissions (validated on write).
+  permissions Json
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  project Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  members ProjectMember[]
+
+  // Role names are unique within a project.
+  @@unique([projectId, name])
+  @@index([projectId])
+  @@map("project_custom_roles")
 }
 
 // ─── Per-project remote backup storage (S3-compatible) ───────────────
@@ -306,15 +333,24 @@ model ProjectMember {
   projectId  String
   userId     String
   role       ProjectRole @default(VIEWER)
+  // Optional custom role. When set, its permission grid drives every
+  // fine-grained check and its baseRole drives administrative rank; `role`
+  // above is kept in sync with the custom role's baseRole for back-compat with
+  // the rank-only checks (assertProjectAccess) that haven't migrated.
+  customRoleId String?
   invitedById String?
   createdAt  DateTime    @default(now())
   updatedAt  DateTime    @updatedAt
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  user    User    @relation("ProjectMembership", fields: [userId], references: [id], onDelete: Cascade)
+  project    Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user       User               @relation("ProjectMembership", fields: [userId], references: [id], onDelete: Cascade)
+  // SetNull so deleting a custom role reverts affected members to their base
+  // `role` rather than cascading them out of the project.
+  customRole ProjectCustomRole? @relation(fields: [customRoleId], references: [id], onDelete: SetNull)
 
   @@unique([projectId, userId])
   @@index([userId])
+  @@index([customRoleId])
   @@map("project_members")
 }
 

@@ -43,17 +43,44 @@ export async function getProjectRole(
   userId: string,
   projectId: string,
 ): Promise<ProjectRole> {
-  const member = await prisma.projectMember.findUnique({
-    where: { projectId_userId: { projectId, userId } },
-    select: { role: true },
-  });
+  const [member, proj] = await Promise.all([
+    prisma.projectMember.findUnique({
+      where: { projectId_userId: { projectId, userId } },
+      select: { role: true },
+    }),
+    prisma.project.findUnique({
+      where: { id: projectId },
+      select: { userId: true },
+    }),
+  ]);
+  if (!proj && !member) throw new NotFoundException('Project not found');
+
+  // The legacy owner pointer (project.userId) is OWNER-equivalent and must
+  // NEVER be shadowed by a lower membership row: a project creator who
+  // accidentally re-adds themselves as a lower role (the "I put my email in
+  // DEVELOPER and it demoted me" foot-gun) would otherwise be locked out of
+  // their own project. This wins even over an explicit membership row.
+  if (proj?.userId === userId) {
+    // Self-heal a membership row that drifted below OWNER. Idempotent: writes
+    // only when actually inconsistent, so it's a no-op after one correction
+    // and the members list then shows the right role too.
+    if (member && member.role !== 'OWNER') {
+      await prisma.projectMember
+        .update({
+          where: { projectId_userId: { projectId, userId } },
+          data: { role: 'OWNER' },
+        })
+        .catch(() => {});
+    }
+    return 'OWNER';
+  }
+
+  // An explicit membership row is authoritative next — it deliberately
+  // shadows the platform-admin bypass so a global ADMIN who was given an
+  // explicit VIEWER role on a project stays VIEWER there.
   if (member) return member.role;
-  const proj = await prisma.project.findUnique({
-    where: { id: projectId },
-    select: { userId: true },
-  });
-  if (!proj) throw new NotFoundException('Project not found');
-  if (proj.userId === userId) return 'OWNER';
+
+  // No membership: platform admins act as implicit OWNER everywhere.
   if (await isPlatformAdmin(prisma, userId)) return 'OWNER';
   throw new ForbiddenException('You are not a member of this project');
 }

@@ -1,6 +1,7 @@
 import { NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
+import { assertPermission } from '../../common/rbac/project-permissions';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -657,11 +658,18 @@ export async function assertAppOwnership(
   userId: string,
   appId: string,
   minRole: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER' = 'DEVELOPER',
+  permission?: string,
 ) {
   const app = await prisma.application.findUnique({
     where: { id: appId },
   });
   if (!app) throw new NotFoundException('Application not found');
   await assertProjectAccess(prisma, userId, app.projectId, minRole);
+  // Fine-grained gate (custom roles): only bites members below ADMIN whose
+  // grid omits this permission. Admins + preset roles that include it pass
+  // unchanged, so this is additive and backward-compatible.
+  if (permission) {
+    await assertPermission(prisma, userId, app.projectId, permission);
+  }
   return app;
 }

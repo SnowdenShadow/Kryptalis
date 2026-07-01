@@ -15,6 +15,7 @@ import {
   assertProjectAccess,
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
+import { assertPermission } from '../../common/rbac/project-permissions';
 import { assertComposeSafe } from '../../common/compose/compose-safety';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { AgentService } from '../agent/agent.service';
@@ -103,12 +104,14 @@ export class ApplicationsService implements OnModuleInit {
     userId: string,
     appId: string,
     minRole: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER' = 'DEVELOPER',
+    permission?: string,
   ) {
     const app = await this.prisma.application.findUnique({
       where: { id: appId },
     });
     if (!app) throw new NotFoundException('Application not found');
     await assertProjectAccess(this.prisma, userId, app.projectId, minRole);
+    if (permission) await assertPermission(this.prisma, userId, app.projectId, permission);
     return app;
   }
 
@@ -116,8 +119,10 @@ export class ApplicationsService implements OnModuleInit {
     userId: string,
     projectId: string,
     minRole: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER' = 'DEVELOPER',
+    permission?: string,
   ) {
     await assertProjectAccess(this.prisma, userId, projectId, minRole);
+    if (permission) await assertPermission(this.prisma, userId, projectId, permission);
   }
 
   // ── create / deploy ────────────────────────────────────────────────
@@ -138,7 +143,7 @@ export class ApplicationsService implements OnModuleInit {
     dto: CreateApplicationDto,
     internalOpts?: { allowHostAccessCompose?: boolean },
   ) {
-    await this.assertProjectOwnership(userId, dto.projectId);
+    await this.assertProjectOwnership(userId, dto.projectId, 'DEVELOPER', 'apps:create');
 
     const {
       gitProviderId,
@@ -720,7 +725,11 @@ export class ApplicationsService implements OnModuleInit {
   }
 
   async remove(userId: string, id: string) {
-    const app = await this.assertOwnership(userId, id, 'ADMIN');
+    // Delete is DEVELOPER-rank + the fine-grained apps:delete perm. (Was
+    // ADMIN-rank; the fine-grained grid now expresses "can delete" precisely,
+    // and the DEVELOPER preset includes apps:delete so existing devs are
+    // unaffected while a custom role can withhold it.)
+    const app = await this.assertOwnership(userId, id, 'DEVELOPER', 'apps:delete');
     const slug = slugify(app.name);
     const server = await resolveAppServer(this.prisma, id);
 

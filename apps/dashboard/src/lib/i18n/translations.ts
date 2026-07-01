@@ -65,6 +65,8 @@ export const translations: Record<string, Record<string, string>> = {
     'members.none': 'No members yet',
     'members.removeConfirm': 'Remove this member from the project?',
     'members.rolePermissions': 'Role permissions',
+    'roles.title': 'Custom roles', 'roles.subtitle': 'Reusable roles with a fine-grained permission grid. Assign them to members instead of a plain role.', 'roles.new': 'New role', 'roles.name': 'Role name', 'roles.baseRole': 'Base role', 'roles.base': 'base', 'roles.noCustom': 'No custom role', 'roles.created': 'Custom role created', 'roles.updated': 'Custom role updated', 'roles.deleted': 'Custom role deleted', 'roles.permCount': '{n} permission(s)', 'roles.memberCount': '{n} member(s)',
+    'roles.resource.apps': 'Applications', 'roles.resource.databases': 'Databases', 'roles.resource.domains': 'Domains', 'roles.resource.backups': 'Backups', 'roles.resource.files': 'Files', 'roles.resource.sftp': 'SFTP', 'roles.resource.monitoring': 'Monitoring', 'roles.resource.email': 'Email', 'roles.resource.marketplace': 'Marketplace', 'roles.resource.deployments': 'Deployments',
     'members.role.OWNER': 'OWNER', 'members.role.ADMIN': 'ADMIN', 'members.role.DEVELOPER': 'DEVELOPER', 'members.role.VIEWER': 'VIEWER',
     'members.roleDesc.OWNER': 'full control, transfers, project deletion',
     'members.roleDesc.ADMIN': 'manage members (except OWNER), manage all resources',
@@ -697,7 +699,8 @@ export const translations: Record<string, Record<string, string>> = {
 
     // ── admin ──────────────────────────────────────────────────────
     'admin.title': 'Admin',
-    'admin.tab.overview': 'Overview', 'admin.tab.users': 'Users', 'admin.tab.settings': 'Settings', 'admin.tab.audit': 'Audit', 'admin.tab.system': 'System config', 'admin.tab.infrastructure': 'Infrastructure', 'admin.tab.updates': 'Updates',
+    'admin.tab.overview': 'Overview', 'admin.tab.users': 'Users', 'admin.tab.projects': 'Projects', 'admin.tab.settings': 'Settings', 'admin.tab.audit': 'Audit', 'admin.tab.system': 'System config', 'admin.tab.infrastructure': 'Infrastructure', 'admin.tab.updates': 'Updates',
+    'admin.projects.search': 'Search projects or owner…', 'admin.projects.name': 'Project', 'admin.projects.owner': 'Owner', 'admin.projects.apps': 'Apps', 'admin.projects.servers': 'Servers', 'admin.projects.open': 'Open', 'admin.projects.manage': 'Manage', 'admin.projects.none': 'No projects', 'admin.projects.counts': '{a} apps · {d} DBs · {m} members',
     'admin.totalUsers': 'Users', 'admin.activeDay': 'Active 24h', 'admin.totalProjects': 'Projects', 'admin.totalApps': 'Applications', 'admin.runningApps': 'Running', 'admin.errorApps': 'Errored', 'admin.totalDeployments': 'Deployments', 'admin.totalProviders': 'Git Providers',
     'admin.recentSignups': 'Recent Signups', 'admin.recentSignupsDesc': 'Last 5 user registrations', 'admin.noSignups': 'No signups yet.',
     'admin.searchUser': 'Search by email / name', 'admin.allRoles': 'All roles', 'admin.allStatuses': 'All statuses', 'admin.createUser': 'Create User', 'admin.user': 'User', 'admin.role': 'Role', 'admin.status': 'Status', 'admin.resources': 'Resources', 'admin.lastLogin': 'Last login', 'admin.actions': 'Actions',
@@ -1502,6 +1505,8 @@ export const translations: Record<string, Record<string, string>> = {
     'members.none': 'Aucun membre',
     'members.removeConfirm': 'Retirer ce membre du projet ?',
     'members.rolePermissions': 'Permissions des rôles',
+    'roles.title': 'Rôles personnalisés', 'roles.subtitle': 'Rôles réutilisables avec une grille de permissions fine. Attribuez-les aux membres au lieu d\'un rôle simple.', 'roles.new': 'Nouveau rôle', 'roles.name': 'Nom du rôle', 'roles.baseRole': 'Rôle de base', 'roles.base': 'base', 'roles.noCustom': 'Aucun rôle personnalisé', 'roles.created': 'Rôle personnalisé créé', 'roles.updated': 'Rôle personnalisé mis à jour', 'roles.deleted': 'Rôle personnalisé supprimé', 'roles.permCount': '{n} permission(s)', 'roles.memberCount': '{n} membre(s)',
+    'roles.resource.apps': 'Applications', 'roles.resource.databases': 'Bases de données', 'roles.resource.domains': 'Domaines', 'roles.resource.backups': 'Sauvegardes', 'roles.resource.files': 'Fichiers', 'roles.resource.sftp': 'SFTP', 'roles.resource.monitoring': 'Monitoring', 'roles.resource.email': 'Email', 'roles.resource.marketplace': 'Marketplace', 'roles.resource.deployments': 'Déploiements',
     'members.role.OWNER': 'PROPRIÉTAIRE', 'members.role.ADMIN': 'ADMIN', 'members.role.DEVELOPER': 'DÉVELOPPEUR', 'members.role.VIEWER': 'LECTEUR',
     'members.roleDesc.OWNER': "contrôle total, transferts, suppression du projet",
     'members.roleDesc.ADMIN': "gérer les membres (sauf PROPRIÉTAIRE), gérer toutes les ressources",
@@ -2134,7 +2139,8 @@ export const translations: Record<string, Record<string, string>> = {
 
     // ── admin ──────────────────────────────────────────────────────
     'admin.title': 'Admin',
-    'admin.tab.overview': "Vue d'ensemble", 'admin.tab.users': 'Utilisateurs', 'admin.tab.settings': 'Paramètres', 'admin.tab.audit': 'Audit', 'admin.tab.system': 'Config système', 'admin.tab.infrastructure': 'Infrastructure', 'admin.tab.updates': 'Mises à jour',
+    'admin.tab.overview': "Vue d'ensemble", 'admin.tab.users': 'Utilisateurs', 'admin.tab.projects': 'Projets', 'admin.tab.settings': 'Paramètres', 'admin.tab.audit': 'Audit', 'admin.tab.system': 'Config système', 'admin.tab.infrastructure': 'Infrastructure', 'admin.tab.updates': 'Mises à jour',
+    'admin.projects.search': 'Rechercher projet ou propriétaire…', 'admin.projects.name': 'Projet', 'admin.projects.owner': 'Propriétaire', 'admin.projects.apps': 'Apps', 'admin.projects.servers': 'Serveurs', 'admin.projects.open': 'Ouvrir', 'admin.projects.manage': 'Gérer', 'admin.projects.none': 'Aucun projet', 'admin.projects.counts': '{a} apps · {d} BDD · {m} membres',
     'admin.totalUsers': 'Utilisateurs', 'admin.activeDay': 'Actifs 24h', 'admin.totalProjects': 'Projets', 'admin.totalApps': 'Applications', 'admin.runningApps': 'En cours', 'admin.errorApps': 'En erreur', 'admin.totalDeployments': 'Déploiements', 'admin.totalProviders': 'Providers Git',
     'admin.recentSignups': 'Inscriptions récentes', 'admin.recentSignupsDesc': '5 dernières inscriptions', 'admin.noSignups': "Aucune inscription pour l'instant.",
     'admin.searchUser': 'Recherche par email / nom', 'admin.allRoles': 'Tous les rôles', 'admin.allStatuses': 'Tous les statuts', 'admin.createUser': 'Créer un utilisateur', 'admin.user': 'Utilisateur', 'admin.role': 'Rôle', 'admin.status': 'Statut', 'admin.resources': 'Ressources', 'admin.lastLogin': 'Dernière connexion', 'admin.actions': 'Actions',

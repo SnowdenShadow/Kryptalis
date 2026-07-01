@@ -114,6 +114,20 @@ export class AdminController {
     });
   }
 
+  @Get('projects')
+  @ApiOperation({ summary: 'List ALL projects across the platform (admin)' })
+  listAllProjects(
+    @Query('search') search?: string,
+    @Query('skip') skip?: string,
+    @Query('take') take?: string,
+  ) {
+    return this.svc.listAllProjects({
+      search,
+      skip: skip ? parseInt(skip, 10) : undefined,
+      take: take ? parseInt(take, 10) : undefined,
+    });
+  }
+
   @Get('users/:id')
   @ApiOperation({ summary: 'Get a single user' })
   getUser(@Param('id') id: string) {

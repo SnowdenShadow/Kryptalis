@@ -262,6 +262,64 @@ export class AdminService implements OnModuleInit, OnModuleDestroy {
     return { total, users };
   }
 
+  /**
+   * Platform-wide project list for the admin console. Every project across all
+   * users, with owner, counts (apps/dbs/members), and the distinct servers its
+   * apps run on (so an admin sees the LOCAL/MULTI spread at a glance). Admins
+   * are already implicit OWNER on every project, so they can open + manage any
+   * of these through the normal project routes.
+   */
+  async listAllProjects(opts: { search?: string; skip?: number; take?: number }) {
+    const where: any = {};
+    if (opts.search) {
+      where.OR = [
+        { name: { contains: opts.search, mode: 'insensitive' } },
+        { user: { email: { contains: opts.search, mode: 'insensitive' } } },
+      ];
+    }
+    const [total, projects] = await Promise.all([
+      this.prisma.project.count({ where }),
+      this.prisma.project.findMany({
+        where,
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          createdAt: true,
+          user: { select: { id: true, name: true, email: true } },
+          _count: { select: { applications: true, databases: true, members: true, domains: true } },
+          applications: {
+            select: {
+              status: true,
+              server: { select: { id: true, name: true, host: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: opts.skip ?? 0,
+        take: Math.min(opts.take ?? 50, 200),
+      }),
+    ]);
+
+    // Collapse each project's apps into a running count + distinct server list
+    // so the client renders a compact row without shipping every app.
+    const rows = projects.map((p) => {
+      const running = p.applications.filter((a) => a.status === 'RUNNING').length;
+      const serverMap = new Map<string, { id: string; name: string; host: string }>();
+      for (const a of p.applications) {
+        if (a.server?.id) serverMap.set(a.server.id, a.server as any);
+      }
+      const { applications, ...rest } = p;
+      void applications;
+      return {
+        ...rest,
+        runningApps: running,
+        servers: [...serverMap.values()],
+      };
+    });
+    return { total, projects: rows };
+  }
+
   async getUser(id: string) {
     const user = await this.prisma.user.findUnique({
       where: { id },

@@ -93,7 +93,7 @@ export class ApplicationOpsService implements OnModuleInit {
   // ── lifecycle ──────────────────────────────────────────────────────
 
   async start(userId: string, id: string) {
-    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER');
+    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER', 'apps:restart');
     const slug = slugify(app.name);
     const server = await resolveAppServer(this.prisma, id);
     const appDir = resolveAppDir(slug, id);
@@ -114,7 +114,7 @@ export class ApplicationOpsService implements OnModuleInit {
   }
 
   async stop(userId: string, id: string) {
-    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER');
+    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER', 'apps:restart');
     const slug = slugify(app.name);
     const server = await resolveAppServer(this.prisma, id);
     const appDir = resolveAppDir(slug, id);
@@ -128,7 +128,7 @@ export class ApplicationOpsService implements OnModuleInit {
   }
 
   async restart(userId: string, id: string) {
-    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER');
+    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER', 'apps:restart');
     const slug = slugify(app.name);
     const server = await resolveAppServer(this.prisma, id);
     const appDir = resolveAppDir(slug, id);
@@ -272,7 +272,7 @@ export class ApplicationOpsService implements OnModuleInit {
   }
 
   async redeploy(userId: string, id: string) {
-    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER');
+    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER', 'apps:deploy');
 
     await this.assertNoInflightDeployment(id);
 
@@ -579,7 +579,7 @@ export class ApplicationOpsService implements OnModuleInit {
    * (force-pushed-away commits will fail with a clear log).
    */
   async rollback(userId: string, id: string, deploymentId: string) {
-    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER');
+    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER', 'apps:deploy');
 
     if (!app.gitUrl) {
       throw new BadRequestException(
@@ -737,7 +737,7 @@ export class ApplicationOpsService implements OnModuleInit {
 
   // shell-free exec, no string interpolation
   async execCommand(userId: string, id: string, command: string) {
-    const app = await assertAppOwnership(this.prisma, userId, id);
+    const app = await assertAppOwnership(this.prisma, userId, id, 'DEVELOPER', 'apps:exec');
     const slug = slugify(app.name);
     // Prefer the container name the deploy ACTUALLY persisted (app.containerName)
     // over the on-disk heuristic. The heuristic (resolveContainerName) appends a

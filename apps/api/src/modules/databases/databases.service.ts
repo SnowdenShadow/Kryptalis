@@ -29,6 +29,7 @@ import {
   assertProjectAccess,
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
+import { assertPermission } from '../../common/rbac/project-permissions';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { DBS_DIR } from '../../common/paths';
 import { AgentService } from '../agent/agent.service';
@@ -91,17 +92,23 @@ export class DatabasesService {
     userId: string,
     id: string,
     minRole: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER' = 'VIEWER',
+    permission?: string,
   ) {
     const db = await this.prisma.database.findUnique({ where: { id } });
     if (!db) throw new NotFoundException('Database not found');
-    if (db.projectId) {
-      await assertProjectAccess(this.prisma, userId, db.projectId, minRole);
-    } else if (db.applicationId) {
+    // Resolve the owning project (direct, or via the parent app) so both the
+    // rank check and the fine-grained permission check target it.
+    let projectId = db.projectId as string | null;
+    if (!projectId && db.applicationId) {
       const app = await this.prisma.application.findUnique({
         where: { id: db.applicationId },
         select: { projectId: true },
       });
-      if (app) await assertProjectAccess(this.prisma, userId, app.projectId, minRole);
+      projectId = app?.projectId ?? null;
+    }
+    if (projectId) {
+      await assertProjectAccess(this.prisma, userId, projectId, minRole);
+      if (permission) await assertPermission(this.prisma, userId, projectId, permission);
     } else {
       // unlinked db (legacy) — only ADMIN or above can touch
       const me = await this.prisma.user.findUnique({
@@ -141,6 +148,7 @@ export class DatabasesService {
       throw new BadRequestException('projectId (or applicationId) is required');
     }
     await assertProjectAccess(this.prisma, userId, projectId, 'DEVELOPER');
+    await assertPermission(this.prisma, userId, projectId, 'databases:create');
 
     const parentProject = await this.prisma.project.findUnique({
       where: { id: projectId },
@@ -616,7 +624,7 @@ export class DatabasesService {
   }
 
   async remove(userId: string, id: string) {
-    const db = await this.assertDbAccess(userId, id, 'ADMIN');
+    const db = await this.assertDbAccess(userId, id, 'DEVELOPER', 'databases:delete');
     const server = await this.resolveDbServer(id);
     const autoImported = (db as any).autoImported as boolean;
 

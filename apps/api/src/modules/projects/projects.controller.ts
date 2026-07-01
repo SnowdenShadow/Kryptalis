@@ -17,6 +17,7 @@ import { UpdateProjectDto } from './dto/update-project.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
+import { RESOURCES, ALL_PERMISSIONS } from '../../common/rbac/permissions';
 import type { ProjectRole } from '@prisma/client';
 
 @ApiTags('Projects')
@@ -36,6 +37,14 @@ export class ProjectsController {
   @ApiOperation({ summary: 'List all projects' })
   findAll(@CurrentUser('id') userId: string) {
     return this.projectsService.findAll(userId);
+  }
+
+  // Static permission catalog for the custom-role editor UI. Placed before the
+  // `:id` routes so "rbac-catalog" isn't captured as a project id.
+  @Get('rbac-catalog')
+  @ApiOperation({ summary: 'Permission catalog (resources + actions) for custom roles' })
+  rbacCatalog() {
+    return { resources: RESOURCES, all: ALL_PERMISSIONS };
   }
 
   @Get(':id')
@@ -115,6 +124,62 @@ export class ProjectsController {
   @ApiOperation({ summary: 'Get my role on this project' })
   myRole(@Param('id') id: string, @CurrentUser('id') userId: string) {
     return this.projectsService.getMyRole(id, userId);
+  }
+
+  @Get(':id/my-permissions')
+  @ApiOperation({ summary: 'My effective fine-grained permissions on this project' })
+  myPermissions(@Param('id') id: string, @CurrentUser('id') userId: string) {
+    return this.projectsService.getMyPermissions(id, userId);
+  }
+
+  // ── Custom roles ────────────────────────────────────────────────────
+
+  @Get(':id/roles')
+  @ApiOperation({ summary: 'List the project\'s custom roles' })
+  listCustomRoles(@Param('id') id: string, @CurrentUser('id') userId: string) {
+    return this.projectsService.listCustomRoles(id, userId);
+  }
+
+  @Post(':id/roles')
+  @ApiOperation({ summary: 'Create a custom role (ADMIN+)' })
+  createCustomRole(
+    @Param('id') id: string,
+    @CurrentUser('id') userId: string,
+    @Body() body: { name: string; baseRole?: ProjectRole; permissions?: string[] },
+  ) {
+    return this.projectsService.createCustomRole(id, userId, body);
+  }
+
+  @Patch(':id/roles/:roleId')
+  @ApiOperation({ summary: 'Update a custom role (ADMIN+)' })
+  updateCustomRole(
+    @Param('id') id: string,
+    @Param('roleId') roleId: string,
+    @CurrentUser('id') userId: string,
+    @Body() body: { name?: string; baseRole?: ProjectRole; permissions?: string[] },
+  ) {
+    return this.projectsService.updateCustomRole(id, userId, roleId, body);
+  }
+
+  @Delete(':id/roles/:roleId')
+  @ApiOperation({ summary: 'Delete a custom role (ADMIN+)' })
+  deleteCustomRole(
+    @Param('id') id: string,
+    @Param('roleId') roleId: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.projectsService.deleteCustomRole(id, userId, roleId);
+  }
+
+  @Patch(':id/members/:memberId/custom-role')
+  @ApiOperation({ summary: 'Assign or clear a member\'s custom role (ADMIN+)' })
+  assignCustomRole(
+    @Param('id') id: string,
+    @Param('memberId') memberId: string,
+    @CurrentUser('id') userId: string,
+    @Body('roleId') roleId: string | null,
+  ) {
+    return this.projectsService.assignCustomRole(id, userId, memberId, roleId ?? null);
   }
 
   @Post(':id/members')
