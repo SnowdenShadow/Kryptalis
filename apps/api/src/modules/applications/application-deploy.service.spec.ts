@@ -170,9 +170,12 @@ function makePrisma() {
     },
     application: {
       update: vi.fn().mockResolvedValue({}),
+      // The app carries its OWN serverId/server now (a project has no server).
+      // resolveAppServer selects app.server; the DB-import path reads app.serverId.
       findUnique: vi.fn().mockResolvedValue({
         projectId: 'proj1',
-        project: { serverId: 'srv1', server: { id: 'srv1', host: 'localhost' } },
+        serverId: 'srv1',
+        server: { id: 'srv1', host: 'localhost' },
         domains: [],
       }),
     },
@@ -696,7 +699,8 @@ describe('runDeploy — compose path', () => {
     const { service, prisma } = makeService();
     prisma.application.findUnique.mockResolvedValue({
       projectId: 'proj1',
-      project: { serverId: 'srv1', server: { id: 'srv1', host: 'localhost' } },
+      serverId: 'srv1',
+      server: { id: 'srv1', host: 'localhost' },
       domains: [{ id: 'd1' }],
     });
 
@@ -1201,9 +1205,11 @@ describe('runDeploy — build failure & .prev snapshot rollback', () => {
 describe('runDeploy — remote server delegation', () => {
   function makeRemote() {
     const ctx = makeService();
+    // The app names its OWN server now — resolveAppServer reads app.server.
     ctx.prisma.application.findUnique.mockResolvedValue({
       projectId: 'proj1',
-      project: { serverId: 'srv-remote', server: { id: 'srv-remote', host: '203.0.113.7' } },
+      serverId: 'srv-remote',
+      server: { id: 'srv-remote', host: '203.0.113.7' },
       domains: [],
     });
     return ctx;
@@ -1392,7 +1398,6 @@ describe('runPhpSiteDeploy', () => {
     prisma.application.findUnique.mockResolvedValue({
       projectId: 'proj1', serverId: 'remoteSrv',
       server: { id: 'remoteSrv', host: '203.0.113.7' },
-      project: { serverId: 'remoteSrv', server: { id: 'remoteSrv', host: '203.0.113.7' } },
       domains: [],
     });
     await service.runPhpSiteDeploy('dep1', APP_ID, APP_NAME, '8.3', {});
