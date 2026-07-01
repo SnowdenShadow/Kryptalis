@@ -126,9 +126,9 @@ export default function ApplicationsPage() {
   const [search, setSearch] = useState('');
   const [filterProject, setFilterProject] = useState('');
   const [filterStatus, setFilterStatus] = useState<'' | 'RUNNING' | 'STOPPED' | 'ERROR' | 'DEPLOYING'>('');
-  // Type filter. PHP sites (framework PHP_SITE) used to have their own page;
-  // they're now surfaced here via `?type=php` (the old /dashboard/php route
-  // redirects to it), alongside web (git-built) and container-based apps.
+  // Type filter. PHP sites (framework PHP_SITE) are managed entirely from here
+  // now — no separate page. `?type=php` deep-links straight to the PHP filter,
+  // alongside web (git-built) and container-based apps.
   const searchParams = useSearchParams();
   const [filterType, setFilterType] = useState<'' | 'php' | 'web' | 'container'>(
     searchParams.get('type') === 'php' ? 'php' : '',
