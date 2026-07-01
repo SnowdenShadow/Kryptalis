@@ -52,6 +52,11 @@ export function SystemConfigTab() {
       // Public URLs.
       public_dashboard_url: snapshot.public_dashboard_url || '',
       public_api_url: snapshot.public_api_url || '',
+      // Gitea/Forgejo OAuth app (self-hosted). client_secret is a secret → blank.
+      gitea_oauth_base_url: snapshot.gitea_oauth_base_url || '',
+      gitea_oauth_provider: snapshot.gitea_oauth_provider || 'GITEA',
+      gitea_oauth_client_id: snapshot.gitea_oauth_client_id || '',
+      gitea_oauth_client_secret: '',
       // Retention windows (days).
       metric_retention_days: snapshot.metric_retention_days ?? '',
       deployment_retention_days: snapshot.deployment_retention_days ?? '',
@@ -89,7 +94,7 @@ export function SystemConfigTab() {
     for (const [k, v] of Object.entries(form)) {
       const stored = snapshot[k];
       // For secrets, blank means "no change", anything else is a new value.
-      if (k === 'smtp_pass' || k === 'backup_encryption_key' || k === 's3_secret_key') {
+      if (k === 'smtp_pass' || k === 'backup_encryption_key' || k === 's3_secret_key' || k === 'gitea_oauth_client_secret') {
         if (v !== '' && v !== undefined) payload[k] = v;
         continue;
       }
@@ -353,6 +358,62 @@ export function SystemConfigTab() {
               <SmtpHint active={!!snapshot.s3_secret_key} />
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* ─── Gitea / Forgejo OAuth ────────────────────────────── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <KeyRound size={18} /> {t('admin.sys.giteaTitle')}
+          </CardTitle>
+          <CardDescription>{t('admin.sys.giteaDesc')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="gitea_oauth_provider">{t('admin.sys.giteaProvider')}</Label>
+              <select
+                id="gitea_oauth_provider"
+                className="flex h-10 w-full rounded-lg border border-zinc-700/70 bg-zinc-950/40 px-3 text-sm"
+                value={form.gitea_oauth_provider || 'GITEA'}
+                onChange={(e) => set('gitea_oauth_provider', e.target.value)}
+              >
+                <option value="GITEA">Gitea</option>
+                <option value="FORGEJO">Forgejo</option>
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="gitea_oauth_base_url">{t('admin.sys.giteaBaseUrl')}</Label>
+              <Input
+                id="gitea_oauth_base_url"
+                placeholder="https://git.example.com"
+                value={form.gitea_oauth_base_url || ''}
+                onChange={(e) => set('gitea_oauth_base_url', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="gitea_oauth_client_id">{t('admin.sys.giteaClientId')}</Label>
+              <Input
+                id="gitea_oauth_client_id"
+                placeholder="abcdef12-3456-…"
+                value={form.gitea_oauth_client_id || ''}
+                onChange={(e) => set('gitea_oauth_client_id', e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="gitea_oauth_client_secret">{t('admin.sys.giteaClientSecret')}</Label>
+              <Input
+                id="gitea_oauth_client_secret"
+                type="password"
+                placeholder="••••••••"
+                value={form.gitea_oauth_client_secret || ''}
+                onChange={(e) => set('gitea_oauth_client_secret', e.target.value)}
+              />
+              <SmtpHint active={!!snapshot.gitea_oauth_client_secret} />
+            </div>
+          </div>
+          <p className="text-[11px] text-muted-foreground">{t('admin.sys.giteaHint')}</p>
         </CardContent>
       </Card>
 

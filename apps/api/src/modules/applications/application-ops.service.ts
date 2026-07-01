@@ -36,7 +36,8 @@ import {
   projectNetworkName,
   APPS_DIR,
 } from './applications.helpers';
-import { assertCloneHostAllowed } from '../git-providers/git-providers.service';
+import { assertCloneHostAllowed, SELF_HOSTED_PROVIDERS } from '../git-providers/git-providers.service';
+import { GitOAuthService } from '../git-providers/git-oauth.service';
 import { assertComposeSafe } from '../../common/compose/compose-safety';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -60,6 +61,7 @@ export class ApplicationOpsService implements OnModuleInit {
     private deploy: ApplicationDeployService,
     private env: ApplicationEnvService,
     private apps: ApplicationRepository,
+    private gitOAuth: GitOAuthService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -250,7 +252,22 @@ export class ApplicationOpsService implements OnModuleInit {
     // stored a gitUrl pointing at an attacker host and exfiltrate the token.
     // For self-hosted Gitea/Forgejo the host is pinned to the provider's baseUrl.
     if (app.gitUrl) assertCloneHostAllowed(gp.provider, app.gitUrl, gp.baseUrl);
-    return this.deploy.buildAuthHeader(gp.provider, this.encryption.decrypt(gp.token));
+    // A self-hosted OAUTH access token expires ~1h; refresh before the clone so
+    // an idle app doesn't fail auth mid-deploy. PAT/SaaS rows pass through.
+    let token: string;
+    if (gp.authMode === 'OAUTH' && SELF_HOSTED_PROVIDERS.has(gp.provider)) {
+      const refreshed = await this.gitOAuth.refreshGiteaToken({
+        id: gp.id,
+        token: gp.token,
+        refreshToken: gp.refreshToken,
+        expiresAt: gp.expiresAt,
+        baseUrl: gp.baseUrl,
+      });
+      token = this.encryption.decrypt(refreshed.token);
+    } else {
+      token = this.encryption.decrypt(gp.token);
+    }
+    return this.deploy.buildAuthHeader(gp.provider, token);
   }
 
   async redeploy(userId: string, id: string) {

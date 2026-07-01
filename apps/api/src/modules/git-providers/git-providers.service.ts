@@ -1,8 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Inject, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { CreateGitProviderDto } from './dto/create-git-provider.dto';
 import { screenUrlLiteral, screenResolvedHost } from '../../common/net/ssrf-guard';
+import { GitOAuthService } from './git-oauth.service';
 
 export interface Repo {
   name: string;
@@ -136,6 +137,12 @@ export function assertCloneHostAllowed(
       throw new BadRequestException('Invalid provider base URL');
     }
     allowed = [bu.hostname.toLowerCase()];
+  } else if (provider && SELF_HOSTED_PROVIDERS.has(provider)) {
+    // Self-hosted provider with NO baseUrl → we have nothing to pin against.
+    // Refuse rather than fall through to the unpinned path (which would accept
+    // any public host and could exfiltrate the token). This shouldn't happen
+    // (create() requires a baseUrl) but is a defense-in-depth backstop.
+    throw new BadRequestException('Self-hosted provider is missing its base URL');
   } else if (provider) {
     allowed = PROVIDER_HOSTS[provider];
   }
@@ -167,11 +174,51 @@ export async function assertCloneHostResolvable(
   }
 }
 
+/**
+ * Full screen of a self-hosted provider base URL before we dispatch a
+ * token-bearing API request to it: HTTPS only, literal range check, AND
+ * DNS re-resolution (screenResolvedHost) to close the rebinding hole — a
+ * public hostname that resolves/rebinds to 169.254.169.254 / 127.0.0.1 /
+ * an RFC1918 host would otherwise receive the decrypted PAT and reflect the
+ * response back to the caller. Returns the normalized base (trailing slash
+ * trimmed). Throws BadRequestException on any violation.
+ */
+export async function screenGiteaBaseUrl(baseUrl: string | null | undefined): Promise<string> {
+  if (!baseUrl) {
+    throw new BadRequestException('Self-hosted provider is missing its base URL');
+  }
+  let bu: URL;
+  try {
+    bu = new URL(baseUrl);
+  } catch {
+    throw new BadRequestException('Invalid provider base URL');
+  }
+  if (bu.protocol !== 'https:') {
+    throw new BadRequestException('Provider base URL must use https');
+  }
+  const allowPrivate = gitHostsAllowPrivate();
+  if (isPrivateOrLoopbackHost(bu.hostname, allowPrivate)) {
+    throw new BadRequestException('Provider base URL host is not allowed');
+  }
+  const violation = await screenResolvedHost(baseUrl, {
+    allowedSchemes: ['https:'],
+    allowPrivate,
+  });
+  if (violation) {
+    throw new BadRequestException(`Provider base URL host is not allowed (${violation})`);
+  }
+  return baseUrl.replace(/\/+$/, '');
+}
+
 @Injectable()
 export class GitProvidersService {
   constructor(
     private prisma: PrismaService,
     private encryption: EncryptionService,
+    // forwardRef: git-oauth.service imports screenGiteaBaseUrl from this file,
+    // so the two services form a (harmless) import cycle Nest resolves lazily.
+    @Inject(forwardRef(() => GitOAuthService))
+    private oauth: GitOAuthService,
   ) {}
 
   /**
@@ -179,6 +226,34 @@ export class GitProvidersService {
    * EncryptionService prefix check; new rows are encrypted at-rest.
    */
   private getToken(gp: { token: string }): string {
+    return this.encryption.decrypt(gp.token);
+  }
+
+  /**
+   * Decrypt the token, first refreshing it if this is a self-hosted OAUTH row
+   * whose access token is stale (Gitea tokens expire ~1h). PAT rows and SaaS
+   * rows are returned as-is. Used by every self-hosted API call + the clone
+   * path so a long-idle connection doesn't 401 mid-deploy.
+   */
+  async getFreshToken(gp: {
+    id: string;
+    provider: string;
+    token: string;
+    authMode?: string | null;
+    refreshToken?: string | null;
+    expiresAt?: Date | null;
+    baseUrl?: string | null;
+  }): Promise<string> {
+    if (gp.authMode === 'OAUTH' && SELF_HOSTED_PROVIDERS.has(gp.provider)) {
+      const refreshed = await this.oauth.refreshGiteaToken({
+        id: gp.id,
+        token: gp.token,
+        refreshToken: gp.refreshToken ?? null,
+        expiresAt: gp.expiresAt ?? null,
+        baseUrl: gp.baseUrl ?? null,
+      });
+      return this.encryption.decrypt(refreshed.token);
+    }
     return this.encryption.decrypt(gp.token);
   }
 
@@ -196,50 +271,26 @@ export class GitProvidersService {
   }
 
   /**
-   * Resolve the API base for a provider. Self-hosted Gitea/Forgejo expose the
-   * GitHub-compatible REST API under `${baseUrl}/api/v1`. Every self-hosted
-   * call screens the baseUrl host first so we never fetch an unscreened host.
+   * Resolve the API base for a self-hosted provider. Gitea/Forgejo expose the
+   * GitHub-compatible REST API under `${baseUrl}/api/v1`. Screens the baseUrl
+   * host — literal AND DNS-resolved (rebinding) — before returning, so no
+   * token-bearing fetch ever reaches an unscreened/internal host.
    */
-  private giteaApiBase(gp: { provider: string; baseUrl: string | null }): string {
-    if (!gp.baseUrl) {
-      throw new BadRequestException('Self-hosted provider is missing its base URL');
-    }
-    let bu: URL;
-    try {
-      bu = new URL(gp.baseUrl);
-    } catch {
-      throw new BadRequestException('Invalid provider base URL');
-    }
-    if (bu.protocol !== 'https:') {
-      throw new BadRequestException('Provider base URL must use https');
-    }
-    if (isPrivateOrLoopbackHost(bu.hostname, gitHostsAllowPrivate())) {
-      throw new BadRequestException('Provider base URL host is not allowed');
-    }
-    return `${gp.baseUrl.replace(/\/+$/, '')}/api/v1`;
+  private async giteaApiBase(gp: { provider: string; baseUrl: string | null }): Promise<string> {
+    const base = await screenGiteaBaseUrl(gp.baseUrl);
+    return `${base}/api/v1`;
   }
 
   async create(userId: string, dto: CreateGitProviderDto) {
-    // Self-hosted providers require an instance base URL. Normalize + screen it
-    // (HTTPS, non-private unless opted in) BEFORE we send the token anywhere.
+    // Self-hosted providers require an instance base URL. Fully screen it
+    // (HTTPS, non-private unless opted in, AND DNS-resolved to close the
+    // rebinding hole) BEFORE we send the token anywhere.
     let baseUrl: string | null = null;
     if (SELF_HOSTED_PROVIDERS.has(dto.provider)) {
       if (!dto.baseUrl) {
         throw new BadRequestException('Gitea/Forgejo require the instance base URL');
       }
-      let bu: URL;
-      try {
-        bu = new URL(dto.baseUrl);
-      } catch {
-        throw new BadRequestException('Invalid provider base URL');
-      }
-      if (bu.protocol !== 'https:') {
-        throw new BadRequestException('Provider base URL must use https');
-      }
-      if (isPrivateOrLoopbackHost(bu.hostname, gitHostsAllowPrivate())) {
-        throw new BadRequestException('Provider base URL host is not allowed');
-      }
-      baseUrl = `${dto.baseUrl.replace(/\/+$/, '')}`;
+      baseUrl = await screenGiteaBaseUrl(dto.baseUrl);
     }
 
     const userInfo = await this.fetchUserInfo(dto.provider, dto.token, baseUrl);
@@ -321,7 +372,7 @@ export class GitProvidersService {
           }
         }
       } else if (SELF_HOSTED_PROVIDERS.has(gp.provider)) {
-        const apiBase = this.giteaApiBase(gp);
+        const apiBase = await this.giteaApiBase(gp);
         for (const file of files) {
           const res = await fetch(`${apiBase}/repos/${repoFullName}/contents/${encodeURIComponent(file)}?ref=${branch}`, {
             headers: { 'Authorization': `token ${this.getToken(gp)}` },
@@ -440,7 +491,7 @@ export class GitProvidersService {
         return { content: await res.text(), exists: true };
       }
       if (SELF_HOSTED_PROVIDERS.has(gp.provider)) {
-        const apiBase = this.giteaApiBase(gp);
+        const apiBase = await this.giteaApiBase(gp);
         const res = await fetch(`${apiBase}/repos/${repoFullName}/contents/${encodeURIComponent(filePath)}?ref=${branch}`, {
           headers: { 'Authorization': `token ${this.getToken(gp)}` },
           signal: AbortSignal.timeout(10_000),
@@ -459,12 +510,12 @@ export class GitProvidersService {
     if (!gp) throw new NotFoundException('Provider not found');
 
     try {
-      const token = this.getToken(gp);
+      const token = await this.getFreshToken(gp);
       if (gp.provider === 'GITHUB') return await this.fetchGitHubRepos(token);
       if (gp.provider === 'GITLAB') return await this.fetchGitLabRepos(token);
       if (gp.provider === 'BITBUCKET') return await this.fetchBitbucketRepos(token);
       if (SELF_HOSTED_PROVIDERS.has(gp.provider)) {
-        return await this.fetchGiteaRepos(this.giteaApiBase(gp), token);
+        return await this.fetchGiteaRepos(await this.giteaApiBase(gp), token);
       }
     } catch (err: any) {
       throw new BadRequestException(err.message || 'Failed to fetch repos');
@@ -481,7 +532,7 @@ export class GitProvidersService {
   async listBranches(id: string, userId: string, repoFullName: string): Promise<Branch[]> {
     const gp = await this.prisma.gitProvider.findFirst({ where: { id, userId } });
     if (!gp) throw new NotFoundException('Provider not found');
-    const token = this.getToken(gp);
+    const token = await this.getFreshToken(gp);
     // Cap the page walk so a repo with thousands of branches can't hang the
     // request (10 pages × 100 = 1000 branches, far past any picker's usefulness).
     const MAX_PAGES = 10;
@@ -539,7 +590,7 @@ export class GitProvidersService {
         return names.map((name) => ({ name, isDefault: name === def }));
       }
       if (SELF_HOSTED_PROVIDERS.has(gp.provider)) {
-        const apiBase = this.giteaApiBase(gp);
+        const apiBase = await this.giteaApiBase(gp);
         const names: string[] = [];
         for (let page = 1; page <= MAX_PAGES; page++) {
           const res = await fetch(
@@ -620,7 +671,7 @@ export class GitProvidersService {
   ): Promise<{ created: boolean; alreadyExists: boolean }> {
     const gp = await this.prisma.gitProvider.findFirst({ where: { id, userId } });
     if (!gp) throw new NotFoundException('Provider not found');
-    const token = this.getToken(gp);
+    const token = await this.getFreshToken(gp);
 
     try {
       if (gp.provider === 'GITHUB') {
@@ -733,7 +784,7 @@ export class GitProvidersService {
       }
 
       if (SELF_HOSTED_PROVIDERS.has(gp.provider)) {
-        const apiBase = this.giteaApiBase(gp);
+        const apiBase = await this.giteaApiBase(gp);
         const base = `${apiBase}/repos/${repoFullName}/hooks`;
         const headers = { Authorization: `token ${token}` };
         // Gitea/Forgejo hook shape mirrors GitHub's: type 'gitea', config map.
@@ -826,9 +877,10 @@ export class GitProvidersService {
         return { username: data.username || data.display_name, avatarUrl: data.links?.avatar?.href || '' };
       }
       if (SELF_HOSTED_PROVIDERS.has(provider)) {
-        // Gitea/Forgejo mirror the GitHub REST API under /api/v1. The baseUrl
-        // was already screened at create()/giteaApiBase time.
-        const apiBase = `${(baseUrl || '').replace(/\/+$/, '')}/api/v1`;
+        // Gitea/Forgejo mirror the GitHub REST API under /api/v1. Screen the
+        // baseUrl (literal + DNS-resolved) here too — defense in depth, so this
+        // token-bearing fetch is safe regardless of the caller.
+        const apiBase = `${await screenGiteaBaseUrl(baseUrl)}/api/v1`;
         const res = await fetch(`${apiBase}/user`, {
           headers: { 'Authorization': `token ${token}` },
           signal: AbortSignal.timeout(10_000),

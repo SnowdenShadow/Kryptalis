@@ -2,6 +2,19 @@ import 'reflect-metadata';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 
+// DNS mock so screenResolvedHost is deterministic. Default: hosts resolve to a
+// public IP (203.0.113.10). Tests override dnsMap to point a host at a private
+// address and assert the rebinding screen blocks it.
+let dnsMap: Record<string, string> = {};
+vi.mock('dns', () => ({
+  promises: {
+    lookup: vi.fn(async (host: string) => {
+      const ip = dnsMap[host] ?? '203.0.113.10';
+      return [{ address: ip, family: ip.includes(':') ? 6 : 4 }];
+    }),
+  },
+}));
+
 import { GitProvidersService, repoFullNameFromUrl } from './git-providers.service';
 import { GitOAuthService } from './git-oauth.service';
 
@@ -51,28 +64,39 @@ function makeEncryption() {
   };
 }
 
+function makeSystemConfig(values: Record<string, any> = {}) {
+  return {
+    get: vi.fn((key: string, _env?: string, def?: any) => values[key] ?? def),
+  };
+}
+
 function makeProvidersService() {
   const prisma = makePrisma();
   const encryption = makeEncryption();
-  const service = new GitProvidersService(prisma as any, encryption as any);
-  return { service, prisma, encryption };
+  // OAuth refresh is a no-op passthrough for these tests (PAT rows).
+  const oauth = { refreshGiteaToken: vi.fn(async (gp: any) => ({ token: gp.token })) };
+  const service = new GitProvidersService(prisma as any, encryption as any, oauth as any);
+  return { service, prisma, encryption, oauth };
 }
 
-function makeOAuthService() {
+function makeOAuthService(configValues: Record<string, any> = {}) {
   const prisma = makePrisma();
   const encryption = makeEncryption();
-  const service = new GitOAuthService(prisma as any, encryption as any);
-  return { service, prisma, encryption };
+  const systemConfig = makeSystemConfig(configValues);
+  const service = new GitOAuthService(prisma as any, encryption as any, systemConfig as any);
+  return { service, prisma, encryption, systemConfig };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   routes = [];
+  dnsMap = {};
   process.env.GITHUB_OAUTH_CLIENT_ID = 'Iv1.testclient';
 });
 
 afterEach(() => {
   delete process.env.GITHUB_OAUTH_CLIENT_ID;
+  delete process.env.ALLOW_PRIVATE_GIT_HOSTS;
 });
 
 // ── GitOAuthService: configuration gate ──────────────────────────────
@@ -906,5 +930,147 @@ describe('assertCloneHostAllowed with baseUrl (self-hosted pinning)', () => {
     expect(() =>
       service.assertCloneHostAllowed('GITEA', 'https://evil.example.com/me/app.git', 'https://git.acme.com'),
     ).toThrow(/does not match/i);
+  });
+});
+
+// ── A2: SSRF DNS-rebinding screen on self-hosted API calls ───────────
+
+describe('self-hosted baseUrl SSRF (DNS-rebinding)', () => {
+  it('refuses a public baseUrl that RESOLVES to cloud metadata before any token fetch', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITEA', token: 'enc:t', baseUrl: 'https://rebind.attacker.com',
+    });
+    dnsMap['rebind.attacker.com'] = '169.254.169.254'; // metadata
+    await expect(service.listBranches('gp1', 'u1', 'me/app')).rejects.toThrow(/not allowed/i);
+    // No token-bearing request ever went out.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a baseUrl that resolves to a private RFC1918 host by default', async () => {
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'FORGEJO', token: 'enc:t', baseUrl: 'https://git.corp.example',
+    });
+    dnsMap['git.corp.example'] = '10.1.2.3';
+    await expect(service.listRepos('gp1', 'u1')).rejects.toThrow(/not allowed/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('allows a private-resolving baseUrl when ALLOW_PRIVATE_GIT_HOSTS=true', async () => {
+    process.env.ALLOW_PRIVATE_GIT_HOSTS = 'true';
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITEA', token: 'enc:t', baseUrl: 'https://git.corp.example',
+    });
+    dnsMap['git.corp.example'] = '10.1.2.3';
+    onUrl('git.corp.example/api/v1/repos/me/app/branches', [{ name: 'main' }]);
+    onUrl('git.corp.example/api/v1/repos/me/app', { default_branch: 'main' });
+    const res = await service.listBranches('gp1', 'u1', 'me/app');
+    expect(res).toEqual([{ name: 'main', isDefault: true }]);
+  });
+
+  it('STILL refuses metadata even with ALLOW_PRIVATE_GIT_HOSTS=true', async () => {
+    process.env.ALLOW_PRIVATE_GIT_HOSTS = 'true';
+    const { service, prisma } = makeProvidersService();
+    prisma.gitProvider.findFirst.mockResolvedValue({
+      id: 'gp1', provider: 'GITEA', token: 'enc:t', baseUrl: 'https://sneaky.example',
+    });
+    dnsMap['sneaky.example'] = '169.254.169.254';
+    await expect(service.listRepos('gp1', 'u1')).rejects.toThrow(/not allowed/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ── B: Gitea OAuth (Authorization Code) ──────────────────────────────
+
+describe('Gitea OAuth', () => {
+  const CONFIG = {
+    gitea_oauth_base_url: 'https://git.acme.com',
+    gitea_oauth_provider: 'GITEA',
+    gitea_oauth_client_id: 'cid',
+    gitea_oauth_client_secret: 'csecret',
+  };
+
+  beforeEach(() => {
+    process.env.PUBLIC_API_URL = 'https://kryptalis.example.com';
+  });
+  afterEach(() => {
+    delete process.env.PUBLIC_API_URL;
+  });
+
+  it('giteaOAuthStatus reflects config without leaking the secret', () => {
+    const { service } = makeOAuthService(CONFIG);
+    expect(service.giteaOAuthStatus()).toEqual({
+      configured: true,
+      provider: 'GITEA',
+      baseUrl: 'https://git.acme.com',
+    });
+    // Not configured when a piece is missing.
+    const { service: s2 } = makeOAuthService({ ...CONFIG, gitea_oauth_client_secret: undefined });
+    expect(s2.giteaOAuthStatus().configured).toBe(false);
+  });
+
+  it('startGiteaOAuth builds the authorize URL with a state + redirect_uri', async () => {
+    const { service } = makeOAuthService(CONFIG);
+    const { url } = await service.startGiteaOAuth('u1');
+    const u = new URL(url);
+    expect(u.origin + u.pathname).toBe('https://git.acme.com/login/oauth/authorize');
+    expect(u.searchParams.get('client_id')).toBe('cid');
+    expect(u.searchParams.get('response_type')).toBe('code');
+    expect(u.searchParams.get('redirect_uri')).toBe(
+      'https://kryptalis.example.com/api/git-providers/oauth/gitea/callback',
+    );
+    expect(u.searchParams.get('state')).toBeTruthy();
+  });
+
+  it('handleGiteaCallback rejects an unknown/expired state (CSRF)', async () => {
+    const { service } = makeOAuthService(CONFIG);
+    await expect(service.handleGiteaCallback('code', 'never-issued')).rejects.toThrow(/state/i);
+  });
+
+  it('handleGiteaCallback exchanges the code and upserts an OAUTH row (single-use state)', async () => {
+    const { service, prisma, encryption } = makeOAuthService(CONFIG);
+    const { url } = await service.startGiteaOAuth('u1');
+    const state = new URL(url).searchParams.get('state')!;
+
+    onUrl('git.acme.com/login/oauth/access_token', {
+      access_token: 'gt_access', refresh_token: 'gt_refresh', expires_in: 3600, scope: 'read:user',
+    });
+    onUrl('git.acme.com/api/v1/user', { login: 'octo', avatar_url: 'https://a/o.png' });
+
+    const res = await service.handleGiteaCallback('the_code', state);
+    expect(res).toEqual({ userId: 'u1' });
+    expect(encryption.encrypt).toHaveBeenCalledWith('gt_access');
+    const created = prisma.gitProvider.create.mock.calls[0][0].data;
+    expect(created).toMatchObject({
+      userId: 'u1', provider: 'GITEA', authMode: 'OAUTH',
+      baseUrl: 'https://git.acme.com', token: 'enc:gt_access', username: 'octo',
+    });
+    // state is single-use → replaying the same one now fails.
+    await expect(service.handleGiteaCallback('the_code', state)).rejects.toThrow(/state/i);
+  });
+
+  it('refreshGiteaToken exchanges a stale token and persists the new one', async () => {
+    const { service, prisma, encryption } = makeOAuthService(CONFIG);
+    onUrl('git.acme.com/login/oauth/access_token', {
+      access_token: 'gt_new', refresh_token: 'gt_newref', expires_in: 3600,
+    });
+    const { token } = await service.refreshGiteaToken({
+      id: 'gp1', token: 'enc:old', refreshToken: 'enc:oldref',
+      expiresAt: new Date(Date.now() - 1000), baseUrl: 'https://git.acme.com',
+    });
+    expect(token).toBe('enc:gt_new');
+    expect(prisma.gitProvider.updateMany).toHaveBeenCalled();
+  });
+
+  it('refreshGiteaToken no-ops for a fresh token (no network)', async () => {
+    const { service } = makeOAuthService(CONFIG);
+    const { token } = await service.refreshGiteaToken({
+      id: 'gp1', token: 'enc:current', refreshToken: 'enc:ref',
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000), baseUrl: 'https://git.acme.com',
+    });
+    expect(token).toBe('enc:current');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

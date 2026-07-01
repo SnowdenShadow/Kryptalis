@@ -33,7 +33,7 @@ function makeService() {
   const prisma = { application: { update: prismaUpdate } } as any;
   const apps = new ApplicationRepository(prisma);
   const svc = new ApplicationOpsService(
-    prisma, {} as any, {} as any, {} as any, {} as any, {} as any, apps,
+    prisma, {} as any, {} as any, {} as any, {} as any, {} as any, apps, {} as any,
   );
   return { svc, prismaUpdate };
 }

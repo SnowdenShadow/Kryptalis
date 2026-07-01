@@ -39,6 +39,20 @@ export class GitProvidersController {
     return this.oauth.pollGithubDeviceFlow(userId, deviceCode);
   }
 
+  // ── Gitea/Forgejo OAuth (Authorization Code) ────────────────────────
+
+  @Get('oauth/gitea/status')
+  @ApiOperation({ summary: 'Whether a Gitea/Forgejo OAuth app is configured on this install' })
+  giteaOAuthStatus() {
+    return this.oauth.giteaOAuthStatus();
+  }
+
+  @Post('oauth/gitea/start')
+  @ApiOperation({ summary: 'Begin Gitea OAuth → returns the authorize URL to open' })
+  startGitea(@CurrentUser('id') userId: string) {
+    return this.oauth.startGiteaOAuth(userId);
+  }
+
   @Post()
   @ApiOperation({ summary: 'Connect a git provider' })
   create(@CurrentUser('id') userId: string, @Body() dto: CreateGitProviderDto) {

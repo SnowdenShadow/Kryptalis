@@ -26,7 +26,7 @@ import { ApplicationOpsService } from './application-ops.service';
 function makeService(deploymentMock: any) {
   const prisma = { deployment: deploymentMock } as any;
   const svc = new ApplicationOpsService(
-    prisma, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+    prisma, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
   );
   return { svc, prisma };
 }

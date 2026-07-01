@@ -37,6 +37,7 @@ function makeService() {
     {} as any, // deploy
     {} as any, // env
     {} as any, // apps (ApplicationRepository) — not exercised by exec tests
+    {} as any, // gitOAuth
   );
 }
 

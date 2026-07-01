@@ -215,7 +215,13 @@ export default function SettingsPage() {
   });
 
   const addGitMutation = useMutation({
-    mutationFn: (data: any) => api.post('/git-providers', data),
+    // Only send baseUrl when it's actually set (Gitea/Forgejo). Sending '' for
+    // the SaaS providers would fail server-side URL validation.
+    mutationFn: (data: any) => {
+      const { baseUrl, ...rest } = data;
+      const payload = baseUrl && baseUrl.trim() ? { ...rest, baseUrl: baseUrl.trim() } : rest;
+      return api.post('/git-providers', payload);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['git-providers'] });
       toast.success(t('settings.gitToastAdded'));
@@ -243,6 +249,43 @@ export default function SettingsPage() {
     queryKey: ['oauth-status', 'github'],
     queryFn: () => api.get('/git-providers/oauth/github/status'),
   });
+
+  // Is a Gitea/Forgejo OAuth app configured (by an admin) on this install?
+  const { data: giteaOAuthStatus } = useQuery<{ configured: boolean; provider: string; baseUrl: string | null }>({
+    queryKey: ['oauth-status', 'gitea'],
+    queryFn: () => api.get('/git-providers/oauth/gitea/status'),
+  });
+
+  // Kick off the Gitea Authorization Code flow: ask the API for the authorize
+  // URL (which also mints a CSRF `state`), then full-page redirect to it.
+  async function startGiteaOAuth() {
+    try {
+      const r = await api.post<{ url: string }>('/git-providers/oauth/gitea/start');
+      if (r?.url) window.location.href = r.url;
+    } catch (e: any) {
+      toast.error(e.message || t('settings.gitOAuthNotConfigured'));
+    }
+  }
+
+  // When Gitea redirects back to /dashboard/settings?tab=git&oauth=gitea_ok|err,
+  // surface the result once and strip the param so a refresh doesn't re-toast.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const oauth = params.get('oauth');
+    if (oauth === 'gitea_ok') {
+      toast.success(t('settings.gitOAuthGiteaOk'));
+      queryClient.invalidateQueries({ queryKey: ['git-providers'] });
+    } else if (oauth === 'gitea_err') {
+      toast.error(t('settings.gitOAuthGiteaErr'));
+    }
+    if (oauth) {
+      params.delete('oauth');
+      const qs = params.toString();
+      window.history.replaceState({}, '', `${window.location.pathname}${qs ? `?${qs}` : ''}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // GitHub Device Flow state
   type DeviceState = {
@@ -861,6 +904,17 @@ export default function SettingsPage() {
                   <p className="text-[11px] text-muted-foreground italic">
                     {t('settings.gitOAuthNotConfigured')}
                   </p>
+                )}
+                {/* Gitea/Forgejo OAuth — only when an admin configured the app. */}
+                {giteaOAuthStatus?.configured && (
+                  <Button
+                    className="w-full justify-start gap-3 h-11"
+                    variant="outline"
+                    onClick={startGiteaOAuth}
+                  >
+                    <span className="text-lg">{giteaOAuthStatus.provider === 'FORGEJO' ? '🟧' : '🍵'}</span>
+                    {t('settings.gitOAuthGitea', { provider: giteaOAuthStatus.provider === 'FORGEJO' ? 'Forgejo' : 'Gitea' })}
+                  </Button>
                 )}
               </div>
 

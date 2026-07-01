@@ -3,8 +3,11 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
+import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
+import { SystemConfigService } from '../system/system-config.service';
+import { screenGiteaBaseUrl, gitHostsAllowPrivate } from './git-providers.service';
 
 type Provider = 'GITHUB';
 
@@ -43,6 +46,22 @@ type Provider = 'GITHUB';
  *   branding/app can override it with GITHUB_OAUTH_CLIENT_ID in env.
  */
 const DEFAULT_GITHUB_OAUTH_CLIENT_ID = 'Ov23liGhrCZJ2hB4ILtX';
+
+// ── Gitea/Forgejo OAuth `state` store (CSRF) ─────────────────────────────
+// The Authorization Code flow bounces the browser to the Gitea instance and
+// back to our public callback. `state` binds that round-trip to the user who
+// started it and defends against CSRF. In-memory + single-use + short TTL —
+// same best-effort model as the webhook delivery dedup (lost on restart, not
+// shared across instances, but enough to stop the attack). A pending OAuth that
+// spans a restart just fails closed and the user clicks again.
+const GITEA_STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const giteaOAuthStates = new Map<string, { userId: string; expiresAt: number }>();
+
+function pruneGiteaStates(now: number): void {
+  for (const [k, v] of giteaOAuthStates) {
+    if (v.expiresAt <= now) giteaOAuthStates.delete(k);
+  }
+}
 @Injectable()
 export class GitOAuthService {
   private readonly logger = new Logger(GitOAuthService.name);
@@ -50,6 +69,7 @@ export class GitOAuthService {
   constructor(
     private prisma: PrismaService,
     private encryption: EncryptionService,
+    private systemConfig: SystemConfigService,
   ) {}
 
   isConfigured(provider: Provider): boolean {
@@ -315,6 +335,235 @@ export class GitOAuthService {
       return { username: d.login, avatarUrl: d.avatar_url };
     } catch (e) {
       this.logger.warn(`fetchGithubUser: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  // ── Gitea / Forgejo OAuth (Authorization Code) ─────────────────────────
+  //
+  // Gitea/Forgejo have no device flow, so we use the standard Authorization
+  // Code grant. Unlike GitHub (one public app baked in), each self-hosted
+  // instance needs its OWN OAuth app, so an admin registers one and stores the
+  // client_id/secret + instance URL as global SystemSettings (secret encrypted).
+
+  /** Read the admin-configured Gitea OAuth app config from SystemSettings. */
+  private giteaOAuthConfig(): {
+    baseUrl?: string;
+    provider: string;
+    clientId?: string;
+    clientSecret?: string;
+  } {
+    return {
+      baseUrl: this.systemConfig.get<string>('gitea_oauth_base_url', 'GITEA_OAUTH_BASE_URL'),
+      provider: this.systemConfig.get<string>('gitea_oauth_provider', 'GITEA_OAUTH_PROVIDER', 'GITEA') || 'GITEA',
+      clientId: this.systemConfig.get<string>('gitea_oauth_client_id', 'GITEA_OAUTH_CLIENT_ID'),
+      clientSecret: this.systemConfig.get<string>('gitea_oauth_client_secret', 'GITEA_OAUTH_CLIENT_SECRET'),
+    };
+  }
+
+  /** Whether Gitea OAuth is fully configured (safe: never leaks the secret). */
+  giteaOAuthStatus(): { configured: boolean; provider: string; baseUrl: string | null } {
+    const c = this.giteaOAuthConfig();
+    return {
+      configured: !!(c.baseUrl && c.clientId && c.clientSecret),
+      provider: c.provider,
+      baseUrl: c.baseUrl || null,
+    };
+  }
+
+  private giteaRedirectUri(): string {
+    const base = (process.env.PUBLIC_API_URL || process.env.API_URL || '').replace(/\/$/, '');
+    return `${base}/api/git-providers/oauth/gitea/callback`;
+  }
+
+  /**
+   * Step 1 — build the Gitea authorize URL and stash a single-use `state`
+   * bound to the user. The dashboard sends the browser to the returned URL.
+   */
+  async startGiteaOAuth(userId: string): Promise<{ url: string }> {
+    const c = this.giteaOAuthConfig();
+    if (!c.baseUrl || !c.clientId || !c.clientSecret) {
+      throw new BadRequestException('Gitea OAuth is not configured on this install.');
+    }
+    // Screen the admin-set base URL (literal + DNS-resolved) before we bounce a
+    // browser (and later a token exchange) to it.
+    const base = await screenGiteaBaseUrl(c.baseUrl);
+    const redirectUri = this.giteaRedirectUri();
+    if (!redirectUri.startsWith('http')) {
+      throw new BadRequestException('PUBLIC_API_URL is not set — cannot build the OAuth callback URL.');
+    }
+
+    const now = Date.now();
+    pruneGiteaStates(now);
+    const state = crypto.randomBytes(24).toString('base64url');
+    giteaOAuthStates.set(state, { userId, expiresAt: now + GITEA_STATE_TTL_MS });
+
+    const params = new URLSearchParams({
+      client_id: c.clientId,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      state,
+      // Gitea scopes: read the user's identity, read+write repos (write needed
+      // to register the auto-deploy webhook).
+      scope: 'read:user write:repository read:repository',
+    });
+    return { url: `${base}/login/oauth/authorize?${params.toString()}` };
+  }
+
+  /**
+   * Step 2 — the Gitea instance redirects the browser back here with `code` +
+   * `state`. Validate+consume the state (CSRF), exchange the code for tokens
+   * server-to-server (the client_secret never touches the browser), and upsert
+   * an OAUTH GitProvider row. Returns nothing on success / throws on failure;
+   * the controller maps that to a dashboard redirect.
+   */
+  async handleGiteaCallback(code: string, state: string): Promise<{ userId: string }> {
+    if (!code || !state) throw new BadRequestException('Missing code/state');
+    const now = Date.now();
+    pruneGiteaStates(now);
+    const entry = giteaOAuthStates.get(state);
+    if (!entry || entry.expiresAt <= now) {
+      throw new BadRequestException('Invalid or expired OAuth state');
+    }
+    giteaOAuthStates.delete(state); // single-use
+    const userId = entry.userId;
+
+    const c = this.giteaOAuthConfig();
+    if (!c.baseUrl || !c.clientId || !c.clientSecret) {
+      throw new BadRequestException('Gitea OAuth is not configured.');
+    }
+    const base = await screenGiteaBaseUrl(c.baseUrl);
+    const redirectUri = this.giteaRedirectUri();
+
+    // Exchange the authorization code for an access token (backend-to-backend).
+    let data: any;
+    try {
+      const res = await fetch(`${base}/login/oauth/access_token`, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: c.clientId,
+          client_secret: c.clientSecret,
+          code,
+          grant_type: 'authorization_code',
+          redirect_uri: redirectUri,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      data = await res.json();
+      if (!res.ok || !data.access_token) {
+        throw new Error(data.error_description || data.error || `token exchange failed (${res.status})`);
+      }
+    } catch (e) {
+      this.logger.warn(`gitea token exchange: ${(e as Error).message}`);
+      throw new BadRequestException('Gitea token exchange failed');
+    }
+
+    const userInfo = await this.fetchGiteaUser(base, data.access_token);
+    if (!userInfo) throw new BadRequestException('Could not fetch Gitea user info');
+
+    const provider = c.provider === 'FORGEJO' ? 'FORGEJO' : 'GITEA';
+    const existing = await this.prisma.gitProvider.findFirst({
+      where: { userId, provider, username: userInfo.username, baseUrl: base },
+    });
+    const row = {
+      provider,
+      name: existing?.name || `${userInfo.username} (${provider.toLowerCase()})`,
+      baseUrl: base,
+      token: this.encryption.encrypt(data.access_token),
+      authMode: 'OAUTH',
+      refreshToken: data.refresh_token ? this.encryption.encrypt(data.refresh_token) : null,
+      expiresAt: data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null,
+      scopes: data.scope || null,
+      username: userInfo.username,
+      avatarUrl: userInfo.avatarUrl,
+    };
+    if (existing) {
+      await this.prisma.gitProvider.update({ where: { id: existing.id }, data: row });
+    } else {
+      await this.prisma.gitProvider.create({ data: { userId, ...row } });
+    }
+    return { userId };
+  }
+
+  /**
+   * Refresh-if-stale for a Gitea/Forgejo OAUTH token (mirrors
+   * refreshGithubToken). Gitea access tokens are short-lived (~1h) with a
+   * refresh token. Uses the admin OAuth app's client_id/secret. No-ops for PAT
+   * rows or when the config/refresh token is missing.
+   */
+  async refreshGiteaToken(gp: {
+    id: string;
+    token: string;
+    refreshToken: string | null;
+    expiresAt: Date | null;
+    baseUrl: string | null;
+  }): Promise<{ token: string }> {
+    const SKEW_MS = 5 * 60 * 1000;
+    const stale = gp.expiresAt ? gp.expiresAt.getTime() - Date.now() < SKEW_MS : false;
+    if (!stale || !gp.refreshToken || !gp.baseUrl) return { token: gp.token };
+
+    const c = this.giteaOAuthConfig();
+    if (!c.clientId || !c.clientSecret) return { token: gp.token };
+
+    let base: string;
+    try {
+      base = await screenGiteaBaseUrl(gp.baseUrl);
+    } catch {
+      return { token: gp.token };
+    }
+
+    let data: any;
+    try {
+      const res = await fetch(`${base}/login/oauth/access_token`, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: c.clientId,
+          client_secret: c.clientSecret,
+          grant_type: 'refresh_token',
+          refresh_token: this.encryption.decrypt(gp.refreshToken),
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      data = await res.json();
+    } catch (e) {
+      this.logger.warn(`refreshGiteaToken: ${(e as Error).message}`);
+      return { token: gp.token };
+    }
+    if (data.error || !data.access_token) {
+      this.logger.warn(`refreshGiteaToken: ${data.error_description || data.error || 'missing access_token'}`);
+      return { token: gp.token };
+    }
+
+    const newToken = this.encryption.encrypt(data.access_token);
+    const newRefreshToken = data.refresh_token ? this.encryption.encrypt(data.refresh_token) : gp.refreshToken;
+    const newExpiresAt = data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : null;
+    const result = await this.prisma.gitProvider.updateMany({
+      where: { id: gp.id, expiresAt: gp.expiresAt },
+      data: { token: newToken, refreshToken: newRefreshToken, expiresAt: newExpiresAt },
+    });
+    if (result.count === 0) {
+      const current = await this.prisma.gitProvider.findUnique({ where: { id: gp.id } });
+      return { token: current?.token ?? gp.token };
+    }
+    return { token: newToken };
+  }
+
+  private async fetchGiteaUser(
+    base: string,
+    token: string,
+  ): Promise<{ username: string; avatarUrl: string } | null> {
+    try {
+      const res = await fetch(`${base}/api/v1/user`, {
+        headers: { Authorization: `token ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) return null;
+      const d: any = await res.json();
+      return { username: d.login || d.username, avatarUrl: d.avatar_url || '' };
+    } catch (e) {
+      this.logger.warn(`fetchGiteaUser: ${(e as Error).message}`);
       return null;
     }
   }

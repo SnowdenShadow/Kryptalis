@@ -41,7 +41,7 @@ function makeService(prismaUpdate = vi.fn()) {
   // prisma.application.update (the assertion target).
   const apps = new ApplicationRepository(prisma);
   return new ApplicationOpsService(
-    prisma, {} as any, {} as any, {} as any, {} as any, {} as any, apps,
+    prisma, {} as any, {} as any, {} as any, {} as any, {} as any, apps, {} as any,
   );
 }
 

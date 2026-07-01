@@ -51,6 +51,8 @@ export class SystemConfigService implements OnModuleInit {
     // Whole-server (admin) remote backup storage credentials.
     's3_access_key',
     's3_secret_key',
+    // Gitea/Forgejo OAuth app client secret (self-hosted, admin-configured).
+    'gitea_oauth_client_secret',
   ]);
 
   // URL-shaped keys must parse as an http(s) URL when set. Empty/unset is
@@ -58,6 +60,8 @@ export class SystemConfigService implements OnModuleInit {
   private readonly URL_KEYS = new Set([
     'public_api_url',
     'public_dashboard_url',
+    // Self-hosted Gitea/Forgejo instance URL for the OAuth app.
+    'gitea_oauth_base_url',
   ]);
 
   // M-4: the EXHAUSTIVE allowlist of operator-writable config keys. setMany()
@@ -98,6 +102,11 @@ export class SystemConfigService implements OnModuleInit {
     // backup encryption + webhook secret
     'backup_encryption_key',
     'github_webhook_secret',
+    // Gitea/Forgejo OAuth app (self-hosted, admin-configured, one per instance)
+    'gitea_oauth_base_url',
+    'gitea_oauth_provider',
+    'gitea_oauth_client_id',
+    'gitea_oauth_client_secret',
   ]);
 
   /** True when `key` may be written through the admin config surface (M-4). */
