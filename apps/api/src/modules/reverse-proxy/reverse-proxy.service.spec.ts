@@ -190,7 +190,9 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
           customPort: false,
           containerName: 'dockcontrol-wordpress-abc123def456',
           containerPort: 80,
-          project: { server: { host: '203.0.113.7' } },
+          // Each app carries its OWN server (per-app placement) — no project
+          // fallback. The app's host is app.server.host only.
+          server: { host: '203.0.113.7' },
         },
       }),
     ]);
@@ -214,7 +216,7 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
               containerName: 'dockcontrol-grafana-abc123def456',
               containerPort: 3000,
               port: 12000,
-              project: { server: { host: '203.0.113.7' } },
+              server: { host: '203.0.113.7' },
             },
           },
         ],
@@ -240,7 +242,7 @@ describe('regenerate — HTTPS-only upstreams (Portainer)', () => {
               containerName: 'dockcontrol-grafana-abc123def456',
               containerPort: 3000,
               port: 12000,
-              project: { server: { host: 'localhost' } },
+              server: { host: 'localhost' },
             },
           },
         ],
@@ -415,7 +417,8 @@ describe('regenerate — upstream host injection (remote Server.host)', () => {
         customPort: false,
         containerName: 'dockcontrol-wordpress-abc123def456',
         containerPort: 80,
-        project: { server: { host } },
+        // Per-app placement: the upstream host comes from app.server.host.
+        server: { host },
       },
     });
   }

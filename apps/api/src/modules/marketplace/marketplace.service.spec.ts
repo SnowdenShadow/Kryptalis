@@ -63,12 +63,21 @@ const INSTANCE_ID = APP_ID.slice(0, 12); // 'app123456789'
 
 function makePrisma() {
   return {
-    // server.host=localhost → install path runs the local docker branch.
-    // Remote-dispatch tests override this with a routable host.
-    project: { findUnique: vi.fn().mockResolvedValue({ serverId: 'srv-1', server: { host: 'localhost' } }) },
-    // Per-app placement: install() validates an explicit serverId against
-    // the servers table. Default: unknown id → null (404 path).
-    server: { findUnique: vi.fn().mockResolvedValue(null) },
+    // A project no longer carries a server — install() reads it only as an
+    // existence check (`select: { id: true }`).
+    project: { findUnique: vi.fn().mockResolvedValue({ id: 'p1' }) },
+    // Per-app placement via resolveCreateServerId:
+    //   - no serverId sent → server.findMany (single ONLINE = LOCAL install).
+    //   - explicit serverId → server.findUnique validates it's ONLINE.
+    // After resolving, install() re-loads the chosen server's host via
+    // server.findUnique. Default: one local ONLINE server 'srv-1', used both to
+    // validate an explicit serverId and to re-load the host (→ local docker
+    // path). The "unknown serverId → 404" test overrides findUnique to null;
+    // remote/offline/other-server tests override as needed.
+    server: {
+      findMany: vi.fn().mockResolvedValue([{ id: 'srv-1', status: 'ONLINE' }]),
+      findUnique: vi.fn().mockResolvedValue({ id: 'srv-1', name: 'Local', status: 'ONLINE', host: 'localhost' }),
+    },
     // system_domain guard on newDomain — null = no platform domain set.
     systemSetting: { findUnique: vi.fn().mockResolvedValue(null) },
     application: {
@@ -238,7 +247,9 @@ describe('install — input validation and RBAC', () => {
   });
 
   it('rejects an unknown serverId (per-app placement validates against the servers table)', async () => {
-    const { service } = makeService();
+    const { service, prisma } = makeService();
+    // Explicit id that doesn't exist → resolveCreateServerId 404s.
+    prisma.server.findUnique.mockResolvedValue(null);
     await expect(
       service.install(
         { appSlug: 'wordpress', projectId: 'p1', serverId: 'srv-unknown' },
@@ -270,15 +281,16 @@ describe('install — input validation and RBAC', () => {
     );
   });
 
-  it("defaults the agent task to the project's server when no serverId is sent", async () => {
+  it('auto-resolves the single LOCAL server when no serverId is sent (app row + task)', async () => {
     const { service, prisma } = makeService();
     await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
     expect(prisma.agentTask.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ serverId: 'srv-1' }) }),
     );
-    // NULL serverId on the app row = inherit the project default.
+    // serverId is REQUIRED now — the resolved id is always stamped on the row
+    // (a project has no server to inherit).
     expect(prisma.application.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ serverId: null }) }),
+      expect.objectContaining({ data: expect.objectContaining({ serverId: 'srv-1' }) }),
     );
   });
 
@@ -296,10 +308,10 @@ describe('install — input validation and RBAC', () => {
 describe('install — remote-server projects dispatch via the agent', () => {
   it('remote project → DEPLOY queued on the agent with the rendered compose, no local docker compose', async () => {
     const { service, prisma, agent } = makeService();
-    prisma.project.findUnique.mockResolvedValue({
-      serverId: 'srv-remote',
-      server: { host: '203.0.113.7' },
-    });
+    // The single provisioned server is remote → resolveCreateServerId picks it,
+    // and the host re-load returns its routable address.
+    prisma.server.findMany.mockResolvedValue([{ id: 'srv-remote', status: 'ONLINE' }]);
+    prisma.server.findUnique.mockResolvedValue({ id: 'srv-remote', host: '203.0.113.7' });
 
     await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
     await flushAsync();
@@ -336,10 +348,8 @@ describe('install — remote-server projects dispatch via the agent', () => {
 
   it('remote custom-image install also dispatches to the agent', async () => {
     const { service, prisma, agent } = makeService();
-    prisma.project.findUnique.mockResolvedValue({
-      serverId: 'srv-remote',
-      server: { host: '203.0.113.7' },
-    });
+    prisma.server.findMany.mockResolvedValue([{ id: 'srv-remote', status: 'ONLINE' }]);
+    prisma.server.findUnique.mockResolvedValue({ id: 'srv-remote', host: '203.0.113.7' });
 
     await service.installCustom(
       {
@@ -736,9 +746,11 @@ describe('install — domain handling', () => {
 describe('install — docker compose outcome', () => {
   it('success: task COMPLETED, application RUNNING, deployment RUNNING, Caddy regenerated, DB sidecar import attempted', async () => {
     const { service, prisma, proxy, databases } = makeService();
+    // The DB sidecar import reads the app row's OWN serverId (a project has no
+    // server) to co-locate the sidecar on the parent app's machine.
     prisma.application.findUnique.mockResolvedValue({
       projectId: 'p1',
-      project: { serverId: 'srv-1' },
+      serverId: 'srv-1',
     });
 
     const res = await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
@@ -799,7 +811,7 @@ describe('install — docker compose outcome', () => {
     const { service, prisma } = makeService();
     prisma.application.findUnique.mockResolvedValue({
       projectId: 'p1',
-      project: { serverId: 'srv-1' },
+      serverId: 'srv-1',
     });
     // Network already exists → inspect succeeds, no create needed.
     await service.install({ appSlug: 'wordpress', projectId: 'p1' }, 'u1');
@@ -834,7 +846,7 @@ describe('install — docker compose outcome', () => {
     const { service, prisma } = makeService();
     prisma.application.findUnique.mockResolvedValue({
       projectId: 'p1',
-      project: { serverId: 'srv-1' },
+      serverId: 'srv-1',
     });
     execFileAsyncMock.mockImplementation(async (_cmd: string, args: string[]) => {
       if (args[0] === 'network' && args[1] === 'inspect') {
@@ -862,7 +874,7 @@ describe('install — docker compose outcome', () => {
     const { service, prisma } = makeService();
     prisma.application.findUnique.mockResolvedValue({
       projectId: 'p1',
-      project: { serverId: 'srv-1' },
+      serverId: 'srv-1',
     });
     execFileAsyncMock.mockRejectedValue(new Error('already connected'));
 
@@ -1029,7 +1041,7 @@ describe('installCustom — arbitrary image deploys', () => {
     const { service, prisma } = makeService();
     prisma.application.findUnique.mockResolvedValue({
       projectId: 'p1',
-      project: { serverId: 'srv-1' },
+      serverId: 'srv-1',
     });
     await service.installCustom(base, 'u1');
     await flushAsync();

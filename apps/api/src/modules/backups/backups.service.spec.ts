@@ -114,8 +114,13 @@ function makeService() {
 /** Non-admin user with access to exactly `serverIds`. */
 function grantAccess(prisma: ReturnType<typeof makePrisma>, serverIds: string[]) {
   prisma.user.findUnique.mockResolvedValue({ role: 'USER' });
+  // A project has no server anymore — accessibleServerIds() derives the visible
+  // machines from the project's apps' and databases' own serverId. Seed each
+  // membership so the app carries the server id (a db could too; one is enough).
   prisma.projectMember.findMany.mockResolvedValue(
-    serverIds.map((id) => ({ project: { serverId: id } })),
+    serverIds.map((id) => ({
+      project: { applications: [{ serverId: id }], databases: [{ serverId: id }] },
+    })),
   );
 }
 
@@ -260,10 +265,12 @@ describe('create', () => {
   });
 
   // ── project scope ─────────────────────────────────────────────────
-  it('persists projectId when the project is on the server + accessible', async () => {
+  it('persists projectId when the project exists + the caller has access', async () => {
     const { service, prisma } = makeService();
     grantAccess(prisma, ['s1']);
-    prisma.project.findUnique.mockResolvedValue({ id: 'p1', serverId: 's1' });
+    // A project has no server anymore — it just needs to exist (findUnique
+    // selects id only) and pass the DEVELOPER access gate (mocked to resolve).
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
     prisma.backup.create.mockResolvedValue({ id: 'b1', status: 'PENDING' });
     vi.spyOn(service as any, 'runBackupJob').mockResolvedValue(undefined);
 
@@ -274,15 +281,22 @@ describe('create', () => {
     );
   });
 
-  it('rejects a project that is on a DIFFERENT server', async () => {
+  it('a project-scoped backup can target any accessible server (no project-on-server check)', async () => {
     const { service, prisma } = makeService();
+    // The old "project must be on the selected server" 400 is gone: a project
+    // has no server, so a project-scoped backup may run on any server the caller
+    // can reach. Access is gated purely by accessibleServerIds(dto.serverId).
     grantAccess(prisma, ['s1']);
-    prisma.project.findUnique.mockResolvedValue({ id: 'p1', serverId: 's2' });
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
+    prisma.backup.create.mockResolvedValue({ id: 'b1', status: 'PENDING' });
+    vi.spyOn(service as any, 'runBackupJob').mockResolvedValue(undefined);
 
     await expect(
       service.create('u1', { name: 'b', serverId: 's1', projectId: 'p1', target: 'LOCAL' } as any),
-    ).rejects.toThrow(/not on the selected server/i);
-    expect(prisma.backup.create).not.toHaveBeenCalled();
+    ).resolves.toBeTruthy();
+    expect(prisma.backup.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ projectId: 'p1', serverId: 's1' }) }),
+    );
   });
 
   it('404s on a missing project', async () => {
@@ -342,8 +356,10 @@ describe('exporters honour project scope', () => {
     );
 
     await (service as any).exportApplications('/tmp/x', 's1', null);
+    // Apps carry their own serverId now (no project fallback), so a server-wide
+    // export filters directly on the app's serverId.
     expect(prisma.application.findMany).toHaveBeenLastCalledWith(
-      expect.objectContaining({ where: { project: { serverId: 's1' } } }),
+      expect.objectContaining({ where: { serverId: 's1' } }),
     );
   });
 });
@@ -437,7 +453,7 @@ describe('per-project S3 storage', () => {
   it('create() with a remote target + a project that has its OWN config succeeds', async () => {
     const { service, prisma } = makeService();
     grantAccess(prisma, ['s1']);
-    prisma.project.findUnique.mockResolvedValue({ id: 'p1', serverId: 's1' });
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
     prisma.projectBackupStorage.findUnique.mockResolvedValue({
       target: 'R2', endpoint: 'https://r2', bucket: 'b', region: 'auto',
       accessKey: 'AK', secretKeyEnc: 'v1.enc(SK)',
@@ -453,7 +469,7 @@ describe('per-project S3 storage', () => {
   it('create() remote target with NO project config and NO global config → 400', async () => {
     const { service, prisma, systemConfig } = makeService();
     grantAccess(prisma, ['s1']);
-    prisma.project.findUnique.mockResolvedValue({ id: 'p1', serverId: 's1' });
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
     prisma.projectBackupStorage.findUnique.mockResolvedValue(null);
     systemConfig.get.mockReturnValue(undefined); // no global config either
 

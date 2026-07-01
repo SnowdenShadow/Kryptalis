@@ -102,6 +102,8 @@ function makePrisma() {
     },
     projectMember: { findMany: vi.fn().mockResolvedValue([]) },
     project: { count: vi.fn().mockResolvedValue(0) },
+    application: { count: vi.fn().mockResolvedValue(0) },
+    database: { count: vi.fn().mockResolvedValue(0) },
     $transaction: vi.fn(async (ops: any) =>
       Array.isArray(ops) ? Promise.all(ops) : ops(),
     ),
@@ -182,11 +184,14 @@ describe('findAccessible — RBAC-scoped server list', () => {
 
   it('dedupes server ids across memberships and never selects agentTokens', async () => {
     const { service, prisma } = makeService();
+    // A project has no server — reachable machines come from its apps' and
+    // databases' own serverId. s1 appears via both an app and a db (and
+    // across two memberships), s2 via a db only; empty/null entries drop out.
     prisma.projectMember.findMany.mockResolvedValue([
-      { project: { serverId: 's1' } },
-      { project: { serverId: 's1' } },
-      { project: { serverId: 's2' } },
-      { project: { serverId: null } },
+      { project: { applications: [{ serverId: 's1' }], databases: [{ serverId: 's1' }] } },
+      { project: { applications: [{ serverId: 's1' }], databases: [] } },
+      { project: { applications: [], databases: [{ serverId: 's2' }] } },
+      { project: { applications: [{ serverId: null }], databases: [] } },
     ]);
     prisma.server.findMany.mockResolvedValue([{ id: 's1' }, { id: 's2' }]);
 
@@ -225,30 +230,39 @@ describe('update / removeChecked', () => {
     });
   });
 
-  it('removeChecked refuses to delete a server that still hosts projects', async () => {
+  it('removeChecked refuses to delete a server that still hosts apps/databases', async () => {
     const { service, prisma } = makeService();
     prisma.server.findUnique.mockResolvedValue({ id: 's1' });
-    prisma.project.count.mockResolvedValue(3);
+    // A project has no server anymore — apps/DBs carry their own serverId
+    // (onDelete: Restrict). One hosted app is enough to block the delete.
+    prisma.application.count.mockResolvedValue(1);
+    prisma.database.count.mockResolvedValue(0);
     await expect(service.removeChecked('s1')).rejects.toThrow(BadRequestException);
-    await expect(service.removeChecked('s1')).rejects.toThrow(/3 project\(s\)/);
+    await expect(service.removeChecked('s1')).rejects.toThrow(
+      /still hosts 1 app\(s\)\/0 database\(s\)/,
+    );
     expect(prisma.server.delete).not.toHaveBeenCalled();
   });
 
-  it('removeChecked with force=true deletes anyway and reports the cascade count', async () => {
+  it('removeChecked counts both apps and databases in the block message', async () => {
     const { service, prisma } = makeService();
     prisma.server.findUnique.mockResolvedValue({ id: 's1' });
-    prisma.project.count.mockResolvedValue(3);
-    const res = await service.removeChecked('s1', true);
-    expect(res).toEqual({ message: 'Server deleted', cascadedProjects: 3 });
-    expect(prisma.server.delete).toHaveBeenCalledWith({ where: { id: 's1' } });
+    prisma.application.count.mockResolvedValue(2);
+    prisma.database.count.mockResolvedValue(3);
+    await expect(service.removeChecked('s1')).rejects.toThrow(
+      /still hosts 2 app\(s\)\/3 database\(s\)/,
+    );
+    expect(prisma.server.delete).not.toHaveBeenCalled();
   });
 
-  it('removeChecked deletes an unused server without force', async () => {
+  it('removeChecked deletes an empty server (no apps, no databases)', async () => {
     const { service, prisma } = makeService();
     prisma.server.findUnique.mockResolvedValue({ id: 's1' });
-    prisma.project.count.mockResolvedValue(0);
+    prisma.application.count.mockResolvedValue(0);
+    prisma.database.count.mockResolvedValue(0);
     const res = await service.removeChecked('s1');
-    expect(res.cascadedProjects).toBe(0);
+    expect(res).toEqual({ message: 'Server deleted' });
+    expect(prisma.server.delete).toHaveBeenCalledWith({ where: { id: 's1' } });
   });
 });
 

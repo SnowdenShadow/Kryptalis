@@ -128,9 +128,15 @@ function makePrisma() {
     project: { findUnique: vi.fn() },
     application: { findUnique: vi.fn() },
     user: { findUnique: vi.fn() },
-    // create() resolves the DB's target server row (per-DB placement) —
-    // default: the project's local server. Remote tests override.
-    server: { findUnique: vi.fn().mockResolvedValue({ id: 'srv1', host: 'localhost' }) },
+    // create() resolves the DB's target server via resolveCreateServerId:
+    //   - no serverId requested → server.findMany (single ONLINE = LOCAL install)
+    //   - explicit serverId     → server.findUnique (validated ONLINE)
+    // then re-loads the chosen server's host for the connection string.
+    // Default: one local ONLINE server. Remote/multi tests override.
+    server: {
+      findMany: vi.fn().mockResolvedValue([{ id: 'srv1', status: 'ONLINE' }]),
+      findUnique: vi.fn().mockResolvedValue({ id: 'srv1', name: 'Local', status: 'ONLINE', host: 'localhost' }),
+    },
   };
 }
 
@@ -147,11 +153,10 @@ function makeService() {
 
 /** Standard "local server" project wiring for create(). */
 function wireLocalCreate(prisma: ReturnType<typeof makePrisma>) {
-  prisma.project.findUnique.mockImplementation(async ({ select }: any) =>
-    select?.serverId
-      ? { serverId: 'srv1' }
-      : { server: { id: 'srv1', host: 'localhost' } },
-  );
+  // A project no longer carries a server — create() only reads it as an
+  // existence check (`select: { id: true }`). The server is resolved via
+  // resolveCreateServerId (server.findMany / findUnique on the prisma mock).
+  prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
 }
 
 beforeEach(() => {
@@ -214,7 +219,7 @@ describe('create', () => {
 
   it("pins the DB to the project's server: a foreign serverId is rejected", async () => {
     const { service, prisma } = makeService();
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'srv1' });
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
     // Per-DB placement: an explicit serverId is validated against the
     // servers table — unknown id → 404, nothing created.
     prisma.server.findUnique.mockResolvedValue(null);
@@ -229,7 +234,7 @@ describe('create', () => {
 
   it('per-DB placement: an ONLINE serverId different from the project default is honored', async () => {
     const { service, prisma } = makeService();
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'srv1' });
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
     prisma.server.findUnique.mockResolvedValue({ id: 'srv2', name: 'Second', status: 'ONLINE', host: 'localhost' });
 
     await service.create('u1', {
@@ -243,7 +248,7 @@ describe('create', () => {
 
   it('per-DB placement: a non-ONLINE server is refused', async () => {
     const { service, prisma } = makeService();
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'srv1' });
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
     prisma.server.findUnique.mockResolvedValue({ id: 'srv2', name: 'Off', status: 'OFFLINE', host: 'x' });
 
     await expect(
@@ -256,7 +261,7 @@ describe('create', () => {
 
   it('rejects a duplicate name within the same project', async () => {
     const { service, prisma } = makeService();
-    prisma.project.findUnique.mockResolvedValue({ serverId: 'srv1' });
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
     prisma.database.findFirst.mockResolvedValue({ id: 'existing' });
 
     await expect(
@@ -387,11 +392,10 @@ describe('create', () => {
 
   it('remote server: no local docker — compose is delegated to the agent as a DEPLOY task', async () => {
     const { service, prisma, agent } = makeService();
-    prisma.project.findUnique.mockImplementation(async ({ select }: any) =>
-      select?.serverId
-        ? { serverId: 'srv-remote' }
-        : { server: { id: 'srv-remote', host: '203.0.113.9' } },
-    );
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
+    // The single provisioned server is remote → resolveCreateServerId picks it,
+    // and the host re-load returns its remote address.
+    prisma.server.findMany.mockResolvedValue([{ id: 'srv-remote', status: 'ONLINE' }]);
     prisma.server.findUnique.mockResolvedValue({ id: 'srv-remote', host: '203.0.113.9' });
 
     await service.create('u1', { name: 'pgdb', type: 'POSTGRESQL', projectId: 'p1' } as any);
@@ -407,11 +411,8 @@ describe('create', () => {
 
   it('REGRESSION: remote server create returns a connection string pointing at the server host, not localhost', async () => {
     const { service, prisma, encryption } = makeService();
-    prisma.project.findUnique.mockImplementation(async ({ select }: any) =>
-      select?.serverId
-        ? { serverId: 'srv-remote' }
-        : { server: { id: 'srv-remote', host: '203.0.113.9' } },
-    );
+    prisma.project.findUnique.mockResolvedValue({ id: 'p1' });
+    prisma.server.findMany.mockResolvedValue([{ id: 'srv-remote', status: 'ONLINE' }]);
     prisma.server.findUnique.mockResolvedValue({ id: 'srv-remote', host: '203.0.113.9' });
 
     const res = await service.create('u1', { name: 'pgdb', type: 'POSTGRESQL', projectId: 'p1' } as any);
@@ -587,10 +588,11 @@ describe('RBAC scoping', () => {
 // ═══════════════════════════════════════════════════════════════════
 
 function wireDbRow(prisma: ReturnType<typeof makePrisma>, row: Record<string, any>) {
-  // assertDbAccess + resolveDbServer both call database.findUnique
+  // assertDbAccess + resolveDbServer both call database.findUnique.
+  // resolveDbServer now selects ONLY `db.server` (no project fallback).
   prisma.database.findUnique.mockImplementation(async ({ select }: any) =>
-    select?.project
-      ? { project: { server: { id: 'srv1', host: 'localhost' } }, application: null }
+    select?.server
+      ? { server: { id: 'srv1', host: 'localhost' } }
       : row,
   );
 }
@@ -694,8 +696,8 @@ describe('lifecycle', () => {
     const { service, prisma, agent } = makeService();
     mockAssert.mockResolvedValue('ADMIN' as any);
     prisma.database.findUnique.mockImplementation(async ({ select }: any) =>
-      select?.project
-        ? { project: { server: { id: 'srv-remote', host: '203.0.113.9' } }, application: null }
+      select?.server
+        ? { server: { id: 'srv-remote', host: '203.0.113.9' } }
         : { id: 'db1', projectId: 'p1', name: 'pgdb', autoImported: false },
     );
 
@@ -714,8 +716,8 @@ describe('lifecycle', () => {
     const { service, prisma, agent } = makeService();
     mockAssert.mockResolvedValue('ADMIN' as any);
     prisma.database.findUnique.mockImplementation(async ({ select }: any) =>
-      select?.project
-        ? { project: { server: { id: 'srv-remote', host: '203.0.113.9' } }, application: null }
+      select?.server
+        ? { server: { id: 'srv-remote', host: '203.0.113.9' } }
         : { id: 'db1', projectId: 'p1', name: 'pgdb', autoImported: false },
     );
     agent.enqueueTask.mockRejectedValue(new Error('agent offline'));
