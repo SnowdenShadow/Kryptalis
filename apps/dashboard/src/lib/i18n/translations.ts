@@ -1354,6 +1354,7 @@ export const translations: Record<string, Record<string, string>> = {
     'projects.import.noFile': 'Choose a .dctproj file to import.',
 
     // ── project members (confirm dialogs) ──────────────────────────
+    'members.you': 'You',
     'members.transferTitle': 'Transfer ownership',
     'members.transferDesc': 'Transfer project ownership to {email}? You will be downgraded to ADMIN.',
     'members.transferBtn': 'Transfer',
@@ -2790,6 +2791,7 @@ export const translations: Record<string, Record<string, string>> = {
     'projects.import.noFile': 'Choisissez un fichier .dctproj à importer.',
 
     // ── membres du projet (dialogues de confirmation) ──────────────
+    'members.you': 'Vous',
     'members.transferTitle': 'Transférer la propriété',
     'members.transferDesc': 'Transférer la propriété du projet à {email} ? Vous serez rétrogradé en ADMIN.',
     'members.transferBtn': 'Transférer',

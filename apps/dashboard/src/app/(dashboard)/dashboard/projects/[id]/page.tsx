@@ -791,23 +791,35 @@ export default function ProjectDetailPage() {
                 <p className="text-sm text-muted-foreground py-4 text-center">{t('members.none')}</p>
               ) : (
                 members.map(m => {
-                  const canEdit = has(myRole, 'ADMIN') && (m.role !== 'OWNER' || myRole === 'OWNER');
+                  const isMe = m.user.id === currentUserId;
+                  // An OWNER can only be edited by another OWNER; you can never
+                  // edit your OWN row from here (self-demote/self-remove would
+                  // strand the project — use Transfer ownership instead).
+                  const canEdit =
+                    has(myRole, 'ADMIN') && !isMe && (m.role !== 'OWNER' || myRole === 'OWNER');
                   return (
                     <div key={m.id} className="flex items-center gap-3 rounded-md border border-border p-3">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <p className="font-medium truncate">{m.user.name}</p>
-                          <RoleBadge role={m.role} />
+                          {isMe && (
+                            <Badge variant="secondary" className="text-[10px] shrink-0">{t('members.you')}</Badge>
+                          )}
+                          {/* Show the role badge as the at-a-glance indicator only
+                              when there's no editable select (the select already
+                              states the role — showing both is a confusing dup). */}
+                          {!canEdit && <RoleBadge role={m.role} />}
                         </div>
                         <p className="text-xs text-muted-foreground truncate">{m.user.email}</p>
                       </div>
-                      {canEdit ? (
+                      {canEdit && (
                         <>
                           <Select
                             value={m.role}
                             disabled={changeRoleMutation.isPending}
                             onChange={(e) => requestRoleChange(m, e.target.value as Role)}
-                            className="w-36 h-8 text-xs"
+                            wrapperClassName="w-36 shrink-0"
+                            className="h-9 text-xs"
                           >
                             {(['VIEWER', 'DEVELOPER', 'ADMIN', ...(myRole === 'OWNER' ? ['OWNER'] : [])] as Role[]).map(r => (
                               <option key={r} value={r}>{r}</option>
@@ -826,13 +838,12 @@ export default function ProjectDetailPage() {
                           <Button
                             size="icon"
                             variant="ghost"
+                            title={t('common.remove')}
                             onClick={() => setRemoveTarget(m)}
                           >
                             <Trash2 size={14} />
                           </Button>
                         </>
-                      ) : (
-                        <Badge variant="outline" className="text-[10px]">{m.role}</Badge>
                       )}
                     </div>
                   );

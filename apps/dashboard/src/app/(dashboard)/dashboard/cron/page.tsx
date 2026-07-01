@@ -567,7 +567,7 @@ function ScheduleBuilder({
       {simple.frequency === 'hourly' && (
         <div className="flex items-center gap-2 text-sm">
           <span className="text-muted-foreground">{t('cron.atMinute')}</span>
-          <Select value={String(simple.minute)} onChange={(e) => set({ minute: Number(e.target.value) })} className="w-24">
+          <Select value={String(simple.minute)} onChange={(e) => set({ minute: Number(e.target.value) })} wrapperClassName="w-24">
             {minutes.map((m) => <option key={m} value={m}>:{pad(m)}</option>)}
           </Select>
         </div>
@@ -578,7 +578,7 @@ function ScheduleBuilder({
           {simple.frequency === 'weekly' && (
             <>
               <span className="text-muted-foreground">{t('cron.onDay')}</span>
-              <Select value={String(simple.weekday)} onChange={(e) => set({ weekday: Number(e.target.value) })} className="w-32">
+              <Select value={String(simple.weekday)} onChange={(e) => set({ weekday: Number(e.target.value) })} wrapperClassName="w-32">
                 {weekdays.map((d, i) => <option key={i} value={i}>{d}</option>)}
               </Select>
             </>
@@ -586,17 +586,17 @@ function ScheduleBuilder({
           {simple.frequency === 'monthly' && (
             <>
               <span className="text-muted-foreground">{t('cron.onDayOfMonth')}</span>
-              <Select value={String(simple.monthday)} onChange={(e) => set({ monthday: Number(e.target.value) })} className="w-20">
+              <Select value={String(simple.monthday)} onChange={(e) => set({ monthday: Number(e.target.value) })} wrapperClassName="w-20">
                 {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => <option key={d} value={d}>{d}</option>)}
               </Select>
             </>
           )}
           <span className="text-muted-foreground">{t('cron.atTime')}</span>
-          <Select value={String(simple.hour)} onChange={(e) => set({ hour: Number(e.target.value) })} className="w-20">
+          <Select value={String(simple.hour)} onChange={(e) => set({ hour: Number(e.target.value) })} wrapperClassName="w-20">
             {hours.map((h) => <option key={h} value={h}>{pad(h)}</option>)}
           </Select>
           <span className="text-muted-foreground">:</span>
-          <Select value={String(simple.atMinute)} onChange={(e) => set({ atMinute: Number(e.target.value) })} className="w-20">
+          <Select value={String(simple.atMinute)} onChange={(e) => set({ atMinute: Number(e.target.value) })} wrapperClassName="w-20">
             {minutes.map((m) => <option key={m} value={m}>{pad(m)}</option>)}
           </Select>
         </div>

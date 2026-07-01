@@ -4,11 +4,21 @@ import { forwardRef, type SelectHTMLAttributes } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-export interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {}
+export interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
+  /**
+   * Classes for the wrapper <div> — use this for SIZING (width) so the chevron,
+   * which is absolutely-positioned inside the wrapper, stays glued to the
+   * select's right edge. Passing a `w-*` on `className` (the inner select)
+   * instead detaches the chevron: the select shrinks but the wrapper stays
+   * `w-full`, leaving the chevron floating at the far right. Defaults to
+   * `w-full`.
+   */
+  wrapperClassName?: string;
+}
 
 const Select = forwardRef<HTMLSelectElement, SelectProps>(
-  ({ className, children, ...props }, ref) => (
-    <div className="relative w-full">
+  ({ className, wrapperClassName, children, ...props }, ref) => (
+    <div className={cn('relative', wrapperClassName ?? 'w-full')}>
       <select
         ref={ref}
         className={cn(
