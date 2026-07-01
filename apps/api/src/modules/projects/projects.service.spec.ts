@@ -654,11 +654,15 @@ describe('migrate', () => {
 
   it('local→remote: exports volumes locally then awaits a remote VOLUME_IMPORT', async () => {
     const { service, prisma, agent } = setupMigrate();
+    // Source apps live on a LOCAL server.
+    prisma.server.findUnique.mockImplementation(async (args: any) =>
+      args?.where?.id === 'old'
+        ? { id: 'old', name: 'local-node', host: '127.0.0.1', status: 'ONLINE' }
+        : SERVERS.new,
+    );
     prisma.project.findUnique.mockResolvedValue({
       id: 'p1',
-      serverId: 'old',
-      server: { id: 'old', host: '127.0.0.1', name: 'local-node' },
-      applications: [{ id: 'a1', name: 'Web App', status: 'RUNNING', serverId: null, hostPort: null }],
+      applications: [{ id: 'a1', name: 'Web App', status: 'RUNNING', serverId: 'old', hostPort: null }],
       databases: [],
       domains: [],
     });
@@ -678,9 +682,12 @@ describe('migrate', () => {
 
   it('remote→local: defers the deploys onto the VOLUME_EXPORT migrateLocalImport handler', async () => {
     const { service, prisma, agent } = setupMigrate();
-    prisma.server.findUnique.mockResolvedValue({
-      id: 'new', name: 'local-node', host: '127.0.0.1', status: 'ONLINE',
-    });
+    // Remote source ('old' = 10.0.0.1) → LOCAL target ('new' = 127.0.0.1).
+    prisma.server.findUnique.mockImplementation(async (args: any) =>
+      args?.where?.id === 'new'
+        ? { id: 'new', name: 'local-node', host: '127.0.0.1', status: 'ONLINE' }
+        : SERVERS.old,
+    );
     // App carries a compose stack so the deferred payload is full-stack.
     prisma.application.findUnique.mockResolvedValue({
       id: 'a1', name: 'Web App', dockerComposeFile: 'services: {}', envVars: null,
@@ -706,9 +713,9 @@ describe('migrate', () => {
   it('warns about mailboxes left behind when the project has domains', async () => {
     const { service, prisma } = setupMigrate();
     prisma.project.findUnique.mockResolvedValue({
-      id: 'p1', serverId: 'old',
-      server: { id: 'old', host: '10.0.0.1', name: 'old-node' },
-      applications: [], databases: [],
+      id: 'p1',
+      applications: [{ id: 'a1', name: 'Web App', status: 'RUNNING', serverId: 'old', hostPort: null }],
+      databases: [],
       domains: [{ id: 'dom1' }, { id: 'dom2' }],
     });
 
