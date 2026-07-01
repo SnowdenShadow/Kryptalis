@@ -100,57 +100,27 @@ beforeEach(() => {
 });
 
 describe('create', () => {
-  it('LOCAL mode: overrides any client-sent serverId with the local server', async () => {
-    const { service, prisma, admin } = makeService();
-    admin.getDeploymentMode.mockResolvedValue('LOCAL');
-    prisma.server.findFirst.mockResolvedValue({ id: 'srv-local' });
+  // A project is a purely logical grouping now — it has NO server. create()
+  // never touches the server table; the machine is chosen per app/DB later.
+  it('creates a server-agnostic project (no serverId written, no server lookup)', async () => {
+    const { service, prisma } = makeService();
     prisma.project.create.mockResolvedValue({ id: 'p1' });
 
-    await service.create('u1', { name: 'demo', serverId: 'srv-evil' } as any);
+    await service.create('u1', { name: 'demo' } as any);
 
-    expect(prisma.project.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ serverId: 'srv-local', userId: 'u1' }),
-      }),
-    );
-  });
-
-  it('LOCAL mode: 400 when no local server is provisioned', async () => {
-    const { service, prisma, admin } = makeService();
-    admin.getDeploymentMode.mockResolvedValue('LOCAL');
-    prisma.server.findFirst.mockResolvedValue(null);
-
-    await expect(service.create('u1', { name: 'demo' } as any)).rejects.toThrow(
-      BadRequestException,
-    );
-  });
-
-  it('MULTI mode: requires a serverId', async () => {
-    const { service, admin } = makeService();
-    admin.getDeploymentMode.mockResolvedValue('MULTI');
-
-    await expect(service.create('u1', { name: 'demo' } as any)).rejects.toThrow(
-      BadRequestException,
-    );
-  });
-
-  it('MULTI mode: rejects a server that is not ONLINE', async () => {
-    const { service, prisma, admin } = makeService();
-    admin.getDeploymentMode.mockResolvedValue('MULTI');
-    prisma.server.findUnique.mockResolvedValue({ id: 's1', name: 'node-1', status: 'OFFLINE' });
-
-    await expect(
-      service.create('u1', { name: 'demo', serverId: 's1' } as any),
-    ).rejects.toThrow(BadRequestException);
+    const arg = prisma.project.create.mock.calls[0][0];
+    expect(arg.data).toEqual(expect.objectContaining({ name: 'demo', userId: 'u1' }));
+    expect(arg.data).not.toHaveProperty('serverId');
+    // No server resolution happens at project-create time.
+    expect(prisma.server.findFirst).not.toHaveBeenCalled();
+    expect(prisma.server.findUnique).not.toHaveBeenCalled();
   });
 
   it('creates the creator as OWNER member', async () => {
-    const { service, prisma, admin } = makeService();
-    admin.getDeploymentMode.mockResolvedValue('MULTI');
-    prisma.server.findUnique.mockResolvedValue({ id: 's1', name: 'node-1', status: 'ONLINE' });
+    const { service, prisma } = makeService();
     prisma.project.create.mockResolvedValue({ id: 'p1' });
 
-    await service.create('u1', { name: 'demo', serverId: 's1' } as any);
+    await service.create('u1', { name: 'demo' } as any);
 
     expect(prisma.project.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -499,20 +469,23 @@ describe('migrate', () => {
   // Default fixture: remote source (10.0.0.1) → remote target (10.0.0.2),
   // one app + one postgres DB. enqueueAndWait succeeds by default; VOLUME_LIST
   // returns the two real volumes; the chained import poll finds a COMPLETED row.
+  // Resolve each server by id — migrate now looks up BOTH the target and the
+  // source (the source is derived from the apps' own serverId).
+  const SERVERS: Record<string, any> = {
+    old: { id: 'old', name: 'old-node', host: '10.0.0.1', status: 'ONLINE' },
+    new: { id: 'new', name: 'new-node', host: '10.0.0.2', status: 'ONLINE' },
+  };
   function setupMigrate() {
     const ctx = makeService();
     mockAssert.mockResolvedValue('OWNER');
+    // A project has no server; every app/DB carries its own serverId ('old').
     ctx.prisma.project.findUnique.mockResolvedValue({
       id: 'p1',
-      serverId: 'old',
-      server: { id: 'old', host: '10.0.0.1', name: 'old-node' },
-      applications: [{ id: 'a1', name: 'Web App', status: 'RUNNING', serverId: null, hostPort: null }],
-      databases: [{ id: 'd1', name: 'maindb', type: 'POSTGRESQL', username: 'u', password: 'enc:p', port: 5440, autoImported: false }],
+      applications: [{ id: 'a1', name: 'Web App', status: 'RUNNING', serverId: 'old', hostPort: null }],
+      databases: [{ id: 'd1', name: 'maindb', type: 'POSTGRESQL', username: 'u', password: 'enc:p', port: 5440, autoImported: false, serverId: 'old' }],
       domains: [],
     });
-    ctx.prisma.server.findUnique.mockResolvedValue({
-      id: 'new', name: 'new-node', host: '10.0.0.2', status: 'ONLINE',
-    });
+    ctx.prisma.server.findUnique.mockImplementation(async (args: any) => SERVERS[args?.where?.id] ?? null);
     ctx.prisma.project.update.mockResolvedValue({});
     // Source VOLUME_LIST returns the real host volume names.
     ctx.agent.enqueueAndWait.mockImplementation(async (_s: string, type: string) => {
@@ -530,11 +503,13 @@ describe('migrate', () => {
     expect(mockAssert).toHaveBeenCalledWith(expect.anything(), 'u1', 'p1', 'OWNER');
   });
 
-  it('rejects migrating to the same server', async () => {
+  it('rejects migrating to the same server (all apps/DBs already there)', async () => {
     const { service, prisma } = setupMigrate();
-    prisma.server.findUnique.mockResolvedValue({ id: 'old', name: 'old-node', status: 'ONLINE' });
     prisma.project.findUnique.mockResolvedValue({
-      id: 'p1', serverId: 'old', server: { id: 'old' }, applications: [], databases: [], domains: [],
+      id: 'p1',
+      applications: [{ id: 'a1', name: 'Web App', status: 'RUNNING', serverId: 'old', hostPort: null }],
+      databases: [],
+      domains: [],
     });
 
     await expect(service.migrate('p1', 'u1', 'old')).rejects.toThrow(
@@ -608,12 +583,14 @@ describe('migrate', () => {
     expect(payload.databaseId).toBeUndefined();
   });
 
-  it('flips project.serverId AND database.serverId only AFTER a successful deploy', async () => {
+  it('flips each app.serverId AND database.serverId only AFTER a successful deploy', async () => {
     const { service, prisma } = setupMigrate();
     const res = await service.migrate('p1', 'u1', 'new');
 
-    expect(prisma.project.update).toHaveBeenCalledWith({
-      where: { id: 'p1' },
+    // A project has no serverId to flip; each app is re-pointed instead (before
+    // its deploy, so a failure stays recoverable on the source).
+    expect(prisma.application.update).toHaveBeenCalledWith({
+      where: { id: 'a1' },
       data: { serverId: 'new' },
     });
     // DB rows follow so resolveDbServer / connHost stay correct.
@@ -637,13 +614,11 @@ describe('migrate', () => {
 
     expect(res.status).toBe('failed');
     expect(res.flipped).toBe(false);
-    // project.serverId NEVER flipped to the target.
-    expect(prisma.project.update).not.toHaveBeenCalledWith({
-      where: { id: 'p1' },
+    // DB serverId NOT flipped on failure (the success-flip is skipped).
+    expect(prisma.database.updateMany).not.toHaveBeenCalledWith({
+      where: { projectId: 'p1', serverId: 'old' },
       data: { serverId: 'new' },
     });
-    // DB serverId NOT flipped either.
-    expect(prisma.database.updateMany).not.toHaveBeenCalled();
     // Source restart attempted (rollback) — app via ops.redeploy, db via START.
     expect(ops.redeploy).toHaveBeenCalledTimes(2);
     expect(agent.enqueueTask).toHaveBeenCalledWith('old', 'START', expect.objectContaining({ slug: 'db-maindb' }));
@@ -741,43 +716,28 @@ describe('migrate', () => {
     expect(res.warnings.some((w: string) => w.includes('mailbox(es)') && w.includes('mail is not relocated'))).toBe(true);
   });
 
-  it('excludes pinned apps by default and warns; includePinned relocates + clears their serverId', async () => {
-    const { service, prisma, ops } = setupMigrate();
+  it('refuses when the project\'s apps span multiple source servers (move individually)', async () => {
+    const { service, prisma } = setupMigrate();
     prisma.project.findUnique.mockResolvedValue({
-      id: 'p1', serverId: 'old',
-      server: { id: 'old', host: '10.0.0.1', name: 'old-node' },
+      id: 'p1',
       applications: [
-        { id: 'a1', name: 'Web App', status: 'RUNNING', serverId: null, hostPort: null },
-        { id: 'a2', name: 'Pinned', status: 'RUNNING', serverId: 'other', hostPort: null },
+        { id: 'a1', name: 'Web App', status: 'RUNNING', serverId: 'old', hostPort: null },
+        { id: 'a2', name: 'Other', status: 'RUNNING', serverId: 'other', hostPort: null },
       ],
       databases: [],
       domains: [],
     });
 
-    // Default: pinned app NOT migrated, warned.
-    const res = await service.migrate('p1', 'u1', 'new');
-    expect(ops.redeploy).toHaveBeenCalledWith('u1', 'a1');
-    expect(ops.redeploy).not.toHaveBeenCalledWith('u1', 'a2');
-    expect(res.warnings.some((w: string) => w.includes('pinned to other servers'))).toBe(true);
-
-    // includePinned: pinned app relocated and its serverId cleared on success.
-    ops.redeploy.mockClear();
-    prisma.application.updateMany.mockClear();
-    const res2 = await service.migrate('p1', 'u1', 'new', true);
-    expect(ops.redeploy).toHaveBeenCalledWith('u1', 'a2');
-    expect(prisma.application.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ['a2'] } },
-      data: { serverId: null },
-    });
-    expect(res2.warnings.some((w: string) => w.includes('pinned to other servers'))).toBe(false);
+    await expect(service.migrate('p1', 'u1', 'new')).rejects.toThrow(
+      /span multiple servers/i,
+    );
   });
 
   it('reassigns a colliding hostPort on the target before deploying the app', async () => {
     const { service, prisma } = setupMigrate();
     prisma.project.findUnique.mockResolvedValue({
-      id: 'p1', serverId: 'old',
-      server: { id: 'old', host: '10.0.0.1', name: 'old-node' },
-      applications: [{ id: 'a1', name: 'Web App', status: 'RUNNING', serverId: null, hostPort: 8080 }],
+      id: 'p1',
+      applications: [{ id: 'a1', name: 'Web App', status: 'RUNNING', serverId: 'old', hostPort: 8080 }],
       databases: [],
       domains: [],
     });
