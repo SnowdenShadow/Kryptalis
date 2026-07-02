@@ -52,6 +52,10 @@ vi.mock('../../common/rbac/project-access', () => ({
   assertProjectAccess: vi.fn(),
 }));
 
+vi.mock('../../common/rbac/project-permissions', () => ({
+  assertPermission: vi.fn(),
+}));
+
 import { assertProjectAccess } from '../../common/rbac/project-access';
 import { MarketplaceService } from './marketplace.service';
 import { ApplicationRepository } from '../applications/application.repository';

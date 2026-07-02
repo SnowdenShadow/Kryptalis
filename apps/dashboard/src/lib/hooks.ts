@@ -86,3 +86,41 @@ export function usePublicSettings<T = { deployment_mode?: string; public_ip?: st
     ...options,
   });
 }
+
+/** Caller's effective fine-grained permissions on ONE project. */
+export interface ProjectPermissions {
+  role: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER';
+  isAdmin: boolean;
+  permissions: string[];
+}
+
+/**
+ * The caller's effective permission set on a project — GET
+ * /projects/:id/my-permissions. Returns a `can(permission)` helper so pages can
+ * hide actions the backend would reject. Admins/owners (`isAdmin`) can do
+ * everything, so `can()` short-circuits true for them.
+ *
+ * Cache key: ['project-my-permissions', projectId] — invalidate this when a
+ * member's role/custom-role changes.
+ */
+export function useProjectPermissions(
+  projectId: string | undefined,
+  options?: RefQueryOptions<ProjectPermissions>,
+): UseQueryResult<ProjectPermissions> & { can: (permission: string) => boolean } {
+  const q = useQuery<ProjectPermissions, Error, ProjectPermissions>({
+    queryKey: ['project-my-permissions', projectId],
+    queryFn: () => api.get<ProjectPermissions>(`/projects/${projectId}/my-permissions`),
+    enabled: !!projectId,
+    staleTime: 30_000,
+    ...options,
+  });
+  const can = (permission: string): boolean => {
+    const data = q.data;
+    // While loading (or on error), don't hard-block the UI — the API is the
+    // real gate. Optimistically allow so buttons don't flicker/hide on every
+    // navigation; a truly unauthorized action still gets a 403 toast.
+    if (!data) return true;
+    return data.isAdmin || data.permissions.includes(permission);
+  };
+  return { ...q, can };
+}

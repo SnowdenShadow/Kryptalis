@@ -14,6 +14,11 @@ vi.mock('../../common/rbac/project-access', () => ({
   listAccessibleProjectIds: vi.fn(),
 }));
 
+// Fine-grained permission gate exercised in its own spec — no-op here.
+vi.mock('../../common/rbac/project-permissions', () => ({
+  assertPermission: vi.fn(),
+}));
+
 import {
   assertProjectAccess,
   listAccessibleProjectIds,
@@ -457,7 +462,7 @@ describe('update (attach/detach app)', () => {
 // ── remove ───────────────────────────────────────────────────────────
 
 describe('remove', () => {
-  it('requires ADMIN, tears down mail FIRST, then deletes + regen', async () => {
+  it('requires DEVELOPER + domains:delete, tears down mail FIRST, then deletes + regen', async () => {
     const { service, prisma, mailServer, proxy } = makeService();
     prisma.domain.findUnique.mockResolvedValue(DOMAIN);
     const order: string[] = [];
@@ -466,7 +471,9 @@ describe('remove', () => {
 
     const res = await service.remove('u1', 'd1');
     expect(res).toEqual({ message: 'Domain deleted' });
-    expect(mockAssert).toHaveBeenCalledWith(expect.anything(), 'u1', 'p1', 'ADMIN');
+    // Rank floor lowered to DEVELOPER; the fine-grained domains:delete perm
+    // (no-op in this spec) precisely expresses "can delete a domain".
+    expect(mockAssert).toHaveBeenCalledWith(expect.anything(), 'u1', 'p1', 'DEVELOPER');
     expect(order).toEqual(['mail', 'delete']);
     expect(proxy.regenerate).toHaveBeenCalled();
   });

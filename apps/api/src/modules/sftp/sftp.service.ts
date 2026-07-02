@@ -11,6 +11,7 @@ import {
 import { PrismaService } from '../../prisma/prisma.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
+import { assertPermission } from '../../common/rbac/project-permissions';
 import { isLocalHost } from '../deployment-target/deployment-target.service';
 import { AgentService } from '../agent/agent.service';
 import { remoteAppSlug, slugify as appSlugify } from '../applications/applications.helpers';
@@ -190,7 +191,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     // role gate is a separate, conservative check on who can issue
     // them.)
     const minRole = dto.permission === 'READ' ? 'DEVELOPER' : 'ADMIN';
-    await this.assertScopeAccess(userId, scope, scopeId, minRole);
+    await this.assertScopeAccess(userId, scope, scopeId, minRole, 'sftp:manage');
 
     const username = (dto.username || '').trim().toLowerCase();
     this.assertUsernameValid(username);
@@ -1462,9 +1463,11 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     scope: 'app' | 'project',
     scopeId: string,
     minRole: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER',
+    permission?: string,
   ): Promise<void> {
     if (scope === 'project') {
       await assertProjectAccess(this.prisma, userId, scopeId, minRole);
+      if (permission) await assertPermission(this.prisma, userId, scopeId, permission);
       return;
     }
     const app = await this.prisma.application.findUnique({
@@ -1473,6 +1476,7 @@ export class SftpService implements OnModuleInit, OnModuleDestroy {
     });
     if (!app) throw new NotFoundException('Application not found');
     await assertProjectAccess(this.prisma, userId, app.projectId, minRole);
+    if (permission) await assertPermission(this.prisma, userId, app.projectId, permission);
   }
 
   private async assertAccountAccess(

@@ -16,6 +16,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess, listAccessibleProjectIds } from '../../common/rbac/project-access';
+import { assertPermission } from '../../common/rbac/project-permissions';
 import { SystemConfigService } from '../system/system-config.service';
 import { SchedulerLeaderService } from '../../common/scheduler/scheduler-leader.service';
 import { EncryptionService } from '../../common/crypto/encryption.service';
@@ -264,7 +265,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     return Array.from(ids);
   }
 
-  private async assertBackupAccess(userId: string, backupId: string) {
+  private async assertBackupAccess(userId: string, backupId: string, permission?: string) {
     const backup = await this.prisma.backup.findUnique({ where: { id: backupId } });
     if (!backup) throw new NotFoundException('Backup not found');
 
@@ -279,6 +280,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
     if (!projectIds.includes(backup.projectId)) {
       throw new ForbiddenException('You do not have access to this backup.');
     }
+    if (permission) await assertPermission(this.prisma, userId, backup.projectId, permission);
     return backup;
   }
 
@@ -1552,6 +1554,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
       });
       if (!project) throw new NotFoundException('Project not found.');
       await assertProjectAccess(this.prisma, userId, dto.projectId, 'DEVELOPER');
+      await assertPermission(this.prisma, userId, dto.projectId, 'backups:create');
       projectId = project.id;
     } else if (!admin) {
       // A SERVER-WIDE backup (no project) dumps every project on the host — an
@@ -1622,7 +1625,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async restore(userId: string, id: string) {
-    const backup = await this.assertBackupAccess(userId, id);
+    const backup = await this.assertBackupAccess(userId, id, 'backups:restore');
     if (backup.status !== 'COMPLETED') {
       throw new BadRequestException(
         `Only COMPLETED backups can be restored. This backup is ${backup.status}.`,
@@ -1764,7 +1767,7 @@ export class BackupsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async remove(userId: string, id: string) {
-    const backup = await this.assertBackupAccess(userId, id);
+    const backup = await this.assertBackupAccess(userId, id, 'backups:delete');
     if (isRemoteTarget(backup.target)) {
       // Best-effort — never blocks row deletion (see deleteRemoteObjects).
       await this.deleteRemoteObjects(backup);

@@ -54,7 +54,7 @@ import {
 } from '@/components/ui/dialog';
 import type { ApplicationResponse, DeploymentResponse, DomainResponse } from '@dockcontrol/types';
 import { api } from '@/lib/api';
-import { useServers, usePublicSettings } from '@/lib/hooks';
+import { useServers, usePublicSettings, useProjectPermissions } from '@/lib/hooks';
 import { useTranslation } from '@/lib/i18n';
 import { cn } from '@/lib/utils';
 import { PhpConfigCard } from './php-config-card';
@@ -297,6 +297,12 @@ export default function ApplicationDetailPage() {
     queryFn: () => api.get(`/applications/${id}`),
     refetchInterval: 5000,
   });
+
+  // Effective fine-grained permissions on this app's project — gates the
+  // lifecycle/deploy/delete/exec buttons so a restricted custom role never
+  // sees an action the API would 403. `can()` optimistically allows while
+  // loading (the API stays the real gate).
+  const { can } = useProjectPermissions(app?.project?.id);
 
   // --- Deployment history ---
   const { data: deployments = [] } = useQuery<Deployment[]>({
@@ -769,7 +775,7 @@ export default function ApplicationDetailPage() {
                 </Button>
               );
             })()}
-            {isStopped ? (
+            {can('apps:restart') && (isStopped ? (
               <Button variant="outline" disabled={actionMutation.isPending} onClick={() => actionMutation.mutate('start')}>
                 <Play size={14} /> {t('apps.start')}
               </Button>
@@ -777,13 +783,13 @@ export default function ApplicationDetailPage() {
               <Button variant="outline" disabled={actionMutation.isPending} onClick={() => actionMutation.mutate('stop')}>
                 <Square size={14} /> {t('apps.stop')}
               </Button>
-            ) : null}
-            {isRunning && (
+            ) : null)}
+            {can('apps:restart') && isRunning && (
               <Button variant="outline" disabled={actionMutation.isPending} onClick={() => actionMutation.mutate('restart')}>
                 <RotateCcw size={14} /> {t('apps.restart')}
               </Button>
             )}
-            {(app.gitUrl || app.dockerImage) && (
+            {can('apps:deploy') && (app.gitUrl || app.dockerImage) && (
               <Button
                 variant="outline"
                 disabled={redeployMutation.isPending || app.status === 'DEPLOYING'}
@@ -793,9 +799,11 @@ export default function ApplicationDetailPage() {
                 <Rocket size={14} /> {t('apps.redeploy2')}
               </Button>
             )}
-            <Button variant="destructive" onClick={() => setShowDelete(true)}>
-              <Trash2 size={14} /> {t('common.delete')}
-            </Button>
+            {can('apps:delete') && (
+              <Button variant="destructive" onClick={() => setShowDelete(true)}>
+                <Trash2 size={14} /> {t('common.delete')}
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -1143,7 +1151,11 @@ export default function ApplicationDetailPage() {
               <CardDescription>{t('apps.term.desc')}</CardDescription>
             </CardHeader>
             <CardContent>
-              <InteractiveTerminal appId={id} />
+              {can('apps:exec') ? (
+                <InteractiveTerminal appId={id} />
+              ) : (
+                <p className="py-6 text-center text-sm text-muted-foreground">{t('apps.term.noPermission')}</p>
+              )}
             </CardContent>
           </Card>
         )}

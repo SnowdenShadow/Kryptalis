@@ -14,6 +14,7 @@ import {
   assertProjectAccess,
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
+import { assertPermission } from '../../common/rbac/project-permissions';
 import { ReverseProxyService } from '../reverse-proxy/reverse-proxy.service';
 import { MailServerService } from '../email/mail-server.service';
 import { DomainAttachService } from './domain-attach.service';
@@ -99,6 +100,7 @@ export class DomainsService {
       throw new BadRequestException('port requires applicationId — a port binding always targets an app');
     }
     await assertProjectAccess(this.prisma, userId, projectId, 'DEVELOPER');
+    await assertPermission(this.prisma, userId, projectId, 'domains:manage');
 
     // Port-pinned create: the app is reachable at http://<domain>:<port>
     // (DomainPortBinding) instead of taking the clean-URL :443 slot.
@@ -226,6 +228,7 @@ export class DomainsService {
     userId: string,
     id: string,
     minRole: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER' = 'VIEWER',
+    permission?: string,
   ) {
     const domain = await this.prisma.domain.findUnique({
       where: { id },
@@ -245,6 +248,7 @@ export class DomainsService {
       return domain;
     }
     await assertProjectAccess(this.prisma, userId, projectId, minRole);
+    if (permission) await assertPermission(this.prisma, userId, projectId, permission);
     return domain;
   }
 
@@ -268,7 +272,7 @@ export class DomainsService {
     id: string,
     data: { applicationId?: string | null },
   ) {
-    await this.assertDomainAccess(userId, id, 'DEVELOPER');
+    await this.assertDomainAccess(userId, id, 'DEVELOPER', 'domains:manage');
 
     if (data.applicationId !== undefined) {
       if (data.applicationId === null) {
@@ -319,7 +323,7 @@ export class DomainsService {
   }
 
   async remove(userId: string, id: string) {
-    await this.assertDomainAccess(userId, id, 'ADMIN');
+    await this.assertDomainAccess(userId, id, 'DEVELOPER', 'domains:delete');
     // Tear down mail stack BEFORE deleting the domain row so the mailbox/alias
     // FKs still resolve and the container can be cleanly stopped + removed
     // (frees ports, removes compose dir, drops mail_servers row).

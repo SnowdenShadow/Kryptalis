@@ -22,6 +22,11 @@ vi.mock('../../common/rbac/project-access', () => ({
   }),
 }));
 
+// Fine-grained permission gate exercised in its own spec — no-op here.
+vi.mock('../../common/rbac/project-permissions', () => ({
+  assertPermission: vi.fn(),
+}));
+
 vi.mock('fs', () => {
   const promises = {
     unlink: vi.fn().mockResolvedValue(undefined),

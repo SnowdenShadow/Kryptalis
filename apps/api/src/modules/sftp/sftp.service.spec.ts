@@ -6,6 +6,10 @@ vi.mock('../../common/rbac/project-access', () => ({
   assertProjectAccess: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../../common/rbac/project-permissions', () => ({
+  assertPermission: vi.fn(),
+}));
+
 import { SftpService } from './sftp.service';
 
 function makePrisma() {

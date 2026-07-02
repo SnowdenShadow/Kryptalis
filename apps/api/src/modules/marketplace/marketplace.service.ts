@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, ConflictException, BadRequestException, ForbiddenException, Logger, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { assertProjectAccess } from '../../common/rbac/project-access';
+import { assertPermission } from '../../common/rbac/project-permissions';
 import { APPS_DIR } from '../../common/paths';
 import { COMPOSE_TEMPLATES, PORT_MAP, SIDE_FILES, renderCustomComposeTemplate, domainPinEnv } from './templates';
 import { checkVolumeSafety, checkEnvVarsSafety } from './dto/install-custom.dto';
@@ -188,6 +189,7 @@ export class MarketplaceService implements OnModuleInit {
       throw new ForbiddenException('userId is required.');
     }
     await assertProjectAccess(this.prisma, userId, data.projectId, 'DEVELOPER');
+    await assertPermission(this.prisma, userId, data.projectId, 'marketplace:install');
 
     // Per-app server placement — REQUIRED. A project has no server, so every
     // app names its own machine: an explicit serverId wins; otherwise the
@@ -774,6 +776,7 @@ export class MarketplaceService implements OnModuleInit {
   ) {
     if (!userId) throw new ForbiddenException('userId is required.');
     await assertProjectAccess(this.prisma, userId, data.projectId, 'DEVELOPER');
+    await assertPermission(this.prisma, userId, data.projectId, 'marketplace:install');
     const project = await this.prisma.project.findUnique({
       where: { id: data.projectId },
       select: { id: true },

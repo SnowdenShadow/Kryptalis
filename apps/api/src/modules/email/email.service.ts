@@ -18,6 +18,7 @@ import {
   assertProjectAccess,
   listAccessibleProjectIds,
 } from '../../common/rbac/project-access';
+import { assertPermission } from '../../common/rbac/project-permissions';
 
 @Injectable()
 export class EmailService {
@@ -58,6 +59,7 @@ export class EmailService {
     userId: string,
     id: string,
     minRole: 'OWNER' | 'ADMIN' | 'DEVELOPER' | 'VIEWER' = 'VIEWER',
+    permission?: string,
   ) {
     const mb = await this.prisma.mailbox.findUnique({ where: { id } });
     if (!mb) throw new NotFoundException('Mailbox not found');
@@ -72,6 +74,7 @@ export class EmailService {
       return mb;
     }
     await assertProjectAccess(this.prisma, userId, mb.projectId, minRole);
+    if (permission) await assertPermission(this.prisma, userId, mb.projectId, permission);
     return mb;
   }
 
@@ -79,6 +82,7 @@ export class EmailService {
 
   async createMailbox(userId: string, dto: CreateMailboxDto) {
     await assertProjectAccess(this.prisma, userId, dto.projectId, 'DEVELOPER');
+    await assertPermission(this.prisma, userId, dto.projectId, 'email:manage');
     const domain = await this.assertDomainAccess(userId, dto.domainId, 'DEVELOPER');
 
     // The mailbox must live under the SAME project that owns the domain.
@@ -171,7 +175,7 @@ export class EmailService {
   }
 
   async updateMailbox(userId: string, id: string, dto: UpdateMailboxDto) {
-    const mb = await this.assertMailboxAccess(userId, id, 'DEVELOPER');
+    const mb = await this.assertMailboxAccess(userId, id, 'DEVELOPER', 'email:manage');
     const data: any = {};
     if (dto.password !== undefined) {
       if (dto.password.length < 8) throw new BadRequestException('Password too short');
@@ -202,7 +206,7 @@ export class EmailService {
   }
 
   async removeMailbox(userId: string, id: string) {
-    const mb = await this.assertMailboxAccess(userId, id, 'ADMIN');
+    const mb = await this.assertMailboxAccess(userId, id, 'DEVELOPER', 'email:manage');
     await this.prisma.mailbox.delete({ where: { id } });
     this.mailServer.syncAccounts(mb.domainId).catch(() => {});
     // Kick any live IMAP/POP sessions for the deleted address — otherwise

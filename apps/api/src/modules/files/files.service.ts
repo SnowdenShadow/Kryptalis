@@ -13,6 +13,7 @@ import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 import { DATA_DIR, APPS_DIR, DBS_DIR, TMP_DIR } from '../../common/paths';
 import { assertProjectAccess } from '../../common/rbac/project-access';
+import { assertPermission } from '../../common/rbac/project-permissions';
 import type { ProjectRole } from '@prisma/client';
 import * as dockerFs from './docker-fs';
 import { pickRootForImage, buildFixWebPermsScript, isWwwDataRoot, type DockerFsTarget } from './docker-fs';
@@ -501,14 +502,17 @@ export class FilesService {
     scopeId: string,
     relPath: string,
     minRole: ProjectRole = 'VIEWER',
+    permission?: string,
   ): Promise<ResolvedPath> {
     let rootDir: string;
     let scopeName: string;
+    let projectId: string | null = null;
 
     if (scope === 'app') {
       const app = await this.prisma.application.findUnique({ where: { id: scopeId } });
       if (!app) throw new NotFoundException('Application not found');
       await assertProjectAccess(this.prisma, userId, app.projectId, minRole);
+      projectId = app.projectId;
       scopeName = app.name;
       rootDir = this.appRootDir(app.id, this.slugify(app.name));
     } else {
@@ -516,6 +520,7 @@ export class FilesService {
       if (!db) throw new NotFoundException('Database not found');
       if (db.projectId) {
         await assertProjectAccess(this.prisma, userId, db.projectId, minRole);
+        projectId = db.projectId;
       } else if (db.applicationId) {
         const app = await this.prisma.application.findUnique({
           where: { id: db.applicationId },
@@ -523,6 +528,7 @@ export class FilesService {
         });
         if (!app) throw new NotFoundException('Application not found');
         await assertProjectAccess(this.prisma, userId, app.projectId, minRole);
+        projectId = app.projectId;
       } else {
         const me = await this.prisma.user.findUnique({
           where: { id: userId },
@@ -534,6 +540,12 @@ export class FilesService {
       }
       scopeName = db.name;
       rootDir = this.dbRootDir(db.id);
+    }
+
+    // Fine-grained gate (custom roles): enforce the files permission on the
+    // resolved project. Skipped for unlinked/legacy DBs (admin-only above).
+    if (permission && projectId) {
+      await assertPermission(this.prisma, userId, projectId, permission);
     }
 
     if (!fs.existsSync(rootDir)) {
@@ -1096,7 +1108,7 @@ export class FilesService {
     relPath: string,
     content: string,
   ) {
-    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
+    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER', 'files:manage');
     this.assertNotManaged(resolved.relPath);
     if (typeof content !== 'string') throw new BadRequestException('content must be a string');
 
@@ -1208,7 +1220,7 @@ export class FilesService {
     }
     const safeName = this.sanitizeBasename(filename);
     const targetRel = relPath ? `${relPath}/${safeName}` : safeName;
-    const resolved = await this.resolvePath(userId, scope, scopeId, targetRel, 'DEVELOPER');
+    const resolved = await this.resolvePath(userId, scope, scopeId, targetRel, 'DEVELOPER', 'files:manage');
     this.assertNotManaged(resolved.relPath);
 
     // Remote app → ship via FILE_WRITE. Payload travels base64 inside the
@@ -1389,7 +1401,7 @@ export class FilesService {
   // ── mkdir / rename / delete ───────────────────────────────────────
 
   async mkdir(userId: string, scope: 'app' | 'db', scopeId: string, relPath: string) {
-    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
+    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER', 'files:manage');
     this.assertNotManaged(resolved.relPath);
 
     // Docker-fs path.
@@ -1426,7 +1438,7 @@ export class FilesService {
     fromRel: string,
     toRel: string,
   ) {
-    const src = await this.resolvePath(userId, scope, scopeId, fromRel, 'DEVELOPER');
+    const src = await this.resolvePath(userId, scope, scopeId, fromRel, 'DEVELOPER', 'files:manage');
     this.assertNotManaged(src.relPath);
     // Sanitize the destination basename first so a `to: 'subdir/.dockcontrol.env'`
     // is refused before any disk hit, regardless of intermediate prefix.
@@ -1436,7 +1448,7 @@ export class FilesService {
     const reconstructedToRel = dstParts.length
       ? `${dstParts.join('/')}/${safeDstName}`
       : safeDstName;
-    const dst = await this.resolvePath(userId, scope, scopeId, reconstructedToRel, 'DEVELOPER');
+    const dst = await this.resolvePath(userId, scope, scopeId, reconstructedToRel, 'DEVELOPER', 'files:manage');
     this.assertNotManaged(dst.relPath);
 
     // Docker-fs path.
@@ -1527,7 +1539,7 @@ export class FilesService {
   ): Promise<{ path: string; mode: string }> {
     if (!relPath || relPath === '.') throw new BadRequestException('No path given');
     const mode = parseChmodMode(modeInput);
-    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
+    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER', 'files:manage');
     this.assertNotManaged(resolved.relPath);
     const octal = mode.toString(8).padStart(3, '0');
 
@@ -1604,7 +1616,7 @@ export class FilesService {
   ): Promise<{ path: string; owner: string }> {
     if (!relPath || relPath === '.') throw new BadRequestException('No path given');
     const owner = parseChownOwner(ownerInput);
-    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
+    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER', 'files:manage');
     this.assertNotManaged(resolved.relPath);
 
     const remote = await this.resolveRemoteFsTarget(scope, scopeId);
@@ -1690,7 +1702,7 @@ export class FilesService {
     relPath = '',
     owner?: string,
   ): Promise<{ path: string; dirs: number; files: number; owner: string | null }> {
-    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER');
+    const resolved = await this.resolvePath(userId, scope, scopeId, relPath, 'DEVELOPER', 'files:manage');
     this.assertNotManaged(resolved.relPath);
 
     // Default to chowning the tree to www-data (33:33) — without it, a 775 dir
@@ -1876,7 +1888,7 @@ export class FilesService {
     if (!format) {
       throw new BadRequestException('Unsupported archive (.zip, .tar.gz, .tgz, .tar, .gz).');
     }
-    const resolved = await this.resolvePath(userId, scope, scopeId, zipRelPath, 'DEVELOPER');
+    const resolved = await this.resolvePath(userId, scope, scopeId, zipRelPath, 'DEVELOPER', 'files:manage');
     this.assertNotManaged(resolved.relPath);
     // Destination = the archive's parent directory ("." when at the root).
     const destRel = resolved.relPath.includes('/')
@@ -1995,7 +2007,7 @@ export class FilesService {
       // Re-resolve EACH destination path through the sandbox (defence in depth
       // on top of decodeZipSafely's own validation).
       const entryRel = [destRel, f.path].filter(Boolean).join('/');
-      const entryResolved = await this.resolvePath(userId, scope, scopeId, entryRel, 'DEVELOPER');
+      const entryResolved = await this.resolvePath(userId, scope, scopeId, entryRel, 'DEVELOPER', 'files:manage');
       this.assertNotManaged(entryResolved.relPath);
       if (f.isDir) {
         // Empty directory entry (e.g. PrestaShop's var/logs/) — create it so it

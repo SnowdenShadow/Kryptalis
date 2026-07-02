@@ -283,6 +283,10 @@ vi.mock('../../common/rbac/project-access', () => ({
   assertProjectAccess: vi.fn(),
 }));
 
+vi.mock('../../common/rbac/project-permissions', () => ({
+  assertPermission: vi.fn(),
+}));
+
 import * as fs from 'fs';
 import * as dockerFs from './docker-fs';
 import { assertProjectAccess } from '../../common/rbac/project-access';
